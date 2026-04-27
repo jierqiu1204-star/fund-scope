@@ -1,0 +1,61 @@
+from __future__ import annotations
+
+import json
+from functools import lru_cache
+from typing import Annotated, Any
+
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file="../.env",
+        env_file_encoding="utf-8",
+        populate_by_name=True,
+        extra="ignore",
+    )
+
+    database_url: str = Field(default="sqlite+aiosqlite:///./fundscope.db", alias="DATABASE_URL")
+    openai_base_url: str = Field(default="https://api.openai.com/v1", alias="OPENAI_BASE_URL")
+    openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
+    model_name: str = Field(default="gpt-4o-mini", alias="MODEL_NAME")
+    smtp_host: str = Field(default="", alias="SMTP_HOST")
+    smtp_port: int = Field(default=587, alias="SMTP_PORT")
+    smtp_username: str = Field(default="", alias="SMTP_USERNAME")
+    smtp_password: str = Field(default="", alias="SMTP_PASSWORD")
+    smtp_from: str = Field(default="", alias="SMTP_FROM")
+    nginx_basic_auth_user: str = Field(default="", alias="NGINX_BASIC_AUTH_USER")
+    nginx_basic_auth_pass: str = Field(default="", alias="NGINX_BASIC_AUTH_PASS")
+    cors_origins: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["http://localhost:3000"],
+        alias="CORS_ORIGINS",
+    )
+    scheduler_timezone: str = "Asia/Shanghai"
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            raw_value = value.strip()
+            if not raw_value:
+                return []
+            if raw_value.startswith("["):
+                value = json.loads(raw_value)
+            else:
+                value = raw_value.split(",")
+        if isinstance(value, list):
+            parsed_values = []
+            for item in value:
+                if not isinstance(item, str):
+                    raise ValueError("CORS origins must be strings")
+                normalized_item = item.strip()
+                if normalized_item:
+                    parsed_values.append(normalized_item)
+            return parsed_values
+        return value
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

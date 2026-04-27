@@ -1,0 +1,31 @@
+{% extends "base.html.j2" %}
+{% block content %}
+<h1>{{ amount }}</h1>
+<p class="muted">{{ reason }}</p>
+<h2>Fund Breakdown</h2>
+<ul>
+  {% for item in breakdown %}
+  <li>{{ item.fund_code }}: {{ item.amount }}</li>
+  {% endfor %}
+</ul>
+{% if valuation_statuses %}
+<h2>Valuation Status</h2>
+<ul>
+  {% for item in valuation_statuses %}
+  <li>{{ item.index_code }}: PE {{ item.pe }} ({{ item.pe_percentile }}%), PB {{ item.pb }} ({{ item.pb_percentile }}%) as of {{ item.as_of_date }}</li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% if portfolio_return %}
+<h2>Portfolio Return</h2>
+<p>Market value {{ portfolio_return.market_value }}, cost {{ portfolio_return.cost_basis }}, P&amp;L {{ portfolio_return.pnl }} ({{ portfolio_return.pnl_pct }}%).</p>
+{% endif %}
+{% if critical_events %}
+<h2>重要事项</h2>
+<ul>
+  {% for item in critical_events %}
+  <li>{{ item.title }} - {{ item.summary }}</li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% endblock %}

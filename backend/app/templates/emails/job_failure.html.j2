@@ -1,0 +1,6 @@
+{% extends "base.html.j2" %}
+{% block content %}
+<h1>Job Failed</h1>
+<p class="muted">Job {{ job_name }} failed with the following error:</p>
+<pre>{{ error_message }}</pre>
+{% endblock %}
