@@ -34,6 +34,8 @@ node_modules/
 dist/
 build/
 *.tsbuildinfo
+*.log
+*.err
 *.db
 *.sqlite3
 coverage/

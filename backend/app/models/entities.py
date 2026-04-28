@@ -66,6 +66,24 @@ class FundNavHistory(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class FundMetric(Base):
+    __tablename__ = "fund_metrics"
+    __table_args__ = (UniqueConstraint("fund_code", "metric_date", name="uq_fund_metrics"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fund_code: Mapped[str] = mapped_column(ForeignKey("funds.code", ondelete="CASCADE"))
+    metric_date: Mapped[date] = mapped_column(Date)
+    return_1y: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volatility_1y: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_drawdown_1y: Mapped[float | None] = mapped_column(Float, nullable=True)
+    tracking_error: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fee_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fund_size: Mapped[float | None] = mapped_column(Float, nullable=True)
+    news_risk_score: Mapped[float] = mapped_column(Float, default=0.0)
+    data_quality_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class Index(Base):
     __tablename__ = "indices"
 
@@ -132,6 +150,66 @@ class HoldingsSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class Stock(Base):
+    __tablename__ = "stocks"
+
+    code: Mapped[str] = mapped_column(String(32), primary_key=True)
+    exchange: Mapped[str] = mapped_column(String(16))
+    name: Mapped[str] = mapped_column(String(255))
+    industry: Mapped[str] = mapped_column(String(128))
+    is_candidate: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class StockPriceHistory(Base):
+    __tablename__ = "stock_price_history"
+    __table_args__ = (UniqueConstraint("stock_code", "trade_date", name="uq_stock_price_history"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    stock_code: Mapped[str] = mapped_column(ForeignKey("stocks.code", ondelete="CASCADE"))
+    trade_date: Mapped[date] = mapped_column(Date)
+    open: Mapped[float] = mapped_column(Float)
+    high: Mapped[float] = mapped_column(Float)
+    low: Mapped[float] = mapped_column(Float)
+    close: Mapped[float] = mapped_column(Float)
+    volume: Mapped[float] = mapped_column(Float)
+    turnover: Mapped[float] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class StockFundamental(Base):
+    __tablename__ = "stock_fundamentals"
+    __table_args__ = (UniqueConstraint("stock_code", "report_date", name="uq_stock_fundamentals"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    stock_code: Mapped[str] = mapped_column(ForeignKey("stocks.code", ondelete="CASCADE"))
+    report_date: Mapped[date] = mapped_column(Date)
+    pe: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pb: Mapped[float | None] = mapped_column(Float, nullable=True)
+    roe: Mapped[float | None] = mapped_column(Float, nullable=True)
+    gross_margin: Mapped[float | None] = mapped_column(Float, nullable=True)
+    debt_to_asset: Mapped[float | None] = mapped_column(Float, nullable=True)
+    operating_cashflow: Mapped[float | None] = mapped_column(Float, nullable=True)
+    dividend_yield: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class StockMetric(Base):
+    __tablename__ = "stock_metrics"
+    __table_args__ = (UniqueConstraint("stock_code", "metric_date", name="uq_stock_metrics"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    stock_code: Mapped[str] = mapped_column(ForeignKey("stocks.code", ondelete="CASCADE"))
+    metric_date: Mapped[date] = mapped_column(Date)
+    quality_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    valuation_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    momentum_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    risk_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    liquidity_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    data_quality_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class NewsItem(Base):
     __tablename__ = "news_items"
 
@@ -166,6 +244,55 @@ class NotificationLog(Base):
     payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     sent_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class RecommendationProfile(Base):
+    __tablename__ = "recommendation_profiles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(255))
+    asset_type: Mapped[str] = mapped_column(String(16))
+    risk_level: Mapped[str] = mapped_column(String(32), default="balanced")
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    config_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class RecommendationRun(Base):
+    __tablename__ = "recommendation_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    profile_id: Mapped[int | None] = mapped_column(
+        ForeignKey("recommendation_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    asset_type: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(32))
+    as_of_date: Mapped[date] = mapped_column(Date)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    data_cutoff_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    details_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class RecommendationItem(Base):
+    __tablename__ = "recommendation_items"
+    __table_args__ = (UniqueConstraint("run_id", "asset_code", name="uq_recommendation_item_asset"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("recommendation_runs.id", ondelete="CASCADE"))
+    asset_code: Mapped[str] = mapped_column(String(32))
+    asset_name: Mapped[str] = mapped_column(String(255))
+    asset_type: Mapped[str] = mapped_column(String(16))
+    rank: Mapped[int] = mapped_column(Integer)
+    total_score: Mapped[float] = mapped_column(Float)
+    score_breakdown_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    rationale_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    risk_flags_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    data_freshness_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class JobRun(Base):

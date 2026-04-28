@@ -14,6 +14,7 @@ const navItems = [
   { href: "/portfolio", label: "Portfolio" },
   { href: "/transactions", label: "Transactions" },
   { href: "/valuation", label: "Valuation" },
+  { href: "/recommendations", label: "Recommendations" },
   { href: "/news", label: "News" },
   { href: "/settings/notifications", label: "Settings" },
   { href: "/admin/jobs", label: "Jobs" }

@@ -1,6 +1,6 @@
 # FundScope
 
-FundScope is a single-user fund-investing dashboard for tracking transactions, monitoring index valuations, reviewing fund news, and receiving monthly DCA reminders.
+FundScope is a single-user fund-investing dashboard for tracking transactions, monitoring index valuations, reviewing fund news, receiving monthly DCA reminders, and reviewing explainable asset screening candidates.
 
 ## Stack
 
@@ -77,6 +77,28 @@ Changing `frontend/.env.local` requires restarting the frontend dev server.
 - Frontend static export for deployment: `pnpm build:static`
 - Pre-commit hooks: `pre-commit install`
 
+## Recommendations
+
+FundScope can generate explainable screening results for fund candidates and stock watchlist candidates. The output is deterministic and stores each run, score breakdown, rationale, risk flag, and data freshness marker for later review.
+
+The recommendation workflow uses the existing admin job system:
+
+```bash
+cd backend
+uv run alembic upgrade head
+uv run uvicorn app.main:app --reload
+```
+
+Then open `/admin/jobs` and run `daily_asset_recommendations`, or call:
+
+```bash
+curl -X POST http://localhost:8000/api/admin/jobs/daily_asset_recommendations/run
+```
+
+The stock MVP uses a small local seed universe so the feature works offline. Replace or extend the `stocks`, `stock_price_history`, and `stock_fundamentals` tables with imported AKShare-compatible data when you want real coverage.
+
+Recommendation results are research aids only. FundScope does not execute trades, provide trade commands, set price targets, or forecast returns.
+
 ## Architecture
 
 ```text
@@ -100,5 +122,5 @@ Changing `frontend/.env.local` requires restarting the frontend dev server.
 
 ## Notes
 
-- The application does not execute trades. It aggregates information and generates reminders only.
+- The application does not execute trades. It aggregates information, generates reminders, and ranks research candidates only.
 - nginx basic auth is the primary authentication layer for the deployed site.

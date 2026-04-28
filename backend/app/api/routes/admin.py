@@ -8,9 +8,11 @@ from app.core.db import get_db_session
 from app.models.entities import JobRun, NewsItem, NewsSummary
 from app.services.job_runner import run_job
 from app.services.jobs import (
+    daily_asset_recommendations_job,
     daily_fund_nav_job,
     daily_holdings_snapshot_job,
     daily_news_fetch_job,
+    daily_recommendation_metrics_job,
     daily_valuation_job,
     monthly_dca_reminder_job,
 )
@@ -114,6 +116,10 @@ async def run_job_by_name(
             job_name,
             lambda tracked_session: daily_news_fetch_job(tracked_session, llm_client),
         )
+    if job_name == "daily_recommendation_metrics":
+        return await run_job(request.app.state.db.session, job_name, daily_recommendation_metrics_job)
+    if job_name == "daily_asset_recommendations":
+        return await run_job(request.app.state.db.session, job_name, daily_asset_recommendations_job)
     if job_name == "news_summary_backfill":
         return await run_job(
             request.app.state.db.session,

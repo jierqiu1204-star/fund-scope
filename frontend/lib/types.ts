@@ -93,3 +93,36 @@ export type JobRun = {
   error_message: string | null;
   details: Record<string, unknown>;
 };
+
+export type RecommendationRun = {
+  id: number;
+  asset_type: "fund" | "stock";
+  status: string;
+  as_of_date: string;
+  started_at: string;
+  finished_at: string | null;
+  data_cutoff: Record<string, unknown>;
+  details: Record<string, unknown>;
+  error_message: string | null;
+};
+
+export type RecommendationItem = {
+  id: number;
+  asset_code: string;
+  asset_name: string;
+  asset_type: "fund" | "stock";
+  rank: number;
+  total_score: number;
+  score_breakdown: Record<string, { score?: number; weight?: number; weighted_score?: number; metrics?: Record<string, unknown> }>;
+  rationale: Record<string, unknown>;
+  risk_flags: string[];
+  data_freshness: Record<string, unknown>;
+  safe_label: string;
+};
+
+export type LatestRecommendationsResponse = {
+  asset_type: "fund" | "stock";
+  disclaimer: string;
+  run: RecommendationRun | null;
+  items: RecommendationItem[];
+};

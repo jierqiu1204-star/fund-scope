@@ -6,9 +6,11 @@ from app.core.config import Settings
 from app.core.db import DatabaseManager
 from app.services.job_runner import run_job
 from app.services.jobs import (
+    daily_asset_recommendations_job,
     daily_fund_nav_job,
     daily_holdings_snapshot_job,
     daily_news_fetch_job,
+    daily_recommendation_metrics_job,
     daily_valuation_job,
     monthly_dca_reminder_job,
 )
@@ -73,5 +75,21 @@ def register_default_jobs(
         hour=9,
         minute=0,
         id="monthly_dca_reminder",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        lambda: run_job(db.session, "daily_recommendation_metrics", daily_recommendation_metrics_job),
+        "cron",
+        hour=19,
+        minute=45,
+        id="daily_recommendation_metrics",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        lambda: run_job(db.session, "daily_asset_recommendations", daily_asset_recommendations_job),
+        "cron",
+        hour=20,
+        minute=0,
+        id="daily_asset_recommendations",
         replace_existing=True,
     )

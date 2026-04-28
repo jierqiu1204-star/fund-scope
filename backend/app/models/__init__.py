@@ -2,6 +2,7 @@
 
 from app.models.entities import (
     Fund,
+    FundMetric,
     FundNavHistory,
     HoldingsSnapshot,
     Index,
@@ -11,12 +12,20 @@ from app.models.entities import (
     NewsSummary,
     NotificationLog,
     Portfolio,
+    RecommendationItem,
+    RecommendationProfile,
+    RecommendationRun,
+    Stock,
+    StockFundamental,
+    StockMetric,
+    StockPriceHistory,
     Transaction,
     User,
 )
 
 __all__ = [
     "Fund",
+    "FundMetric",
     "FundNavHistory",
     "HoldingsSnapshot",
     "Index",
@@ -26,6 +35,13 @@ __all__ = [
     "NewsSummary",
     "NotificationLog",
     "Portfolio",
+    "RecommendationItem",
+    "RecommendationProfile",
+    "RecommendationRun",
+    "Stock",
+    "StockFundamental",
+    "StockMetric",
+    "StockPriceHistory",
     "Transaction",
     "User",
 ]

@@ -8,6 +8,7 @@
     "build:static": "node ./scripts/build-static.mjs",
     "start": "next start",
     "lint": "next lint",
+    "test:recommendations": "node ./scripts/check-recommendations-page.mjs",
     "format": "prettier --check ."
   },
   "dependencies": {

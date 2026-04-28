@@ -26,6 +26,7 @@ from app.services.llm import LLMClient
 from app.services.news import fetch_news_for_fund
 from app.services.news_summarizer import parse_summary_output
 from app.services.notifier import Notifier
+from app.services.recommendations.engine import generate_all_recommendations, recompute_all_metrics
 from app.services.valuation import compute_percentile
 
 
@@ -365,3 +366,11 @@ async def monthly_dca_reminder_job(
         },
     )
     return {"amount": dca.amount, "reason": dca.reason, "send_status": send_status}
+
+
+async def daily_recommendation_metrics_job(session: AsyncSession) -> dict[str, int]:
+    return await recompute_all_metrics(session)
+
+
+async def daily_asset_recommendations_job(session: AsyncSession) -> dict[str, int]:
+    return await generate_all_recommendations(session)

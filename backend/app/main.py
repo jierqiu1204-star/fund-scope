@@ -12,6 +12,7 @@ from app.api.routes.health import router as health_router
 from app.api.routes.news import router as news_router
 from app.api.routes.onboarding import router as onboarding_router
 from app.api.routes.portfolio import router as portfolio_router
+from app.api.routes.recommendations import router as recommendations_router
 from app.api.routes.settings import router as settings_router
 from app.api.routes.transactions import router as transactions_router
 from app.api.routes.valuation import router as valuation_router
@@ -71,6 +72,7 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
     app.include_router(transactions_router)
     app.include_router(portfolio_router)
     app.include_router(valuation_router)
+    app.include_router(recommendations_router)
     app.include_router(news_router)
     app.include_router(settings_router)
     app.include_router(onboarding_router)

@@ -37,6 +37,12 @@ export default function AdminJobsPage() {
             </button>
             <button
               className="rounded-full border border-ink/10 px-4 py-2 text-sm font-semibold text-ink"
+              onClick={() => triggerJob.mutate("daily_asset_recommendations")}
+            >
+              Run Recommendations
+            </button>
+            <button
+              className="rounded-full border border-ink/10 px-4 py-2 text-sm font-semibold text-ink"
               onClick={() => triggerJob.mutate("news_summary_backfill")}
             >
               Retry News Summaries
