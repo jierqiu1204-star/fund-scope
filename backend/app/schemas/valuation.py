@@ -5,6 +5,26 @@ from datetime import date
 from pydantic import BaseModel
 
 
+class IndexWatchlistCreate(BaseModel):
+    code: str
+    name: str
+    region: str = "CN"
+
+
+class IndexWatchlistItem(BaseModel):
+    code: str
+    name: str
+    region: str
+    is_watchlist: bool
+    backfill_required: bool = False
+
+
+class IndexWatchlistRemoval(BaseModel):
+    code: str
+    is_watchlist: bool
+    historical_rows_retained: int
+
+
 class CurrentValuation(BaseModel):
     index_code: str
     pe: float

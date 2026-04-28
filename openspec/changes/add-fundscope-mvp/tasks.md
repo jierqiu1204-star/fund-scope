@@ -30,7 +30,7 @@
 - [x] 4.1 Implement `services/fund_data.py`: `fetch_fund_nav(code, from_date, to_date)` via AKShare with httpx fallback to 天天基金
 - [x] 4.2 Implement `services/index_data.py`: `fetch_index_valuation(index_code, date)` returning PE / PB / dividend yield
 - [x] 4.3 Implement retry policy (2 retries with exponential backoff) and structured logging for all external calls
-- [ ] 4.4 Add unit tests with recorded VCR cassettes for AKShare and fallback parsers
+- [x] 4.4 Add unit tests with recorded VCR cassettes for AKShare and fallback parsers
 
 ## 5. Scheduler & job infrastructure
 
@@ -53,7 +53,7 @@
 - [x] 6.6 Implement `POST /api/transactions/import-csv` with atomic validation and per-row error reporting (spec: "Support CSV import")
 - [x] 6.7 Build frontend `/portfolio` page: holdings cards, value-history chart (Recharts Area), allocation donut, empty-state onboarding CTA
 - [x] 6.8 Build frontend `/transactions` page: table + add-transaction modal + CSV upload
-- [ ] 6.9 Write pytest tests covering every scenario in `portfolio-tracking/spec.md`
+- [x] 6.9 Write pytest tests covering every scenario in `portfolio-tracking/spec.md`
 
 ## 7. Feature B - valuation-monitoring
 
@@ -63,7 +63,7 @@
 - [x] 7.4 Build frontend `/valuation` page: cards per index with PE/PB, percentile bar (green/neutral/red), data-as-of date
 - [x] 7.5 Build frontend `/valuation/{code}` detail page with PE/PB toggle line chart
 - [x] 7.6 Implement backfill command `python -m app.cli backfill-valuation --index CSI300 --years 10` for first-time setup
-- [ ] 7.7 Write pytest tests covering every scenario in `valuation-monitoring/spec.md`
+- [x] 7.7 Write pytest tests covering every scenario in `valuation-monitoring/spec.md`
 
 ## 8. Feature D - news-aggregation
 
@@ -108,14 +108,14 @@
 
 - [x] 12.1 Write `.github/workflows/ci.yml` running backend pytest + ruff + mypy and frontend lint + typecheck + build on PRs
 - [x] 12.2 Write `.github/workflows/deploy.yml` triggered on `main` push: SSH to VPS, `git pull`, `docker compose up -d --build`
-- [ ] 12.3 Configure GitHub Secrets: `VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY`
+- [x] 12.3 Configure GitHub Secrets: `VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY`
 
 ## 13. End-to-end verification
 
-- [ ] 13.1 Spin up full stack locally via `docker compose up`; verify each feature A/B/C/D produces expected UI output
-- [ ] 13.2 Record a real transaction -> confirm it flows into holdings -> value-history chart updates after snapshot job run
-- [ ] 13.3 Manually trigger `daily_valuation` -> spot-check one index's PE against the official CSIndex website
-- [ ] 13.4 Manually trigger `monthly_dca_reminder` -> receive email -> verify amounts match percentile-band rules across all 5 bands (adjust reference index or mock percentile for testing)
-- [ ] 13.5 Manually trigger `daily_news_fetch` -> verify `/news` shows summaries + event-type badges; disable LLM endpoint briefly to verify raw-fallback path
+- [x] 13.1 Spin up full stack locally via `docker compose up`; verify each feature A/B/C/D produces expected UI output
+- [x] 13.2 Record a real transaction -> confirm it flows into holdings -> value-history chart updates after snapshot job run
+- [x] 13.3 Manually trigger `daily_valuation` -> spot-check one index's PE against the official CSIndex website
+- [x] 13.4 Manually trigger `monthly_dca_reminder` -> receive email -> verify amounts match percentile-band rules across all 5 bands (adjust reference index or mock percentile for testing)
+- [x] 13.5 Manually trigger `daily_news_fetch` -> verify `/news` shows summaries + event-type badges; disable LLM endpoint briefly to verify raw-fallback path
 - [ ] 13.6 Deploy to VPS, verify HTTPS, basic auth, and that scheduler fires at configured times (temporarily set to next 2 minutes to observe)
-- [ ] 13.7 Take screenshots of `/portfolio`, `/valuation`, `/news`, sample email for README / resume portfolio
+- [x] 13.7 Take screenshots of `/portfolio`, `/valuation`, `/news`, sample email for README / resume portfolio

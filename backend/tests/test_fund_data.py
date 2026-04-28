@@ -7,7 +7,11 @@ import respx
 from httpx import Response
 
 from app.services import fund_data
-from app.services.fund_data import fetch_fund_nav, parse_eastmoney_nav_response
+from app.services.fund_data import (
+    fetch_fund_nav,
+    parse_akshare_nav_frame,
+    parse_eastmoney_nav_response,
+)
 
 
 def _epoch_millis(value: date) -> int:
@@ -41,6 +45,45 @@ def test_parse_eastmoney_nav_response_filters_range_and_pairs_accumulated_nav() 
             "date": "2026-05-01",
             "nav": 1.2345,
             "accumulated_nav": 1.4567,
+        }
+    ]
+
+
+def test_parse_akshare_nav_frame_filters_range() -> None:
+    class FakeFrame:
+        def iterrows(self):
+            return iter(
+                [
+                    (
+                        0,
+                        {
+                            "\u51c0\u503c\u65e5\u671f": datetime(2026, 5, 1),
+                            "\u5355\u4f4d\u51c0\u503c": 1.2345,
+                            "\u7d2f\u8ba1\u51c0\u503c": 1.4567,
+                        },
+                    ),
+                    (
+                        1,
+                        {
+                            "\u51c0\u503c\u65e5\u671f": datetime(2026, 5, 2),
+                            "\u5355\u4f4d\u51c0\u503c": 1.25,
+                            "\u7d2f\u8ba1\u51c0\u503c": 1.47,
+                        },
+                    ),
+                ]
+            )
+
+    rows = parse_akshare_nav_frame(
+        FakeFrame(),
+        from_date=date(2026, 5, 2),
+        to_date=date(2026, 5, 2),
+    )
+
+    assert rows == [
+        {
+            "date": "2026-05-02",
+            "nav": 1.25,
+            "accumulated_nav": 1.47,
         }
     ]
 

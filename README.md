@@ -99,6 +99,18 @@ The stock MVP uses a small local seed universe so the feature works offline. Rep
 
 Recommendation results are research aids only. FundScope does not execute trades, provide trade commands, set price targets, or forecast returns.
 
+## Portfolio Evidence
+
+Generated MVP screenshots are stored in `docs/assets/screenshots/`:
+
+- Portfolio: `docs/assets/screenshots/portfolio.png`
+- Valuation: `docs/assets/screenshots/valuation.png`
+- News: `docs/assets/screenshots/news.png`
+- Recommendations: `docs/assets/screenshots/recommendations.png`
+- Sample DCA email: `docs/assets/screenshots/sample-email.png`
+
+These images use static frontend export output with mocked sample data, so they are suitable for README or resume portfolio material without exposing private account data.
+
 ## Architecture
 
 ```text

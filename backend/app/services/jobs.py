@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from datetime import date, timedelta
 from typing import Any, cast
@@ -28,6 +29,8 @@ from app.services.news_summarizer import parse_summary_output
 from app.services.notifier import Notifier
 from app.services.recommendations.engine import generate_all_recommendations, recompute_all_metrics
 from app.services.valuation import compute_percentile
+
+logger = logging.getLogger(__name__)
 
 
 def _aggregate_transactions(transactions: Sequence[Transaction]) -> dict[str, tuple[float, float]]:
@@ -91,9 +94,15 @@ async def daily_valuation_job(session: AsyncSession) -> dict[str, Any]:
         )
     ).all()
     inserted = 0
+    failures: list[dict[str, str]] = []
 
     for index_code in index_codes:
-        payload = await fetch_index_valuation(index_code, today)
+        try:
+            payload = await fetch_index_valuation(index_code, today)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("daily_valuation_index_failed", extra={"index_code": index_code})
+            failures.append({"index_code": index_code, "error": str(exc)})
+            continue
         pe = float(cast(float, payload["pe"]))
         pb = float(cast(float, payload["pb"]))
         historical_rows = (
@@ -134,7 +143,12 @@ async def daily_valuation_job(session: AsyncSession) -> dict[str, Any]:
         existing.pb_percentile = pb_result.percentile
         existing.effective_window = pe_result.effective_window
     await session.commit()
-    return {"indices": len(index_codes), "rows_inserted": inserted}
+    return {
+        "indices": len(index_codes),
+        "rows_inserted": inserted,
+        "failed": len(failures),
+        "failures": failures,
+    }
 
 
 async def daily_holdings_snapshot_job(session: AsyncSession) -> dict[str, Any]:

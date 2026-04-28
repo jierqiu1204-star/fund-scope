@@ -2,13 +2,19 @@ from __future__ import annotations
 
 from datetime import date
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db_session
-from app.models.entities import IndexValuationHistory
-from app.schemas.valuation import CurrentValuation, HistoricalValuation
+from app.models.entities import Index, IndexValuationHistory
+from app.schemas.valuation import (
+    CurrentValuation,
+    HistoricalValuation,
+    IndexWatchlistCreate,
+    IndexWatchlistItem,
+    IndexWatchlistRemoval,
+)
 
 router = APIRouter(prefix="/api/valuation", tags=["valuation"])
 
@@ -47,6 +53,69 @@ async def get_current_valuation(session: AsyncSession = Depends(get_db_session))
         )
         for row in rows
     ]
+
+
+@router.post(
+    "/watchlist",
+    response_model=IndexWatchlistItem,
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_index_to_watchlist(
+    payload: IndexWatchlistCreate,
+    session: AsyncSession = Depends(get_db_session),
+) -> IndexWatchlistItem:
+    index_code = payload.code.strip().upper()
+    index = await session.get(Index, index_code)
+    if index is None:
+        index = Index(
+            code=index_code,
+            name=payload.name.strip(),
+            region=payload.region.strip().upper(),
+            is_watchlist=True,
+        )
+        session.add(index)
+        backfill_required = True
+    else:
+        index.name = payload.name.strip() or index.name
+        index.region = payload.region.strip().upper() or index.region
+        index.is_watchlist = True
+        history_count = await session.scalar(
+            select(func.count())
+            .select_from(IndexValuationHistory)
+            .where(IndexValuationHistory.index_code == index_code)
+        )
+        backfill_required = not bool(history_count)
+    await session.commit()
+    return IndexWatchlistItem(
+        code=index.code,
+        name=index.name,
+        region=index.region,
+        is_watchlist=index.is_watchlist,
+        backfill_required=backfill_required,
+    )
+
+
+@router.delete("/watchlist/{index_code}", response_model=IndexWatchlistRemoval)
+async def remove_index_from_watchlist(
+    index_code: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> IndexWatchlistRemoval:
+    normalized_code = index_code.strip().upper()
+    index = await session.get(Index, normalized_code)
+    if index is None:
+        raise HTTPException(status_code=404, detail="Index is not in the watchlist.")
+    index.is_watchlist = False
+    historical_rows = await session.scalar(
+        select(func.count())
+        .select_from(IndexValuationHistory)
+        .where(IndexValuationHistory.index_code == normalized_code)
+    )
+    await session.commit()
+    return IndexWatchlistRemoval(
+        code=index.code,
+        is_watchlist=index.is_watchlist,
+        historical_rows_retained=int(historical_rows or 0),
+    )
 
 
 @router.get("/{index_code}/history", response_model=list[HistoricalValuation])

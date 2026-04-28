@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 from datetime import UTC, date, datetime
+from typing import Any
 
 import akshare as ak
 import httpx
@@ -23,6 +24,37 @@ def _extract_js_array(text: str, variable_name: str) -> list[object]:
 
 def _date_from_epoch_millis(value: int | float) -> date:
     return datetime.fromtimestamp(float(value) / 1000, tz=UTC).date()
+
+
+def _as_date(value: Any) -> date:
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    if hasattr(value, "date"):
+        parsed = value.date()
+        if isinstance(parsed, date):
+            return parsed
+    return date.fromisoformat(str(value))
+
+
+def parse_akshare_nav_frame(
+    frame: Any,
+    from_date: date,
+    to_date: date,
+) -> list[dict[str, float | str]]:
+    rows: list[dict[str, float | str]] = []
+    for _, record in frame.iterrows():
+        nav_date = _as_date(record.get("\u51c0\u503c\u65e5\u671f"))
+        if from_date <= nav_date <= to_date:
+            rows.append(
+                {
+                    "date": nav_date.isoformat(),
+                    "nav": float(record.get("\u5355\u4f4d\u51c0\u503c")),
+                    "accumulated_nav": float(record.get("\u7d2f\u8ba1\u51c0\u503c")),
+                }
+            )
+    return rows
 
 
 def parse_eastmoney_nav_response(
@@ -62,19 +94,12 @@ def parse_eastmoney_nav_response(
 
 async def fetch_fund_nav(code: str, from_date: date, to_date: date) -> list[dict[str, float | str]]:
     async def fetch_primary() -> list[dict[str, float | str]]:
-        frame = await asyncio.to_thread(ak.fund_open_fund_info_em, symbol=code, indicator="单位净值走势")
-        rows = []
-        for _, record in frame.iterrows():
-            nav_date = record.get("净值日期")
-            if from_date <= nav_date.date() <= to_date:
-                rows.append(
-                    {
-                        "date": nav_date.strftime("%Y-%m-%d"),
-                        "nav": float(record.get("单位净值")),
-                        "accumulated_nav": float(record.get("累计净值")),
-                    }
-                )
-        return rows
+        frame = await asyncio.to_thread(
+            ak.fund_open_fund_info_em,
+            symbol=code,
+            indicator="\u5355\u4f4d\u51c0\u503c\u8d70\u52bf",
+        )
+        return parse_akshare_nav_frame(frame, from_date, to_date)
 
     async def fetch_fallback() -> list[dict[str, float | str]]:
         url = f"https://fund.eastmoney.com/pingzhongdata/{code}.js"
