@@ -14,10 +14,23 @@ from app.services.jobs import (
     daily_news_fetch_job,
     daily_recommendation_metrics_job,
     daily_valuation_job,
+    fund_nav_backfill_job,
     monthly_dca_reminder_job,
 )
 from app.services.llm import LLMClient
 from app.services.news_summarizer import parse_summary_output
+from app.services.short_etf.jobs import (
+    daily_short_etf_data_job,
+    daily_short_etf_paper_job,
+    daily_short_etf_reliability_evaluation_job,
+    daily_short_etf_retry_failed_data_job,
+    daily_short_etf_signals_job,
+)
+from app.services.short_research.jobs import (
+    daily_short_research_data_job,
+    daily_short_research_signals_job,
+)
+from app.services.strategy_lab.jobs import daily_strategy_paper_job
 
 router = APIRouter(prefix="/api/admin/jobs", tags=["admin"])
 
@@ -78,6 +91,19 @@ async def run_monthly_dca_reminder(
     )
 
 
+@router.post("/fund_nav_backfill/run")
+async def run_fund_nav_backfill(
+    days: int,
+    request: Request,
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, object]:
+    return await run_job(
+        request.app.state.db.session,
+        "fund_nav_backfill",
+        lambda tracked_session: fund_nav_backfill_job(tracked_session, days),
+    )
+
+
 @router.get("")
 async def list_job_runs(session: AsyncSession = Depends(get_db_session)) -> list[dict[str, object]]:
     rows = (
@@ -120,6 +146,22 @@ async def run_job_by_name(
         return await run_job(request.app.state.db.session, job_name, daily_recommendation_metrics_job)
     if job_name == "daily_asset_recommendations":
         return await run_job(request.app.state.db.session, job_name, daily_asset_recommendations_job)
+    if job_name == "daily_strategy_paper":
+        return await run_job(request.app.state.db.session, job_name, daily_strategy_paper_job)
+    if job_name == "daily_short_etf_data":
+        return await run_job(request.app.state.db.session, job_name, daily_short_etf_data_job)
+    if job_name == "daily_short_etf_retry_failed_data":
+        return await run_job(request.app.state.db.session, job_name, daily_short_etf_retry_failed_data_job)
+    if job_name == "daily_short_etf_signals":
+        return await run_job(request.app.state.db.session, job_name, daily_short_etf_signals_job)
+    if job_name == "daily_short_etf_paper":
+        return await run_job(request.app.state.db.session, job_name, daily_short_etf_paper_job)
+    if job_name == "daily_short_etf_reliability_evaluation":
+        return await run_job(request.app.state.db.session, job_name, daily_short_etf_reliability_evaluation_job)
+    if job_name == "daily_short_research_data":
+        return await run_job(request.app.state.db.session, job_name, daily_short_research_data_job)
+    if job_name == "daily_short_research_signals":
+        return await run_job(request.app.state.db.session, job_name, daily_short_research_signals_job)
     if job_name == "news_summary_backfill":
         return await run_job(
             request.app.state.db.session,

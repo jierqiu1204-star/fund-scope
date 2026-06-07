@@ -5,6 +5,7 @@ from datetime import date, timedelta
 import pytest
 from sqlalchemy import func, select, update
 
+from app.defaults.funds import DEFAULT_RESEARCH_FUNDS
 from app.models.entities import Fund, FundNavHistory, HoldingsSnapshot, Transaction
 from app.services.jobs import daily_holdings_snapshot_job
 
@@ -138,6 +139,30 @@ async def test_csv_import_creates_all_valid_rows_in_one_transaction(client) -> N
     payload = listing.json()
     assert payload["total"] == 2
     assert {item["fund_code"] for item in payload["items"]} == {"007339", "001052"}
+
+
+@pytest.mark.asyncio
+async def test_alipay_csv_import_accepts_chinese_fund_transaction_columns(client) -> None:
+    files = {
+        "file": (
+            "alipay-transactions.csv",
+            "基金代码,交易类型,金额,份额,成交净值,手续费,交易日期\n"
+            "007339,买入,500,,1.25,0.5,2026/05/01\n"
+            "007339,卖出,,100,1.30,0.2,2026/05/10\n",
+            "text/csv",
+        )
+    }
+
+    response = await client.post("/api/transactions/import-alipay-csv", files=files)
+
+    assert response.status_code == 200
+    assert response.json() == {"inserted": 2, "errors": []}
+
+    listing = await client.get("/api/transactions")
+    payload = listing.json()
+    assert payload["total"] == 2
+    assert [item["action"] for item in payload["items"]] == ["sell", "buy"]
+    assert payload["items"][1]["shares"] == pytest.approx((500 - 0.5) / 1.25)
 
 
 @pytest.mark.asyncio
@@ -297,10 +322,8 @@ async def test_onboarding_applies_default_seed_without_creating_transactions(cli
         ).all()
         transaction_count = await session.scalar(select(func.count()).select_from(Transaction))
 
-    assert [(fund.code, fund.target_allocation) for fund in funds] == [
-        ("000198", 0.1),
-        ("001052", 0.3),
-        ("007339", 0.4),
-        ("270042", 0.2),
-    ]
+    assert [(fund.code, fund.target_allocation) for fund in funds] == sorted(
+        [(fund.code, fund.target_allocation) for fund in DEFAULT_RESEARCH_FUNDS],
+        key=lambda item: item[0],
+    )
     assert transaction_count == 0

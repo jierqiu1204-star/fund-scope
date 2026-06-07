@@ -12,7 +12,7 @@ export function formatPercent(value: number) {
 
 export function formatDate(value: string | Date | null | undefined) {
   if (!value) {
-    return "N/A";
+    return "暂无";
   }
 
   const date = value instanceof Date ? value : new Date(value);
@@ -32,7 +32,7 @@ export function eventTypeLabel(eventType: string | null | undefined) {
     case "size_change":
       return "规模变化";
     case "strategy_change":
-      return "策略变更";
+      return "策略变化";
     default:
       return "其他";
   }

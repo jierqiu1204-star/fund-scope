@@ -68,7 +68,7 @@ export function EmptyState({
 }) {
   return (
     <Panel className="border-dashed bg-gradient-to-br from-white via-white to-blush/60 text-center">
-      <p className="text-xs uppercase tracking-[0.35em] text-accent">Start Here</p>
+      <p className="text-xs uppercase tracking-[0.35em] text-accent">从这里开始</p>
       <h3 className="mt-3 font-display text-3xl">{title}</h3>
       <p className="mx-auto mt-3 max-w-xl text-sm text-ink/70">{description}</p>
       <Link

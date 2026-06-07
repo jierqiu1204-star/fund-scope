@@ -1,5 +1,8 @@
 # FundScope VPS Deployment
 
+This is the domain + HTTPS deployment path. If you need to deploy temporarily by
+public IP before buying or configuring a domain, use `README-ip.md` instead.
+
 ## Services
 
 - `postgres`: application database

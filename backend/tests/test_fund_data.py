@@ -88,6 +88,61 @@ def test_parse_akshare_nav_frame_filters_range() -> None:
     ]
 
 
+def test_parse_akshare_nav_frame_skips_empty_nav_rows() -> None:
+    class FakeFrame:
+        def iterrows(self):
+            return iter(
+                [
+                    (
+                        0,
+                        {
+                            "\u51c0\u503c\u65e5\u671f": datetime(2026, 5, 1),
+                            "\u5355\u4f4d\u51c0\u503c": None,
+                            "\u7d2f\u8ba1\u51c0\u503c": None,
+                        },
+                    ),
+                    (
+                        1,
+                        {
+                            "\u51c0\u503c\u65e5\u671f": datetime(2026, 5, 2),
+                            "\u5355\u4f4d\u51c0\u503c": 1.25,
+                            "\u7d2f\u8ba1\u51c0\u503c": None,
+                        },
+                    ),
+                ]
+            )
+
+    rows = parse_akshare_nav_frame(
+        FakeFrame(),
+        from_date=date(2026, 5, 1),
+        to_date=date(2026, 5, 2),
+    )
+
+    assert rows == [
+        {
+            "date": "2026-05-02",
+            "nav": 1.25,
+            "accumulated_nav": 1.25,
+        }
+    ]
+
+
+def test_parse_eastmoney_nav_response_skips_empty_accumulated_nav() -> None:
+    may_1 = _epoch_millis(date(2026, 5, 1))
+    payload = f"""
+    var Data_netWorthTrend = [
+      {{"x": {may_1}, "y": 1.2345}}
+    ];
+    var Data_ACWorthTrend = [
+      [{may_1}, null]
+    ];
+    """
+
+    rows = parse_eastmoney_nav_response(payload, date(2026, 5, 1), date(2026, 5, 1))
+
+    assert rows == [{"date": "2026-05-01", "nav": 1.2345, "accumulated_nav": 1.2345}]
+
+
 @pytest.mark.asyncio
 @respx.mock
 async def test_fetch_fund_nav_uses_eastmoney_fallback_when_primary_fails(monkeypatch) -> None:

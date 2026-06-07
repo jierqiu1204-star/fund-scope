@@ -17,9 +17,9 @@ export default function ValuationPage() {
   return (
     <div className="space-y-8">
       <SectionHeader
-        eyebrow="Valuation"
-        title="A watchlist built around percentile, not headlines."
-        description="The dashboard compresses PE, PB, and percentile into a fast pre-check before the month’s DCA reminder goes out."
+        eyebrow="估值"
+        title="先看贵不贵，再决定要不要投。"
+        description="这里用 PE（市盈率）、PB（市净率）和历史百分位做一个快速预检。百分位越高，通常代表当前估值越热。"
       />
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -30,16 +30,16 @@ export default function ValuationPage() {
                 <div>
                   <p className="text-xs uppercase tracking-[0.35em] text-accent">{item.index_code}</p>
                   <h3 className="mt-3 font-display text-3xl">{item.pe.toFixed(2)}</h3>
-                  <p className="mt-1 text-sm text-ink/60">PE · PB {item.pb.toFixed(2)}</p>
+                  <p className="mt-1 text-sm text-ink/60">PE（市盈率）/ PB（市净率）{item.pb.toFixed(2)}</p>
                 </div>
                 <span className={`rounded-full px-3 py-2 text-xs font-semibold ${percentileTone(item.pe_percentile)}`}>
-                  PE {item.pe_percentile ?? "-"}%
+                  PE 百分位 {item.pe_percentile ?? "-"}%
                 </span>
               </div>
               <div className="mt-8 space-y-3">
                 <div>
                   <div className="mb-2 flex items-center justify-between text-xs uppercase tracking-[0.25em] text-ink/55">
-                    <span>PE Percentile</span>
+                    <span>PE（市盈率）百分位</span>
                     <span>{item.pe_percentile ?? "-"}%</span>
                   </div>
                   <div className="h-2 rounded-full bg-paper">
@@ -51,7 +51,7 @@ export default function ValuationPage() {
                 </div>
                 <div>
                   <div className="mb-2 flex items-center justify-between text-xs uppercase tracking-[0.25em] text-ink/55">
-                    <span>PB Percentile</span>
+                    <span>PB（市净率）百分位</span>
                     <span>{item.pb_percentile ?? "-"}%</span>
                   </div>
                   <div className="h-2 rounded-full bg-paper">
@@ -63,7 +63,7 @@ export default function ValuationPage() {
                 </div>
               </div>
               <p className="mt-8 text-xs uppercase tracking-[0.25em] text-ink/45">
-                Data as of {formatDate(item.as_of_date)}
+                数据日期：{formatDate(item.as_of_date)}
               </p>
             </Panel>
           </Link>

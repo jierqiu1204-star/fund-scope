@@ -65,6 +65,61 @@ def _build_transaction(payload: TransactionCreate, portfolio_id: int) -> Transac
     )
 
 
+def _row_value(row: dict[str, str], *columns: str) -> str:
+    for column in columns:
+        value = row.get(column)
+        if value is not None and value.strip():
+            return value.strip()
+    return ""
+
+
+def _optional_float(value: str) -> float | None:
+    if not value:
+        return None
+    return float(value.replace(",", ""))
+
+
+def _required_float(value: str, field_name: str) -> float:
+    parsed = _optional_float(value)
+    if parsed is None:
+        raise ValueError(f"{field_name} is required")
+    return parsed
+
+
+def _parse_alipay_action(value: str) -> Literal["buy", "sell"]:
+    normalized = value.strip().lower()
+    if normalized in {"buy", "申购", "买入", "定投"} or "买" in normalized or "申购" in normalized:
+        return "buy"
+    if normalized in {"sell", "redeem", "赎回", "卖出"} or "卖" in normalized or "赎回" in normalized:
+        return "sell"
+    raise ValueError(f"Unsupported Alipay transaction type: {value}")
+
+
+def _parse_alipay_date(value: str) -> date:
+    normalized = value.strip().replace("/", "-")
+    if " " in normalized:
+        normalized = normalized.split(" ", 1)[0]
+    return date.fromisoformat(normalized)
+
+
+def _parse_alipay_transaction(row: dict[str, str]) -> TransactionCreate:
+    action = _parse_alipay_action(_row_value(row, "交易类型", "业务类型", "类型", "action"))
+    nav = _required_float(_row_value(row, "成交净值", "确认净值", "净值", "单位净值", "nav"), "nav")
+    fee = _optional_float(_row_value(row, "手续费", "费用", "fee")) or 0.0
+    traded_at = _parse_alipay_date(_row_value(row, "交易日期", "确认日期", "申请日期", "traded_at"))
+    amount = _optional_float(_row_value(row, "金额", "成交金额", "确认金额", "amount"))
+    shares = _optional_float(_row_value(row, "份额", "确认份额", "shares"))
+    return TransactionCreate(
+        fund_code=_row_value(row, "基金代码", "产品代码", "fund_code"),
+        action=action,
+        amount=amount if action == "buy" else None,
+        shares=shares if action == "sell" else None,
+        nav_at_trade=nav,
+        fee=fee,
+        traded_at=traded_at,
+    )
+
+
 @router.post("", response_model=TransactionRead, status_code=status.HTTP_201_CREATED)
 async def create_transaction(
     payload: TransactionCreate,
@@ -90,7 +145,7 @@ async def import_transactions_csv(
     file: UploadFile = File(...),
     session: AsyncSession = Depends(get_db_session),
 ) -> CsvImportResponse | JSONResponse:
-    content = (await file.read()).decode("utf-8")
+    content = (await file.read()).decode("utf-8-sig")
     reader = csv.DictReader(StringIO(content))
     rows = list(reader)
     errors: list[dict[str, str | int]] = []
@@ -108,6 +163,35 @@ async def import_transactions_csv(
                 fee=float(row["fee"]),
                 traded_at=date.fromisoformat(row["traded_at"]),
             )
+            await _validate_fund(session, payload.fund_code)
+            parsed.append(payload)
+        except Exception as exc:  # noqa: BLE001
+            errors.append({"row": index, "message": str(exc)})
+
+    if errors:
+        return JSONResponse(status_code=422, content={"inserted": 0, "errors": errors})
+
+    portfolio_id = await _default_portfolio_id(session)
+    for payload in parsed:
+        session.add(_build_transaction(payload, portfolio_id))
+    await session.commit()
+    return CsvImportResponse(inserted=len(parsed))
+
+
+@router.post("/import-alipay-csv", response_model=CsvImportResponse)
+async def import_alipay_transactions_csv(
+    file: UploadFile = File(...),
+    session: AsyncSession = Depends(get_db_session),
+) -> CsvImportResponse | JSONResponse:
+    content = (await file.read()).decode("utf-8-sig")
+    reader = csv.DictReader(StringIO(content))
+    rows = list(reader)
+    errors: list[dict[str, str | int]] = []
+    parsed: list[TransactionCreate] = []
+
+    for index, row in enumerate(rows, start=2):
+        try:
+            payload = _parse_alipay_transaction(row)
             await _validate_fund(session, payload.fund_code)
             parsed.append(payload)
         except Exception as exc:  # noqa: BLE001

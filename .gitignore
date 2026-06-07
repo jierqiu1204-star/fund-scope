@@ -18,6 +18,7 @@ bin-release/
 # information for Eclipse / Flash Builder.
 .claude/
 .codex/
+.agents/
 .env
 .env.*
 !.env.example

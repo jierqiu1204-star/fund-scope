@@ -28,35 +28,35 @@ export default function PortfolioPage() {
   return (
     <div className="space-y-8">
       <SectionHeader
-        eyebrow="Portfolio"
-        title="Every position, stripped of drama."
-        description="Holdings, value history, and allocation are laid out like a monthly editorial spread so stale data and concentration show up immediately."
+        eyebrow="资产"
+        title="看清现在持有什么，赚亏多少。"
+        description="这里汇总你的基金份额、市值、成本和盈亏。数据来自你手动记录或导入的交易，以及后台生成的持仓快照。"
       />
 
       <div className="grid gap-4 md:grid-cols-3">
-        <StatPill label="Market Value" value={formatCurrency(totalValue)} />
-        <StatPill label="Cost Basis" value={formatCurrency(totalCost)} tone="bg-white text-ink" />
+        <StatPill label="当前市值" value={formatCurrency(totalValue)} />
+        <StatPill label="投入成本" value={formatCurrency(totalCost)} tone="bg-white text-ink" />
         <StatPill
-          label="P&L"
-          value={`${formatCurrency(totalPnl)} · ${totalCost ? formatPercent((totalPnl / totalCost) * 100) : "0.00%"}`}
+          label="累计盈亏"
+          value={`${formatCurrency(totalPnl)} / ${totalCost ? formatPercent((totalPnl / totalCost) * 100) : "0.00%"}`}
           tone={totalPnl >= 0 ? "bg-emerald-100 text-emerald-900" : "bg-rose-100 text-rose-900"}
         />
       </div>
 
       {items.length === 0 ? (
         <EmptyState
-          title="No transactions yet"
-          description="Apply the default portfolio or log the first fund order to unlock holdings cards, value history, and allocation diagnostics."
+          title="还没有交易记录"
+          description="可以先初始化默认基金池，或者手动记录第一笔基金买入。记录之后，这里会显示持仓、资产曲线和配置占比。"
           href="/onboarding"
-          label="Open Onboarding"
+          label="初始化基金池"
         />
       ) : (
         <div className="grid gap-8 xl:grid-cols-[1.4fr_0.8fr]">
           <Panel>
             <SectionHeader
-              eyebrow="Value History"
-              title="Portfolio curve"
-              description="The chart only reads from snapshot data, so it mirrors what the evening jobs have actually persisted."
+              eyebrow="资产曲线"
+              title="组合市值变化"
+              description="这张图只读取已经保存的持仓快照，所以它反映的是系统实际记录下来的资产变化。"
             />
             <div className="h-80">
               <ResponsiveContainer width="100%" height="100%">
@@ -78,9 +78,9 @@ export default function PortfolioPage() {
 
           <Panel>
             <SectionHeader
-              eyebrow="Allocation"
-              title="Weight by market value"
-              description="The donut makes concentration obvious before it turns into a regret."
+              eyebrow="配置占比"
+              title="按市值看持仓权重"
+              description="这张图用来快速发现是否某一只基金占比过高。"
             />
             <div className="h-80">
               <ResponsiveContainer width="100%" height="100%">
@@ -106,26 +106,26 @@ export default function PortfolioPage() {
             <h3 className="mt-3 font-display text-2xl">{item.fund_name}</h3>
             <div className="mt-5 space-y-3 text-sm">
               <div className="flex justify-between">
-                <span className="text-ink/60">Shares</span>
+                <span className="text-ink/60">份额</span>
                 <span>{item.shares.toFixed(2)}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-ink/60">Cost</span>
+                <span className="text-ink/60">成本</span>
                 <span>{formatCurrency(item.cost_basis)}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-ink/60">Market Value</span>
+                <span className="text-ink/60">市值</span>
                 <span>{formatCurrency(item.market_value)}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-ink/60">P&L</span>
+                <span className="text-ink/60">盈亏</span>
                 <span className={item.pnl >= 0 ? "text-emerald-700" : "text-rose-700"}>
-                  {formatCurrency(item.pnl)} · {formatPercent(item.pnl_pct)}
+                  {formatCurrency(item.pnl)} / {formatPercent(item.pnl_pct)}
                 </span>
               </div>
             </div>
             <div className="mt-6 rounded-2xl bg-paper px-4 py-3 text-xs uppercase tracking-[0.2em] text-ink/60">
-              {item.is_stale ? `数据截至 ${formatDate(item.as_of_date)}` : `Fresh as of ${formatDate(item.as_of_date)}`}
+              {item.is_stale ? `数据可能过期，最近日期 ${formatDate(item.as_of_date)}` : `数据截至 ${formatDate(item.as_of_date)}`}
             </div>
           </Panel>
         ))}

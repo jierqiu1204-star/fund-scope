@@ -8,12 +8,16 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes.admin import router as admin_router
+from app.api.routes.admin_data import router as admin_data_router
 from app.api.routes.health import router as health_router
 from app.api.routes.news import router as news_router
 from app.api.routes.onboarding import router as onboarding_router
 from app.api.routes.portfolio import router as portfolio_router
 from app.api.routes.recommendations import router as recommendations_router
 from app.api.routes.settings import router as settings_router
+from app.api.routes.short_etf import router as short_etf_router
+from app.api.routes.short_research import router as short_research_router
+from app.api.routes.strategy_lab import router as strategy_lab_router
 from app.api.routes.transactions import router as transactions_router
 from app.api.routes.valuation import router as valuation_router
 from app.core.config import Settings, get_settings
@@ -57,7 +61,7 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
     app = FastAPI(title="FundScope API", lifespan=lifespan)
     app.state.db = DatabaseManager(app_settings.database_url)
     app.state.settings = app_settings
-    app.state.scheduler = build_scheduler()
+    app.state.scheduler = build_scheduler(app_settings.scheduler_timezone)
     register_default_jobs(app.state.scheduler, app.state.db, app_settings)
 
     app.add_middleware(
@@ -73,9 +77,13 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
     app.include_router(portfolio_router)
     app.include_router(valuation_router)
     app.include_router(recommendations_router)
+    app.include_router(strategy_lab_router)
+    app.include_router(short_etf_router)
+    app.include_router(short_research_router)
     app.include_router(news_router)
     app.include_router(settings_router)
     app.include_router(onboarding_router)
+    app.include_router(admin_data_router)
     app.include_router(admin_router)
     return app
 

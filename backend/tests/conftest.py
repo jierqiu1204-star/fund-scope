@@ -10,6 +10,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.core.config import Settings
 from app.db.base import Base
+from app.defaults.funds import DEFAULT_RESEARCH_FUNDS
 from app.main import create_app
 from app.models.entities import Fund, Index, Portfolio, User
 
@@ -67,10 +68,15 @@ async def app(settings: Settings):
         session.add(Portfolio(id=1, user_id=1, name="Default Portfolio", is_default=True))
         session.add_all(
             [
-                Fund(code="007339", name="E Fund CSI 300", category="equity", target_allocation=0.4, is_watchlist=True),
-                Fund(code="001052", name="Huaxia SP500", category="equity", target_allocation=0.3, is_watchlist=True),
-                Fund(code="270042", name="GF Nasdaq 100", category="equity", target_allocation=0.2, is_watchlist=True),
-                Fund(code="000198", name="Tianhong YEB", category="money_market", target_allocation=0.1, is_watchlist=True),
+                Fund(
+                    code=fund.code,
+                    name=fund.name,
+                    category=fund.category,
+                    tracking_index_code=fund.tracking_index_code,
+                    target_allocation=fund.target_allocation,
+                    is_watchlist=True,
+                )
+                for fund in DEFAULT_RESEARCH_FUNDS
             ]
         )
         session.add_all(

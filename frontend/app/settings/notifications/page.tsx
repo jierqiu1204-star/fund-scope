@@ -7,13 +7,20 @@ import { Panel, SectionHeader } from "@/components/ui";
 import { api } from "@/lib/api";
 import type { NotificationSettings } from "@/lib/types";
 
-export default function NotificationSettingsPage() {
-  const queryClient = useQueryClient();
-  const settings = useQuery({
-    queryKey: ["notification-settings"],
-    queryFn: async () => (await api.get<NotificationSettings>("/api/settings/notifications")).data
-  });
-  const [form, setForm] = useState({
+const fields: Array<[string, keyof ReturnType<typeof defaultForm>]> = [
+  ["收件邮箱", "recipient_email"],
+  ["每月提醒日", "reminder_day"],
+  ["参考指数", "reference_index_code"],
+  ["基础月投入金额", "base_monthly_amount"],
+  ["SMTP 服务器", "smtp_host"],
+  ["SMTP 端口", "smtp_port"],
+  ["SMTP 用户名", "smtp_username"],
+  ["发件人", "smtp_from"],
+  ["SMTP 密码", "smtp_password"]
+];
+
+function defaultForm() {
+  return {
     recipient_email: "owner@example.com",
     reminder_day: "1",
     reference_index_code: "CSI300",
@@ -23,7 +30,16 @@ export default function NotificationSettingsPage() {
     smtp_username: "mailer@example.com",
     smtp_from: "FundScope <mailer@example.com>",
     smtp_password: ""
+  };
+}
+
+export default function NotificationSettingsPage() {
+  const queryClient = useQueryClient();
+  const settings = useQuery({
+    queryKey: ["notification-settings"],
+    queryFn: async () => (await api.get<NotificationSettings>("/api/settings/notifications")).data
   });
+  const [form, setForm] = useState(defaultForm());
   const [statusText, setStatusText] = useState("");
 
   useEffect(() => {
@@ -57,7 +73,7 @@ export default function NotificationSettingsPage() {
         smtp_password: form.smtp_password || undefined
       }),
     onSuccess: async () => {
-      setStatusText("Settings saved.");
+      setStatusText("设置已保存。");
       await queryClient.invalidateQueries({ queryKey: ["notification-settings"] });
     }
   });
@@ -72,37 +88,27 @@ export default function NotificationSettingsPage() {
         smtp_from: form.smtp_from,
         recipient_email: form.recipient_email
       }),
-    onSuccess: () => setStatusText("Test email accepted."),
-    onError: () => setStatusText("SMTP test failed.")
+    onSuccess: () => setStatusText("测试邮件已提交。"),
+    onError: () => setStatusText("SMTP 测试失败，请检查邮箱服务器配置。")
   });
 
   return (
     <div className="space-y-8">
       <SectionHeader
-        eyebrow="Settings"
-        title="Monthly reminder settings, kept explicit."
-        description="SMTP transport, reminder cadence, base amount, and reference index live together so the DCA rule is auditable."
+        eyebrow="设置"
+        title="定投提醒和邮件发送配置。"
+        description="这里配置每月提醒日、参考指数、基础投入金额和 SMTP 邮件服务器。不会自动买入，只负责提醒。"
       />
 
       <Panel className="max-w-4xl">
         <div className="grid gap-4 md:grid-cols-2">
-          {[
-            ["Recipient", "recipient_email"],
-            ["Reminder Day", "reminder_day"],
-            ["Reference Index", "reference_index_code"],
-            ["Base Amount", "base_monthly_amount"],
-            ["SMTP Host", "smtp_host"],
-            ["SMTP Port", "smtp_port"],
-            ["SMTP Username", "smtp_username"],
-            ["SMTP From", "smtp_from"],
-            ["SMTP Password", "smtp_password"]
-          ].map(([label, key]) => (
+          {fields.map(([label, key]) => (
             <label key={key} className="text-sm">
               {label}
               <input
                 className="mt-2 w-full rounded-2xl border border-ink/10 bg-paper px-4 py-3"
                 type={key === "smtp_password" ? "password" : "text"}
-                value={form[key as keyof typeof form]}
+                value={form[key]}
                 onChange={(event) =>
                   setForm((current) => ({
                     ...current,
@@ -118,13 +124,13 @@ export default function NotificationSettingsPage() {
             className="rounded-full bg-ink px-5 py-3 text-sm font-semibold text-white transition hover:bg-pine"
             onClick={() => saveSettings.mutate()}
           >
-            Save Settings
+            保存设置
           </button>
           <button
             className="rounded-full border border-ink/10 px-5 py-3 text-sm font-semibold text-ink transition hover:border-accent hover:text-accent"
             onClick={() => testSend.mutate()}
           >
-            Send Test Email
+            发送测试邮件
           </button>
         </div>
         {statusText ? <p className="mt-4 text-sm text-accent">{statusText}</p> : null}

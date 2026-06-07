@@ -18,6 +18,10 @@ const defaultForm = {
   traded_at: "2026-05-01"
 };
 
+function actionLabel(action: string) {
+  return action === "sell" ? "卖出" : "买入";
+}
+
 export default function TransactionsPage() {
   const queryClient = useQueryClient();
   const [showComposer, setShowComposer] = useState(false);
@@ -63,11 +67,29 @@ export default function TransactionsPage() {
       });
     },
     onSuccess: async (response) => {
-      setCsvResult(`Imported ${response.data.inserted} rows.`);
+      setCsvResult(`已导入 ${response.data.inserted} 条记录。`);
       await queryClient.invalidateQueries({ queryKey: ["transactions"] });
     },
     onError: (error: unknown) => {
-      setCsvResult("CSV import failed. Check row-level errors from the API.");
+      setCsvResult("CSV 导入失败，请检查每一行的基金代码、净值、费用和日期。");
+      console.error(error);
+    }
+  });
+
+  const importAlipayCsv = useMutation({
+    mutationFn: async (file: File) => {
+      const formData = new FormData();
+      formData.append("file", file);
+      return api.post("/api/transactions/import-alipay-csv", formData, {
+        headers: { "Content-Type": "multipart/form-data" }
+      });
+    },
+    onSuccess: async (response) => {
+      setCsvResult(`已导入 ${response.data.inserted} 条支付宝记录。`);
+      await queryClient.invalidateQueries({ queryKey: ["transactions"] });
+    },
+    onError: (error: unknown) => {
+      setCsvResult("支付宝 CSV 导入失败，请检查基金代码、交易类型、金额、份额、成交净值、手续费和日期。");
       console.error(error);
     }
   });
@@ -75,15 +97,15 @@ export default function TransactionsPage() {
   return (
     <div className="space-y-8">
       <SectionHeader
-        eyebrow="Transactions"
-        title="A ledger built for manual discipline."
-        description="Every buy and redemption stays explicit. The form is minimal, the table is audit-friendly, and CSV import preserves atomic validation."
+        eyebrow="交易"
+        title="手动记录真实买卖，后面才能对账。"
+        description="这里记录的是你真实操作过的基金交易。可以手动新增，也可以导入普通 CSV 或支付宝 CSV。"
         action={
           <button
             className="rounded-full bg-ink px-5 py-3 text-sm font-semibold text-white transition hover:bg-pine"
             onClick={() => setShowComposer(true)}
           >
-            Add Transaction
+            新增交易
           </button>
         }
       />
@@ -91,15 +113,15 @@ export default function TransactionsPage() {
       <div className="grid gap-8 lg:grid-cols-[0.9fr_1.1fr]">
         <Panel>
           <SectionHeader
-            eyebrow="Ledger"
-            title={`Buys ${totals.buys} · Sells ${totals.sells}`}
-            description="This table mirrors the backend order records. It is intentionally plain so anomalies are visible."
+            eyebrow="流水"
+            title={`买入 ${totals.buys} 笔 / 卖出 ${totals.sells} 笔`}
+            description="这张表是你的本地交易账本。模拟盘和支付宝式对账会用它来推算真实持仓。"
           />
           <div className="overflow-hidden rounded-[24px] border border-ink/10">
             <table className="min-w-full divide-y divide-ink/10 text-sm">
               <thead className="bg-paper/80">
                 <tr>
-                  {["Fund", "Action", "Shares", "Amount", "NAV", "Fee", "Trade Date"].map((column) => (
+                  {["基金", "类型", "份额", "金额", "净值", "费用", "交易日期"].map((column) => (
                     <th key={column} className="px-4 py-3 text-left font-medium text-ink/55">
                       {column}
                     </th>
@@ -110,7 +132,7 @@ export default function TransactionsPage() {
                 {(transactions.data?.items ?? []).map((item) => (
                   <tr key={item.id}>
                     <td className="px-4 py-3 font-semibold">{item.fund_code}</td>
-                    <td className="px-4 py-3 uppercase tracking-[0.2em] text-ink/55">{item.action}</td>
+                    <td className="px-4 py-3 tracking-[0.2em] text-ink/55">{actionLabel(item.action)}</td>
                     <td className="px-4 py-3">{item.shares.toFixed(2)}</td>
                     <td className="px-4 py-3">{formatCurrency(item.amount ?? 0)}</td>
                     <td className="px-4 py-3">{item.nav_at_trade.toFixed(4)}</td>
@@ -121,9 +143,9 @@ export default function TransactionsPage() {
               </tbody>
             </table>
           </div>
-          <div className="mt-6">
+          <div className="mt-6 flex flex-wrap gap-3">
             <label className="inline-flex rounded-full border border-ink/10 px-5 py-3 text-sm font-semibold text-ink transition hover:border-accent hover:text-accent">
-              Upload CSV
+              导入普通 CSV
               <input
                 className="hidden"
                 type="file"
@@ -136,9 +158,25 @@ export default function TransactionsPage() {
                 }}
               />
             </label>
-            <p className="mt-4 text-sm text-ink/60">
-              Buy rows use `amount`, redemption rows use `shares`. CSV schema:
-              `fund_code,action,amount_or_shares,nav,fee,traded_at`.
+            <label className="inline-flex rounded-full border border-ink/10 px-5 py-3 text-sm font-semibold text-ink transition hover:border-accent hover:text-accent">
+              导入支付宝 CSV
+              <input
+                className="hidden"
+                type="file"
+                accept=".csv"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) {
+                    importAlipayCsv.mutate(file);
+                  }
+                }}
+              />
+            </label>
+          </div>
+          <div className="mt-4">
+            <p className="text-sm text-ink/60">
+              普通 CSV 格式：`fund_code,action,amount_or_shares,nav,fee,traded_at`。支付宝 CSV 支持中文列：
+              `基金代码,交易类型,金额,份额,成交净值,手续费,交易日期`。
             </p>
             {csvResult ? <p className="mt-3 text-sm text-accent">{csvResult}</p> : null}
           </div>
@@ -150,19 +188,19 @@ export default function TransactionsPage() {
           <Panel className="w-full max-w-2xl">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-xs uppercase tracking-[0.35em] text-accent">Record Order</p>
-                <h3 className="mt-3 font-display text-3xl">Add a new transaction</h3>
+                <p className="text-xs uppercase tracking-[0.35em] text-accent">记录交易</p>
+                <h3 className="mt-3 font-display text-3xl">新增一笔基金交易</h3>
               </div>
               <button
                 className="rounded-full border border-ink/10 px-4 py-2 text-sm font-semibold"
                 onClick={() => setShowComposer(false)}
               >
-                Close
+                关闭
               </button>
             </div>
             <div className="mt-5 grid gap-4 md:grid-cols-2">
               <label className="text-sm">
-                Fund Code
+                基金代码
                 <input
                   className="mt-2 w-full rounded-2xl border border-ink/10 bg-paper px-4 py-3"
                   value={form.fund_code}
@@ -170,18 +208,18 @@ export default function TransactionsPage() {
                 />
               </label>
               <label className="text-sm">
-                Action
+                交易类型
                 <select
                   className="mt-2 w-full rounded-2xl border border-ink/10 bg-paper px-4 py-3"
                   value={form.action}
                   onChange={(event) => setForm((current) => ({ ...current, action: event.target.value }))}
                 >
-                  <option value="buy">buy</option>
-                  <option value="sell">sell</option>
+                  <option value="buy">买入</option>
+                  <option value="sell">卖出</option>
                 </select>
               </label>
               <label className="text-sm">
-                Amount
+                买入金额
                 <input
                   className="mt-2 w-full rounded-2xl border border-ink/10 bg-paper px-4 py-3"
                   value={form.amount}
@@ -189,7 +227,7 @@ export default function TransactionsPage() {
                 />
               </label>
               <label className="text-sm">
-                Shares
+                卖出份额
                 <input
                   className="mt-2 w-full rounded-2xl border border-ink/10 bg-paper px-4 py-3"
                   value={form.shares}
@@ -197,7 +235,7 @@ export default function TransactionsPage() {
                 />
               </label>
               <label className="text-sm">
-                NAV
+                成交净值
                 <input
                   className="mt-2 w-full rounded-2xl border border-ink/10 bg-paper px-4 py-3"
                   value={form.nav_at_trade}
@@ -207,7 +245,7 @@ export default function TransactionsPage() {
                 />
               </label>
               <label className="text-sm">
-                Fee
+                手续费
                 <input
                   className="mt-2 w-full rounded-2xl border border-ink/10 bg-paper px-4 py-3"
                   value={form.fee}
@@ -215,7 +253,7 @@ export default function TransactionsPage() {
                 />
               </label>
               <label className="text-sm md:col-span-2">
-                Trade Date
+                交易日期
                 <input
                   className="mt-2 w-full rounded-2xl border border-ink/10 bg-paper px-4 py-3"
                   value={form.traded_at}
@@ -232,7 +270,7 @@ export default function TransactionsPage() {
                   })
                 }
               >
-                Save Transaction
+                保存交易
               </button>
             </div>
           </Panel>

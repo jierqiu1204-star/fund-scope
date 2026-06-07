@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 import respx
 from httpx import Response
 from sqlalchemy import func, select
 
+from app.defaults.funds import DEFAULT_RESEARCH_FUNDS
 from app.models.entities import JobRun, NewsItem, NewsSummary
 from app.services import jobs as jobs_module
 from app.services.job_runner import run_job
@@ -16,11 +17,12 @@ from app.services.news import fetch_news_for_fund
 
 @pytest.mark.asyncio
 async def test_news_feed_falls_back_to_title_when_summary_missing(client, app) -> None:
+    recent = datetime.utcnow() - timedelta(days=1)
     async with app.state.db.session() as session:
         session.add(
             NewsItem(
                 fund_code="007339",
-                published_at=datetime(2026, 5, 1, 10, 0, 0),
+                published_at=recent,
                 title="Manager changed",
                 url="https://example.com/news/1",
                 raw_content="Long raw content",
@@ -65,11 +67,12 @@ async def test_news_summary_backfill_retries_unsummarized_items(client, app, mon
 
     monkeypatch.setattr("app.services.llm.LLMClient.summarize_news", fake_summary)
 
+    recent = datetime.utcnow() - timedelta(days=1)
     async with app.state.db.session() as session:
         session.add(
             NewsItem(
                 fund_code="007339",
-                published_at=datetime(2026, 5, 1, 10, 0, 0),
+                published_at=recent,
                 title="Dividend issued",
                 url="https://example.com/news/2",
                 raw_content="Fund announced a dividend.",
@@ -121,7 +124,7 @@ async def test_daily_news_fetch_records_llm_failure_in_job_details(monkeypatch, 
     assert result["inserted"] == 1
     assert result["summarized"] == 0
     assert result["summary_failed"] == 1
-    assert result["empty_funds"] == 3
+    assert result["empty_funds"] == len(DEFAULT_RESEARCH_FUNDS) - 1
     assert "llm unavailable" in result["summary_errors"][0]["error"]
 
     async with app.state.db.session() as session:
@@ -171,4 +174,4 @@ async def test_daily_news_fetch_skips_duplicate_urls(monkeypatch, app) -> None:
         result = await daily_news_fetch_job(session, UnexpectedLLM())
 
     assert result["inserted"] == 0
-    assert result["duplicate_skipped"] == 4
+    assert result["duplicate_skipped"] == len(DEFAULT_RESEARCH_FUNDS)

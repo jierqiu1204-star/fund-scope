@@ -24,9 +24,9 @@ export default function NewsPage() {
   return (
     <div className="space-y-8">
       <SectionHeader
-        eyebrow="News"
-        title="Fund-level context in short, filterable bursts."
-        description="Summaries stay deliberately brief. When the LLM fails, raw titles remain visible so ingestion never becomes invisible."
+        eyebrow="新闻"
+        title="只看和基金有关的近况。"
+        description="这里把最近 14 天的基金新闻和公告做成简短摘要。摘要失败时仍会显示原始标题，避免重要信息被隐藏。"
         action={
           <div className="flex flex-wrap gap-2">
             {FILTERS.map((filter) => (
@@ -37,7 +37,7 @@ export default function NewsPage() {
                 }`}
                 onClick={() => setSelectedFilter(filter)}
               >
-                {filter === "all" ? "All" : eventTypeLabel(filter)}
+                {filter === "all" ? "全部" : eventTypeLabel(filter)}
               </button>
             ))}
           </div>
@@ -50,10 +50,10 @@ export default function NewsPage() {
             <div className="mb-5 flex items-center justify-between">
               <div>
                 <p className="text-xs uppercase tracking-[0.35em] text-accent">{group.fund_code}</p>
-                <h3 className="mt-2 font-display text-3xl">Last 14 days</h3>
+                <h3 className="mt-2 font-display text-3xl">最近 14 天</h3>
               </div>
               <span className="rounded-full bg-paper px-4 py-2 text-xs uppercase tracking-[0.2em] text-ink/55">
-                {group.items.length} items
+                {group.items.length} 条
               </span>
             </div>
             <div className="space-y-4">
@@ -74,7 +74,7 @@ export default function NewsPage() {
                   </div>
                   <h4 className="mt-4 text-xl font-semibold">{item.title}</h4>
                   <p className="mt-2 text-sm leading-7 text-ink/70">
-                    {item.summary ?? "LLM summary unavailable. Falling back to raw title only."}
+                    {item.summary ?? "暂无摘要，先显示原始标题。"}
                   </p>
                   <a
                     href={item.url}
@@ -82,7 +82,7 @@ export default function NewsPage() {
                     rel="noreferrer"
                     className="mt-4 inline-flex text-sm font-semibold text-accent hover:text-pine"
                   >
-                    Read source
+                    查看来源
                   </a>
                 </article>
               ))}

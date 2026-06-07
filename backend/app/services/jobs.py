@@ -53,13 +53,41 @@ def _aggregate_transactions(transactions: Sequence[Transaction]) -> dict[str, tu
 
 async def daily_fund_nav_job(session: AsyncSession) -> dict[str, Any]:
     today = date.today()
-    fund_codes = (
-        await session.scalars(select(Fund.code).where(Fund.is_watchlist.is_(True)).order_by(Fund.code.asc()))
-    ).all()
+    return await sync_fund_nav_history(session, today - timedelta(days=7), today)
+
+
+async def fund_nav_backfill_job(session: AsyncSession, days: int) -> dict[str, Any]:
+    if days <= 0:
+        raise ValueError("days must be greater than 0")
+    today = date.today()
+    return await sync_fund_nav_history(session, today - timedelta(days=days), today)
+
+
+async def sync_fund_nav_history(
+    session: AsyncSession,
+    from_date: date,
+    to_date: date,
+    codes: list[str] | None = None,
+) -> dict[str, Any]:
+    if from_date > to_date:
+        raise ValueError("from_date must be before to_date")
+
+    query = select(Fund.code).where(Fund.is_watchlist.is_(True)).order_by(Fund.code.asc())
+    if codes:
+        query = query.where(Fund.code.in_(codes))
+    fund_codes = (await session.scalars(query)).all()
     inserted = 0
+    updated = 0
+    failures: list[dict[str, str]] = []
 
     for fund_code in fund_codes:
-        rows = await fetch_fund_nav(fund_code, today - timedelta(days=7), today)
+        try:
+            rows = await fetch_fund_nav(fund_code, from_date, to_date)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("fund_nav_fetch_failed", extra={"fund_code": fund_code})
+            failures.append({"fund_code": fund_code, "error": str(exc)})
+            continue
+
         for row in rows:
             nav_date = date.fromisoformat(str(row["date"]))
             existing = await session.scalar(
@@ -82,8 +110,17 @@ async def daily_fund_nav_job(session: AsyncSession) -> dict[str, Any]:
 
             existing.nav = float(row["nav"])
             existing.accumulated_nav = float(row["accumulated_nav"])
+            updated += 1
     await session.commit()
-    return {"funds": len(fund_codes), "rows_inserted": inserted}
+    return {
+        "funds": len(fund_codes),
+        "from_date": from_date.isoformat(),
+        "to_date": to_date.isoformat(),
+        "rows_inserted": inserted,
+        "rows_updated": updated,
+        "failed": len(failures),
+        "failures": failures,
+    }
 
 
 async def daily_valuation_job(session: AsyncSession) -> dict[str, Any]:

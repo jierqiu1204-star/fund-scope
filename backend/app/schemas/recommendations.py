@@ -39,3 +39,28 @@ class LatestRecommendationsResponse(BaseModel):
     disclaimer: str
     run: RecommendationRunSummary | None
     items: list[RecommendationItemOut]
+
+
+class RecommendationReviewItemOut(BaseModel):
+    id: int
+    recommendation_item_id: int
+    asset_code: str
+    verdict: str
+    agent_notes: dict[str, Any]
+    risk_flags: list[str]
+
+
+class RecommendationReviewOut(BaseModel):
+    id: int
+    run_id: int
+    status: str
+    model_name: str
+    started_at: datetime
+    finished_at: datetime | None
+    summary: dict[str, Any]
+    error_message: str | None
+    items: list[RecommendationReviewItemOut]
+
+
+class LatestRecommendationsWithReviewResponse(LatestRecommendationsResponse):
+    review: RecommendationReviewOut | None

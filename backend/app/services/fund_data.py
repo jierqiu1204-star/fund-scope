@@ -45,13 +45,21 @@ def parse_akshare_nav_frame(
 ) -> list[dict[str, float | str]]:
     rows: list[dict[str, float | str]] = []
     for _, record in frame.iterrows():
-        nav_date = _as_date(record.get("\u51c0\u503c\u65e5\u671f"))
+        raw_date = record.get("\u51c0\u503c\u65e5\u671f")
+        raw_nav = record.get("\u5355\u4f4d\u51c0\u503c")
+        raw_accumulated_nav = record.get("\u7d2f\u8ba1\u51c0\u503c")
+        if raw_date in (None, "") or raw_nav in (None, ""):
+            continue
+        nav_date = _as_date(raw_date)
         if from_date <= nav_date <= to_date:
+            nav = float(raw_nav)
             rows.append(
                 {
                     "date": nav_date.isoformat(),
-                    "nav": float(record.get("\u5355\u4f4d\u51c0\u503c")),
-                    "accumulated_nav": float(record.get("\u7d2f\u8ba1\u51c0\u503c")),
+                    "nav": nav,
+                    "accumulated_nav": (
+                        nav if raw_accumulated_nav in (None, "") else float(raw_accumulated_nav)
+                    ),
                 }
             )
     return rows
@@ -67,7 +75,7 @@ def parse_eastmoney_nav_response(
     accumulated_by_date = {
         _date_from_epoch_millis(row[0]): float(row[1])
         for row in accumulated_rows
-        if isinstance(row, list) and len(row) >= 2
+        if isinstance(row, list) and len(row) >= 2 and row[1] not in (None, "")
     }
 
     rows: list[dict[str, float | str]] = []

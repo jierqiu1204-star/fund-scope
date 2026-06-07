@@ -23,9 +23,9 @@ export function ValuationDetailClient({ code }: { code: string }) {
   return (
     <div className="space-y-8">
       <SectionHeader
-        eyebrow="Valuation Detail"
-        title={`${code} history across the full stored window.`}
-        description="Switch between PE and PB to inspect whether the current reminder signal is being driven by earnings or balance-sheet valuation."
+        eyebrow="估值详情"
+        title={`${code} 的历史估值`}
+        description="可以在 PE（市盈率）和 PB（市净率）之间切换，看看当前估值处在历史区间的什么位置。"
       />
       <Panel>
         <div className="mb-6 flex flex-wrap gap-3">
@@ -37,7 +37,7 @@ export function ValuationDetailClient({ code }: { code: string }) {
               }`}
               onClick={() => setMetric(item)}
             >
-              {item.toUpperCase()}
+              {item === "pe" ? "PE（市盈率）" : "PB（市净率）"}
             </button>
           ))}
         </div>

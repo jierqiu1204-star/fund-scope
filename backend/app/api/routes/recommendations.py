@@ -1,15 +1,25 @@
 from __future__ import annotations
 
+from typing import cast
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db_session
-from app.models.entities import RecommendationItem, RecommendationRun
+from app.models.entities import (
+    RecommendationItem,
+    RecommendationReview,
+    RecommendationReviewItem,
+    RecommendationRun,
+)
 from app.schemas.recommendations import (
     AssetType,
     LatestRecommendationsResponse,
+    LatestRecommendationsWithReviewResponse,
     RecommendationItemOut,
+    RecommendationReviewItemOut,
+    RecommendationReviewOut,
     RecommendationRunSummary,
 )
 from app.services.recommendations.constants import (
@@ -18,6 +28,11 @@ from app.services.recommendations.constants import (
     RECOMMENDATION_DISCLAIMER,
     RUN_STATUS_SUCCESS,
     SAFE_LABELS,
+)
+from app.services.recommendations.reviews import (
+    generate_review_for_run,
+    get_review_for_run,
+    list_review_items,
 )
 
 router = APIRouter(prefix="/api/recommendations", tags=["recommendations"])
@@ -71,6 +86,47 @@ async def _items_for_run(session: AsyncSession, run_id: int) -> list[Recommendat
     return [_item_out(item) for item in rows]
 
 
+def _review_item_out(item: RecommendationReviewItem) -> RecommendationReviewItemOut:
+    return RecommendationReviewItemOut(
+        id=item.id,
+        recommendation_item_id=item.recommendation_item_id,
+        asset_code=item.asset_code,
+        verdict=item.verdict,
+        agent_notes=item.agent_notes_json,
+        risk_flags=item.risk_flags_json,
+    )
+
+
+async def _review_out(session: AsyncSession, review: RecommendationReview) -> RecommendationReviewOut:
+    return RecommendationReviewOut(
+        id=review.id,
+        run_id=review.run_id,
+        status=review.status,
+        model_name=review.model_name,
+        started_at=review.started_at,
+        finished_at=review.finished_at,
+        summary=review.summary_json,
+        error_message=review.error_message,
+        items=[_review_item_out(item) for item in await list_review_items(session, review.id)],
+    )
+
+
+async def _latest_successful_run(session: AsyncSession, asset_type: AssetType) -> RecommendationRun | None:
+    run = await session.scalar(
+        select(RecommendationRun)
+        .where(
+            RecommendationRun.asset_type == asset_type,
+            RecommendationRun.status == RUN_STATUS_SUCCESS,
+        )
+        .order_by(
+            RecommendationRun.as_of_date.desc(),
+            RecommendationRun.finished_at.desc(),
+            RecommendationRun.id.desc(),
+        )
+    )
+    return cast(RecommendationRun | None, run)
+
+
 @router.get("/runs", response_model=list[RecommendationRunSummary])
 async def list_recommendation_runs(
     asset_type: str | None = Query(default=None),
@@ -96,18 +152,7 @@ async def latest_recommendations(
     session: AsyncSession = Depends(get_db_session),
 ) -> LatestRecommendationsResponse:
     validated_type = _validate_asset_type(asset_type)
-    run = await session.scalar(
-        select(RecommendationRun)
-        .where(
-            RecommendationRun.asset_type == validated_type,
-            RecommendationRun.status == RUN_STATUS_SUCCESS,
-        )
-        .order_by(
-            RecommendationRun.as_of_date.desc(),
-            RecommendationRun.finished_at.desc(),
-            RecommendationRun.id.desc(),
-        )
-    )
+    run = await _latest_successful_run(session, validated_type)
     if run is None:
         return LatestRecommendationsResponse(
             asset_type=validated_type,
@@ -120,6 +165,31 @@ async def latest_recommendations(
         disclaimer=RECOMMENDATION_DISCLAIMER,
         run=_run_summary(run),
         items=await _items_for_run(session, run.id),
+    )
+
+
+@router.get("/latest-with-review", response_model=LatestRecommendationsWithReviewResponse)
+async def latest_recommendations_with_review(
+    asset_type: str = Query(default=ASSET_TYPE_FUND),
+    session: AsyncSession = Depends(get_db_session),
+) -> LatestRecommendationsWithReviewResponse:
+    validated_type = _validate_asset_type(asset_type)
+    run = await _latest_successful_run(session, validated_type)
+    if run is None:
+        return LatestRecommendationsWithReviewResponse(
+            asset_type=validated_type,
+            disclaimer=RECOMMENDATION_DISCLAIMER,
+            run=None,
+            items=[],
+            review=None,
+        )
+    review = await get_review_for_run(session, run.id)
+    return LatestRecommendationsWithReviewResponse(
+        asset_type=validated_type,
+        disclaimer=RECOMMENDATION_DISCLAIMER,
+        run=_run_summary(run),
+        items=await _items_for_run(session, run.id),
+        review=await _review_out(session, review) if review is not None else None,
     )
 
 
@@ -137,3 +207,32 @@ async def get_recommendation_run(
         run=_run_summary(run),
         items=await _items_for_run(session, run.id),
     )
+
+
+@router.post("/runs/{run_id}/review", response_model=RecommendationReviewOut)
+async def create_recommendation_review(
+    run_id: int,
+    session: AsyncSession = Depends(get_db_session),
+) -> RecommendationReviewOut:
+    run = await session.scalar(select(RecommendationRun).where(RecommendationRun.id == run_id))
+    if run is None:
+        raise HTTPException(status_code=404, detail="Recommendation run not found")
+    try:
+        review = await generate_review_for_run(session, run)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return await _review_out(session, review)
+
+
+@router.get("/runs/{run_id}/review", response_model=RecommendationReviewOut)
+async def get_recommendation_review(
+    run_id: int,
+    session: AsyncSession = Depends(get_db_session),
+) -> RecommendationReviewOut:
+    run = await session.scalar(select(RecommendationRun).where(RecommendationRun.id == run_id))
+    if run is None:
+        raise HTTPException(status_code=404, detail="Recommendation run not found")
+    review = await get_review_for_run(session, run.id)
+    if review is None:
+        raise HTTPException(status_code=404, detail="Recommendation review not found")
+    return await _review_out(session, review)

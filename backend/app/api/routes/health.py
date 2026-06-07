@@ -9,3 +9,8 @@ router = APIRouter(tags=["health"])
 async def healthcheck(request: Request) -> dict[str, str]:
     await request.app.state.db.ping()
     return {"app": "ok", "db": "ok"}
+
+
+@router.get("/api/health")
+async def api_healthcheck(request: Request) -> dict[str, str]:
+    return await healthcheck(request)

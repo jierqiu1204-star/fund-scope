@@ -5,16 +5,10 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db_session
+from app.defaults.funds import DEFAULT_RESEARCH_FUNDS
 from app.models.entities import Fund
 
 router = APIRouter(prefix="/api/onboarding", tags=["onboarding"])
-
-DEFAULT_FUNDS = {
-    "007339": ("E Fund CSI 300", "equity", 0.4),
-    "001052": ("Huaxia SP500", "equity", 0.3),
-    "270042": ("GF Nasdaq 100", "equity", 0.2),
-    "000198": ("Tianhong YEB", "money_market", 0.1),
-}
 
 
 @router.post("/apply-default-portfolio")
@@ -32,20 +26,24 @@ async def apply_default_portfolio(
     if existing and mode == "replace":
         await session.execute(update(Fund).values(is_watchlist=False))
 
-    for code, (name, category, allocation) in DEFAULT_FUNDS.items():
-        fund = await session.get(Fund, code)
+    for default_fund in DEFAULT_RESEARCH_FUNDS:
+        fund = await session.get(Fund, default_fund.code)
         if fund is None:
             session.add(
                 Fund(
-                    code=code,
-                    name=name,
-                    category=category,
-                    target_allocation=allocation,
+                    code=default_fund.code,
+                    name=default_fund.name,
+                    category=default_fund.category,
+                    tracking_index_code=default_fund.tracking_index_code,
+                    target_allocation=default_fund.target_allocation,
                     is_watchlist=True,
                 )
             )
         else:
+            fund.name = default_fund.name
+            fund.category = default_fund.category
+            fund.tracking_index_code = default_fund.tracking_index_code
             fund.is_watchlist = True
-            fund.target_allocation = allocation
+            fund.target_allocation = default_fund.target_allocation
     await session.commit()
     return {"applied": True, "mode": mode}

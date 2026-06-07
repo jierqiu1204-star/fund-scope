@@ -99,6 +99,18 @@ The stock MVP uses a small local seed universe so the feature works offline. Rep
 
 Recommendation results are research aids only. FundScope does not execute trades, provide trade commands, set price targets, or forecast returns.
 
+## Strategy Lab
+
+FundScope includes a fund/ETF strategy lab for repeatable research. It stores strategy definitions, runs NAV-based backtests, starts local paper portfolios, and keeps the legacy fund screening workflow available as a strategy-lab view.
+
+The first built-in templates are:
+
+- ETF/fund momentum rotation with a valuation-percentile filter.
+- Monthly DCA baseline for comparison.
+- Fund screening using the existing recommendation scoring rules.
+
+Open `/strategy-lab` to create strategies, run backtests, start a paper portfolio, or review screening results. Admin jobs also include `daily_strategy_paper` for refreshing active paper portfolios. Strategy Lab does not connect to brokers or place real orders.
+
 ## Portfolio Evidence
 
 Generated MVP screenshots are stored in `docs/assets/screenshots/`:
