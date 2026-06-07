@@ -140,6 +140,7 @@ def validate_advisor_payload(
     payload: str | dict[str, Any],
     *,
     rule_action: str,
+    fallback_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     parsed: dict[str, Any]
     if isinstance(payload, str):
@@ -155,15 +156,29 @@ def validate_advisor_payload(
     if _is_stronger(str(action_label), rule_action):
         action_label = rule_action
 
+    def text_field(key: str, limit: int) -> str:
+        value = str(parsed.get(key, "")).strip()
+        if not value and fallback_payload is not None:
+            value = str(fallback_payload.get(key, "")).strip()
+        return value[:limit]
+
+    def list_field(key: str) -> list[str]:
+        try:
+            return _coerce_string_list(parsed.get(key), key)
+        except ValueError:
+            if fallback_payload is None:
+                raise
+            return _coerce_string_list(fallback_payload.get(key), key)
+
     report = {
         "action_label": action_label,
-        "plain_summary": str(parsed.get("plain_summary", "")).strip()[:360],
-        "opportunity": _coerce_string_list(parsed.get("opportunity"), "opportunity"),
-        "risks": _coerce_string_list(parsed.get("risks"), "risks"),
-        "opposing_view": str(parsed.get("opposing_view", "")).strip()[:500],
-        "watch_conditions": _coerce_string_list(parsed.get("watch_conditions"), "watch_conditions"),
-        "holding_note": str(parsed.get("holding_note", "")).strip()[:500],
-        "data_limitations": str(parsed.get("data_limitations", "")).strip()[:500],
+        "plain_summary": text_field("plain_summary", 360),
+        "opportunity": list_field("opportunity"),
+        "risks": list_field("risks"),
+        "opposing_view": text_field("opposing_view", 500),
+        "watch_conditions": list_field("watch_conditions"),
+        "holding_note": text_field("holding_note", 500),
+        "data_limitations": text_field("data_limitations", 500),
     }
     for key in ("plain_summary", "opposing_view", "holding_note", "data_limitations"):
         if not report[key]:
@@ -435,7 +450,16 @@ async def run_advisor_generation(
                 response_schema=PROMPT_SCHEMA,
                 timeout_seconds=settings.llm_advisor_timeout_seconds,
             )
-            report = validate_advisor_payload(raw_content, rule_action=rule_action)
+            model_fallback = fallback_report(
+                item,
+                is_held=is_held,
+                reason="模型未提供完整字段",
+            )
+            report = validate_advisor_payload(
+                raw_content,
+                rule_action=rule_action,
+                fallback_payload=model_fallback,
+            )
             attempt.status = "success"
             attempt.finished_at = utcnow()
             attempt.response_json = report

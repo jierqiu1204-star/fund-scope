@@ -120,6 +120,30 @@ def test_validate_advisor_payload_replaces_unknown_action_with_rule_action() -> 
     assert report["action_label"] == ACTION_CAUTION
 
 
+def test_validate_advisor_payload_uses_fallback_for_missing_fields() -> None:
+    payload = json.loads(_valid_report(ACTION_FOCUS))
+    payload["opportunity"] = []
+    payload["plain_summary"] = ""
+    fallback = {
+        "plain_summary": "规则兜底说明。",
+        "opportunity": ["规则机会。"],
+        "risks": ["规则风险。"],
+        "opposing_view": "规则反方。",
+        "watch_conditions": ["规则观察条件。"],
+        "holding_note": "规则持仓说明。",
+        "data_limitations": "规则数据限制。",
+    }
+
+    report = validate_advisor_payload(
+        payload,
+        rule_action=ACTION_CAUTION,
+        fallback_payload=fallback,
+    )
+
+    assert report["plain_summary"] == "规则兜底说明。"
+    assert report["opportunity"] == ["规则机会。"]
+
+
 @pytest.mark.asyncio
 async def test_advisor_generation_is_idempotent_and_does_not_change_signal_items(app, settings) -> None:
     run_id = await _seed_signal_run(app)
