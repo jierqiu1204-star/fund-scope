@@ -108,6 +108,8 @@ def _is_stronger(candidate: str, allowed: str) -> bool:
 
 
 def _coerce_string_list(value: Any, field: str) -> list[str]:
+    if isinstance(value, str) and value.strip():
+        return [value.strip()[:240]]
     if not isinstance(value, list) or not value:
         raise ValueError(f"{field} must be a non-empty list")
     result: list[str] = []

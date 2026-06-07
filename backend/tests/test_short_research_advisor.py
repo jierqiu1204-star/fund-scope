@@ -98,6 +98,19 @@ def test_validate_advisor_payload_downgrades_and_rejects_unsafe_language() -> No
         validate_advisor_payload("{bad json", rule_action=ACTION_SKIP)
 
 
+def test_validate_advisor_payload_accepts_single_text_list_fields() -> None:
+    payload = json.loads(_valid_report(ACTION_CAUTION))
+    payload["opportunity"] = "趋势还可以继续观察"
+    payload["risks"] = "波动仍然偏高"
+    payload["watch_conditions"] = "先看近 20 日趋势是否保持"
+
+    report = validate_advisor_payload(payload, rule_action=ACTION_CAUTION)
+
+    assert report["opportunity"] == ["趋势还可以继续观察"]
+    assert report["risks"] == ["波动仍然偏高"]
+    assert report["watch_conditions"] == ["先看近 20 日趋势是否保持"]
+
+
 @pytest.mark.asyncio
 async def test_advisor_generation_is_idempotent_and_does_not_change_signal_items(app, settings) -> None:
     run_id = await _seed_signal_run(app)
