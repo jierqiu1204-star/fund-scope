@@ -223,7 +223,7 @@ def fallback_report(item: ShortResearchSignalItem, *, is_held: bool, reason: str
     risk_flags = list(item.risk_flags_json or [])
     action = conservative_action_for_item(item, is_held=is_held)
     name = _asset_name(item)
-    fallback_reason = f"AI 分析未更新：{reason}。" if reason else "当前使用规则解释。"
+    fallback_reason = f"{reason}。" if reason else "当前使用规则解释。"
     risks = risk_flags or ["暂未触发主要风险标签，但短线结果仍可能很快变化。"]
     return {
         "action_label": action,
@@ -453,7 +453,7 @@ async def run_advisor_generation(
             model_fallback = fallback_report(
                 item,
                 is_held=is_held,
-                reason="模型未提供完整字段",
+                reason="模型输出不完整，已用规则解释补齐",
             )
             report = validate_advisor_payload(
                 raw_content,
