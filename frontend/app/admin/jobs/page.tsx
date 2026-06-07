@@ -111,6 +111,31 @@ const jobGroups: Array<{ title: string; description: string; actions: JobAction[
     ]
   },
   {
+    title: "短线基金/ETF研究",
+    description: "同步统一短线研究池，生成保守观察排序，并用大模型补充多角度研究说明。大模型只解释，不会改排名或真实操作。",
+    actions: [
+      {
+        key: "daily_short_research_data",
+        label: "同步短线研究数据",
+        description: "拉取短线基金和 ETF 研究池最近一段时间的公开净值与日线数据。",
+        endpoint: "/api/admin/jobs/daily_short_research_data/run",
+        primary: true
+      },
+      {
+        key: "daily_short_research_signals",
+        label: "生成短线排序",
+        description: "按趋势、回撤、波动和数据质量生成保守观察标签。",
+        endpoint: "/api/admin/jobs/daily_short_research_signals/run"
+      },
+      {
+        key: "daily_short_research_advisor",
+        label: "生成 AI 研究报告",
+        description: "为最新短线榜单生成重点观察、高位别追、谨慎等保守说明；AI 不改变榜单。",
+        endpoint: "/api/admin/jobs/daily_short_research_advisor/run"
+      }
+    ]
+  },
+  {
     title: "信息辅助",
     description: "这些任务用于提醒和新闻摘要，不影响净值回填本身。",
     actions: [

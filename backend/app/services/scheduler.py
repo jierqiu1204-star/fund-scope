@@ -28,6 +28,7 @@ from app.services.short_etf.jobs import (
     daily_short_etf_signals_job,
 )
 from app.services.short_research.jobs import (
+    daily_short_research_advisor_job,
     daily_short_research_data_job,
     daily_short_research_signals_job,
 )
@@ -55,6 +56,9 @@ def register_default_jobs(
 
     async def daily_news_fetch_tracked(session: AsyncSession) -> dict[str, Any]:
         return await daily_news_fetch_job(session, llm_client)
+
+    async def daily_short_research_advisor_tracked(session: AsyncSession) -> dict[str, Any]:
+        return await daily_short_research_advisor_job(session, settings, llm_client)
 
     async def monthly_dca_reminder_tracked(session: AsyncSession) -> dict[str, Any]:
         return await monthly_dca_reminder_job(session, settings)
@@ -193,5 +197,14 @@ def register_default_jobs(
         hour=21,
         minute=40,
         id="daily_short_research_signals",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_tracked_job,
+        "cron",
+        args=[db, "daily_short_research_advisor", daily_short_research_advisor_tracked],
+        hour=21,
+        minute=50,
+        id="daily_short_research_advisor",
         replace_existing=True,
     )

@@ -3,12 +3,13 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db_session
 from app.models.entities import ShortResearchSignalRun
 from app.schemas.short_research import (
+    ShortResearchAdvisorReportOut,
     ShortResearchAssetDetailOut,
     ShortResearchAssetListOut,
     ShortResearchAssetOut,
@@ -18,6 +19,7 @@ from app.schemas.short_research import (
     ShortResearchSignalRunRequest,
     ShortResearchStatusOut,
 )
+from app.services.short_research.advisor import latest_reports_by_asset, run_advisor_generation
 from app.services.short_research.service import (
     ComputedAsset,
     get_asset_detail,
@@ -32,7 +34,28 @@ from app.services.short_research.service import (
 router = APIRouter(prefix="/api/short-research", tags=["short-research"])
 
 
-def _asset_out(asset: ComputedAsset) -> ShortResearchAssetOut:
+def _advisor_report_out(report: Any | None) -> ShortResearchAdvisorReportOut | None:
+    if report is None:
+        return None
+    return ShortResearchAdvisorReportOut(
+        id=report.id,
+        status=report.status,
+        action_label=report.action_label,
+        plain_summary=report.plain_summary,
+        opportunity=list(report.opportunity_json),
+        risks=list(report.risks_json),
+        opposing_view=report.opposing_view,
+        watch_conditions=list(report.watch_conditions_json),
+        holding_note=report.holding_note,
+        data_limitations=report.data_limitations,
+        model_name=report.model_name,
+        prompt_version=report.prompt_version,
+        source=report.source,
+        generated_at=report.generated_at,
+    )
+
+
+def _asset_out(asset: ComputedAsset, advisor_report: Any | None = None) -> ShortResearchAssetOut:
     return ShortResearchAssetOut(
         asset_type=asset.metadata.asset_type,
         code=asset.metadata.code,
@@ -52,11 +75,13 @@ def _asset_out(asset: ComputedAsset) -> ShortResearchAssetOut:
         risk_flags=asset.risk_flags,
         rationale=asset.rationale,
         source_note=asset.source_note,
+        advisor_report=_advisor_report_out(advisor_report),
     )
 
 
 async def _signal_run_out(session: AsyncSession, run: ShortResearchSignalRun) -> ShortResearchSignalRunOut:
     assets = await signal_run_items_as_assets(session, run)
+    advisor_reports = await latest_reports_by_asset(session, run.id)
     return ShortResearchSignalRunOut(
         id=run.id,
         status=run.status,
@@ -66,7 +91,13 @@ async def _signal_run_out(session: AsyncSession, run: ShortResearchSignalRun) ->
         config=run.config_json,
         summary=run.summary_json,
         error_message=run.error_message,
-        items=[_asset_out(item) for item in assets],
+        items=[
+            _asset_out(
+                item,
+                advisor_reports.get((item.metadata.asset_type, item.metadata.code)),
+            )
+            for item in assets
+        ],
     )
 
 
@@ -91,7 +122,18 @@ async def list_short_research_assets(
             for item in assets
             if keyword in item.metadata.code.lower() or keyword in item.metadata.name.lower()
         ]
-    return ShortResearchAssetListOut(items=[_asset_out(item) for item in assets], total=len(assets))
+    run = await latest_signal_run(session)
+    advisor_reports = await latest_reports_by_asset(session, run.id) if run is not None else {}
+    return ShortResearchAssetListOut(
+        items=[
+            _asset_out(
+                item,
+                advisor_reports.get((item.metadata.asset_type, item.metadata.code)),
+            )
+            for item in assets
+        ],
+        total=len(assets),
+    )
 
 
 @router.get("/assets/{asset_type}/{code}", response_model=ShortResearchAssetDetailOut)
@@ -104,8 +146,10 @@ async def get_short_research_asset_detail(
         asset, chart, sections = await get_asset_detail(session, asset_type, code)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    run = await latest_signal_run(session)
+    advisor_reports = await latest_reports_by_asset(session, run.id) if run is not None else {}
     return ShortResearchAssetDetailOut(
-        asset=_asset_out(asset),
+        asset=_asset_out(asset, advisor_reports.get((asset.metadata.asset_type, asset.metadata.code))),
         chart=[
             ShortResearchChartPointOut(
                 date=item["date"],
@@ -158,6 +202,17 @@ async def run_short_research_signals(
         codes=payload.codes,
     )
     return await _signal_run_out(session, run)
+
+
+@router.post("/advisor/run")
+async def run_short_research_advisor(
+    request: Request,
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    return await run_advisor_generation(
+        session,
+        request.app.state.settings,
+    )
 
 
 @router.get("/signals/latest", response_model=ShortResearchSignalRunOut | None)

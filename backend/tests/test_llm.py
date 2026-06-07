@@ -52,6 +52,48 @@ async def test_summarize_news_calls_configured_openai_endpoint(monkeypatch, sett
     assert "The manager changed today." in request["messages"][1]["content"]
 
 
+@pytest.mark.asyncio
+async def test_generate_short_research_report_uses_structured_output(monkeypatch, settings) -> None:
+    created_clients: list[Any] = []
+
+    class FakeCompletions:
+        def __init__(self) -> None:
+            self.requests: list[dict[str, Any]] = []
+
+        async def create(self, **kwargs: Any) -> Any:
+            self.requests.append(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content='{"action_label":"谨慎"}')
+                    )
+                ]
+            )
+
+    class FakeAsyncOpenAI:
+        def __init__(self, *, base_url: str, api_key: str) -> None:
+            self.completions = FakeCompletions()
+            self.chat = SimpleNamespace(completions=self.completions)
+            created_clients.append(self)
+
+    monkeypatch.setattr(llm_module, "AsyncOpenAI", FakeAsyncOpenAI)
+
+    client = llm_module.LLMClient(settings)
+    result = await client.generate_short_research_report(
+        {"code": "270042"},
+        response_schema={"type": "object", "properties": {"action_label": {"type": "string"}}},
+        timeout_seconds=12,
+    )
+
+    request = created_clients[0].completions.requests[0]
+    assert result == '{"action_label":"谨慎"}'
+    assert request["model"] == "test-model"
+    assert request["temperature"] == 0
+    assert request["timeout"] == 12
+    assert request["response_format"]["type"] == "json_schema"
+    assert "只做解释" not in request["messages"][1]["content"]
+
+
 def test_parse_summary_output_restricts_event_type_and_summary_length() -> None:
     parsed = parse_summary_output(f"unsupported|{'x' * 100}")
 

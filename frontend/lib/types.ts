@@ -496,6 +496,24 @@ export type ShortResearchAsset = {
   risk_flags: string[];
   rationale: Record<string, unknown>;
   source_note: string;
+  advisor_report: ShortResearchAdvisorReport | null;
+};
+
+export type ShortResearchAdvisorReport = {
+  id: number;
+  status: string;
+  action_label: string;
+  plain_summary: string;
+  opportunity: string[];
+  risks: string[];
+  opposing_view: string;
+  watch_conditions: string[];
+  holding_note: string;
+  data_limitations: string;
+  model_name: string;
+  prompt_version: string;
+  source: string;
+  generated_at: string;
 };
 
 export type ShortResearchAssetList = {

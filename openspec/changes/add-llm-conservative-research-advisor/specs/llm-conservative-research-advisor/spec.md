@@ -1,0 +1,86 @@
+## ADDED Requirements
+
+### Requirement: LLM Research Reports Are Generated After Deterministic Signals
+The system SHALL generate LLM research reports only after deterministic short-term fund and ETF signals have been computed, and SHALL use deterministic scores, labels, metrics, and risk flags as the source of truth.
+
+#### Scenario: Report uses existing signal data
+- **WHEN** the daily LLM research job runs after short-term signal generation
+- **THEN** each LLM request receives the asset code, name, asset type, rank, deterministic label, score, recent return metrics, drawdown, volatility, liquidity where available, data date, risk flags, and investment direction
+
+#### Scenario: LLM does not change ranking
+- **WHEN** the LLM returns a research report for an asset
+- **THEN** the persisted rank, score, deterministic label, and risk flags remain unchanged from the deterministic signal run
+
+### Requirement: Conservative Observation Actions Are Enforced
+The system SHALL expose only conservative observation actions for LLM-assisted research and SHALL NOT expose direct trading commands.
+
+#### Scenario: Allowed action labels are returned
+- **WHEN** the API returns an LLM research report
+- **THEN** its action label is one of `重点观察`, `高位别追`, `谨慎`, `暂不考虑`, or `退出观察`
+
+#### Scenario: Stronger model action is downgraded
+- **WHEN** the deterministic label maps to `谨慎` or `暂不考虑` and the LLM returns a stronger action label
+- **THEN** the backend replaces the model action with the conservative rule-derived action before saving or returning the report
+
+#### Scenario: High watch is not treated as buyable
+- **WHEN** an asset's deterministic label is high-watch or has chase-risk, surge, or high-volatility risk flags
+- **THEN** the LLM-assisted action is `高位别追` or weaker and the explanation highlights the relevant risk
+
+### Requirement: LLM Output Is Structured And Validated
+The system SHALL request and store structured LLM output with required fields for beginner-readable research, risks, and opposing views.
+
+#### Scenario: Valid structured report is stored
+- **WHEN** the model returns valid structured output
+- **THEN** the system stores action label, plain summary, opportunity notes, risk notes, opposing view, watch conditions, holding note, data limitations, model name, prompt version, and generation timestamp
+
+#### Scenario: Invalid model output is rejected
+- **WHEN** the model output is missing required fields, contains invalid JSON, or includes prohibited trading language
+- **THEN** the system records the LLM attempt as failed and falls back to rule-based explanation without changing the deterministic signal
+
+### Requirement: LLM Failures Degrade Gracefully
+The system SHALL keep short-term research usable when the LLM provider is unavailable, the API key is missing, quota is exhausted, or the model response fails validation.
+
+#### Scenario: API key is not configured
+- **WHEN** no model API key is configured
+- **THEN** deterministic rankings, charts, labels, and rule-based explanations remain available and the UI states that AI analysis is not enabled
+
+#### Scenario: Provider call fails
+- **WHEN** a model call fails during daily report generation
+- **THEN** the job stores the failed asset code and readable error message while continuing with other selected assets
+
+### Requirement: Daily Advisor Job Is Visible And Idempotent
+The system SHALL provide a manual and scheduled job for LLM conservative research reports, and repeated runs for the same signal run SHALL update existing reports instead of creating duplicates.
+
+#### Scenario: Admin runs advisor job from web
+- **WHEN** the user clicks the web action to generate AI research reports
+- **THEN** the system generates reports for the latest eligible short-term signal run and records job status in admin job history
+
+#### Scenario: Daily scheduled advisor runs after signal generation
+- **WHEN** the daily scheduler executes short-term research jobs
+- **THEN** the LLM advisor job runs after source data sync and deterministic short-term signal generation
+
+#### Scenario: Re-running same signal is idempotent
+- **WHEN** the advisor job runs twice for the same signal run and asset
+- **THEN** the second run updates the existing report record rather than inserting duplicate active reports
+
+### Requirement: Frontend Shows Beginner-Friendly Multi-Angle Research
+The system SHALL show LLM-assisted research in the short-term fund and ETF interface as concise Chinese cards focused on observation, risk, and evidence.
+
+#### Scenario: User opens short-term page with reports
+- **WHEN** the user opens `/short-term` and LLM reports exist for the latest signal run
+- **THEN** the page shows 今日研究建议, action label, plain summary, why it is observed, main risks, opposing view, watch conditions, and data limitations in Chinese
+
+#### Scenario: Report is absent
+- **WHEN** a ranked asset does not have a valid LLM report
+- **THEN** the page shows the deterministic rule explanation and does not hide the asset from the ranked list
+
+### Requirement: Research Language Avoids Trading Instruction Claims
+The system SHALL frame LLM-assisted outputs as research observations and SHALL reject or hide outputs that present direct buy, sell, target price, guaranteed return, or automatic trading claims.
+
+#### Scenario: Prohibited language is filtered
+- **WHEN** the model output contains direct trading commands, target prices, guaranteed profit claims, or claims of syncing with Alipay real-time account data
+- **THEN** the output is rejected and the UI displays a conservative fallback explanation
+
+#### Scenario: Disclaimer is visible
+- **WHEN** the frontend renders LLM-assisted research
+- **THEN** it displays that the result is based on public data and model-assisted explanation, does not connect to Alipay or brokers, and is not an automatic trade instruction

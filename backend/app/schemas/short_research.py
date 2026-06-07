@@ -56,6 +56,23 @@ class ShortResearchChartPointOut(BaseModel):
     turnover: float | None = None
 
 
+class ShortResearchAdvisorReportOut(BaseModel):
+    id: int
+    status: str
+    action_label: str
+    plain_summary: str
+    opportunity: list[str]
+    risks: list[str]
+    opposing_view: str
+    watch_conditions: list[str]
+    holding_note: str
+    data_limitations: str
+    model_name: str
+    prompt_version: str
+    source: str
+    generated_at: datetime
+
+
 class ShortResearchAssetOut(BaseModel):
     asset_type: str
     code: str
@@ -75,6 +92,7 @@ class ShortResearchAssetOut(BaseModel):
     risk_flags: list[str]
     rationale: dict[str, Any]
     source_note: str
+    advisor_report: ShortResearchAdvisorReportOut | None = None
 
 
 class ShortResearchAssetListOut(BaseModel):

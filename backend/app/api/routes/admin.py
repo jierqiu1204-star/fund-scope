@@ -27,6 +27,7 @@ from app.services.short_etf.jobs import (
     daily_short_etf_signals_job,
 )
 from app.services.short_research.jobs import (
+    daily_short_research_advisor_job,
     daily_short_research_data_job,
     daily_short_research_signals_job,
 )
@@ -162,6 +163,16 @@ async def run_job_by_name(
         return await run_job(request.app.state.db.session, job_name, daily_short_research_data_job)
     if job_name == "daily_short_research_signals":
         return await run_job(request.app.state.db.session, job_name, daily_short_research_signals_job)
+    if job_name == "daily_short_research_advisor":
+        return await run_job(
+            request.app.state.db.session,
+            job_name,
+            lambda tracked_session: daily_short_research_advisor_job(
+                tracked_session,
+                request.app.state.settings,
+                llm_client,
+            ),
+        )
     if job_name == "news_summary_backfill":
         return await run_job(
             request.app.state.db.session,

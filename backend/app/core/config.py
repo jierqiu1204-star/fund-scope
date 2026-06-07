@@ -20,6 +20,13 @@ class Settings(BaseSettings):
     openai_base_url: str = Field(default="https://api.openai.com/v1", alias="OPENAI_BASE_URL")
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
     model_name: str = Field(default="gpt-4o-mini", alias="MODEL_NAME")
+    llm_advisor_enabled: bool = Field(default=False, alias="LLM_ADVISOR_ENABLED")
+    llm_advisor_max_assets: int = Field(default=20, alias="LLM_ADVISOR_MAX_ASSETS")
+    llm_advisor_timeout_seconds: float = Field(default=30.0, alias="LLM_ADVISOR_TIMEOUT_SECONDS")
+    llm_advisor_prompt_version: str = Field(
+        default="short_research_advisor_v1",
+        alias="LLM_ADVISOR_PROMPT_VERSION",
+    )
     smtp_host: str = Field(default="", alias="SMTP_HOST")
     smtp_port: int = Field(default=587, alias="SMTP_PORT")
     smtp_username: str = Field(default="", alias="SMTP_USERNAME")

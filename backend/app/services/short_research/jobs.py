@@ -5,6 +5,9 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings, get_settings
+from app.services.llm import LLMClient
+from app.services.short_research.advisor import run_advisor_generation
 from app.services.short_research.service import run_signal_generation, sync_short_research_data
 
 
@@ -24,3 +27,15 @@ async def daily_short_research_signals_job(session: AsyncSession) -> dict[str, A
         "etfs": int(run.summary_json.get("etf_count", 0)),
         "conclusion_counts": run.summary_json.get("conclusion_counts", {}),
     }
+
+
+async def daily_short_research_advisor_job(
+    session: AsyncSession,
+    settings: Settings | None = None,
+    llm_client: LLMClient | None = None,
+) -> dict[str, Any]:
+    return await run_advisor_generation(
+        session,
+        settings or get_settings(),
+        llm_client=llm_client,
+    )

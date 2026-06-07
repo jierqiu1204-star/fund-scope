@@ -460,6 +460,54 @@ class ShortResearchSignalItem(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class ShortResearchAdvisorReport(Base):
+    __tablename__ = "short_research_advisor_reports"
+    __table_args__ = (
+        UniqueConstraint("signal_run_id", "asset_type", "asset_code", name="uq_short_research_advisor_report"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    signal_run_id: Mapped[int] = mapped_column(ForeignKey("short_research_signal_runs.id", ondelete="CASCADE"))
+    signal_item_id: Mapped[int] = mapped_column(ForeignKey("short_research_signal_items.id", ondelete="CASCADE"))
+    asset_type: Mapped[str] = mapped_column(String(16))
+    asset_code: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(32), default="success")
+    action_label: Mapped[str] = mapped_column(String(32))
+    plain_summary: Mapped[str] = mapped_column(Text)
+    opportunity_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    risks_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    opposing_view: Mapped[str] = mapped_column(Text)
+    watch_conditions_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    holding_note: Mapped[str] = mapped_column(Text)
+    data_limitations: Mapped[str] = mapped_column(Text)
+    model_name: Mapped[str] = mapped_column(String(255))
+    prompt_version: Mapped[str] = mapped_column(String(128))
+    source: Mapped[str] = mapped_column(String(32), default="llm")
+    deterministic_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    raw_response_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    generated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class ShortResearchAdvisorAttempt(Base):
+    __tablename__ = "short_research_advisor_attempts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    signal_run_id: Mapped[int] = mapped_column(ForeignKey("short_research_signal_runs.id", ondelete="CASCADE"))
+    signal_item_id: Mapped[int] = mapped_column(ForeignKey("short_research_signal_items.id", ondelete="CASCADE"))
+    asset_type: Mapped[str] = mapped_column(String(16))
+    asset_code: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(32))
+    model_name: Mapped[str] = mapped_column(String(255))
+    prompt_version: Mapped[str] = mapped_column(String(128))
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    request_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    response_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class NewsItem(Base):
     __tablename__ = "news_items"
 

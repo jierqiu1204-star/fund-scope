@@ -100,6 +100,19 @@ function conclusionTone(conclusion: string) {
   return "bg-slate-200 text-slate-800";
 }
 
+function advisorTone(action: string) {
+  if (action === "重点观察") {
+    return "bg-emerald-100 text-emerald-800";
+  }
+  if (action === "高位别追" || action === "退出观察") {
+    return "bg-rose-100 text-rose-800";
+  }
+  if (action === "谨慎") {
+    return "bg-amber-100 text-amber-900";
+  }
+  return "bg-stone-200 text-stone-700";
+}
+
 function assetTypeLabel(assetType: string) {
   return assetType === "etf" ? "ETF" : "基金";
 }
@@ -260,7 +273,16 @@ export default function ShortTermPage() {
     }
   });
 
+  const runAdvisor = useMutation({
+    mutationFn: async () => (await api.post<Record<string, unknown>>("/api/short-research/advisor/run")).data,
+    onSuccess: async (result) => {
+      setLastResult(result);
+      await queryClient.invalidateQueries({ queryKey: ["short-research"] });
+    }
+  });
+
   const selectedAsset = selectedDetail.data?.asset;
+  const advisorReport = selectedAsset?.advisor_report ?? null;
   const detailPoints = chartPoints(selectedDetail.data);
   const windowPoints = returnWindowChart(selectedAsset);
   const statusData = status.data;
@@ -288,6 +310,13 @@ export default function ShortTermPage() {
             >
               {runSignals.isPending ? "正在生成排序..." : "生成短线排序"}
             </button>
+            <button
+              className="rounded-full border border-ink/10 bg-white px-5 py-3 text-sm font-semibold text-ink transition hover:border-accent disabled:opacity-60"
+              disabled={runAdvisor.isPending}
+              onClick={() => runAdvisor.mutate()}
+            >
+              {runAdvisor.isPending ? "正在生成报告..." : "生成 AI 研究报告"}
+            </button>
           </div>
         }
       />
@@ -301,9 +330,9 @@ export default function ShortTermPage() {
         <StatPill label="高位观察" value={`${statusData?.high_risk_count ?? 0} 只`} tone="bg-rose-100 text-rose-800" />
       </div>
 
-      {(syncData.isError || runSignals.isError || status.isError) && (
+      {(syncData.isError || runSignals.isError || runAdvisor.isError || status.isError) && (
         <p className="rounded-[18px] bg-rose-50 px-4 py-3 text-sm text-rose-700">
-          {errorText(syncData.error ?? runSignals.error ?? status.error)}
+          {errorText(syncData.error ?? runSignals.error ?? runAdvisor.error ?? status.error)}
         </p>
       )}
 
@@ -418,6 +447,11 @@ export default function ShortTermPage() {
                       <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : conclusionTone(item.conclusion)}`}>
                         {item.conclusion}
                       </span>
+                      {item.advisor_report ? (
+                        <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : advisorTone(item.advisor_report.action_label)}`}>
+                          {item.advisor_report.action_label}
+                        </span>
+                      ) : null}
                     </div>
                   </div>
                   <div className={`mt-4 grid gap-2 text-sm md:grid-cols-5 ${isSelected ? "text-white/70" : "text-ink/60"}`}>
@@ -474,6 +508,59 @@ export default function ShortTermPage() {
                   />
                   <StatPill label="可用样本" value={`${selectedAsset.usable_days} 天`} tone="bg-accentSoft text-ink" />
                   <StatPill label="60 日回撤" value={percentMetric(selectedAsset.metrics, "max_drawdown_60d")} tone="bg-white text-ink" />
+                </div>
+
+                <div className="mt-6 rounded-[20px] border border-ink/10 bg-white p-5">
+                  <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-[0.22em] text-accent">今日研究建议</p>
+                      <h3 className="mt-2 text-xl font-semibold text-ink">
+                        {advisorReport ? advisorReport.plain_summary : "还没有 AI 研究报告，先看规则解释。"}
+                      </h3>
+                      <p className="mt-2 text-sm leading-6 text-ink/60">
+                        {advisorReport
+                          ? `${advisorReport.source === "llm" ? "大模型辅助" : "规则降级"} · ${advisorReport.model_name} · ${formatDate(advisorReport.generated_at)}`
+                          : "点击页面顶部“生成 AI 研究报告”后，会在这里显示多角度说明。没有报告时，排序和图表仍然正常可用。"}
+                      </p>
+                    </div>
+                    <span className={`w-fit rounded-full px-4 py-2 text-sm font-semibold ${advisorTone(advisorReport?.action_label ?? "暂不考虑")}`}>
+                      {advisorReport?.action_label ?? "暂无报告"}
+                    </span>
+                  </div>
+                  {advisorReport ? (
+                    <div className="mt-5 grid gap-4 md:grid-cols-2">
+                      <div className="rounded-[18px] bg-paper p-4">
+                        <p className="font-semibold text-ink">为什么</p>
+                        <ul className="mt-2 space-y-2 text-sm leading-6 text-ink/65">
+                          {advisorReport.opportunity.map((item) => (
+                            <li key={item}>{item}</li>
+                          ))}
+                        </ul>
+                      </div>
+                      <div className="rounded-[18px] bg-paper p-4">
+                        <p className="font-semibold text-ink">风险和反方</p>
+                        <ul className="mt-2 space-y-2 text-sm leading-6 text-ink/65">
+                          {advisorReport.risks.map((item) => (
+                            <li key={item}>{item}</li>
+                          ))}
+                        </ul>
+                        <p className="mt-3 text-sm leading-6 text-ink/65">{advisorReport.opposing_view}</p>
+                      </div>
+                      <div className="rounded-[18px] bg-paper p-4">
+                        <p className="font-semibold text-ink">接下来观察</p>
+                        <ul className="mt-2 space-y-2 text-sm leading-6 text-ink/65">
+                          {advisorReport.watch_conditions.map((item) => (
+                            <li key={item}>{item}</li>
+                          ))}
+                        </ul>
+                      </div>
+                      <div className="rounded-[18px] bg-paper p-4">
+                        <p className="font-semibold text-ink">持有和数据限制</p>
+                        <p className="mt-2 text-sm leading-6 text-ink/65">{advisorReport.holding_note}</p>
+                        <p className="mt-3 text-sm leading-6 text-ink/65">{advisorReport.data_limitations}</p>
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
 
                 <div className="mt-6 grid gap-5 xl:grid-cols-2">
@@ -616,7 +703,7 @@ export default function ShortTermPage() {
 
       <p className="rounded-[18px] bg-white/70 px-5 py-4 text-sm leading-7 text-ink/60">
         说明：短线研究只使用公开基金净值和 ETF 日线数据。基金净值通常不是盘中实时数据，ETF 也可能受数据源延迟影响。
-        页面里的排序和标签用于研究观察，不代表未来收益，也不会触发真实操作。
+        页面里的排序、标签和 AI 说明都用于研究观察，不代表未来收益，也不会触发真实操作。
       </p>
     </div>
   );

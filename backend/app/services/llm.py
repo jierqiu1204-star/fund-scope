@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
 from openai import AsyncOpenAI
 
@@ -19,6 +21,9 @@ class LLMClient:
             Path(__file__).resolve().parent / "prompts" / "news_summary.txt"
         ).read_text(encoding="utf-8")
         self._recommendation_prompt = (prompt_dir / "recommendation_explanation.txt").read_text(
+            encoding="utf-8"
+        )
+        self._short_research_advisor_prompt = (prompt_dir / "short_research_advisor.txt").read_text(
             encoding="utf-8"
         )
 
@@ -52,3 +57,35 @@ class LLMClient:
         if not content:
             raise ValueError("LLM returned an empty explanation")
         return content.strip()[:280]
+
+    async def generate_short_research_report(
+        self,
+        payload: dict[str, Any],
+        *,
+        response_schema: dict[str, Any],
+        timeout_seconds: float,
+    ) -> str:
+        response = await self._client.chat.completions.create(
+            model=self.model_name,
+            temperature=0,
+            messages=[
+                {"role": "system", "content": self._short_research_advisor_prompt},
+                {
+                    "role": "user",
+                    "content": json.dumps(payload, ensure_ascii=False, default=str),
+                },
+            ],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "short_research_advisor_report",
+                    "schema": response_schema,
+                },
+            },
+            max_tokens=1200,
+            timeout=timeout_seconds,
+        )
+        content = response.choices[0].message.content
+        if not content:
+            raise ValueError("LLM returned an empty advisor report")
+        return content.strip()
