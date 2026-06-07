@@ -420,9 +420,10 @@ export default function ShortTermPage() {
                       </span>
                     </div>
                   </div>
-                  <div className={`mt-4 grid gap-2 text-sm md:grid-cols-4 ${isSelected ? "text-white/70" : "text-ink/60"}`}>
+                  <div className={`mt-4 grid gap-2 text-sm md:grid-cols-5 ${isSelected ? "text-white/70" : "text-ink/60"}`}>
                     <span>近 5 日：{percentMetric(item.metrics, "return_5d")}</span>
                     <span>近 20 日：{percentMetric(item.metrics, "return_20d")}</span>
+                    <span>近 60 日：{percentMetric(item.metrics, "return_60d")}</span>
                     <span>60 日回撤：{percentMetric(item.metrics, "max_drawdown_60d")}</span>
                     <span>样本：{item.usable_days} 天</span>
                   </div>
