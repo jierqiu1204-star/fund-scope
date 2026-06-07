@@ -33,6 +33,7 @@ from app.services.short_research.jobs import (
     daily_short_research_signals_job,
 )
 from app.services.strategy_lab.jobs import daily_strategy_paper_job
+from app.services.tracked_positions.jobs import daily_tracked_position_alerts_job
 
 
 async def _run_tracked_job(
@@ -62,6 +63,9 @@ def register_default_jobs(
 
     async def monthly_dca_reminder_tracked(session: AsyncSession) -> dict[str, Any]:
         return await monthly_dca_reminder_job(session, settings)
+
+    async def daily_tracked_position_alerts_tracked(session: AsyncSession) -> dict[str, Any]:
+        return await daily_tracked_position_alerts_job(session, settings)
 
     scheduler.add_job(
         _run_tracked_job,
@@ -206,5 +210,14 @@ def register_default_jobs(
         hour=21,
         minute=50,
         id="daily_short_research_advisor",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_tracked_job,
+        "cron",
+        args=[db, "daily_tracked_position_alerts", daily_tracked_position_alerts_tracked],
+        hour=22,
+        minute=0,
+        id="daily_tracked_position_alerts",
         replace_existing=True,
     )

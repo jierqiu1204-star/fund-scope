@@ -1,0 +1,43 @@
+{% extends "base.html.j2" %}
+{% block content %}
+<h1>{{ alert_title }}：{{ asset_name }}</h1>
+<p class="muted">
+  你标注追踪的 {{ asset_type }} {{ asset_code }} 触发了 FundScope 的保守提醒。
+  这不是自动卖出指令，也不代表未来收益，只是提醒你去投资平台人工检查。
+</p>
+
+<h2>这笔追踪</h2>
+<ul>
+  <li>买入日期：{{ buy_date }}</li>
+  <li>买入金额：{{ buy_amount }} 元</li>
+  <li>估算买入净值/价格：{{ entry_price or "暂无" }}{% if entry_price_date %}（{{ entry_price_date }}）{% endif %}</li>
+  <li>当前净值/价格：{{ current_price or "暂无" }}{% if current_price_date %}（{{ current_price_date }}）{% endif %}</li>
+  <li>估算当前金额：{{ estimated_value or "暂无" }} 元</li>
+  <li>估算盈亏：{{ estimated_pnl or "暂无" }} 元{% if estimated_pnl_pct is not none %}（{{ estimated_pnl_pct }}%）{% endif %}</li>
+</ul>
+
+<h2>为什么提醒</h2>
+<p class="muted">当前研究标签：{{ current_label }}；保守动作：{{ trigger_label }}。</p>
+<ul>
+  {% for item in reasons %}
+  <li>{{ item }}</li>
+  {% endfor %}
+</ul>
+
+{% if risk_flags %}
+<h2>风险标签</h2>
+<p class="muted">{{ risk_flags | join("、") }}</p>
+{% endif %}
+
+{% if watch_conditions %}
+<h2>接下来可以看什么</h2>
+<ul>
+  {% for item in watch_conditions %}
+  <li>{{ item }}</li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+<h2>数据限制</h2>
+<p class="muted">{{ data_limitations }}</p>
+{% endblock %}

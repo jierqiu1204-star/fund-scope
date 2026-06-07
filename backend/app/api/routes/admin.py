@@ -32,6 +32,7 @@ from app.services.short_research.jobs import (
     daily_short_research_signals_job,
 )
 from app.services.strategy_lab.jobs import daily_strategy_paper_job
+from app.services.tracked_positions.jobs import daily_tracked_position_alerts_job
 
 router = APIRouter(prefix="/api/admin/jobs", tags=["admin"])
 
@@ -171,6 +172,15 @@ async def run_job_by_name(
                 tracked_session,
                 request.app.state.settings,
                 llm_client,
+            ),
+        )
+    if job_name == "daily_tracked_position_alerts":
+        return await run_job(
+            request.app.state.db.session,
+            job_name,
+            lambda tracked_session: daily_tracked_position_alerts_job(
+                tracked_session,
+                request.app.state.settings,
             ),
         )
     if job_name == "news_summary_backfill":

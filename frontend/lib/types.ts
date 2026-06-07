@@ -541,3 +541,72 @@ export type ShortResearchSignalRun = {
   error_message: string | null;
   items: ShortResearchAsset[];
 };
+
+export type TrackedPositionSnapshot = {
+  current_price: number | null;
+  current_price_date: string | null;
+  estimated_value: number | null;
+  estimated_pnl: number | null;
+  estimated_pnl_pct: number | null;
+  current_label: string | null;
+  advisor_label: string | null;
+  risk_flags: string[];
+  explanation: string | null;
+};
+
+export type TrackedPositionAlert = {
+  id: number;
+  tracked_position_id: number;
+  alert_date: string;
+  alert_type: string;
+  trigger_label: string;
+  current_price: number | null;
+  current_price_date: string | null;
+  estimated_value: number | null;
+  estimated_pnl: number | null;
+  estimated_pnl_pct: number | null;
+  reasons: string[];
+  risk_flags: string[];
+  advisor_summary: string | null;
+  email_status: string;
+  email_error_message: string | null;
+  sent_at: string | null;
+  created_at: string;
+};
+
+export type TrackedPositionChartPoint = {
+  date: string;
+  price: number;
+  estimated_value: number | null;
+  estimated_pnl_pct: number | null;
+};
+
+export type TrackedPosition = {
+  id: number;
+  asset_type: "fund" | "etf";
+  asset_code: string;
+  asset_name: string;
+  buy_date: string;
+  buy_amount: number;
+  entry_price: number | null;
+  entry_price_date: string | null;
+  estimated_shares: number | null;
+  status: string;
+  note: string | null;
+  created_at: string;
+  updated_at: string;
+  current_snapshot: TrackedPositionSnapshot;
+  latest_alert: TrackedPositionAlert | null;
+};
+
+export type TrackedPositionDetail = TrackedPosition & {
+  chart: TrackedPositionChartPoint[];
+  alerts: TrackedPositionAlert[];
+};
+
+export type TrackedPositionList = {
+  items: TrackedPosition[];
+  total: number;
+  email_configured: boolean;
+  recipient_email: string;
+};

@@ -16,13 +16,15 @@ import {
 
 import { Panel, SectionHeader, StatPill } from "@/components/ui";
 import { api } from "@/lib/api";
-import { formatDate, formatPercent } from "@/lib/format";
+import { formatCurrency, formatDate, formatPercent } from "@/lib/format";
 import type {
   ShortResearchAsset,
   ShortResearchAssetDetail,
   ShortResearchAssetList,
   ShortResearchSignalRun,
-  ShortResearchStatus
+  ShortResearchStatus,
+  TrackedPosition,
+  TrackedPositionList
 } from "@/lib/types";
 
 type AssetTypeFilter = "all" | "fund" | "etf";
@@ -170,6 +172,56 @@ function safeSummary(result: Record<string, unknown> | null) {
   return JSON.stringify(result, null, 2);
 }
 
+function todayInputValue() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function trackingStatusLabel(status: string) {
+  switch (status) {
+    case "active":
+      return "追踪中";
+    case "handled":
+      return "已处理";
+    case "closed":
+      return "已卖出";
+    case "stopped":
+      return "已停止";
+    default:
+      return status;
+  }
+}
+
+function alertTypeLabel(alertType: string) {
+  if (alertType === "exit_watch") {
+    return "退出观察提醒";
+  }
+  if (alertType === "risk_warning") {
+    return "风险提醒";
+  }
+  return alertType;
+}
+
+function pnlTone(value: number | null) {
+  if (value === null) {
+    return "text-ink/55";
+  }
+  if (value > 0) {
+    return "text-emerald-700";
+  }
+  if (value < 0) {
+    return "text-rose-700";
+  }
+  return "text-ink";
+}
+
+function pnlText(position: TrackedPosition) {
+  const snapshot = position.current_snapshot;
+  if (snapshot.estimated_pnl === null || snapshot.estimated_pnl_pct === null) {
+    return "等待净值";
+  }
+  return `${formatCurrency(snapshot.estimated_pnl)} / ${snapshot.estimated_pnl_pct.toFixed(2)}%`;
+}
+
 export default function ShortTermPage() {
   const queryClient = useQueryClient();
   const [assetType, setAssetType] = useState<AssetTypeFilter>("all");
@@ -178,6 +230,10 @@ export default function ShortTermPage() {
   const [keyword, setKeyword] = useState("");
   const [selected, setSelected] = useState<{ asset_type: "fund" | "etf"; code: string } | null>(null);
   const [lastResult, setLastResult] = useState<Record<string, unknown> | null>(null);
+  const [trackingOpen, setTrackingOpen] = useState(false);
+  const [trackingAmount, setTrackingAmount] = useState("3000");
+  const [trackingDate, setTrackingDate] = useState(todayInputValue());
+  const [trackingNote, setTrackingNote] = useState("");
 
   const status = useQuery({
     queryKey: ["short-research", "status"],
@@ -216,6 +272,11 @@ export default function ShortTermPage() {
           `/api/short-research/assets/${selected?.asset_type}/${selected?.code}`
         )
       ).data
+  });
+
+  const trackedPositions = useQuery({
+    queryKey: ["tracked-positions"],
+    queryFn: async () => (await api.get<TrackedPositionList>("/api/tracked-positions")).data
   });
 
   useEffect(() => {
@@ -281,12 +342,53 @@ export default function ShortTermPage() {
     }
   });
 
+  const createTracking = useMutation({
+    mutationFn: async () => {
+      if (!selectedAsset) {
+        throw new Error("请先选择一只基金或 ETF");
+      }
+      return (
+        await api.post<TrackedPosition>("/api/tracked-positions", {
+          asset_type: selectedAsset.asset_type,
+          asset_code: selectedAsset.code,
+          buy_amount: Number(trackingAmount),
+          buy_date: trackingDate,
+          note: trackingNote || undefined
+        })
+      ).data;
+    },
+    onSuccess: async () => {
+      setTrackingOpen(false);
+      setTrackingAmount("3000");
+      setTrackingDate(todayInputValue());
+      setTrackingNote("");
+      await queryClient.invalidateQueries({ queryKey: ["tracked-positions"] });
+    }
+  });
+
+  const closeTracking = useMutation({
+    mutationFn: async (positionId: number) =>
+      (
+        await api.post<TrackedPosition>(`/api/tracked-positions/${positionId}/close`, {
+          status: "closed",
+          note: "已在平台外手动处理"
+        })
+      ).data,
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["tracked-positions"] });
+    }
+  });
+
   const selectedAsset = selectedDetail.data?.asset;
   const advisorReport = selectedAsset?.advisor_report ?? null;
   const detailPoints = chartPoints(selectedDetail.data);
   const windowPoints = returnWindowChart(selectedAsset);
   const statusData = status.data;
   const dataIssues = statusData?.data_health.filter((item) => item.status !== "success" || item.is_stale).slice(0, 6) ?? [];
+  const activeTracked = (trackedPositions.data?.items ?? []).filter((item) => item.status === "active");
+  const selectedTracked = activeTracked.filter(
+    (item) => selectedAsset && item.asset_type === selectedAsset.asset_type && item.asset_code === selectedAsset.code
+  );
 
   return (
     <div className="space-y-8">
@@ -335,6 +437,69 @@ export default function ShortTermPage() {
           {errorText(syncData.error ?? runSignals.error ?? runAdvisor.error ?? status.error)}
         </p>
       )}
+
+      <Panel className="rounded-[24px]">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.22em] text-accent">我的短线追踪</p>
+            <h2 className="mt-2 text-2xl font-semibold text-ink">标注你已经买入的基金/ETF</h2>
+            <p className="mt-2 text-sm leading-6 text-ink/65">
+              这里记录的是你在支付宝等平台手动买入后的观察笔记。系统每天检查公开数据，触发退出观察或明显风险时给你发邮件。
+            </p>
+          </div>
+          <div className="rounded-[18px] bg-paper px-4 py-3 text-sm leading-6 text-ink/65">
+            收件邮箱：{trackedPositions.data?.recipient_email ?? "19535838578@163.com"}
+            <br />
+            邮件通道：{trackedPositions.data?.email_configured ? "已配置" : "未配置授权码"}
+          </div>
+        </div>
+
+        <div className="mt-5 grid gap-3 xl:grid-cols-3">
+          {activeTracked.map((item) => (
+            <div key={item.id} className="rounded-[20px] border border-ink/10 bg-white p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold text-accent">{trackingStatusLabel(item.status)}</p>
+                  <h3 className="mt-1 text-lg font-semibold text-ink">
+                    {item.asset_name}
+                    <span className="ml-2 text-sm font-normal text-ink/45">{item.asset_code}</span>
+                  </h3>
+                </div>
+                <span className={`rounded-full px-3 py-1 text-xs font-semibold ${conclusionTone(item.current_snapshot.current_label ?? "数据不足")}`}>
+                  {item.current_snapshot.current_label ?? "等待排序"}
+                </span>
+              </div>
+              <div className="mt-4 grid gap-2 text-sm text-ink/65">
+                <span>买入：{formatCurrency(item.buy_amount)} / {formatDate(item.buy_date)}</span>
+                <span>估算份额：{item.estimated_shares === null ? "等待净值" : item.estimated_shares.toFixed(2)}</span>
+                <span className={pnlTone(item.current_snapshot.estimated_pnl)}>估算盈亏：{pnlText(item)}</span>
+                <span>当前价：{item.current_snapshot.current_price?.toFixed(4) ?? "暂无"}</span>
+              </div>
+              {item.latest_alert ? (
+                <div className="mt-4 rounded-[16px] bg-rose-50 p-3 text-sm leading-6 text-rose-800">
+                  {alertTypeLabel(item.latest_alert.alert_type)}：{item.latest_alert.reasons[0] ?? item.latest_alert.trigger_label}
+                </div>
+              ) : (
+                <p className="mt-4 rounded-[16px] bg-paper p-3 text-sm leading-6 text-ink/55">
+                  暂无提醒。高位观察不会直接触发卖出邮件，只有退出观察或明显风险才提醒。
+                </p>
+              )}
+              <button
+                className="mt-4 rounded-full border border-ink/10 px-4 py-2 text-sm font-semibold text-ink transition hover:border-accent hover:text-accent disabled:opacity-60"
+                disabled={closeTracking.isPending}
+                onClick={() => closeTracking.mutate(item.id)}
+              >
+                标记已卖出 / 停止提醒
+              </button>
+            </div>
+          ))}
+          {!trackedPositions.isLoading && activeTracked.length === 0 ? (
+            <div className="rounded-[20px] border border-dashed border-ink/20 bg-white p-5 text-sm leading-7 text-ink/55 xl:col-span-3">
+              还没有追踪记录。左侧选择一只基金或 ETF 后，点“我已买入，开始追踪”。
+            </div>
+          ) : null}
+        </div>
+      </Panel>
 
       <Panel className="rounded-[24px]">
         <div className="grid gap-4 lg:grid-cols-[1.5fr_0.9fr]">
@@ -489,6 +654,9 @@ export default function ShortTermPage() {
                       <span className="ml-2 text-lg font-normal text-ink/45">{selectedAsset.code}</span>
                     </h2>
                     <p className="mt-2 text-sm leading-6 text-ink/65">{selectedAsset.investment_direction}</p>
+                    {selectedTracked.length ? (
+                      <p className="mt-2 text-sm text-emerald-700">你正在追踪这只资产的 {selectedTracked.length} 笔买入。</p>
+                    ) : null}
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <span className="rounded-full bg-ink px-4 py-2 text-sm font-semibold text-white">
@@ -498,6 +666,66 @@ export default function ShortTermPage() {
                       {selectedAsset.conclusion}
                     </span>
                   </div>
+                </div>
+
+                <div className="mt-5 rounded-[20px] border border-ink/10 bg-white p-4">
+                  <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                    <div>
+                      <p className="text-sm font-semibold text-ink">我已买入，开始追踪</p>
+                      <p className="mt-1 text-sm leading-6 text-ink/60">
+                        输入你手动买入的金额和日期。系统按公开净值估算份额，只做提醒，不会连接支付宝。
+                      </p>
+                    </div>
+                    <button
+                      className="rounded-full bg-accent px-5 py-3 text-sm font-semibold text-white transition hover:bg-pine"
+                      onClick={() => setTrackingOpen((value) => !value)}
+                    >
+                      {trackingOpen ? "收起" : "我已买入，开始追踪"}
+                    </button>
+                  </div>
+                  {trackingOpen ? (
+                    <div className="mt-4 grid gap-3 md:grid-cols-[1fr_1fr_1.4fr_auto]">
+                      <label className="text-sm text-ink/65">
+                        买入金额
+                        <input
+                          className="mt-2 w-full rounded-2xl border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent"
+                          inputMode="decimal"
+                          value={trackingAmount}
+                          onChange={(event) => setTrackingAmount(event.target.value)}
+                        />
+                      </label>
+                      <label className="text-sm text-ink/65">
+                        买入日期
+                        <input
+                          className="mt-2 w-full rounded-2xl border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent"
+                          type="date"
+                          value={trackingDate}
+                          onChange={(event) => setTrackingDate(event.target.value)}
+                        />
+                      </label>
+                      <label className="text-sm text-ink/65">
+                        备注
+                        <input
+                          className="mt-2 w-full rounded-2xl border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent"
+                          placeholder="例如：支付宝手动买入"
+                          value={trackingNote}
+                          onChange={(event) => setTrackingNote(event.target.value)}
+                        />
+                      </label>
+                      <button
+                        className="self-end rounded-full bg-ink px-5 py-3 text-sm font-semibold text-white transition hover:bg-pine disabled:opacity-60"
+                        disabled={createTracking.isPending || Number(trackingAmount) <= 0}
+                        onClick={() => createTracking.mutate()}
+                      >
+                        {createTracking.isPending ? "保存中..." : "保存追踪"}
+                      </button>
+                    </div>
+                  ) : null}
+                  {createTracking.isError ? (
+                    <p className="mt-3 rounded-[16px] bg-rose-50 px-4 py-3 text-sm text-rose-700">
+                      创建追踪失败：{errorText(createTracking.error)}
+                    </p>
+                  ) : null}
                 </div>
 
                 <div className="mt-5 grid gap-3 md:grid-cols-4">

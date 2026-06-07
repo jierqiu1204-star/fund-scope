@@ -132,6 +132,12 @@ const jobGroups: Array<{ title: string; description: string; actions: JobAction[
         label: "生成 AI 研究报告",
         description: "为最新短线榜单生成重点观察、高位别追、谨慎等保守说明；AI 不改变榜单。",
         endpoint: "/api/admin/jobs/daily_short_research_advisor/run"
+      },
+      {
+        key: "daily_tracked_position_alerts",
+        label: "检查追踪提醒",
+        description: "检查你标注买入的基金/ETF，触发退出观察或明显风险时发送邮件提醒。",
+        endpoint: "/api/admin/jobs/daily_tracked_position_alerts/run"
       }
     ]
   },

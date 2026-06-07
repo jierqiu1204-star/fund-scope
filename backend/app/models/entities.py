@@ -508,6 +508,56 @@ class ShortResearchAdvisorAttempt(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class TrackedPosition(Base):
+    __tablename__ = "tracked_positions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    asset_type: Mapped[str] = mapped_column(String(16))
+    asset_code: Mapped[str] = mapped_column(String(32))
+    asset_name: Mapped[str] = mapped_column(String(255))
+    buy_date: Mapped[date] = mapped_column(Date)
+    buy_amount: Mapped[float] = mapped_column(Float)
+    entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entry_price_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    estimated_shares: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="active")
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class TrackedPositionAlert(Base):
+    __tablename__ = "tracked_position_alerts"
+    __table_args__ = (
+        UniqueConstraint(
+            "tracked_position_id",
+            "alert_date",
+            "alert_type",
+            name="uq_tracked_position_alert_day_type",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tracked_position_id: Mapped[int] = mapped_column(
+        ForeignKey("tracked_positions.id", ondelete="CASCADE")
+    )
+    alert_date: Mapped[date] = mapped_column(Date)
+    alert_type: Mapped[str] = mapped_column(String(32))
+    trigger_label: Mapped[str] = mapped_column(String(64))
+    current_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    current_price_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    estimated_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    estimated_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    estimated_pnl_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reasons_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    risk_flags_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    advisor_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    email_status: Mapped[str] = mapped_column(String(32), default="pending")
+    email_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class NewsItem(Base):
     __tablename__ = "news_items"
 

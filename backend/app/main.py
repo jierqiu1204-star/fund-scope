@@ -18,6 +18,7 @@ from app.api.routes.settings import router as settings_router
 from app.api.routes.short_etf import router as short_etf_router
 from app.api.routes.short_research import router as short_research_router
 from app.api.routes.strategy_lab import router as strategy_lab_router
+from app.api.routes.tracked_positions import router as tracked_positions_router
 from app.api.routes.transactions import router as transactions_router
 from app.api.routes.valuation import router as valuation_router
 from app.core.config import Settings, get_settings
@@ -80,6 +81,7 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
     app.include_router(strategy_lab_router)
     app.include_router(short_etf_router)
     app.include_router(short_research_router)
+    app.include_router(tracked_positions_router)
     app.include_router(news_router)
     app.include_router(settings_router)
     app.include_router(onboarding_router)

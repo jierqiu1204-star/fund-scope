@@ -53,7 +53,7 @@ class Notifier:
         if smtp_host.endswith("example.com"):
             return
 
-        client = aiosmtplib.SMTP(hostname=smtp_host, port=smtp_port, use_tls=False)
+        client = aiosmtplib.SMTP(hostname=smtp_host, port=smtp_port, use_tls=smtp_port == 465)
         await client.connect()
         if smtp_username:
             await client.login(smtp_username, smtp_password)
@@ -82,7 +82,8 @@ class Notifier:
                         message,
                         hostname=self.smtp_host,
                         port=self.smtp_port,
-                        start_tls=True,
+                        start_tls=self.smtp_port != 465,
+                        use_tls=self.smtp_port == 465,
                         username=self.smtp_username,
                         password=self.smtp_password,
                     ),

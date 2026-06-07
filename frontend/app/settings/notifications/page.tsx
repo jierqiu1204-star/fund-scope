@@ -21,14 +21,14 @@ const fields: Array<[string, keyof ReturnType<typeof defaultForm>]> = [
 
 function defaultForm() {
   return {
-    recipient_email: "owner@example.com",
+    recipient_email: "19535838578@163.com",
     reminder_day: "1",
     reference_index_code: "CSI300",
     base_monthly_amount: "833",
-    smtp_host: "smtp.example.com",
-    smtp_port: "587",
-    smtp_username: "mailer@example.com",
-    smtp_from: "FundScope <mailer@example.com>",
+    smtp_host: "smtp.163.com",
+    smtp_port: "465",
+    smtp_username: "19535838578@163.com",
+    smtp_from: "FundScope <19535838578@163.com>",
     smtp_password: ""
   };
 }
@@ -97,7 +97,7 @@ export default function NotificationSettingsPage() {
       <SectionHeader
         eyebrow="设置"
         title="定投提醒和邮件发送配置。"
-        description="这里配置每月提醒日、参考指数、基础投入金额和 SMTP 邮件服务器。不会自动买入，只负责提醒。"
+        description="这里配置每月提醒日、参考指数、基础投入金额和 SMTP 邮件服务器。163 邮箱需要填写授权码，不要填写网页登录密码。"
       />
 
       <Panel className="max-w-4xl">
