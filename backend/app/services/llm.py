@@ -2,11 +2,41 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from openai import AsyncOpenAI
 
 from app.core.config import Settings
+
+
+def _extract_json_object_text(content: str) -> str:
+    stripped = content.strip()
+    if not stripped:
+        raise ValueError("LLM returned empty content")
+
+    candidates = [stripped]
+    if "```" in stripped:
+        parts = stripped.split("```")
+        for index, part in enumerate(parts):
+            if index % 2 == 1:
+                block = part.strip()
+                if block.lower().startswith("json"):
+                    block = block[4:].strip()
+                candidates.append(block)
+
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start != -1 and end > start:
+        candidates.append(stripped[start : end + 1])
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return json.dumps(parsed, ensure_ascii=False)
+    raise ValueError("LLM returned content without a valid JSON object")
 
 
 class LLMClient:
@@ -65,27 +95,52 @@ class LLMClient:
         response_schema: dict[str, Any],
         timeout_seconds: float,
     ) -> str:
+        messages = [
+            {"role": "system", "content": self._short_research_advisor_prompt},
+            {
+                "role": "user",
+                "content": json.dumps(payload, ensure_ascii=False, default=str),
+            },
+        ]
         response = await self._client.chat.completions.create(
             model=self.model_name,
             temperature=0,
-            messages=[
-                {"role": "system", "content": self._short_research_advisor_prompt},
-                {
-                    "role": "user",
-                    "content": json.dumps(payload, ensure_ascii=False, default=str),
-                },
-            ],
-            response_format={
+            messages=cast(Any, messages),
+            response_format=cast(Any, {
                 "type": "json_schema",
                 "json_schema": {
                     "name": "short_research_advisor_report",
                     "schema": response_schema,
                 },
-            },
+            }),
             max_tokens=1200,
             timeout=timeout_seconds,
         )
         content = response.choices[0].message.content
-        if not content:
+        if content:
+            try:
+                return _extract_json_object_text(content)
+            except ValueError:
+                pass
+
+        fallback_messages = [
+            *messages,
+            {
+                "role": "user",
+                "content": (
+                    "上一次输出不是可解析 JSON。请只返回一个 JSON 对象，不要 Markdown、"
+                    "不要解释文字，字段必须符合给定 schema。"
+                ),
+            },
+        ]
+        fallback_response = await self._client.chat.completions.create(
+            model=self.model_name,
+            temperature=0,
+            messages=cast(Any, fallback_messages),
+            max_tokens=1200,
+            timeout=timeout_seconds,
+        )
+        fallback_content = fallback_response.choices[0].message.content
+        if not fallback_content:
             raise ValueError("LLM returned an empty advisor report")
-        return content.strip()
+        return _extract_json_object_text(fallback_content)
