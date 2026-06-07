@@ -111,6 +111,15 @@ def test_validate_advisor_payload_accepts_single_text_list_fields() -> None:
     assert report["watch_conditions"] == ["先看近 20 日趋势是否保持"]
 
 
+def test_validate_advisor_payload_replaces_unknown_action_with_rule_action() -> None:
+    payload = json.loads(_valid_report(ACTION_FOCUS))
+    payload["action_label"] = "积极关注"
+
+    report = validate_advisor_payload(payload, rule_action=ACTION_CAUTION)
+
+    assert report["action_label"] == ACTION_CAUTION
+
+
 @pytest.mark.asyncio
 async def test_advisor_generation_is_idempotent_and_does_not_change_signal_items(app, settings) -> None:
     run_id = await _seed_signal_run(app)

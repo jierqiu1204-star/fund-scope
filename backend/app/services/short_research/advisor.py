@@ -151,7 +151,7 @@ def validate_advisor_payload(
 
     action_label = parsed.get("action_label")
     if action_label not in ALLOWED_ACTION_LABELS:
-        raise ValueError("LLM output action_label is not allowed")
+        action_label = rule_action
     if _is_stronger(str(action_label), rule_action):
         action_label = rule_action
 
