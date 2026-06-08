@@ -8,6 +8,8 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  Line,
+  LineChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -24,6 +26,7 @@ import type {
   ShortResearchSignalRun,
   ShortResearchStatus,
   TrackedPosition,
+  TrackedPositionDetail,
   TrackedPositionList
 } from "@/lib/types";
 
@@ -165,6 +168,20 @@ function returnWindowChart(asset: ShortResearchAsset | undefined) {
   ].map((item) => ({ ...item, percent: item.value === null ? null : item.value * 100 }));
 }
 
+function trackingChartPoints(detail: TrackedPositionDetail | undefined) {
+  return (
+    detail?.chart.map((point) => ({
+      date: point.date,
+      label: point.date.slice(5).replace("-", "/"),
+      pnl: point.estimated_pnl_pct,
+      stop: point.trailing_stop_pnl_pct,
+      isEntry: point.is_entry,
+      isHigh: point.is_high,
+      isCurrent: point.is_current
+    })) ?? []
+  );
+}
+
 function safeSummary(result: Record<string, unknown> | null) {
   if (!result) {
     return null;
@@ -198,7 +215,32 @@ function alertTypeLabel(alertType: string) {
   if (alertType === "risk_warning") {
     return "风险提醒";
   }
+  if (alertType === "take_profit_watch") {
+    return "止盈观察提醒";
+  }
+  if (alertType === "trailing_take_profit") {
+    return "移动止盈提醒";
+  }
+  if (alertType === "trend_weakening") {
+    return "趋势转弱提醒";
+  }
+  if (alertType === "hard_stop") {
+    return "硬止损提醒";
+  }
   return alertType;
+}
+
+function exitSignalTone(level: string) {
+  if (level === "urgent") {
+    return "bg-rose-100 text-rose-800";
+  }
+  if (level === "warning") {
+    return "bg-amber-100 text-amber-900";
+  }
+  if (level === "watch") {
+    return "bg-sky-100 text-sky-800";
+  }
+  return "bg-paper text-ink/60";
 }
 
 function pnlTone(value: number | null) {
@@ -220,6 +262,10 @@ function pnlText(position: TrackedPosition) {
     return "等待净值";
   }
   return `${formatCurrency(snapshot.estimated_pnl)} / ${snapshot.estimated_pnl_pct.toFixed(2)}%`;
+}
+
+function percentOrWaiting(value: number | null) {
+  return value === null ? "等待数据" : formatPercent(value);
 }
 
 export default function ShortTermPage() {
@@ -389,6 +435,16 @@ export default function ShortTermPage() {
   const selectedTracked = activeTracked.filter(
     (item) => selectedAsset && item.asset_type === selectedAsset.asset_type && item.asset_code === selectedAsset.code
   );
+  const primaryTracked = selectedTracked[0] ?? null;
+  const trackedDetail = useQuery({
+    queryKey: ["tracked-position", primaryTracked?.id],
+    enabled: primaryTracked !== null,
+    queryFn: async () => (await api.get<TrackedPositionDetail>(`/api/tracked-positions/${primaryTracked?.id}`)).data
+  });
+  const trackingPoints = trackingChartPoints(trackedDetail.data);
+  const trackingEntry = trackingPoints.find((point) => point.isEntry);
+  const trackingHigh = trackingPoints.find((point) => point.isHigh);
+  const trackingCurrent = trackingPoints.find((point) => point.isCurrent);
 
   return (
     <div className="space-y-8">
@@ -444,7 +500,7 @@ export default function ShortTermPage() {
             <p className="text-xs font-semibold uppercase tracking-[0.22em] text-accent">我的短线追踪</p>
             <h2 className="mt-2 text-2xl font-semibold text-ink">标注你已经买入的基金/ETF</h2>
             <p className="mt-2 text-sm leading-6 text-ink/65">
-              这里记录的是你在支付宝等平台手动买入后的观察笔记。系统每天检查公开数据，触发退出观察或明显风险时给你发邮件。
+              这里记录的是你在支付宝等平台手动买入后的观察笔记。系统每天检查公开数据，触发止盈观察、移动止盈、趋势转弱或明显风险时给你发邮件。
             </p>
           </div>
           <div className="rounded-[18px] bg-paper px-4 py-3 text-sm leading-6 text-ink/65">
@@ -471,9 +527,16 @@ export default function ShortTermPage() {
               </div>
               <div className="mt-4 grid gap-2 text-sm text-ink/65">
                 <span>买入：{formatCurrency(item.buy_amount)} / {formatDate(item.buy_date)}</span>
+                <span>持有：{item.holding_days === null ? "等待数据" : `${item.holding_days} 天`}</span>
                 <span>估算份额：{item.estimated_shares === null ? "等待净值" : item.estimated_shares.toFixed(2)}</span>
                 <span className={pnlTone(item.current_snapshot.estimated_pnl)}>估算盈亏：{pnlText(item)}</span>
+                <span>最高盈利：{percentOrWaiting(item.max_profit_pct)}</span>
+                <span>高点回吐：{percentOrWaiting(item.profit_giveback_pct)}</span>
                 <span>当前价：{item.current_snapshot.current_price?.toFixed(4) ?? "暂无"}</span>
+              </div>
+              <div className={`mt-4 rounded-[16px] p-3 text-sm leading-6 ${exitSignalTone(item.exit_signal.level)}`}>
+                <p className="font-semibold">{item.exit_signal.label}</p>
+                <p className="mt-1">{item.exit_signal.reason ?? "暂无卖出/减仓提醒，继续观察公开数据。"}</p>
               </div>
               {item.latest_alert ? (
                 <div className="mt-4 rounded-[16px] bg-rose-50 p-3 text-sm leading-6 text-rose-800">
@@ -481,7 +544,7 @@ export default function ShortTermPage() {
                 </div>
               ) : (
                 <p className="mt-4 rounded-[16px] bg-paper p-3 text-sm leading-6 text-ink/55">
-                  暂无提醒。高位观察不会直接触发卖出邮件，只有退出观察或明显风险才提醒。
+                  暂无邮件提醒。高位观察不会单独触发邮件，必须同时有盈利保护、趋势转弱或明显风险。
                 </p>
               )}
               <button
@@ -727,6 +790,57 @@ export default function ShortTermPage() {
                     </p>
                   ) : null}
                 </div>
+
+                {primaryTracked ? (
+                  <div className="mt-5 rounded-[20px] border border-ink/10 bg-white p-4">
+                    <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                      <div>
+                        <p className="text-sm font-semibold text-ink">追踪收益保护图</p>
+                        <p className="mt-1 text-sm leading-6 text-ink/60">
+                          展示这笔买入后的估算收益、历史最高盈利和移动止盈线。提醒只是卖出/减仓检查，不会替你自动交易。
+                        </p>
+                      </div>
+                      <span className={`w-fit rounded-full px-3 py-1 text-xs font-semibold ${exitSignalTone(primaryTracked.exit_signal.level)}`}>
+                        {primaryTracked.exit_signal.label}
+                      </span>
+                    </div>
+                    <div className="mt-4 h-64">
+                      {trackingPoints.length ? (
+                        <ResponsiveContainer width="100%" height="100%">
+                          <LineChart data={trackingPoints}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#eadfd2" />
+                            <XAxis dataKey="label" tickLine={false} axisLine={false} minTickGap={28} />
+                            <YAxis tickFormatter={(value) => `${Number(value).toFixed(0)}%`} tickLine={false} axisLine={false} width={56} />
+                            <Tooltip formatter={(value) => (value === null ? "暂无" : `${Number(value).toFixed(2)}%`)} />
+                            <Line type="monotone" dataKey="pnl" name="估算收益" stroke="#1f5c4b" strokeWidth={2} dot={false} connectNulls />
+                            <Line
+                              type="monotone"
+                              dataKey="stop"
+                              name="移动止盈线"
+                              stroke="#b5532d"
+                              strokeDasharray="5 5"
+                              strokeWidth={2}
+                              dot={false}
+                              connectNulls
+                            />
+                          </LineChart>
+                        </ResponsiveContainer>
+                      ) : (
+                        <div className="flex h-full items-center justify-center rounded-[18px] bg-paper text-sm text-ink/50">
+                          暂无追踪曲线，等待公开净值更新。
+                        </div>
+                      )}
+                    </div>
+                    <div className="mt-3 grid gap-2 text-sm text-ink/65 md:grid-cols-3">
+                      <span>买入点：{trackingEntry ? `${trackingEntry.label} / ${percentOrWaiting(trackingEntry.pnl)}` : "等待数据"}</span>
+                      <span>最高点：{trackingHigh ? `${trackingHigh.label} / ${percentOrWaiting(trackingHigh.pnl)}` : "等待数据"}</span>
+                      <span>当前点：{trackingCurrent ? `${trackingCurrent.label} / ${percentOrWaiting(trackingCurrent.pnl)}` : "等待数据"}</span>
+                    </div>
+                    <p className="mt-3 rounded-[16px] bg-paper px-4 py-3 text-sm leading-6 text-ink/65">
+                      {primaryTracked.exit_signal.reason ?? "暂无卖出/减仓提醒，继续观察公开数据。"}
+                    </p>
+                  </div>
+                ) : null}
 
                 <div className="mt-5 grid gap-3 md:grid-cols-4">
                   <StatPill label="最新日期" value={formatDate(selectedAsset.latest_date)} tone="bg-white text-ink" />

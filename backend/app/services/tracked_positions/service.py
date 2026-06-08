@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, cast
 
 from sqlalchemy import select
@@ -19,6 +19,7 @@ from app.models.entities import (
     FundNavHistory,
     ShortResearchAdvisorReport,
     ShortResearchSignalItem,
+    ShortResearchSignalRun,
     TrackedPosition,
     TrackedPositionAlert,
     TradableEtf,
@@ -28,6 +29,7 @@ from app.models.entities import (
 from app.schemas.tracked_positions import (
     TrackedPositionAlertOut,
     TrackedPositionChartPoint,
+    TrackedPositionExitSignal,
     TrackedPositionSnapshot,
 )
 from app.services.notifier import Notifier
@@ -46,6 +48,19 @@ from app.services.short_research.service import (
 ACTIVE_STATUS = "active"
 ALERT_EXIT_WATCH = "exit_watch"
 ALERT_RISK_WARNING = "risk_warning"
+ALERT_TAKE_PROFIT_WATCH = "take_profit_watch"
+ALERT_TRAILING_TAKE_PROFIT = "trailing_take_profit"
+ALERT_TREND_WEAKENING = "trend_weakening"
+ALERT_HARD_STOP = "hard_stop"
+
+TAKE_PROFIT_WATCH_PCT = 3.0
+TRAILING_START_PROFIT_PCT = 5.0
+TRAILING_GIVEBACK_POINTS = 2.5
+TRAILING_GIVEBACK_RATIO = 0.35
+HARD_STOP_LOSS_PCT = -4.0
+TAKE_PROFIT_WATCH_COOLDOWN_DAYS = 3
+
+TAKE_PROFIT_RISKS = {"追高风险", "连续大涨"}
 
 
 @dataclass(frozen=True)
@@ -63,6 +78,16 @@ class AlertDecision:
     advisor_summary: str | None
     signal_item: ShortResearchSignalItem
     advisor_report: ShortResearchAdvisorReport | None
+
+
+@dataclass(frozen=True)
+class PositionAnalysis:
+    chart: list[TrackedPositionChartPoint]
+    exit_signal: TrackedPositionExitSignal
+    max_profit_pct: float | None
+    profit_giveback_pct: float | None
+    holding_days: int | None
+    technical_metrics: dict[str, Any]
 
 
 def email_configured(user: User, settings: Settings) -> bool:
@@ -123,6 +148,165 @@ async def latest_price(
 
 def _round_or_none(value: float | None, digits: int = 2) -> float | None:
     return round(value, digits) if value is not None else None
+
+
+def _mean_or_none(values: list[float]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+def _exit_signal(
+    *,
+    alert_type: str | None = None,
+    label: str = "暂无卖出/减仓提醒",
+    level: str = "none",
+    reasons: list[str] | None = None,
+) -> TrackedPositionExitSignal:
+    reason_list = reasons or []
+    return TrackedPositionExitSignal(
+        alert_type=alert_type,
+        label=label,
+        level=cast(Any, level),
+        reason=reason_list[0] if reason_list else None,
+        reasons=reason_list,
+    )
+
+
+def _alert_type_label(alert_type: str) -> str:
+    return {
+        ALERT_EXIT_WATCH: "退出观察提醒",
+        ALERT_RISK_WARNING: "风险提醒",
+        ALERT_TAKE_PROFIT_WATCH: "止盈观察提醒",
+        ALERT_TRAILING_TAKE_PROFIT: "移动止盈提醒",
+        ALERT_TREND_WEAKENING: "趋势转弱提醒",
+        ALERT_HARD_STOP: "硬止损提醒",
+    }.get(alert_type, "风险提醒")
+
+
+def _performance_analysis(
+    position: TrackedPosition,
+    chart: list[TrackedPositionChartPoint],
+    item: ShortResearchSignalItem | None,
+) -> PositionAnalysis:
+    if not chart:
+        return PositionAnalysis(
+            chart=[],
+            exit_signal=_exit_signal(reasons=["等待公开净值或 ETF 日线数据，暂不能计算卖出/减仓提醒。"]),
+            max_profit_pct=None,
+            profit_giveback_pct=None,
+            holding_days=None,
+            technical_metrics={"data_status": "数据不足"},
+        )
+
+    current_point = chart[-1]
+    current_pnl_pct = current_point.estimated_pnl_pct
+    pnl_points = [point for point in chart if point.estimated_pnl_pct is not None]
+    if current_pnl_pct is None or not pnl_points:
+        return PositionAnalysis(
+            chart=chart,
+            exit_signal=_exit_signal(reasons=["缺少买入净值或估算份额，暂不能计算卖出/减仓提醒。"]),
+            max_profit_pct=None,
+            profit_giveback_pct=None,
+            holding_days=(current_point.date - position.buy_date).days,
+            technical_metrics={"data_status": "等待买入净值"},
+        )
+
+    high_point = max(pnl_points, key=lambda point: cast(float, point.estimated_pnl_pct))
+    max_profit_pct = cast(float, high_point.estimated_pnl_pct)
+    profit_giveback_pct = max(0.0, max_profit_pct - current_pnl_pct)
+    prices = [point.price for point in chart]
+    ma5 = _mean_or_none(prices[-5:]) if len(prices) >= 5 else None
+    ma10 = _mean_or_none(prices[-10:]) if len(prices) >= 10 else None
+    return_5d_pct = ((prices[-1] / prices[-6] - 1.0) * 100) if len(prices) >= 6 and prices[-6] else None
+    trailing_threshold = (
+        min(TRAILING_GIVEBACK_POINTS, max_profit_pct * TRAILING_GIVEBACK_RATIO)
+        if max_profit_pct >= TRAILING_START_PROFIT_PCT
+        else None
+    )
+    trailing_stop_pnl_pct = max_profit_pct - trailing_threshold if trailing_threshold is not None else None
+
+    for point in chart:
+        point.is_entry = point.date == chart[0].date
+        point.is_high = point.date == high_point.date
+        point.is_current = point.date == current_point.date
+        point.trailing_stop_pnl_pct = _round_or_none(trailing_stop_pnl_pct)
+
+    risk_flags = set(item.risk_flags_json or []) if item is not None else set()
+    current_label = item.conclusion if item is not None else None
+    trend_weakening = (
+        ma5 is not None
+        and ma10 is not None
+        and return_5d_pct is not None
+        and current_point.price < ma5
+        and current_point.price < ma10
+        and return_5d_pct < 0
+    )
+
+    technical_metrics: dict[str, Any] = {
+        "current_pnl_pct": _round_or_none(current_pnl_pct),
+        "max_profit_pct": _round_or_none(max_profit_pct),
+        "max_profit_date": high_point.date.isoformat(),
+        "profit_giveback_pct": _round_or_none(profit_giveback_pct),
+        "ma5": _round_or_none(ma5, 6),
+        "ma10": _round_or_none(ma10, 6),
+        "return_5d_pct": _round_or_none(return_5d_pct),
+        "trailing_threshold_pct": _round_or_none(trailing_threshold),
+        "trailing_stop_pnl_pct": _round_or_none(trailing_stop_pnl_pct),
+        "trend_weakening": trend_weakening,
+    }
+
+    if current_pnl_pct <= HARD_STOP_LOSS_PCT:
+        exit_signal = _exit_signal(
+            alert_type=ALERT_HARD_STOP,
+            label="硬止损提醒",
+            level="urgent",
+            reasons=[f"当前估算亏损 {current_pnl_pct:.2f}%，已达到 -4% 的硬止损检查线。"],
+        )
+    elif trailing_threshold is not None and profit_giveback_pct >= trailing_threshold:
+        exit_signal = _exit_signal(
+            alert_type=ALERT_TRAILING_TAKE_PROFIT,
+            label="移动止盈提醒",
+            level="warning",
+            reasons=[
+                f"最高盈利 {max_profit_pct:.2f}%，当前盈利 {current_pnl_pct:.2f}%，已从高点回吐 {profit_giveback_pct:.2f} 个百分点。",
+                f"移动止盈阈值为 {trailing_threshold:.2f} 个百分点，建议人工考虑卖出或减仓。",
+            ],
+        )
+    elif trend_weakening:
+        exit_signal = _exit_signal(
+            alert_type=ALERT_TREND_WEAKENING,
+            label="趋势转弱提醒",
+            level="warning",
+            reasons=[
+                f"最新价格 {current_point.price:.4f} 已同时低于 5 日均线 {ma5:.4f} 和 10 日均线 {ma10:.4f}。",
+                f"近 5 日收益 {return_5d_pct:.2f}%，上涨趋势开始转弱。",
+            ],
+        )
+    elif current_pnl_pct >= TAKE_PROFIT_WATCH_PCT and (
+        current_label == "高位观察" or bool(risk_flags.intersection(TAKE_PROFIT_RISKS))
+    ):
+        risk_text = "、".join(sorted(risk_flags.intersection(TAKE_PROFIT_RISKS))) or "高位观察"
+        exit_signal = _exit_signal(
+            alert_type=ALERT_TAKE_PROFIT_WATCH,
+            label="止盈观察提醒",
+            level="watch",
+            reasons=[
+                f"当前估算盈利 {current_pnl_pct:.2f}%，且触发 {risk_text}，说明利润已有但追高风险也在上升。",
+                "这不是立即卖出指令，只是提醒你别贪最高点，可以开始考虑止盈或减仓。",
+            ],
+        )
+    else:
+        exit_signal = _exit_signal(
+            reasons=["暂无卖出/减仓提醒；继续按每日公开数据观察。"],
+        )
+
+    return PositionAnalysis(
+        chart=chart,
+        exit_signal=exit_signal,
+        max_profit_pct=_round_or_none(max_profit_pct),
+        profit_giveback_pct=_round_or_none(profit_giveback_pct),
+        holding_days=(current_point.date - position.buy_date).days,
+        technical_metrics=technical_metrics,
+    )
 
 
 def _estimate_snapshot(position: TrackedPosition, price: PriceSnapshot | None) -> TrackedPositionSnapshot:
@@ -215,6 +399,37 @@ async def position_chart(session: AsyncSession, position: TrackedPosition) -> li
     return chart
 
 
+async def latest_signal_context(
+    session: AsyncSession,
+    position: TrackedPosition,
+) -> tuple[ShortResearchSignalRun | None, ShortResearchSignalItem | None, ShortResearchAdvisorReport | None]:
+    run = await latest_signal_run(session)
+    if run is None:
+        return None, None, None
+    items = await list_signal_items(session, run.id)
+    item = next(
+        (
+            row
+            for row in items
+            if row.asset_type == position.asset_type and row.asset_code == position.asset_code
+        ),
+        None,
+    )
+    if item is None:
+        return run, None, None
+    reports = await latest_reports_by_asset(session, run.id)
+    return run, item, reports.get((position.asset_type, position.asset_code))
+
+
+async def position_analysis(
+    session: AsyncSession,
+    position: TrackedPosition,
+    *,
+    item: ShortResearchSignalItem | None = None,
+) -> PositionAnalysis:
+    return _performance_analysis(position, await position_chart(session, position), item)
+
+
 async def create_position(
     session: AsyncSession,
     *,
@@ -292,27 +507,16 @@ async def evaluate_alert_decision(
     session: AsyncSession,
     position: TrackedPosition,
 ) -> tuple[AlertDecision | None, date | None]:
-    run = await latest_signal_run(session)
+    run, item, report = await latest_signal_context(session, position)
     if run is None:
         return None, None
-    items = await list_signal_items(session, run.id)
-    item = next(
-        (
-            row
-            for row in items
-            if row.asset_type == position.asset_type and row.asset_code == position.asset_code
-        ),
-        None,
-    )
     if item is None:
         return None, run.as_of_date
-    reports = await latest_reports_by_asset(session, run.id)
-    report = reports.get((position.asset_type, position.asset_code))
     trigger_label = report.action_label if report is not None else conservative_action_for_item(item, is_held=True)
     risk_flags = list(item.risk_flags_json or [])
     exit_risks = sorted(set(risk_flags).intersection(EXIT_RISKS))
-    if trigger_label != ACTION_EXIT and not exit_risks:
-        return None, run.as_of_date
+    analysis = await position_analysis(session, position, item=item)
+    technical_signal = analysis.exit_signal if analysis.exit_signal.alert_type is not None else None
 
     if item.conclusion in {"不适合短线", "数据不足"}:
         alert_type = ALERT_EXIT_WATCH
@@ -320,6 +524,12 @@ async def evaluate_alert_decision(
     elif exit_risks:
         alert_type = ALERT_RISK_WARNING
         reasons = [f"触发明显风险标签：{'、'.join(exit_risks)}。"]
+    elif technical_signal is not None:
+        alert_type = cast(str, technical_signal.alert_type)
+        reasons = list(technical_signal.reasons)
+        trigger_label = technical_signal.label
+    elif trigger_label != ACTION_EXIT:
+        return None, run.as_of_date
     else:
         alert_type = ALERT_EXIT_WATCH
         reasons = ["保守规则把这笔持仓标记为“退出观察”。"]
@@ -356,6 +566,18 @@ async def create_alert_if_needed(
     )
     if existing is not None:
         return existing, "deduplicated"
+    if decision.alert_type == ALERT_TAKE_PROFIT_WATCH:
+        recent_take_profit = await session.scalar(
+            select(TrackedPositionAlert)
+            .where(
+                TrackedPositionAlert.tracked_position_id == position.id,
+                TrackedPositionAlert.alert_type == ALERT_TAKE_PROFIT_WATCH,
+                TrackedPositionAlert.alert_date >= signal_date - timedelta(days=TAKE_PROFIT_WATCH_COOLDOWN_DAYS),
+            )
+            .order_by(TrackedPositionAlert.alert_date.desc(), TrackedPositionAlert.id.desc())
+        )
+        if recent_take_profit is not None:
+            return recent_take_profit, "deduplicated"
 
     current = await latest_price(session, position.asset_type, position.asset_code)
     snapshot = _estimate_snapshot(position, current)
@@ -410,7 +632,7 @@ def _email_payload(
     alert: TrackedPositionAlert,
     decision: AlertDecision,
 ) -> dict[str, Any]:
-    title_prefix = "退出观察提醒" if alert.alert_type == ALERT_EXIT_WATCH else "风险提醒"
+    title_prefix = _alert_type_label(alert.alert_type)
     return {
         "title": f"FundScope {title_prefix}：{position.asset_name}",
         "alert_title": title_prefix,

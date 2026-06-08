@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -38,6 +38,14 @@ class TrackedPositionSnapshot(BaseModel):
     explanation: str | None = None
 
 
+class TrackedPositionExitSignal(BaseModel):
+    alert_type: str | None = None
+    label: str = "暂无卖出/减仓提醒"
+    level: Literal["none", "watch", "warning", "urgent"] = "none"
+    reason: str | None = None
+    reasons: list[str] = Field(default_factory=list)
+
+
 class TrackedPositionAlertOut(BaseModel):
     id: int
     tracked_position_id: int
@@ -63,6 +71,10 @@ class TrackedPositionChartPoint(BaseModel):
     price: float
     estimated_value: float | None = None
     estimated_pnl_pct: float | None = None
+    is_entry: bool = False
+    is_high: bool = False
+    is_current: bool = False
+    trailing_stop_pnl_pct: float | None = None
 
 
 class TrackedPositionOut(BaseModel):
@@ -80,6 +92,11 @@ class TrackedPositionOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     current_snapshot: TrackedPositionSnapshot
+    exit_signal: TrackedPositionExitSignal
+    max_profit_pct: float | None = None
+    profit_giveback_pct: float | None = None
+    holding_days: int | None = None
+    technical_metrics: dict[str, Any] = Field(default_factory=dict)
     latest_alert: TrackedPositionAlertOut | None = None
 
 
@@ -93,4 +110,3 @@ class TrackedPositionListOut(BaseModel):
     total: int
     email_configured: bool
     recipient_email: str
-

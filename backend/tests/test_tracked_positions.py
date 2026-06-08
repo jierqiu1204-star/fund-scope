@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -33,6 +33,22 @@ async def _seed_nav(app, fund_code: str = "270042") -> None:
                     nav=1.65,
                     accumulated_nav=1.65,
                 ),
+            ]
+        )
+        await session.commit()
+
+
+async def _seed_nav_series(app, values: list[tuple[date, float]], fund_code: str = "270042") -> None:
+    async with app.state.db.session() as session:
+        session.add_all(
+            [
+                FundNavHistory(
+                    fund_code=fund_code,
+                    nav_date=nav_date,
+                    nav=nav,
+                    accumulated_nav=nav,
+                )
+                for nav_date, nav in values
             ]
         )
         await session.commit()
@@ -126,10 +142,13 @@ async def test_create_tracked_position_estimates_shares_from_latest_nav(client, 
 
 
 @pytest.mark.asyncio
-async def test_high_watch_does_not_send_sell_alert(client, app, settings, monkeypatch) -> None:
-    await _seed_nav(app)
+async def test_high_watch_without_profit_does_not_send_sell_alert(client, app, settings, monkeypatch) -> None:
+    await _seed_nav_series(app, [(date(2026, 6, 1), 1.5), (date(2026, 6, 5), 1.53)])
     await _seed_signal(app, conclusion="高位观察", risk_flags=["追高风险"], action_label="高位别追")
-    await client.post("/api/tracked-positions", json={"asset_type": "fund", "asset_code": "270042"})
+    await client.post(
+        "/api/tracked-positions",
+        json={"asset_type": "fund", "asset_code": "270042", "buy_date": "2026-06-01"},
+    )
     sent: list[str] = []
 
     async def fake_send_template(self, session, *, recipient: str, template_name: str, payload: dict) -> str:
@@ -150,6 +169,181 @@ async def test_high_watch_does_not_send_sell_alert(client, app, settings, monkey
     assert result["positions_checked"] == 1
     assert alert_count == 0
     assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_take_profit_watch_sends_alert_for_profitable_high_watch(client, app, settings, monkeypatch) -> None:
+    await _seed_nav_series(app, [(date(2026, 6, 1), 1.0), (date(2026, 6, 5), 1.04)])
+    await _seed_signal(app, conclusion="高位观察", risk_flags=["追高风险"], action_label="高位别追")
+    await client.post(
+        "/api/tracked-positions",
+        json={"asset_type": "fund", "asset_code": "270042", "buy_date": "2026-06-01"},
+    )
+    sent: list[dict[str, object]] = []
+
+    async def fake_send_template(self, session, *, recipient: str, template_name: str, payload: dict) -> str:
+        sent.append(payload)
+        return "sent"
+
+    monkeypatch.setattr("app.services.notifier.Notifier.send_template", fake_send_template)
+
+    async with app.state.db.session() as session:
+        user = await session.get(User, 1)
+        assert user is not None
+        user.smtp_host = "smtp.163.com"
+        await session.commit()
+        result = await daily_tracked_position_alerts_job(session, settings)
+        alerts = (await session.scalars(select(TrackedPositionAlert))).all()
+
+    assert result["alerts_created"] == 1
+    assert alerts[0].alert_type == "take_profit_watch"
+    assert "止盈观察" in sent[0]["title"]
+    assert any("盈利" in reason for reason in alerts[0].reasons_json)
+
+
+@pytest.mark.asyncio
+async def test_trailing_take_profit_triggers_after_profit_giveback(client, app, settings, monkeypatch) -> None:
+    await _seed_nav_series(
+        app,
+        [
+            (date(2026, 6, 1), 1.0),
+            (date(2026, 6, 2), 1.06),
+            (date(2026, 6, 3), 1.08),
+            (date(2026, 6, 5), 1.053),
+        ],
+    )
+    await _seed_signal(app, conclusion="短线观察", risk_flags=[], action_label="重点观察")
+    await client.post(
+        "/api/tracked-positions",
+        json={"asset_type": "fund", "asset_code": "270042", "buy_date": "2026-06-01"},
+    )
+
+    async def fake_send_template(self, session, *, recipient: str, template_name: str, payload: dict) -> str:
+        return "sent"
+
+    monkeypatch.setattr("app.services.notifier.Notifier.send_template", fake_send_template)
+
+    async with app.state.db.session() as session:
+        user = await session.get(User, 1)
+        assert user is not None
+        user.smtp_host = "smtp.163.com"
+        await session.commit()
+        result = await daily_tracked_position_alerts_job(session, settings)
+        alert = await session.scalar(select(TrackedPositionAlert))
+
+    assert result["alerts_created"] == 1
+    assert alert is not None
+    assert alert.alert_type == "trailing_take_profit"
+    assert any("回吐" in reason for reason in alert.reasons_json)
+
+
+@pytest.mark.asyncio
+async def test_trend_weakening_triggers_when_price_breaks_short_averages(client, app, settings, monkeypatch) -> None:
+    await _seed_nav_series(
+        app,
+        [
+            (date(2026, 5, 22), 1.0),
+            (date(2026, 5, 25), 1.035),
+            (date(2026, 5, 26), 1.04),
+            (date(2026, 5, 27), 1.04),
+            (date(2026, 5, 28), 1.035),
+            (date(2026, 5, 29), 1.03),
+            (date(2026, 6, 1), 1.025),
+            (date(2026, 6, 2), 1.02),
+            (date(2026, 6, 3), 1.01),
+            (date(2026, 6, 4), 1.0),
+            (date(2026, 6, 5), 0.99),
+        ],
+    )
+    await _seed_signal(app, conclusion="短线观察", risk_flags=[], action_label="重点观察")
+    await client.post(
+        "/api/tracked-positions",
+        json={"asset_type": "fund", "asset_code": "270042", "buy_date": "2026-05-22"},
+    )
+
+    async def fake_send_template(self, session, *, recipient: str, template_name: str, payload: dict) -> str:
+        return "sent"
+
+    monkeypatch.setattr("app.services.notifier.Notifier.send_template", fake_send_template)
+
+    async with app.state.db.session() as session:
+        user = await session.get(User, 1)
+        assert user is not None
+        user.smtp_host = "smtp.163.com"
+        await session.commit()
+        result = await daily_tracked_position_alerts_job(session, settings)
+        alert = await session.scalar(select(TrackedPositionAlert))
+
+    assert result["alerts_created"] == 1
+    assert alert is not None
+    assert alert.alert_type == "trend_weakening"
+    assert any("均线" in reason for reason in alert.reasons_json)
+
+
+@pytest.mark.asyncio
+async def test_hard_stop_triggers_at_four_percent_loss(client, app, settings, monkeypatch) -> None:
+    await _seed_nav_series(app, [(date(2026, 6, 1), 1.0), (date(2026, 6, 5), 0.95)])
+    await _seed_signal(app, conclusion="短线观察", risk_flags=[], action_label="重点观察")
+    await client.post(
+        "/api/tracked-positions",
+        json={"asset_type": "fund", "asset_code": "270042", "buy_date": "2026-06-01"},
+    )
+
+    async def fake_send_template(self, session, *, recipient: str, template_name: str, payload: dict) -> str:
+        return "sent"
+
+    monkeypatch.setattr("app.services.notifier.Notifier.send_template", fake_send_template)
+
+    async with app.state.db.session() as session:
+        user = await session.get(User, 1)
+        assert user is not None
+        user.smtp_host = "smtp.163.com"
+        await session.commit()
+        result = await daily_tracked_position_alerts_job(session, settings)
+        alert = await session.scalar(select(TrackedPositionAlert))
+
+    assert result["alerts_created"] == 1
+    assert alert is not None
+    assert alert.alert_type == "hard_stop"
+    assert any("亏损" in reason for reason in alert.reasons_json)
+
+
+@pytest.mark.asyncio
+async def test_take_profit_watch_uses_three_day_cooldown(client, app, settings, monkeypatch) -> None:
+    await _seed_nav_series(app, [(date(2026, 6, 1), 1.0), (date(2026, 6, 5), 1.04)])
+    await _seed_signal(app, conclusion="高位观察", risk_flags=["追高风险"], action_label="高位别追")
+    response = await client.post(
+        "/api/tracked-positions",
+        json={"asset_type": "fund", "asset_code": "270042", "buy_date": "2026-06-01"},
+    )
+    position_id = response.json()["id"]
+
+    async def fake_send_template(self, session, *, recipient: str, template_name: str, payload: dict) -> str:
+        return "sent"
+
+    monkeypatch.setattr("app.services.notifier.Notifier.send_template", fake_send_template)
+
+    async with app.state.db.session() as session:
+        session.add(
+            TrackedPositionAlert(
+                tracked_position_id=position_id,
+                alert_date=date(2026, 6, 5) - timedelta(days=2),
+                alert_type="take_profit_watch",
+                trigger_label="止盈观察",
+                reasons_json=["旧提醒"],
+                risk_flags_json=[],
+            )
+        )
+        user = await session.get(User, 1)
+        assert user is not None
+        user.smtp_host = "smtp.163.com"
+        await session.commit()
+        result = await daily_tracked_position_alerts_job(session, settings)
+        alerts = (await session.scalars(select(TrackedPositionAlert))).all()
+
+    assert result["alerts_created"] == 0
+    assert result["deduplicated"] == 1
+    assert len(alerts) == 1
 
 
 @pytest.mark.asyncio
@@ -189,4 +383,3 @@ async def test_exit_watch_sends_email_once_per_signal_day(client, app, settings,
     assert sent[0]["recipient"] == "19535838578@163.com"
     assert sent[0]["template_name"] == "tracked_position_alert.html.j2"
     assert "退出观察提醒" in sent[0]["payload"]["title"]
-

@@ -22,7 +22,8 @@ from app.services.tracked_positions.service import (
     current_snapshot,
     email_configured,
     latest_alert_for_position,
-    position_chart,
+    latest_signal_context,
+    position_analysis,
     recalculate_entry,
 )
 
@@ -31,6 +32,8 @@ router = APIRouter(prefix="/api/tracked-positions", tags=["tracked-positions"])
 
 async def _position_out(session: AsyncSession, row: TrackedPosition) -> TrackedPositionOut:
     latest_alert = await latest_alert_for_position(session, row.id)
+    _, item, _ = await latest_signal_context(session, row)
+    analysis = await position_analysis(session, row, item=item)
     return TrackedPositionOut(
         id=row.id,
         asset_type=row.asset_type,
@@ -46,6 +49,11 @@ async def _position_out(session: AsyncSession, row: TrackedPosition) -> TrackedP
         created_at=row.created_at,
         updated_at=row.updated_at,
         current_snapshot=await current_snapshot(session, row),
+        exit_signal=analysis.exit_signal,
+        max_profit_pct=analysis.max_profit_pct,
+        profit_giveback_pct=analysis.profit_giveback_pct,
+        holding_days=analysis.holding_days,
+        technical_metrics=analysis.technical_metrics,
         latest_alert=alert_out(latest_alert) if latest_alert is not None else None,
     )
 
@@ -61,7 +69,7 @@ async def _position_detail_out(session: AsyncSession, row: TrackedPosition) -> T
     ).all()
     return TrackedPositionDetailOut(
         **base.model_dump(),
-        chart=await position_chart(session, row),
+        chart=(await position_analysis(session, row, item=(await latest_signal_context(session, row))[1])).chart,
         alerts=[alert_out(item) for item in alerts],
     )
 

@@ -554,6 +554,14 @@ export type TrackedPositionSnapshot = {
   explanation: string | null;
 };
 
+export type TrackedPositionExitSignal = {
+  alert_type: string | null;
+  label: string;
+  level: "none" | "watch" | "warning" | "urgent";
+  reason: string | null;
+  reasons: string[];
+};
+
 export type TrackedPositionAlert = {
   id: number;
   tracked_position_id: number;
@@ -579,6 +587,10 @@ export type TrackedPositionChartPoint = {
   price: number;
   estimated_value: number | null;
   estimated_pnl_pct: number | null;
+  is_entry: boolean;
+  is_high: boolean;
+  is_current: boolean;
+  trailing_stop_pnl_pct: number | null;
 };
 
 export type TrackedPosition = {
@@ -596,6 +608,11 @@ export type TrackedPosition = {
   created_at: string;
   updated_at: string;
   current_snapshot: TrackedPositionSnapshot;
+  exit_signal: TrackedPositionExitSignal;
+  max_profit_pct: number | null;
+  profit_giveback_pct: number | null;
+  holding_days: number | null;
+  technical_metrics: Record<string, unknown>;
   latest_alert: TrackedPositionAlert | null;
 };
 
