@@ -36,8 +36,8 @@ type OrderTimeBucket = "before_15" | "after_15" | "unknown";
 
 const assetTypeOptions: Array<{ key: AssetTypeFilter; label: string }> = [
   { key: "all", label: "全部" },
-  { key: "fund", label: "基金" },
-  { key: "etf", label: "ETF" }
+  { key: "fund", label: "场外基金（支付宝）" },
+  { key: "etf", label: "场内 ETF（证券账户）" }
 ];
 
 const sortOptions: Array<{ key: SortKey; label: string }> = [
@@ -45,7 +45,7 @@ const sortOptions: Array<{ key: SortKey; label: string }> = [
   { key: "return_5d", label: "近 5 日强" },
   { key: "return_20d", label: "近 20 日强" },
   { key: "drawdown_low", label: "回撤较小" },
-  { key: "liquidity", label: "ETF 活跃" },
+  { key: "liquidity", label: "场内 ETF 活跃" },
   { key: "risk_low", label: "风险较低" }
 ];
 
@@ -120,7 +120,17 @@ function advisorTone(action: string) {
 }
 
 function assetTypeLabel(assetType: string) {
-  return assetType === "etf" ? "ETF" : "基金";
+  return assetType === "etf" ? "场内 ETF" : "场外基金";
+}
+
+function assetTradingNote(assetType: string, name?: string) {
+  if (assetType === "etf") {
+    return "证券账户交易，有盘中价格，支付宝通常不能直接买场内份额。";
+  }
+  if (name?.includes("ETF联接")) {
+    return "支付宝可买；名字带 ETF联接，但仍是场外基金，非实时净值，按确认净值日估算。";
+  }
+  return "支付宝可买，非实时净值，按确认净值日估算。";
 }
 
 function rationaleText(asset: ShortResearchAsset, key: string, fallback: string) {
@@ -415,7 +425,7 @@ export default function ShortTermPage() {
   const createTracking = useMutation({
     mutationFn: async () => {
       if (!selectedAsset) {
-        throw new Error("请先选择一只基金或 ETF");
+        throw new Error("请先选择一只场外基金或场内 ETF");
       }
       return (
         await api.post<TrackedPosition>("/api/tracked-positions", {
@@ -483,7 +493,7 @@ export default function ShortTermPage() {
       <SectionHeader
         eyebrow="短线研究"
         title="基金和 ETF，一页看清近期强弱"
-        description="这里只看公开基金净值和 ETF 日线，适合一两周到两三个月的观察周期。系统给排序、图表和风险解释，不给确定性结论。"
+        description="这里只看公开基金净值和场内 ETF 日线，适合一两周到两三个月的观察周期。场外基金按每日确认净值估算，场内 ETF 才有盘中价格；名字带“ETF联接”的仍是场外基金。"
         action={
           <div className="flex flex-wrap gap-3">
             <button
@@ -513,7 +523,7 @@ export default function ShortTermPage() {
 
       <div className="grid gap-4 md:grid-cols-3 xl:grid-cols-6">
         <StatPill label="研究池" value={`${statusData?.asset_count ?? 0} 只`} tone="bg-white text-ink" />
-        <StatPill label="基金 / ETF" value={`${statusData?.fund_count ?? 0} / ${statusData?.etf_count ?? 0}`} />
+        <StatPill label="场外 / 场内" value={`${statusData?.fund_count ?? 0} / ${statusData?.etf_count ?? 0}`} />
         <StatPill label="已有数据" value={`${statusData?.priced_asset_count ?? 0} 只`} tone="bg-accentSoft text-ink" />
         <StatPill label="最新数据" value={formatDate(statusData?.latest_data_date)} tone="bg-white text-ink" />
         <StatPill label="短线观察" value={`${statusData?.observable_count ?? 0} 只`} tone="bg-emerald-100 text-emerald-800" />
@@ -530,9 +540,9 @@ export default function ShortTermPage() {
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.22em] text-accent">我的短线追踪</p>
-            <h2 className="mt-2 text-2xl font-semibold text-ink">标注你已经买入的基金/ETF</h2>
+            <h2 className="mt-2 text-2xl font-semibold text-ink">标注你已经买入的场外基金/场内 ETF</h2>
             <p className="mt-2 text-sm leading-6 text-ink/65">
-              这里记录的是你在支付宝等平台手动买入后的观察笔记。系统每天检查公开数据，触发止盈观察、移动止盈、趋势转弱或明显风险时给你发邮件。
+              这里记录的是你在支付宝或证券账户手动买入后的观察笔记。场外基金不是实时净值，系统每天检查公开数据，触发止盈观察、移动止盈、趋势转弱或明显风险时给你发邮件。
             </p>
           </div>
           <div className="rounded-[18px] bg-paper px-4 py-3 text-sm leading-6 text-ink/65">
@@ -599,7 +609,7 @@ export default function ShortTermPage() {
           ))}
           {!trackedPositions.isLoading && activeTracked.length === 0 ? (
             <div className="rounded-[20px] border border-dashed border-ink/20 bg-white p-5 text-sm leading-7 text-ink/55 xl:col-span-3">
-              还没有追踪记录。左侧选择一只基金或 ETF 后，点“我已买入，开始追踪”。
+              还没有追踪记录。左侧选择一只场外基金或场内 ETF 后，点“我已买入，开始追踪”。
             </div>
           ) : null}
         </div>
@@ -708,6 +718,9 @@ export default function ShortTermPage() {
                           {item.code}
                         </span>
                       </h3>
+                      <p className={`mt-2 text-xs leading-5 ${isSelected ? "text-white/55" : "text-ink/50"}`}>
+                        {assetTradingNote(item.asset_type, item.name)}
+                      </p>
                     </div>
                     <div className="flex flex-wrap gap-2">
                       <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white text-ink" : "bg-ink text-white"}`}>
@@ -757,6 +770,9 @@ export default function ShortTermPage() {
                       {selectedAsset.name}
                       <span className="ml-2 text-lg font-normal text-ink/45">{selectedAsset.code}</span>
                     </h2>
+                    <p className="mt-2 rounded-[14px] bg-paper px-4 py-3 text-sm leading-6 text-ink/65">
+                      {assetTradingNote(selectedAsset.asset_type, selectedAsset.name)}
+                    </p>
                     <p className="mt-2 text-sm leading-6 text-ink/65">{selectedAsset.investment_direction}</p>
                     {selectedTracked.length ? (
                       <p className="mt-2 text-sm text-emerald-700">你正在追踪这只资产的 {selectedTracked.length} 笔买入。</p>
@@ -1046,7 +1062,7 @@ export default function ShortTermPage() {
                   </div>
 
                   <div className="rounded-[20px] bg-paper p-4">
-                    <p className="font-semibold text-ink">{selectedAsset.asset_type === "etf" ? "ETF 成交活跃度" : "样本和风险说明"}</p>
+                    <p className="font-semibold text-ink">{selectedAsset.asset_type === "etf" ? "场内 ETF 成交活跃度" : "样本和风险说明"}</p>
                     <div className="mt-4 h-64">
                       {selectedAsset.asset_type === "etf" && detailPoints.some((point) => point.turnover !== null) ? (
                         <ResponsiveContainer width="100%" height="100%">
@@ -1073,7 +1089,7 @@ export default function ShortTermPage() {
               </>
             ) : (
               <div className="rounded-[20px] border border-dashed border-ink/20 p-8 text-sm leading-6 text-ink/55">
-                左侧选择一只基金或 ETF 后，这里会显示走势、回撤、近期涨跌和解释。
+                左侧选择一只场外基金或场内 ETF 后，这里会显示走势、回撤、近期涨跌和解释。
               </div>
             )}
           </Panel>
@@ -1126,7 +1142,7 @@ export default function ShortTermPage() {
       ) : null}
 
       <p className="rounded-[18px] bg-white/70 px-5 py-4 text-sm leading-7 text-ink/60">
-        说明：短线研究只使用公开基金净值和 ETF 日线数据。基金净值通常不是盘中实时数据，ETF 也可能受数据源延迟影响。
+        说明：短线研究只使用公开基金净值和场内 ETF 日线数据。场外基金净值通常不是盘中实时数据；名字里有“ETF联接”的仍按场外基金净值确认。
         页面里的排序、标签和 AI 说明都用于研究观察，不代表未来收益，也不会触发真实操作。
       </p>
     </div>
