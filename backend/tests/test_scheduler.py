@@ -29,3 +29,17 @@ def test_scheduler_uses_configured_timezone() -> None:
     scheduler = scheduler_module.build_scheduler("Asia/Shanghai")
 
     assert scheduler.timezone.key == "Asia/Shanghai"
+
+
+def test_scheduler_uses_unified_short_research_jobs(app) -> None:
+    scheduler = scheduler_module.build_scheduler("Asia/Shanghai")
+
+    scheduler_module.register_default_jobs(scheduler, app.state.db, app.state.settings)
+
+    job_ids = {job.id for job in scheduler.get_jobs()}
+    assert "daily_short_research_data" in job_ids
+    assert "daily_short_research_signals" in job_ids
+    assert "daily_short_research_advisor" in job_ids
+    assert "daily_short_etf_data" not in job_ids
+    assert "daily_short_etf_signals" not in job_ids
+    assert "daily_short_etf_paper" not in job_ids

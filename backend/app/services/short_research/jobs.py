@@ -6,24 +6,22 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
-from app.defaults.short_research import ASSET_TYPE_FUND
+from app.defaults.short_research import ASSET_TYPE_ETF, ASSET_TYPE_FUND
 from app.services.llm import LLMClient
 from app.services.short_research.advisor import run_advisor_generation
 from app.services.short_research.service import run_signal_generation, sync_short_research_data
 
-
-async def daily_short_research_data_job(session: AsyncSession) -> dict[str, Any]:
-    today = date.today()
-    return await sync_short_research_data(
-        session,
-        from_date=today - timedelta(days=120),
-        to_date=today,
-        asset_type=ASSET_TYPE_FUND,
-    )
+SHORT_RESEARCH_DAILY_ASSET_TYPES = [ASSET_TYPE_FUND, ASSET_TYPE_ETF]
 
 
-async def daily_short_research_signals_job(session: AsyncSession) -> dict[str, Any]:
-    run = await run_signal_generation(session, asset_type=ASSET_TYPE_FUND)
+def _count(value: Any, key: str) -> int:
+    raw = value.get(key, 0) if isinstance(value, dict) else 0
+    if isinstance(raw, int | float | str):
+        return int(raw)
+    return 0
+
+
+def _signal_result(run: Any) -> dict[str, Any]:
     return {
         "run_id": run.id,
         "status": run.status,
@@ -35,14 +33,60 @@ async def daily_short_research_signals_job(session: AsyncSession) -> dict[str, A
     }
 
 
+async def daily_short_research_data_job(session: AsyncSession) -> dict[str, Any]:
+    today = date.today()
+    results: dict[str, dict[str, Any]] = {}
+    for asset_type in SHORT_RESEARCH_DAILY_ASSET_TYPES:
+        results[asset_type] = await sync_short_research_data(
+            session,
+            from_date=today - timedelta(days=120),
+            to_date=today,
+            asset_type=asset_type,
+        )
+    return {
+        "from_date": (today - timedelta(days=120)).isoformat(),
+        "to_date": today.isoformat(),
+        "asset_types": SHORT_RESEARCH_DAILY_ASSET_TYPES,
+        "fund": results[ASSET_TYPE_FUND],
+        "etf": results[ASSET_TYPE_ETF],
+        "asset_count": sum(_count(item, "asset_count") for item in results.values()),
+        "failed": sum(_count(item, "failed") for item in results.values()),
+    }
+
+
+async def daily_short_research_signals_job(session: AsyncSession) -> dict[str, Any]:
+    results: dict[str, dict[str, Any]] = {}
+    for asset_type in SHORT_RESEARCH_DAILY_ASSET_TYPES:
+        results[asset_type] = _signal_result(await run_signal_generation(session, asset_type=asset_type))
+    return {
+        "asset_types": SHORT_RESEARCH_DAILY_ASSET_TYPES,
+        "fund": results[ASSET_TYPE_FUND],
+        "etf": results[ASSET_TYPE_ETF],
+        "items": sum(_count(item, "items") for item in results.values()),
+        "funds": sum(_count(item, "funds") for item in results.values()),
+        "etfs": sum(_count(item, "etfs") for item in results.values()),
+    }
+
+
 async def daily_short_research_advisor_job(
     session: AsyncSession,
     settings: Settings | None = None,
     llm_client: LLMClient | None = None,
 ) -> dict[str, Any]:
-    return await run_advisor_generation(
-        session,
-        settings or get_settings(),
-        llm_client=llm_client,
-        asset_type=ASSET_TYPE_FUND,
-    )
+    effective_settings = settings or get_settings()
+    results: dict[str, dict[str, Any]] = {}
+    for asset_type in SHORT_RESEARCH_DAILY_ASSET_TYPES:
+        results[asset_type] = await run_advisor_generation(
+            session,
+            effective_settings,
+            llm_client=llm_client,
+            asset_type=asset_type,
+        )
+    return {
+        "asset_types": SHORT_RESEARCH_DAILY_ASSET_TYPES,
+        "fund": results[ASSET_TYPE_FUND],
+        "etf": results[ASSET_TYPE_ETF],
+        "selected": sum(_count(item, "selected") for item in results.values()),
+        "succeeded": sum(_count(item, "succeeded") for item in results.values()),
+        "failed": sum(_count(item, "failed") for item in results.values()),
+    }

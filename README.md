@@ -1,6 +1,6 @@
 # FundScope
 
-FundScope is a single-user fund-investing dashboard for tracking transactions, monitoring index valuations, reviewing fund news, receiving monthly DCA reminders, and reviewing explainable asset screening candidates.
+FundScope is a single-user fund and ETF research dashboard for short-term research, manual position tracking, index valuation context, fund news, reminders, and explainable screening candidates.
 
 ## Stack
 
@@ -77,27 +77,17 @@ Changing `frontend/.env.local` requires restarting the frontend dev server.
 - Frontend static export for deployment: `pnpm build:static`
 - Pre-commit hooks: `pre-commit install`
 
-## Recommendations
+## Short-Term Research
 
-FundScope can generate explainable screening results for fund candidates and stock watchlist candidates. The output is deterministic and stores each run, score breakdown, rationale, risk flag, and data freshness marker for later review.
+`/short-term` is the main product entry for short-term research:
 
-The recommendation workflow uses the existing admin job system:
+- Default mode: exchange-traded ETFs for securities accounts, ranked with price trend, drawdown, volatility, data freshness, and turnover context.
+- Optional mode: Alipay-style off-exchange funds, ranked with public NAV data and clear non-realtime NAV warnings.
+- Manual tracking: record a fund or ETF you already bought, then receive email alerts when conservative exit, risk, trend-weakening, or profit-protection rules trigger.
 
-```bash
-cd backend
-uv run alembic upgrade head
-uv run uvicorn app.main:app --reload
-```
+The unified admin jobs are `daily_short_research_data`, `daily_short_research_signals`, `daily_short_research_advisor`, and `daily_tracked_position_alerts`. Recommendation and screening APIs remain available for compatibility, but they are no longer the primary product entry.
 
-Then open `/admin/jobs` and run `daily_asset_recommendations`, or call:
-
-```bash
-curl -X POST http://localhost:8000/api/admin/jobs/daily_asset_recommendations/run
-```
-
-The stock MVP uses a small local seed universe so the feature works offline. Replace or extend the `stocks`, `stock_price_history`, and `stock_fundamentals` tables with imported AKShare-compatible data when you want real coverage.
-
-Recommendation results are research aids only. FundScope does not execute trades, provide trade commands, set price targets, or forecast returns.
+All outputs are research aids only. FundScope does not connect to Alipay or brokers, does not execute trades, does not provide trade commands, and does not guarantee future returns.
 
 ## Strategy Lab
 

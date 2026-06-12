@@ -20,13 +20,6 @@ from app.services.jobs import (
     monthly_dca_reminder_job,
 )
 from app.services.llm import LLMClient
-from app.services.short_etf.jobs import (
-    daily_short_etf_data_job,
-    daily_short_etf_paper_job,
-    daily_short_etf_reliability_evaluation_job,
-    daily_short_etf_retry_failed_data_job,
-    daily_short_etf_signals_job,
-)
 from app.services.short_research.jobs import (
     daily_short_research_advisor_job,
     daily_short_research_data_job,
@@ -138,51 +131,6 @@ def register_default_jobs(
         hour=20,
         minute=15,
         id="daily_strategy_paper",
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        _run_tracked_job,
-        "cron",
-        args=[db, "daily_short_etf_data", daily_short_etf_data_job],
-        hour=20,
-        minute=30,
-        id="daily_short_etf_data",
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        _run_tracked_job,
-        "cron",
-        args=[db, "daily_short_etf_signals", daily_short_etf_signals_job],
-        hour=20,
-        minute=45,
-        id="daily_short_etf_signals",
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        _run_tracked_job,
-        "cron",
-        args=[db, "daily_short_etf_retry_failed_data", daily_short_etf_retry_failed_data_job],
-        hour=20,
-        minute=50,
-        id="daily_short_etf_retry_failed_data",
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        _run_tracked_job,
-        "cron",
-        args=[db, "daily_short_etf_paper", daily_short_etf_paper_job],
-        hour=21,
-        minute=0,
-        id="daily_short_etf_paper",
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        _run_tracked_job,
-        "cron",
-        args=[db, "daily_short_etf_reliability_evaluation", daily_short_etf_reliability_evaluation_job],
-        hour=21,
-        minute=15,
-        id="daily_short_etf_reliability_evaluation",
         replace_existing=True,
     )
     scheduler.add_job(

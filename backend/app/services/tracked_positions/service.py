@@ -388,7 +388,7 @@ async def current_snapshot(session: AsyncSession, position: TrackedPosition) -> 
         position,
         await latest_price(session, position.asset_type, position.asset_code),
     )
-    run = await latest_signal_run(session)
+    run = await latest_signal_run(session, asset_type=position.asset_type)
     if run is None:
         return snapshot
     items = await list_signal_items(session, run.id)
@@ -461,7 +461,7 @@ async def latest_signal_context(
     session: AsyncSession,
     position: TrackedPosition,
 ) -> tuple[ShortResearchSignalRun | None, ShortResearchSignalItem | None, ShortResearchAdvisorReport | None]:
-    run = await latest_signal_run(session)
+    run = await latest_signal_run(session, asset_type=position.asset_type)
     if run is None:
         return None, None, None
     items = await list_signal_items(session, run.id)

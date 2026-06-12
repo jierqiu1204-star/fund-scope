@@ -30,18 +30,84 @@ import type {
   TrackedPositionList
 } from "@/lib/types";
 
-const SHORT_TERM_ASSET_TYPE = "fund";
-
-type SortKey = "score" | "return_5d" | "return_20d" | "drawdown_low" | "risk_low";
+type AssetType = "fund" | "etf";
+type SortKey = "score" | "return_5d" | "return_20d" | "drawdown_low" | "risk_low" | "liquidity";
 type OrderTimeBucket = "before_15" | "after_15" | "unknown";
 
-const sortOptions: Array<{ key: SortKey; label: string }> = [
+const baseSortOptions: Array<{ key: SortKey; label: string }> = [
   { key: "score", label: "综合排序" },
   { key: "return_5d", label: "近 5 日强" },
   { key: "return_20d", label: "近 20 日强" },
   { key: "drawdown_low", label: "回撤较小" },
   { key: "risk_low", label: "风险较低" }
 ];
+
+const etfSortOptions: Array<{ key: SortKey; label: string }> = [
+  ...baseSortOptions,
+  { key: "liquidity", label: "成交额高" }
+];
+
+const assetModes: Record<
+  AssetType,
+  {
+    label: string;
+    shortLabel: string;
+    title: string;
+    description: string;
+    poolLabel: string;
+    classification: string;
+    latestLabel: string;
+    priceLabel: string;
+    dataButton: string;
+    trackingTitle: string;
+    trackingDescription: string;
+    trackingEmpty: string;
+    detailEmpty: string;
+    noResults: string;
+    sourceSummary: string;
+  }
+> = {
+  etf: {
+    label: "场内 ETF（证券账户实时交易）",
+    shortLabel: "场内 ETF",
+    title: "场内 ETF 短线研究",
+    description:
+      "默认看证券账户可以买卖的场内 ETF，更适合一两周到两三个月的短线观察。这里用公开日线收盘价、成交额和风险标签做排序；价格比场外基金更及时，但页面数据仍可能延迟，不代表券商盘口实时价。",
+    poolLabel: "ETF 池",
+    classification: "场内 ETF（证券账户交易）",
+    latestLabel: "最新交易日",
+    priceLabel: "最新收盘价",
+    dataButton: "拉取近 120 天 ETF 日线",
+    trackingTitle: "标注你已经在证券账户买入的场内 ETF",
+    trackingDescription:
+      "ETF 追踪按公开日线收盘价估算，不连接券商账户。系统每天检查价格、成交额、趋势转弱和止盈保护，触发风险时发邮件提醒你人工判断。",
+    trackingEmpty: "还没有追踪记录。左侧选择一只场内 ETF 后，点“我已买入，开始追踪”。",
+    detailEmpty: "左侧选择一只 ETF 后，这里会显示走势、回撤、成交额、近期涨跌和解释。",
+    noResults: "当前筛选条件下没有 ETF 结果。可以换一个方向，或先点击“拉取近 120 天 ETF 日线”。",
+    sourceSummary:
+      "说明：ETF 使用公开日线收盘价和成交额，适合证券账户短线研究；它不是券商盘口实时价，也不会自动下单。"
+  },
+  fund: {
+    label: "支付宝场外基金（非实时净值）",
+    shortLabel: "场外基金",
+    title: "支付宝场外基金短线研究",
+    description:
+      "这里看支付宝可手动买入的场外基金，适合观察但不适合盘中即买即卖。数据来自公开基金净值，不是支付宝实时收益；15:00 后下单通常按下一交易日确认净值估算，名字带“ETF联接”的仍按场外基金处理。",
+    poolLabel: "场外基金池",
+    classification: "场外基金（非实时净值）",
+    latestLabel: "最新净值日",
+    priceLabel: "最新净值",
+    dataButton: "拉取近 120 天基金净值",
+    trackingTitle: "标注你已经在支付宝买入的场外基金",
+    trackingDescription:
+      "这里记录的是你在支付宝手动买入后的观察笔记。场外基金不是实时净值，系统每天检查公开数据，触发止盈观察、移动止盈、趋势转弱或明显风险时给你发邮件。",
+    trackingEmpty: "还没有追踪记录。左侧选择一只场外基金后，点“我已买入，开始追踪”。",
+    detailEmpty: "左侧选择一只场外基金后，这里会显示走势、回撤、近期涨跌和解释。",
+    noResults: "当前筛选条件下没有场外基金结果。可以换一个方向，或先点击“拉取近 120 天基金净值”。",
+    sourceSummary:
+      "说明：场外基金使用公开基金净值。净值通常不是盘中实时数据；名字里有“ETF联接”的仍按场外基金净值确认。"
+  }
+};
 
 const fallbackThemes = [
   "科技",
@@ -114,17 +180,31 @@ function advisorTone(action: string) {
 }
 
 function assetTypeLabel(assetType: string) {
-  return assetType === "etf" ? "非支付宝资产" : "场外基金";
+  return assetType === "etf" ? "场内 ETF" : "支付宝场外基金";
 }
 
 function assetTradingNote(assetType: string, name?: string) {
   if (assetType === "etf") {
-    return "当前支付宝场外基金页面默认不展示这类资产。";
+    return "证券账户交易，使用公开日线收盘价和成交额估算；可做短线研究，但页面不是券商盘口实时价。";
   }
   if (name?.includes("ETF联接")) {
     return "支付宝可买；名字带 ETF联接，但仍是场外基金，非实时净值，按确认净值日估算。";
   }
   return "支付宝可买，非实时净值，按确认净值日估算。";
+}
+
+function formatTurnover(value: number | null) {
+  if (value === null) {
+    return "暂无";
+  }
+  if (value >= 100_000_000) {
+    return `${(value / 100_000_000).toFixed(2)} 亿元`;
+  }
+  return `${(value / 10_000).toFixed(0)} 万元`;
+}
+
+function assetCount(status: ShortResearchStatus | undefined, assetType: AssetType) {
+  return assetType === "etf" ? status?.etf_count ?? 0 : status?.fund_count ?? 0;
 }
 
 function rationaleText(asset: ShortResearchAsset, key: string, fallback: string) {
@@ -283,7 +363,7 @@ function pnlTone(value: number | null) {
 function pnlText(position: TrackedPosition) {
   const snapshot = position.current_snapshot;
   if (snapshot.estimated_pnl === null || snapshot.estimated_pnl_pct === null) {
-    return "等待净值";
+    return "等待价格";
   }
   return `${formatCurrency(snapshot.estimated_pnl)} / ${snapshot.estimated_pnl_pct.toFixed(2)}%`;
 }
@@ -294,6 +374,7 @@ function percentOrWaiting(value: number | null) {
 
 export default function ShortTermPage() {
   const queryClient = useQueryClient();
+  const [assetType, setAssetType] = useState<AssetType>("etf");
   const [theme, setTheme] = useState("all");
   const [sort, setSort] = useState<SortKey>("score");
   const [keyword, setKeyword] = useState("");
@@ -307,6 +388,8 @@ export default function ShortTermPage() {
   const [trackingConfirmedNav, setTrackingConfirmedNav] = useState("");
   const [trackingConfirmedShares, setTrackingConfirmedShares] = useState("");
   const [trackingNote, setTrackingNote] = useState("");
+  const mode = assetModes[assetType];
+  const sortOptions = assetType === "etf" ? etfSortOptions : baseSortOptions;
 
   const status = useQuery({
     queryKey: ["short-research", "status"],
@@ -314,16 +397,16 @@ export default function ShortTermPage() {
   });
 
   const latestSignals = useQuery({
-    queryKey: ["short-research", "signals", "latest", SHORT_TERM_ASSET_TYPE],
+    queryKey: ["short-research", "signals", "latest", assetType],
     queryFn: async () =>
-      (await api.get<ShortResearchSignalRun | null>(`/api/short-research/signals/latest?asset_type=${SHORT_TERM_ASSET_TYPE}`)).data
+      (await api.get<ShortResearchSignalRun | null>(`/api/short-research/signals/latest?asset_type=${assetType}`)).data
   });
 
   const assets = useQuery({
-    queryKey: ["short-research", "assets", SHORT_TERM_ASSET_TYPE, theme, sort, keyword],
+    queryKey: ["short-research", "assets", assetType, theme, sort, keyword],
     queryFn: async () => {
       const params = new URLSearchParams();
-      params.set("asset_type", SHORT_TERM_ASSET_TYPE);
+      params.set("asset_type", assetType);
       if (theme !== "all") {
         params.set("theme", theme);
       }
@@ -363,6 +446,12 @@ export default function ShortTermPage() {
     }
   }, [assets.data, selected]);
 
+  useEffect(() => {
+    if (assetType === "fund" && sort === "liquidity") {
+      setSort("score");
+    }
+  }, [assetType, sort]);
+
   const themes = useMemo(() => {
     const seen = new Set<string>(fallbackThemes);
     for (const item of assets.data?.items ?? []) {
@@ -376,7 +465,7 @@ export default function ShortTermPage() {
       (
         await api.post<Record<string, unknown>>("/api/short-research/data/sync", {
           days: 120,
-          asset_type: SHORT_TERM_ASSET_TYPE
+          asset_type: assetType
         })
       ).data,
     onSuccess: async (result) => {
@@ -392,7 +481,7 @@ export default function ShortTermPage() {
     mutationFn: async () =>
       (
         await api.post<ShortResearchSignalRun>("/api/short-research/signals/run", {
-          asset_type: SHORT_TERM_ASSET_TYPE,
+          asset_type: assetType,
           theme: theme === "all" ? null : theme
         })
       ).data,
@@ -410,7 +499,7 @@ export default function ShortTermPage() {
     mutationFn: async () =>
       (
         await api.post<Record<string, unknown>>("/api/short-research/advisor/run", {
-          asset_type: SHORT_TERM_ASSET_TYPE,
+          asset_type: assetType,
           theme: theme === "all" ? null : theme
         })
       ).data,
@@ -423,7 +512,7 @@ export default function ShortTermPage() {
   const createTracking = useMutation({
     mutationFn: async () => {
       if (!selectedAsset) {
-        throw new Error("请先选择一只场外基金");
+        throw new Error(`请先选择一只${mode.shortLabel}`);
       }
       return (
         await api.post<TrackedPosition>("/api/tracked-positions", {
@@ -470,19 +559,19 @@ export default function ShortTermPage() {
   const detailPoints = chartPoints(selectedDetail.data);
   const windowPoints = returnWindowChart(selectedAsset);
   const statusData = status.data;
-  const fundHealth = statusData?.data_health.filter((item) => item.asset_type === SHORT_TERM_ASSET_TYPE) ?? [];
-  const fundDataIssues = fundHealth.filter((item) => item.status !== "success" || item.is_stale);
-  const fundDates = fundHealth
+  const currentHealth = statusData?.data_health.filter((item) => item.asset_type === assetType) ?? [];
+  const currentDataIssues = currentHealth.filter((item) => item.status !== "success" || item.is_stale);
+  const currentDates = currentHealth
     .map((item) => item.latest_date)
     .filter((item): item is string => item !== null)
     .sort();
-  const fundLatestDate = fundDates.length ? fundDates[fundDates.length - 1] : null;
+  const currentLatestDate = currentDates.length ? currentDates[currentDates.length - 1] : null;
   const visibleAssets = assets.data?.items ?? [];
   const observableCount = visibleAssets.filter((item) => item.conclusion === "短线观察").length;
   const highRiskCount = visibleAssets.filter((item) => item.conclusion === "高位观察").length;
-  const dataIssues = fundDataIssues.slice(0, 6);
+  const dataIssues = currentDataIssues.slice(0, 6);
   const activeTracked = (trackedPositions.data?.items ?? []).filter(
-    (item) => item.status === "active" && item.asset_type === SHORT_TERM_ASSET_TYPE
+    (item) => item.status === "active" && item.asset_type === assetType
   );
   const selectedTracked = activeTracked.filter(
     (item) => selectedAsset && item.asset_type === selectedAsset.asset_type && item.asset_code === selectedAsset.code
@@ -502,8 +591,8 @@ export default function ShortTermPage() {
     <div className="space-y-8">
       <SectionHeader
         eyebrow="短线研究"
-        title="场外基金短线研究"
-        description="这里只看支付宝可手动买入的场外基金，适合一两周到两三个月的观察周期。数据来自公开基金净值，不是支付宝实时收益；15:00 后下单通常按下一交易日确认净值估算。名字带“ETF联接”的仍按场外基金处理。"
+        title={mode.title}
+        description={mode.description}
         action={
           <div className="flex flex-wrap gap-3">
             <button
@@ -511,7 +600,7 @@ export default function ShortTermPage() {
               disabled={syncData.isPending}
               onClick={() => syncData.mutate()}
             >
-              {syncData.isPending ? "正在准备数据..." : "拉取近 120 天数据"}
+              {syncData.isPending ? "正在准备数据..." : mode.dataButton}
             </button>
             <button
               className="rounded-full bg-ink px-5 py-3 text-sm font-semibold text-white transition hover:bg-pine disabled:opacity-60"
@@ -531,11 +620,32 @@ export default function ShortTermPage() {
         }
       />
 
+      <div className="flex flex-wrap gap-3 rounded-[24px] border border-ink/10 bg-white p-3">
+        {(["etf", "fund"] as AssetType[]).map((item) => {
+          const isActive = assetType === item;
+          return (
+            <button
+              key={item}
+              className={`rounded-full px-5 py-3 text-sm font-semibold transition ${
+                isActive ? "bg-ink text-white" : "bg-paper text-ink hover:bg-accentSoft"
+              }`}
+              onClick={() => {
+                setAssetType(item);
+                setTheme("all");
+                setSelected(null);
+              }}
+            >
+              {assetModes[item].label}
+            </button>
+          );
+        })}
+      </div>
+
       <div className="grid gap-4 md:grid-cols-3 xl:grid-cols-6">
-        <StatPill label="场外基金池" value={`${statusData?.fund_count ?? 0} 只`} tone="bg-white text-ink" />
-        <StatPill label="分类口径" value="场外基金（非实时净值）" />
-        <StatPill label="已有数据" value={`${fundHealth.filter((item) => item.usable_days > 0).length} 只`} tone="bg-accentSoft text-ink" />
-        <StatPill label="最新净值" value={formatDate(fundLatestDate)} tone="bg-white text-ink" />
+        <StatPill label={mode.poolLabel} value={`${assetCount(statusData, assetType)} 只`} tone="bg-white text-ink" />
+        <StatPill label="分类口径" value={mode.classification} />
+        <StatPill label="已有数据" value={`${currentHealth.filter((item) => item.usable_days > 0).length} 只`} tone="bg-accentSoft text-ink" />
+        <StatPill label={mode.latestLabel} value={formatDate(currentLatestDate)} tone="bg-white text-ink" />
         <StatPill label="短线观察" value={`${observableCount} 只`} tone="bg-emerald-100 text-emerald-800" />
         <StatPill label="高位观察" value={`${highRiskCount} 只`} tone="bg-rose-100 text-rose-800" />
       </div>
@@ -550,9 +660,9 @@ export default function ShortTermPage() {
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.22em] text-accent">我的短线追踪</p>
-            <h2 className="mt-2 text-2xl font-semibold text-ink">标注你已经在支付宝买入的场外基金</h2>
+            <h2 className="mt-2 text-2xl font-semibold text-ink">{mode.trackingTitle}</h2>
             <p className="mt-2 text-sm leading-6 text-ink/65">
-              这里记录的是你在支付宝手动买入后的观察笔记。场外基金不是实时净值，系统每天检查公开数据，触发止盈观察、移动止盈、趋势转弱或明显风险时给你发邮件。
+              {mode.trackingDescription}
             </p>
           </div>
           <div className="rounded-[18px] bg-paper px-4 py-3 text-sm leading-6 text-ink/65">
@@ -581,14 +691,18 @@ export default function ShortTermPage() {
                 <span>
                   下单：{formatCurrency(item.buy_amount)} / {formatDate(item.buy_date)}（{orderTimeBucketLabel(item.order_time_bucket)}）
                 </span>
-                <span>确认净值日：{formatDate(item.confirmed_nav_date ?? item.entry_price_date)}</span>
                 <span>
-                  确认净值：{item.confirmed_nav?.toFixed(4) ?? item.entry_price?.toFixed(4) ?? "等待净值"}
+                  {item.asset_type === "etf" ? "买入价格日" : "确认净值日"}：
+                  {formatDate(item.confirmed_nav_date ?? item.entry_price_date)}
+                </span>
+                <span>
+                  {item.asset_type === "etf" ? "买入价" : "确认净值"}：
+                  {item.confirmed_nav?.toFixed(4) ?? item.entry_price?.toFixed(4) ?? "等待价格"}
                 </span>
                 <span>持有：{item.holding_days === null ? "等待数据" : `${item.holding_days} 天`}</span>
                 <span>
                   {item.confirmed_shares === null ? "估算份额" : "确认份额"}：
-                  {item.estimated_shares === null ? "等待净值" : item.estimated_shares.toFixed(2)}
+                  {item.estimated_shares === null ? "等待价格" : item.estimated_shares.toFixed(2)}
                 </span>
                 <span className={pnlTone(item.current_snapshot.estimated_pnl)}>估算盈亏：{pnlText(item)}</span>
                 <span>最高盈利：{percentOrWaiting(item.max_profit_pct)}</span>
@@ -619,7 +733,7 @@ export default function ShortTermPage() {
           ))}
           {!trackedPositions.isLoading && activeTracked.length === 0 ? (
             <div className="rounded-[20px] border border-dashed border-ink/20 bg-white p-5 text-sm leading-7 text-ink/55 xl:col-span-3">
-              还没有追踪记录。左侧选择一只场外基金后，点“我已买入，开始追踪”。
+              {mode.trackingEmpty}
             </div>
           ) : null}
         </div>
@@ -644,7 +758,7 @@ export default function ShortTermPage() {
             <p className="text-lg font-semibold text-ink">数据状态</p>
             <p className="mt-2 text-sm leading-6 text-ink/65">
               最近一次排序日期：{formatDate(latestSignals.data?.as_of_date ?? statusData?.signal_date)}。
-              场外基金数据异常 {fundDataIssues.length} 只，主要是缺少历史或最新净值滞后。
+              {mode.shortLabel}数据异常 {currentDataIssues.length} 只，主要是缺少历史或最新数据滞后。
             </p>
             {lastResult ? (
               <pre className="mt-4 max-h-40 overflow-auto rounded-[16px] bg-white p-3 text-xs leading-5 text-ink/65">
@@ -659,7 +773,7 @@ export default function ShortTermPage() {
         <Panel className="rounded-[24px]">
           <div className="grid gap-3 md:grid-cols-2">
             <div className="rounded-full border border-ink/10 bg-white px-4 py-2 text-sm font-semibold text-ink">
-              场外基金（非实时净值）
+              {mode.classification}
             </div>
             <input
               className="rounded-full border border-ink/10 bg-white px-4 py-2 text-sm outline-none transition focus:border-accent"
@@ -736,11 +850,14 @@ export default function ShortTermPage() {
                       ) : null}
                     </div>
                   </div>
-                  <div className={`mt-4 grid gap-2 text-sm md:grid-cols-5 ${isSelected ? "text-white/70" : "text-ink/60"}`}>
+                  <div className={`mt-4 grid gap-2 text-sm ${assetType === "etf" ? "md:grid-cols-6" : "md:grid-cols-5"} ${isSelected ? "text-white/70" : "text-ink/60"}`}>
                     <span>近 5 日：{percentMetric(item.metrics, "return_5d")}</span>
                     <span>近 20 日：{percentMetric(item.metrics, "return_20d")}</span>
                     <span>近 60 日：{percentMetric(item.metrics, "return_60d")}</span>
                     <span>60 日回撤：{percentMetric(item.metrics, "max_drawdown_60d")}</span>
+                    {assetType === "etf" ? (
+                      <span>20 日成交额：{formatTurnover(numericMetric(item.metrics, "average_turnover_20d"))}</span>
+                    ) : null}
                     <span>样本：{item.usable_days} 天</span>
                   </div>
                   <p className={`mt-3 line-clamp-2 text-sm leading-6 ${isSelected ? "text-white/65" : "text-ink/60"}`}>
@@ -751,7 +868,7 @@ export default function ShortTermPage() {
             })}
             {!assets.isLoading && (assets.data?.items ?? []).length === 0 ? (
               <div className="rounded-[20px] border border-dashed border-ink/20 p-6 text-sm leading-6 text-ink/55">
-                当前筛选条件下没有场外基金结果。可以换一个方向，或先点击“拉取近 120 天数据”。
+                {mode.noResults}
               </div>
             ) : null}
           </div>
@@ -793,7 +910,9 @@ export default function ShortTermPage() {
                     <div>
                       <p className="text-sm font-semibold text-ink">我已买入，开始追踪</p>
                       <p className="mt-1 text-sm leading-6 text-ink/60">
-                        输入你手动买入的金额和下单时间。15:00 后下单会按下一条公开净值估算；支付宝已确认份额时可以手动填入。
+                        {assetType === "etf"
+                          ? "输入你在证券账户手动买入的金额和日期。系统按公开日线收盘价估算份额和盈亏，不连接券商账户。"
+                          : "输入你手动买入的金额和下单时间。15:00 后下单会按下一条公开净值估算；支付宝已确认份额时可以手动填入。"}
                       </p>
                     </div>
                     <button
@@ -836,7 +955,7 @@ export default function ShortTermPage() {
                         </select>
                       </label>
                       <label className="text-sm text-ink/65">
-                        确认净值日（可选）
+                        {assetType === "etf" ? "买入价格日（可选）" : "确认净值日（可选）"}
                         <input
                           className="mt-2 w-full rounded-2xl border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent"
                           type="date"
@@ -845,17 +964,17 @@ export default function ShortTermPage() {
                         />
                       </label>
                       <label className="text-sm text-ink/65">
-                        支付宝确认净值（可选）
+                        {assetType === "etf" ? "实际成交价（可选）" : "支付宝确认净值（可选）"}
                         <input
                           className="mt-2 w-full rounded-2xl border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent"
                           inputMode="decimal"
-                          placeholder="例如：7.3130"
+                          placeholder={assetType === "etf" ? "例如：1.238" : "例如：7.3130"}
                           value={trackingConfirmedNav}
                           onChange={(event) => setTrackingConfirmedNav(event.target.value)}
                         />
                       </label>
                       <label className="text-sm text-ink/65">
-                        支付宝确认份额（可选）
+                        {assetType === "etf" ? "实际成交份额（可选）" : "支付宝确认份额（可选）"}
                         <input
                           className="mt-2 w-full rounded-2xl border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent"
                           inputMode="decimal"
@@ -868,7 +987,7 @@ export default function ShortTermPage() {
                         备注
                         <input
                           className="mt-2 w-full rounded-2xl border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent"
-                          placeholder="例如：支付宝手动买入"
+                          placeholder={assetType === "etf" ? "例如：证券账户手动买入" : "例如：支付宝手动买入"}
                           value={trackingNote}
                           onChange={(event) => setTrackingNote(event.target.value)}
                         />
@@ -925,7 +1044,7 @@ export default function ShortTermPage() {
                         </ResponsiveContainer>
                       ) : (
                         <div className="flex h-full items-center justify-center rounded-[18px] bg-paper text-sm text-ink/50">
-                          暂无追踪曲线，等待公开净值更新。
+                          暂无追踪曲线，等待公开数据更新。
                         </div>
                       )}
                     </div>
@@ -940,10 +1059,17 @@ export default function ShortTermPage() {
                   </div>
                 ) : null}
 
-                <div className="mt-5 grid gap-3 md:grid-cols-4">
-                  <StatPill label="最新日期" value={formatDate(selectedAsset.latest_date)} tone="bg-white text-ink" />
-                  <StatPill label="最新净值" value={selectedAsset.latest_value === null ? "暂无" : selectedAsset.latest_value.toFixed(4)} />
+                <div className={`mt-5 grid gap-3 ${assetType === "etf" ? "md:grid-cols-5" : "md:grid-cols-4"}`}>
+                  <StatPill label={mode.latestLabel} value={formatDate(selectedAsset.latest_date)} tone="bg-white text-ink" />
+                  <StatPill label={mode.priceLabel} value={selectedAsset.latest_value === null ? "暂无" : selectedAsset.latest_value.toFixed(4)} />
                   <StatPill label="可用样本" value={`${selectedAsset.usable_days} 天`} tone="bg-accentSoft text-ink" />
+                  {assetType === "etf" ? (
+                    <StatPill
+                      label="20 日成交额"
+                      value={formatTurnover(numericMetric(selectedAsset.metrics, "average_turnover_20d"))}
+                      tone="bg-white text-ink"
+                    />
+                  ) : null}
                   <StatPill label="60 日回撤" value={percentMetric(selectedAsset.metrics, "max_drawdown_60d")} tone="bg-white text-ink" />
                 </div>
 
@@ -1011,7 +1137,7 @@ export default function ShortTermPage() {
                             <XAxis dataKey="label" tickLine={false} axisLine={false} minTickGap={28} />
                             <YAxis tickLine={false} axisLine={false} width={56} domain={["dataMin", "dataMax"]} />
                             <Tooltip formatter={(value) => Number(value).toFixed(4)} />
-                            <Area type="monotone" dataKey="value" name="价格/净值" stroke="#1f5c4b" fill="#dce9df" />
+                            <Area type="monotone" dataKey="value" name={assetType === "etf" ? "收盘价" : "净值"} stroke="#1f5c4b" fill="#dce9df" />
                           </AreaChart>
                         </ResponsiveContainer>
                       ) : (
@@ -1058,6 +1184,29 @@ export default function ShortTermPage() {
                     </div>
                   </div>
 
+                  {assetType === "etf" ? (
+                    <div className="rounded-[20px] bg-paper p-4">
+                      <p className="font-semibold text-ink">成交额</p>
+                      <div className="mt-4 h-64">
+                        {detailPoints.some((point) => point.turnover !== null) ? (
+                          <ResponsiveContainer width="100%" height="100%">
+                            <BarChart data={detailPoints}>
+                              <CartesianGrid stroke="#eadfd2" vertical={false} />
+                              <XAxis dataKey="label" tickLine={false} axisLine={false} minTickGap={28} />
+                              <YAxis tickFormatter={(value) => `${Number(value).toFixed(1)}亿`} tickLine={false} axisLine={false} width={56} />
+                              <Tooltip formatter={(value) => (value === null ? "暂无" : `${Number(value).toFixed(2)} 亿元`)} />
+                              <Bar dataKey="turnover" name="成交额" fill="#e3b873" radius={[8, 8, 0, 0]} />
+                            </BarChart>
+                          </ResponsiveContainer>
+                        ) : (
+                          <div className="flex h-full items-center justify-center rounded-[18px] bg-white text-sm text-ink/50">
+                            暂无成交额数据。
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ) : null}
+
                   <div className="rounded-[20px] bg-paper p-4">
                     <p className="font-semibold text-ink">样本和风险说明</p>
                     <div className="mt-4 h-64">
@@ -1067,7 +1216,12 @@ export default function ShortTermPage() {
                           风险标签：{selectedAsset.risk_flags.length ? selectedAsset.risk_flags.join("、") : "暂未触发主要风险标签"}
                         </p>
                         <p className="mt-2">数据来源：{selectedAsset.source_note}</p>
-                        <p className="mt-2">交易口径：支付宝场外基金，按确认净值日估算，不是盘中实时价格。</p>
+                        <p className="mt-2">
+                          交易口径：
+                          {assetType === "etf"
+                            ? "证券账户场内 ETF，按公开日线收盘价估算；页面不是券商盘口实时价。"
+                            : "支付宝场外基金，按确认净值日估算，不是盘中实时价格。"}
+                        </p>
                       </div>
                     </div>
                   </div>
@@ -1075,7 +1229,7 @@ export default function ShortTermPage() {
               </>
             ) : (
               <div className="rounded-[20px] border border-dashed border-ink/20 p-8 text-sm leading-6 text-ink/55">
-                左侧选择一只场外基金后，这里会显示走势、回撤、近期涨跌和解释。
+                {mode.detailEmpty}
               </div>
             )}
           </Panel>
@@ -1128,8 +1282,9 @@ export default function ShortTermPage() {
       ) : null}
 
       <p className="rounded-[18px] bg-white/70 px-5 py-4 text-sm leading-7 text-ink/60">
-        说明：短线研究只使用公开基金净值。场外基金净值通常不是盘中实时数据；名字里有“ETF联接”的仍按场外基金净值确认。
-        页面里的排序、标签和 AI 说明都用于研究观察，不代表未来收益，也不会触发真实操作；真实买卖仍需要你在支付宝手动确认。
+        {mode.sourceSummary}
+        页面里的排序、标签和 AI 说明都用于研究观察，不代表未来收益，也不会触发真实操作；
+        真实买卖仍需要你在{assetType === "etf" ? "证券账户" : "支付宝"}手动确认。
       </p>
     </div>
   );

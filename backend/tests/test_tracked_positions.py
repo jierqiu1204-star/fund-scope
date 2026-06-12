@@ -116,6 +116,76 @@ async def _seed_signal(
 
 
 @pytest.mark.asyncio
+async def test_tracked_position_uses_latest_signal_for_same_asset_type(client, app) -> None:
+    await _seed_nav(app)
+    async with app.state.db.session() as session:
+        fund_run = ShortResearchSignalRun(
+            status="success",
+            started_at=utcnow(),
+            finished_at=utcnow(),
+            as_of_date=date(2026, 6, 5),
+            config_json={"asset_type": "fund", "theme": None, "codes": [], "language": "research_only"},
+            summary_json={"item_count": 1, "fund_count": 1, "etf_count": 0},
+        )
+        session.add(fund_run)
+        await session.commit()
+        await session.refresh(fund_run)
+        session.add(
+            ShortResearchSignalItem(
+                run_id=fund_run.id,
+                asset_type="fund",
+                asset_code="270042",
+                rank=1,
+                total_score=50.0,
+                conclusion="不适合短线",
+                score_breakdown_json={},
+                risk_flags_json=["回撤较大"],
+                rationale_json={"key_reason": "基金 run 的原因"},
+                metrics_json={},
+            )
+        )
+        etf_run = ShortResearchSignalRun(
+            status="success",
+            started_at=utcnow(),
+            finished_at=utcnow(),
+            as_of_date=date(2026, 6, 6),
+            config_json={"asset_type": "etf", "theme": None, "codes": [], "language": "research_only"},
+            summary_json={"item_count": 1, "fund_count": 0, "etf_count": 1},
+        )
+        session.add(etf_run)
+        await session.commit()
+        await session.refresh(etf_run)
+        session.add(
+            ShortResearchSignalItem(
+                run_id=etf_run.id,
+                asset_type="etf",
+                asset_code="512480",
+                rank=1,
+                total_score=80.0,
+                conclusion="短线观察",
+                score_breakdown_json={},
+                risk_flags_json=[],
+                rationale_json={"key_reason": "ETF run 的原因"},
+                metrics_json={},
+            )
+        )
+        await session.commit()
+
+    await client.post(
+        "/api/tracked-positions",
+        json={"asset_type": "fund", "asset_code": "270042", "buy_date": "2026-06-03"},
+    )
+
+    response = await client.get("/api/tracked-positions")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["asset_type"] == "fund"
+    assert item["current_snapshot"]["current_label"] == "不适合短线"
+    assert item["current_snapshot"]["risk_flags"] == ["回撤较大"]
+
+
+@pytest.mark.asyncio
 async def test_create_tracked_position_estimates_shares_from_latest_nav(client, app) -> None:
     await _seed_nav(app)
 

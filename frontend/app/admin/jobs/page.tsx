@@ -74,50 +74,13 @@ const jobGroups: Array<{ title: string; description: string; actions: JobAction[
     ]
   },
   {
-    title: "短线 ETF",
-    description: "同步场内 ETF 行情，生成短线观察信号，并更新短线 ETF 模拟盘。",
-    actions: [
-      {
-        key: "daily_short_etf_data",
-        label: "同步 ETF 行情",
-        description: "拉取默认 ETF 池最近一段时间的日线价格和成交额。",
-        endpoint: "/api/admin/jobs/daily_short_etf_data/run",
-        primary: true
-      },
-      {
-        key: "daily_short_etf_retry_failed_data",
-        label: "重试失败 ETF 数据",
-        description: "只重试同步失败或数据过期的 ETF，不会重拉整个池子。",
-        endpoint: "/api/admin/jobs/daily_short_etf_retry_failed_data/run"
-      },
-      {
-        key: "daily_short_etf_signals",
-        label: "生成 ETF 信号",
-        description: "按趋势、流动性和追高风险生成短线观察结果。",
-        endpoint: "/api/admin/jobs/daily_short_etf_signals/run"
-      },
-      {
-        key: "daily_short_etf_reliability_evaluation",
-        label: "评估 ETF 规则可靠性",
-        description: "用历史日线检查短线规则的样本长度、参数稳定性、手续费影响和回撤。",
-        endpoint: "/api/admin/jobs/daily_short_etf_reliability_evaluation/run"
-      },
-      {
-        key: "daily_short_etf_paper",
-        label: "更新 ETF 模拟盘",
-        description: "把 active 状态的短线 ETF 模拟盘更新到最新日期。",
-        endpoint: "/api/admin/jobs/daily_short_etf_paper/run"
-      }
-    ]
-  },
-  {
-    title: "短线基金/ETF研究",
-    description: "同步统一短线研究池，生成保守观察排序，并用大模型补充多角度研究说明。大模型只解释，不会改排名或真实操作。",
+    title: "短线研究",
+    description: "同步场内 ETF 和支付宝场外基金数据，生成短线排序，并用 AI 补充多角度研究说明。AI 只解释，不会改排名或真实操作。",
     actions: [
       {
         key: "daily_short_research_data",
-        label: "同步短线研究数据",
-        description: "拉取短线基金和 ETF 研究池最近一段时间的公开净值与日线数据。",
+        label: "更新短线研究数据",
+        description: "同时拉取场内 ETF 日线和场外基金公开净值，供短线页排序和图表使用。",
         endpoint: "/api/admin/jobs/daily_short_research_data/run",
         primary: true
       },
@@ -170,6 +133,16 @@ const jobGroups: Array<{ title: string; description: string; actions: JobAction[
 function jobLabel(jobName: string) {
   if (jobName === "fund_nav_backfill") {
     return "历史净值回填";
+  }
+  const legacyLabels: Record<string, string> = {
+    daily_short_etf_data: "同步 ETF 行情（旧）",
+    daily_short_etf_retry_failed_data: "重试失败 ETF 数据（旧）",
+    daily_short_etf_signals: "生成 ETF 信号（旧）",
+    daily_short_etf_reliability_evaluation: "评估 ETF 规则可靠性（旧）",
+    daily_short_etf_paper: "更新 ETF 模拟盘（旧）"
+  };
+  if (legacyLabels[jobName]) {
+    return legacyLabels[jobName];
   }
   const allActions = jobGroups.flatMap((group) => group.actions);
   return allActions.find((action) => action.key === jobName)?.label ?? jobName;

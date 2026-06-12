@@ -57,8 +57,7 @@ const views: Array<{ key: ViewKey; label: string }> = [
   { key: "backtests", label: "回测" },
   { key: "evaluation", label: "可靠性评估" },
   { key: "paper", label: "模拟盘" },
-  { key: "screening", label: "筛选评分" },
-  { key: "short-etf", label: "短线 ETF" }
+  { key: "screening", label: "筛选评分" }
 ];
 
 const dataActions: DataAction[] = [
@@ -535,39 +534,44 @@ function StrategyLabClient() {
 
   const shortEtfUniverse = useQuery({
     queryKey: ["short-etf", "universe"],
+    enabled: view === "short-etf",
     queryFn: async () => (await api.get<EtfUniverseResponse>("/api/short-etf/universe")).data
   });
 
   const shortEtfDataStatus = useQuery({
     queryKey: ["short-etf", "data-status"],
+    enabled: view === "short-etf",
     queryFn: async () => (await api.get<EtfDataStatus>("/api/short-etf/data-status")).data
   });
 
   const shortEtfEvaluations = useQuery({
     queryKey: ["short-etf", "evaluations"],
+    enabled: view === "short-etf",
     queryFn: async () => (await api.get<ShortEtfEvaluation[]>("/api/short-etf/evaluations")).data
   });
 
   const latestShortEtfEvaluationId = shortEtfEvaluations.data?.[0]?.id ?? null;
   const shortEtfEvaluationDetail = useQuery({
     queryKey: ["short-etf", "evaluations", latestShortEtfEvaluationId],
-    enabled: latestShortEtfEvaluationId !== null,
+    enabled: view === "short-etf" && latestShortEtfEvaluationId !== null,
     queryFn: async () => (await api.get<ShortEtfEvaluation>(`/api/short-etf/evaluations/${latestShortEtfEvaluationId}`)).data
   });
 
   const shortEtfSignals = useQuery({
     queryKey: ["short-etf", "signals", "latest"],
+    enabled: view === "short-etf",
     queryFn: async () => (await api.get<ShortEtfSignalRun | null>("/api/short-etf/signals/latest")).data
   });
 
   const shortEtfPapers = useQuery({
     queryKey: ["short-etf", "paper"],
+    enabled: view === "short-etf",
     queryFn: async () => (await api.get<ShortEtfPaper[]>("/api/short-etf/paper")).data
   });
 
   const shortEtfReview = useQuery({
     queryKey: ["short-etf", "review", shortEtfSignals.data?.id],
-    enabled: Boolean(shortEtfSignals.data?.id),
+    enabled: view === "short-etf" && Boolean(shortEtfSignals.data?.id),
     retry: false,
     queryFn: async () => {
       try {
