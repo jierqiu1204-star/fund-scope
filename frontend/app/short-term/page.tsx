@@ -23,6 +23,7 @@ import type {
   ShortResearchAsset,
   ShortResearchAssetDetail,
   ShortResearchAssetList,
+  ShortResearchObservationPortfolio,
   ShortResearchSignalRun,
   ShortResearchStatus,
   TrackedPosition,
@@ -33,6 +34,13 @@ import type {
 type AssetType = "fund" | "etf";
 type SortKey = "score" | "return_5d" | "return_20d" | "drawdown_low" | "risk_low" | "liquidity";
 type OrderTimeBucket = "before_15" | "after_15" | "unknown";
+type EtfUniverse = "default" | "all" | "illiquid";
+
+const etfUniverseOptions: Array<{ key: EtfUniverse; label: string; description: string }> = [
+  { key: "default", label: "默认精选", description: "只看数据新、历史够、成交额达标的 ETF。" },
+  { key: "all", label: "全部可分析", description: "纳入有可用日线的 ETF，并显示排除原因。" },
+  { key: "illiquid", label: "含低流动性", description: "把成交额偏低的 ETF 也放进来对比。" }
+];
 
 const baseSortOptions: Array<{ key: SortKey; label: string }> = [
   { key: "score", label: "综合排序" },
@@ -150,6 +158,15 @@ function percentMetric(metrics: Record<string, unknown>, key: string) {
   return value === null ? "暂无" : formatPercent(value * 100);
 }
 
+function stringListMetric(metrics: Record<string, unknown>, key: string) {
+  const value = metrics[key];
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function boolMetric(metrics: Record<string, unknown>, key: string) {
+  return metrics[key] === true;
+}
+
 function conclusionTone(conclusion: string) {
   if (conclusion === "短线观察") {
     return "bg-emerald-100 text-emerald-800";
@@ -204,7 +221,7 @@ function formatTurnover(value: number | null) {
 }
 
 function assetCount(status: ShortResearchStatus | undefined, assetType: AssetType) {
-  return assetType === "etf" ? status?.etf_count ?? 0 : status?.fund_count ?? 0;
+  return assetType === "etf" ? status?.etf_total_count ?? status?.etf_count ?? 0 : status?.fund_count ?? 0;
 }
 
 function rationaleText(asset: ShortResearchAsset, key: string, fallback: string) {
@@ -375,6 +392,7 @@ function percentOrWaiting(value: number | null) {
 export default function ShortTermPage() {
   const queryClient = useQueryClient();
   const [assetType, setAssetType] = useState<AssetType>("etf");
+  const [etfUniverse, setEtfUniverse] = useState<EtfUniverse>("default");
   const [theme, setTheme] = useState("all");
   const [sort, setSort] = useState<SortKey>("score");
   const [keyword, setKeyword] = useState("");
@@ -403,7 +421,7 @@ export default function ShortTermPage() {
   });
 
   const assets = useQuery({
-    queryKey: ["short-research", "assets", assetType, theme, sort, keyword],
+    queryKey: ["short-research", "assets", assetType, etfUniverse, theme, sort, keyword],
     queryFn: async () => {
       const params = new URLSearchParams();
       params.set("asset_type", assetType);
@@ -414,8 +432,22 @@ export default function ShortTermPage() {
         params.set("q", keyword.trim());
       }
       params.set("sort", sort);
+      if (assetType === "etf") {
+        params.set("universe", etfUniverse);
+      }
       return (await api.get<ShortResearchAssetList>(`/api/short-research/assets?${params.toString()}`)).data;
     }
+  });
+
+  const observationPortfolio = useQuery({
+    queryKey: ["short-research", "observation-portfolio", etfUniverse],
+    enabled: assetType === "etf",
+    queryFn: async () =>
+      (
+        await api.get<ShortResearchObservationPortfolio>(
+          `/api/short-research/observation-portfolio?asset_type=etf&universe=${etfUniverse}`
+        )
+      ).data
   });
 
   const selectedDetail = useQuery({
@@ -642,10 +674,16 @@ export default function ShortTermPage() {
       </div>
 
       <div className="grid gap-4 md:grid-cols-3 xl:grid-cols-6">
-        <StatPill label={mode.poolLabel} value={`${assetCount(statusData, assetType)} 只`} tone="bg-white text-ink" />
+        <StatPill label={assetType === "etf" ? "ETF 全量池" : mode.poolLabel} value={`${assetCount(statusData, assetType)} 只`} tone="bg-white text-ink" />
+        {assetType === "etf" ? (
+          <StatPill label="默认精选" value={`${statusData?.etf_default_display_count ?? 0} 只`} tone="bg-emerald-100 text-emerald-800" />
+        ) : null}
         <StatPill label="分类口径" value={mode.classification} />
         <StatPill label="已有数据" value={`${currentHealth.filter((item) => item.usable_days > 0).length} 只`} tone="bg-accentSoft text-ink" />
         <StatPill label={mode.latestLabel} value={formatDate(currentLatestDate)} tone="bg-white text-ink" />
+        {assetType === "etf" ? (
+          <StatPill label="滞后/失败" value={`${statusData?.etf_data_stale_count ?? 0} / ${statusData?.etf_failed_count ?? 0} 只`} tone="bg-amber-100 text-amber-900" />
+        ) : null}
         <StatPill label="短线观察" value={`${observableCount} 只`} tone="bg-emerald-100 text-emerald-800" />
         <StatPill label="高位观察" value={`${highRiskCount} 只`} tone="bg-rose-100 text-rose-800" />
       </div>
@@ -769,6 +807,57 @@ export default function ShortTermPage() {
         </div>
       </Panel>
 
+      {assetType === "etf" ? (
+        <Panel className="rounded-[24px]">
+          <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.22em] text-accent">ETF 观察组合</p>
+              <h2 className="mt-2 text-2xl font-semibold text-ink">把排名结果翻译成仓位参考</h2>
+              <p className="mt-2 text-sm leading-6 text-ink/65">
+                这里只是研究用目标权重：风险高时提高现金比例，不连接证券账户，不自动下单。
+              </p>
+            </div>
+            <StatPill
+              label="现金比例"
+              value={observationPortfolio.data ? formatPercent(observationPortfolio.data.cash_weight * 100) : "暂无"}
+              tone="bg-accentSoft text-ink"
+            />
+          </div>
+          <div className="mt-5 grid gap-3 lg:grid-cols-3">
+            {(observationPortfolio.data?.items ?? []).map((item) => (
+              <div key={item.code} className="rounded-[18px] border border-ink/10 bg-white p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-ink">{item.name}</p>
+                    <p className="mt-1 text-xs text-ink/45">{item.code} · {formatDate(item.data_date)}</p>
+                  </div>
+                  <span className="rounded-full bg-ink px-3 py-1 text-xs font-semibold text-white">
+                    {formatPercent(item.target_weight * 100)}
+                  </span>
+                </div>
+                <p className="mt-3 text-sm text-ink/65">综合分 {item.score.toFixed(1)} · {item.conclusion}</p>
+                <ul className="mt-3 space-y-1 text-xs leading-5 text-ink/55">
+                  {item.evidence.slice(0, 3).map((text) => (
+                    <li key={text}>{text}</li>
+                  ))}
+                </ul>
+                <p className="mt-3 rounded-[14px] bg-paper px-3 py-2 text-xs leading-5 text-ink/55">
+                  风险：{item.risk_reasons.join("；")}
+                </p>
+              </div>
+            ))}
+          </div>
+          {!observationPortfolio.isLoading && !(observationPortfolio.data?.items ?? []).length ? (
+            <p className="mt-4 rounded-[18px] bg-paper px-4 py-3 text-sm text-ink/55">
+              暂无可用观察组合。先更新 ETF 数据，或切到“全部可分析”查看低流动性样本。
+            </p>
+          ) : null}
+          <p className="mt-4 text-xs leading-5 text-ink/50">
+            {observationPortfolio.data?.note ?? "观察组合只用于手动研究参考。"}
+          </p>
+        </Panel>
+      ) : null}
+
       <div className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
         <Panel className="rounded-[24px]">
           <div className="grid gap-3 md:grid-cols-2">
@@ -805,6 +894,28 @@ export default function ShortTermPage() {
             </select>
           </div>
 
+          {assetType === "etf" ? (
+            <div className="mt-5 grid gap-3 md:grid-cols-3">
+              {etfUniverseOptions.map((option) => {
+                const active = etfUniverse === option.key;
+                return (
+                  <button
+                    key={option.key}
+                    className={`rounded-[18px] border px-4 py-3 text-left transition ${
+                      active ? "border-ink bg-ink text-white" : "border-ink/10 bg-white text-ink hover:border-accent"
+                    }`}
+                    onClick={() => setEtfUniverse(option.key)}
+                  >
+                    <span className="text-sm font-semibold">{option.label}</span>
+                    <span className={`mt-1 block text-xs leading-5 ${active ? "text-white/65" : "text-ink/55"}`}>
+                      {option.description}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
+
           <div className="mt-5 space-y-3">
             {assets.isLoading ? (
               <div className="rounded-[20px] border border-dashed border-ink/20 p-6 text-sm text-ink/55">
@@ -813,6 +924,8 @@ export default function ShortTermPage() {
             ) : null}
             {(assets.data?.items ?? []).slice(0, 30).map((item) => {
               const isSelected = selected?.asset_type === item.asset_type && selected.code === item.code;
+              const exclusionReasons = stringListMetric(item.metrics, "default_exclusion_reasons");
+              const defaultEligible = boolMetric(item.metrics, "default_display_eligible");
               return (
                 <button
                   key={`${item.asset_type}-${item.code}`}
@@ -860,6 +973,13 @@ export default function ShortTermPage() {
                     ) : null}
                     <span>样本：{item.usable_days} 天</span>
                   </div>
+                  {assetType === "etf" ? (
+                    <div className={`mt-3 rounded-[14px] px-3 py-2 text-xs leading-5 ${isSelected ? "bg-white/10 text-white/70" : "bg-paper text-ink/60"}`}>
+                      {defaultEligible
+                        ? "已通过默认精选门槛：数据较新、样本可用、成交额达标。"
+                        : `未进默认精选：${exclusionReasons.length ? exclusionReasons.join("；") : "数据质量或流动性未达标"}。`}
+                    </div>
+                  ) : null}
                   <p className={`mt-3 line-clamp-2 text-sm leading-6 ${isSelected ? "text-white/65" : "text-ink/60"}`}>
                     {rationaleText(item, "key_reason", "按近期趋势、风险和数据质量生成。")}
                   </p>

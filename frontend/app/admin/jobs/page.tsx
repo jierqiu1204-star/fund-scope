@@ -78,6 +78,12 @@ const jobGroups: Array<{ title: string; description: string; actions: JobAction[
     description: "同步场内 ETF 和支付宝场外基金数据，生成短线排序，并用 AI 补充多角度研究说明。AI 只解释，不会改排名或真实操作。",
     actions: [
       {
+        key: "daily_etf_universe",
+        label: "刷新 ETF 全量池",
+        description: "从公开数据源发现交易所 ETF，入库后再按数据质量和成交额筛选默认展示。",
+        endpoint: "/api/admin/jobs/daily_etf_universe/run"
+      },
+      {
         key: "daily_short_research_data",
         label: "更新短线研究数据",
         description: "同时拉取场内 ETF 日线和场外基金公开净值，供短线页排序和图表使用。",

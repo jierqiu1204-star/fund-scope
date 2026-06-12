@@ -461,6 +461,11 @@ export type ShortResearchStatus = {
   asset_count: number;
   fund_count: number;
   etf_count: number;
+  etf_total_count: number;
+  etf_eligible_count: number;
+  etf_default_display_count: number;
+  etf_data_stale_count: number;
+  etf_failed_count: number;
   priced_asset_count: number;
   observable_count: number;
   high_risk_count: number;
@@ -540,6 +545,28 @@ export type ShortResearchSignalRun = {
   summary: Record<string, unknown>;
   error_message: string | null;
   items: ShortResearchAsset[];
+};
+
+export type ShortResearchObservationPortfolioItem = {
+  asset_type: "etf";
+  code: string;
+  name: string;
+  target_weight: number;
+  score: number;
+  conclusion: string;
+  data_date: string | null;
+  evidence: string[];
+  risk_reasons: string[];
+};
+
+export type ShortResearchObservationPortfolio = {
+  as_of_date: string;
+  asset_type: "etf";
+  items: ShortResearchObservationPortfolioItem[];
+  cash_weight: number;
+  research_only: boolean;
+  no_trade_instruction: boolean;
+  note: string;
 };
 
 export type TrackedPositionSnapshot = {

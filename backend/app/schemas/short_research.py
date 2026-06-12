@@ -25,6 +25,11 @@ class ShortResearchStatusOut(BaseModel):
     asset_count: int
     fund_count: int
     etf_count: int
+    etf_total_count: int = 0
+    etf_eligible_count: int = 0
+    etf_default_display_count: int = 0
+    etf_data_stale_count: int = 0
+    etf_failed_count: int = 0
     priced_asset_count: int
     observable_count: int
     high_risk_count: int
@@ -126,3 +131,25 @@ class ShortResearchSignalRunOut(BaseModel):
     summary: dict[str, Any]
     error_message: str | None
     items: list[ShortResearchAssetOut]
+
+
+class ShortResearchObservationPortfolioItemOut(BaseModel):
+    asset_type: str
+    code: str
+    name: str
+    target_weight: float
+    score: float
+    conclusion: str
+    data_date: date | None = None
+    evidence: list[str]
+    risk_reasons: list[str]
+
+
+class ShortResearchObservationPortfolioOut(BaseModel):
+    as_of_date: date
+    asset_type: str
+    items: list[ShortResearchObservationPortfolioItemOut]
+    cash_weight: float
+    research_only: bool
+    no_trade_instruction: bool
+    note: str

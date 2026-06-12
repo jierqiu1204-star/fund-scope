@@ -32,6 +32,30 @@ async def test_daily_short_research_data_job_syncs_funds_and_etfs(monkeypatch) -
 
 
 @pytest.mark.asyncio
+async def test_daily_etf_universe_job_reports_refresh_counts(monkeypatch) -> None:
+    async def fake_refresh_etf_universe(_session: object) -> dict[str, Any]:
+        return {
+            "discovered": 3,
+            "inserted": 2,
+            "updated": 1,
+            "excluded": 1,
+            "default_display": 2,
+            "failed": 0,
+            "failures": [],
+        }
+
+    monkeypatch.setattr(jobs_module, "refresh_etf_universe", fake_refresh_etf_universe)
+
+    result = await jobs_module.daily_etf_universe_job(object())  # type: ignore[arg-type]
+
+    assert result["discovered"] == 3
+    assert result["inserted"] == 2
+    assert result["updated"] == 1
+    assert result["excluded"] == 1
+    assert result["default_display"] == 2
+
+
+@pytest.mark.asyncio
 async def test_daily_short_research_signals_job_generates_fund_and_etf_runs(monkeypatch) -> None:
     calls: list[str] = []
 

@@ -16,6 +16,7 @@ from app.schemas.short_research import (
     ShortResearchAssetOut,
     ShortResearchChartPointOut,
     ShortResearchDataSyncRequest,
+    ShortResearchObservationPortfolioOut,
     ShortResearchSignalRunOut,
     ShortResearchSignalRunRequest,
     ShortResearchStatusOut,
@@ -23,6 +24,7 @@ from app.schemas.short_research import (
 from app.services.short_research.advisor import latest_reports_by_asset, run_advisor_generation
 from app.services.short_research.service import (
     ComputedAsset,
+    etf_observation_portfolio,
     get_asset_detail,
     latest_signal_run,
     list_computed_assets,
@@ -80,9 +82,32 @@ def _asset_out(asset: ComputedAsset, advisor_report: Any | None = None) -> Short
     )
 
 
-async def _signal_run_out(session: AsyncSession, run: ShortResearchSignalRun) -> ShortResearchSignalRunOut:
+async def _signal_run_out(
+    session: AsyncSession,
+    run: ShortResearchSignalRun,
+    *,
+    asset_type: str | None = None,
+    theme: str | None = None,
+    codes: list[str] | None = None,
+) -> ShortResearchSignalRunOut:
     assets = await signal_run_items_as_assets(session, run)
+    if asset_type is not None:
+        assets = [item for item in assets if item.metadata.asset_type == asset_type]
+    if theme is not None:
+        assets = [item for item in assets if theme in item.metadata.theme_tags]
+    if codes is not None:
+        code_set = set(codes)
+        assets = [item for item in assets if item.metadata.code in code_set]
     advisor_reports = await latest_reports_by_asset(session, run.id)
+    summary = dict(run.summary_json or {})
+    if asset_type is not None or theme is not None or codes is not None:
+        summary["item_count"] = len(assets)
+        summary["fund_count"] = sum(1 for item in assets if item.metadata.asset_type == "fund")
+        summary["etf_count"] = sum(1 for item in assets if item.metadata.asset_type == "etf")
+    else:
+        summary.setdefault("item_count", len(assets))
+        summary.setdefault("fund_count", sum(1 for item in assets if item.metadata.asset_type == "fund"))
+        summary.setdefault("etf_count", sum(1 for item in assets if item.metadata.asset_type == "etf"))
     return ShortResearchSignalRunOut(
         id=run.id,
         status=run.status,
@@ -90,7 +115,7 @@ async def _signal_run_out(session: AsyncSession, run: ShortResearchSignalRun) ->
         finished_at=run.finished_at,
         as_of_date=run.as_of_date,
         config=run.config_json,
-        summary=run.summary_json,
+        summary=summary,
         error_message=run.error_message,
         items=[
             _asset_out(
@@ -113,9 +138,19 @@ async def list_short_research_assets(
     theme: str | None = Query(default=None),
     sort: str = Query(default="score"),
     q: str | None = Query(default=None),
+    universe: str = Query(default="default"),
     session: AsyncSession = Depends(get_db_session),
 ) -> ShortResearchAssetListOut:
-    assets = await list_computed_assets(session, asset_type=asset_type, theme=theme, sort=sort)
+    try:
+        assets = await list_computed_assets(
+            session,
+            asset_type=asset_type,
+            theme=theme,
+            sort=sort,
+            universe=universe,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if q:
         keyword = q.strip().lower()
         assets = [
@@ -135,6 +170,18 @@ async def list_short_research_assets(
         ],
         total=len(assets),
     )
+
+
+@router.get("/observation-portfolio", response_model=ShortResearchObservationPortfolioOut)
+async def get_short_research_observation_portfolio(
+    asset_type: str = Query(default="etf"),
+    limit: int = Query(default=5, ge=1, le=10),
+    universe: str = Query(default="default"),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    if asset_type != "etf":
+        raise HTTPException(status_code=400, detail="观察组合第一版只支持场内 ETF")
+    return await etf_observation_portfolio(session, limit=limit, universe=universe)
 
 
 @router.get("/assets/{asset_type}/{code}", response_model=ShortResearchAssetDetailOut)
@@ -202,7 +249,13 @@ async def run_short_research_signals(
         theme=payload.theme,
         codes=payload.codes,
     )
-    return await _signal_run_out(session, run)
+    return await _signal_run_out(
+        session,
+        run,
+        asset_type=payload.asset_type,
+        theme=payload.theme,
+        codes=payload.codes,
+    )
 
 
 @router.post("/advisor/run")
@@ -231,4 +284,4 @@ async def get_latest_short_research_signals(
     run = await latest_signal_run(session, asset_type=asset_type, theme=theme)
     if run is None:
         return None
-    return await _signal_run_out(session, run)
+    return await _signal_run_out(session, run, asset_type=asset_type, theme=theme)

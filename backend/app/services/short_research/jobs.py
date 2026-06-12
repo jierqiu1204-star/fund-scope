@@ -10,6 +10,7 @@ from app.defaults.short_research import ASSET_TYPE_ETF, ASSET_TYPE_FUND
 from app.services.llm import LLMClient
 from app.services.short_research.advisor import run_advisor_generation
 from app.services.short_research.service import run_signal_generation, sync_short_research_data
+from app.services.short_research.universe import refresh_etf_universe
 
 SHORT_RESEARCH_DAILY_ASSET_TYPES = [ASSET_TYPE_FUND, ASSET_TYPE_ETF]
 
@@ -52,6 +53,10 @@ async def daily_short_research_data_job(session: AsyncSession) -> dict[str, Any]
         "asset_count": sum(_count(item, "asset_count") for item in results.values()),
         "failed": sum(_count(item, "failed") for item in results.values()),
     }
+
+
+async def daily_etf_universe_job(session: AsyncSession) -> dict[str, Any]:
+    return await refresh_etf_universe(session)
 
 
 async def daily_short_research_signals_job(session: AsyncSession) -> dict[str, Any]:

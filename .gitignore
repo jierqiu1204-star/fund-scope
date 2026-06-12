@@ -41,3 +41,10 @@ build/
 *.sqlite3
 coverage/
 frontend/out/
+
+# OpenSpec local/runtime files
+.openspec/
+openspec/.cache/
+openspec/.tmp/
+openspec/**/*.tmp
+openspec/**/*.bak

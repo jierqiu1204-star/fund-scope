@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, replace
 from datetime import date
 from statistics import mean, pstdev
 from typing import Any, cast
@@ -26,11 +27,13 @@ from app.models.entities import (
     FundNavHistory,
     ShortResearchSignalItem,
     ShortResearchSignalRun,
+    TrackedPosition,
     TradableEtf,
     utcnow,
 )
 from app.services.jobs import sync_fund_nav_history
 from app.services.short_etf.data import sync_etf_price_history
+from app.services.short_research.universe import refresh_etf_universe
 
 RUN_STATUS_SUCCESS = "success"
 RUN_STATUS_FAILED = "failed"
@@ -44,6 +47,10 @@ CONCLUSION_INSUFFICIENT = "数据不足"
 
 STALE_DATA_DAYS = 7
 MIN_AVERAGE_TURNOVER = 50_000_000
+DEFAULT_ETF_SYNC_BATCH_SIZE = 100
+UNIVERSE_DEFAULT = "default"
+UNIVERSE_ALL = "all"
+UNIVERSE_ILLIQUID = "illiquid"
 CHASE_RETURN_20D = 0.25
 CHASE_RETURN_60D = 0.45
 SURGE_RETURN_5D = 0.08
@@ -132,11 +139,12 @@ async def ensure_short_research_universe(session: AsyncSession) -> dict[str, int
         else:
             existing_etf.name = item.name
             existing_etf.exchange = item.exchange or existing_etf.exchange
-            existing_etf.theme_tags_json = list(item.theme_tags)
+            if not existing_etf.theme_tags_json:
+                existing_etf.theme_tags_json = list(item.theme_tags)
             existing_etf.trading_rule_label = item.trading_rule_label
             existing_etf.asset_class = item.category
             existing_etf.is_short_term_eligible = eligible
-            existing_etf.is_watchlist = eligible
+            existing_etf.is_watchlist = bool(existing_etf.is_watchlist or eligible)
         for theme in item.theme_tags:
             exposure = await session.scalar(
                 select(EtfThemeExposure).where(
@@ -175,6 +183,70 @@ def _metadata(asset_type: str, code: str, name: str | None = None) -> ShortResea
         "场外基金",
         "场外基金，按净值确认",
     )
+
+
+def _metadata_from_etf_row(row: TradableEtf) -> ShortResearchAsset:
+    tags = tuple(row.theme_tags_json or ["ETF"])
+    direction = "交易所 ETF"
+    if row.asset_class == "broad_index":
+        direction = "宽基指数 ETF"
+    elif row.asset_class == "sector":
+        direction = "行业主题 ETF"
+    elif row.asset_class == "cross_border":
+        direction = "跨境市场 ETF"
+    elif row.asset_class == "bond":
+        direction = "债券 ETF"
+    elif row.asset_class == "commodity":
+        direction = "商品 ETF"
+    return ShortResearchAsset(
+        ASSET_TYPE_ETF,
+        row.code,
+        row.name,
+        row.asset_class or "etf",
+        tags,
+        direction,
+        row.trading_rule_label or "证券账户 T+1 ETF",
+        exchange=row.exchange,
+    )
+
+
+async def _metadata_for_code(session: AsyncSession, asset_type: str, code: str) -> ShortResearchAsset:
+    if asset_type == ASSET_TYPE_ETF:
+        row = await session.scalar(select(TradableEtf).where(TradableEtf.code == code))
+        if row is not None:
+            return _metadata_from_etf_row(row)
+    static = SHORT_RESEARCH_ASSET_BY_KEY.get((asset_type, code))
+    if static is not None:
+        return static
+    if asset_type == ASSET_TYPE_FUND:
+        fund = await session.scalar(select(Fund).where(Fund.code == code))
+        if fund is not None:
+            return _metadata(asset_type, code, fund.name)
+    return _metadata(asset_type, code)
+
+
+async def _available_assets(
+    session: AsyncSession,
+    *,
+    asset_type: str | None = None,
+    codes: list[str] | None = None,
+) -> list[ShortResearchAsset]:
+    assets: list[ShortResearchAsset] = []
+    if asset_type in (None, ASSET_TYPE_FUND):
+        assets.extend(
+            item
+            for item in DEFAULT_SHORT_RESEARCH_ASSETS
+            if item.asset_type == ASSET_TYPE_FUND
+            and is_short_term_eligible_name(item.name)
+            and (not codes or item.code in codes)
+        )
+    if asset_type in (None, ASSET_TYPE_ETF):
+        query = select(TradableEtf).where(TradableEtf.is_short_term_eligible.is_(True))
+        if codes:
+            query = query.where(TradableEtf.code.in_(codes))
+        rows = await session.scalars(query.order_by(TradableEtf.code.asc()))
+        assets.extend(_metadata_from_etf_row(row) for row in rows.all())
+    return assets
 
 
 def _matches_signal_config(
@@ -218,6 +290,17 @@ async def _latest_signal_run(
     for run in rows:
         if _matches_signal_config(run, asset_type=asset_type, theme=theme, codes=codes):
             return run
+        config = run.config_json or {}
+        if asset_type is not None and config.get("asset_type") is None and theme is None:
+            item_query = select(ShortResearchSignalItem.id).where(
+                ShortResearchSignalItem.run_id == run.id,
+                ShortResearchSignalItem.asset_type == asset_type,
+            )
+            if codes:
+                item_query = item_query.where(ShortResearchSignalItem.asset_code.in_(codes))
+            legacy_item_id = await session.scalar(item_query.limit(1))
+            if legacy_item_id is not None:
+                return run
     return None
 
 
@@ -508,6 +591,73 @@ def _rationale(metadata: ShortResearchAsset, metrics: dict[str, Any], conclusion
     }
 
 
+def _data_quality_from_reasons(reasons: list[str]) -> float:
+    if not reasons:
+        return 100.0
+    score = 100.0
+    for reason in reasons:
+        if "历史" in reason:
+            score -= 35
+        elif "成交额" in reason or "流动性" in reason:
+            score -= 35
+        elif "滞后" in reason:
+            score -= 40
+        elif "失败" in reason:
+            score -= 25
+        else:
+            score -= 15
+    return round(max(0.0, score), 2)
+
+
+async def _quality_gate_reasons(
+    session: AsyncSession,
+    asset: ComputedAsset,
+    as_of_date: date,
+) -> list[str]:
+    if asset.metadata.asset_type != ASSET_TYPE_ETF:
+        return []
+    reasons: list[str] = []
+    if asset.usable_days < 20:
+        reasons.append("可用历史少于 20 个交易日")
+    if asset.latest_date is None:
+        reasons.append("暂无最新价格数据")
+    elif (as_of_date - asset.latest_date).days > STALE_DATA_DAYS:
+        reasons.append("数据滞后")
+    turnover = asset.metrics.get("average_turnover_20d")
+    if turnover is None or float(turnover) < MIN_AVERAGE_TURNOVER:
+        reasons.append("近 20 日平均成交额偏低，流动性不足")
+    health = await session.scalar(select(EtfDataHealth).where(EtfDataHealth.etf_code == asset.metadata.code))
+    if health is not None and int(health.consecutive_failures or 0) >= 3:
+        reasons.append("数据源连续同步失败")
+    return reasons
+
+
+async def _with_quality_metrics(
+    session: AsyncSession,
+    asset: ComputedAsset,
+    as_of_date: date,
+) -> ComputedAsset:
+    reasons = await _quality_gate_reasons(session, asset, as_of_date)
+    data_quality_score = _data_quality_from_reasons(reasons)
+    metrics = {
+        **asset.metrics,
+        "data_quality_score": data_quality_score,
+        "default_display_eligible": not reasons,
+        "default_exclusion_reasons": reasons,
+    }
+    score_breakdown = dict(asset.score_breakdown)
+    score_breakdown["data_quality"] = {"score": data_quality_score, "weight": 0.10}
+    adjusted_score = asset.total_score
+    if asset.metadata.asset_type == ASSET_TYPE_ETF:
+        adjusted_score = round(asset.total_score * 0.90 + data_quality_score * 0.10, 2)
+    return replace(
+        asset,
+        total_score=adjusted_score,
+        metrics=metrics,
+        score_breakdown=score_breakdown,
+    )
+
+
 async def compute_asset(
     session: AsyncSession,
     metadata: ShortResearchAsset,
@@ -537,7 +687,7 @@ async def compute_asset(
             )
         },
     }
-    return ComputedAsset(
+    computed = ComputedAsset(
         metadata=metadata,
         rank=rank,
         total_score=float(metrics["total_score"]),
@@ -563,6 +713,7 @@ async def compute_asset(
         rationale=_rationale(metadata, metrics, conclusion),
         source_note=source_note,
     )
+    return await _with_quality_metrics(session, computed, effective_date)
 
 
 def _matches_filters(
@@ -596,6 +747,27 @@ def _sort_key(asset: ComputedAsset, sort: str) -> tuple[float, str]:
     return (asset.total_score, asset.metadata.code)
 
 
+def _dedupe_etf_candidates(assets: list[ComputedAsset]) -> list[ComputedAsset]:
+    best_by_key: dict[str, ComputedAsset] = {}
+    for asset in assets:
+        normalized_name = (
+            asset.metadata.name.replace("交易型开放式指数证券投资基金", "")
+            .replace("ETF", "")
+            .replace("联接", "")
+            .replace("基金", "")
+        )
+        key = normalized_name or asset.metadata.investment_direction or asset.metadata.code
+        current = best_by_key.get(key)
+        if current is None:
+            best_by_key[key] = asset
+            continue
+        current_liquidity = float(current.metrics.get("average_turnover_20d") or 0)
+        asset_liquidity = float(asset.metrics.get("average_turnover_20d") or 0)
+        if (asset_liquidity, asset.total_score) > (current_liquidity, current.total_score):
+            best_by_key[key] = asset
+    return list(best_by_key.values())
+
+
 async def list_computed_assets(
     session: AsyncSession,
     *,
@@ -604,31 +776,25 @@ async def list_computed_assets(
     theme: str | None = None,
     codes: list[str] | None = None,
     sort: str = "score",
+    universe: str = UNIVERSE_DEFAULT,
 ) -> list[ComputedAsset]:
     await ensure_short_research_universe(session)
     candidates = [
         item
-        for item in DEFAULT_SHORT_RESEARCH_ASSETS
-        if is_short_term_eligible_name(item.name)
-        and _matches_filters(item, asset_type=asset_type, theme=theme, codes=codes)
+        for item in await _available_assets(session, asset_type=asset_type, codes=codes)
+        if _matches_filters(item, asset_type=asset_type, theme=theme, codes=codes)
     ]
     computed = [await compute_asset(session, item, as_of_date=as_of_date) for item in candidates]
+    if asset_type == ASSET_TYPE_ETF and universe == UNIVERSE_DEFAULT and not codes:
+        computed = [item for item in computed if bool(item.metrics.get("default_display_eligible"))]
+        computed = _dedupe_etf_candidates(computed)
+    elif asset_type == ASSET_TYPE_ETF and universe not in {UNIVERSE_DEFAULT, UNIVERSE_ALL, UNIVERSE_ILLIQUID}:
+        raise ValueError("ETF universe 只支持 default、all、illiquid")
     computed.sort(key=lambda item: _sort_key(item, sort), reverse=True)
     return [
-        ComputedAsset(
-            metadata=item.metadata,
+        replace(
+            item,
             rank=index,
-            total_score=item.total_score,
-            conclusion=item.conclusion,
-            latest_date=item.latest_date,
-            latest_value=item.latest_value,
-            usable_days=item.usable_days,
-            sample_level=item.sample_level,
-            metrics=item.metrics,
-            score_breakdown=item.score_breakdown,
-            risk_flags=item.risk_flags,
-            rationale=item.rationale,
-            source_note=item.source_note,
         )
         for index, item in enumerate(computed, start=1)
     ]
@@ -750,7 +916,7 @@ async def signal_run_items_as_assets(session: AsyncSession, run: ShortResearchSi
     items = await list_signal_items(session, run.id)
     assets: list[ComputedAsset] = []
     for item in items:
-        metadata = _metadata(item.asset_type, item.asset_code)
+        metadata = await _metadata_for_code(session, item.asset_type, item.asset_code)
         fresh = await compute_asset(session, metadata, as_of_date=run.as_of_date, rank=item.rank)
         assets.append(
             ComputedAsset(
@@ -777,6 +943,20 @@ async def status_summary(session: AsyncSession) -> dict[str, Any]:
     latest_run = await latest_signal_run(session)
     latest = await latest_data_date(session)
     health = await data_health(session)
+    etf_total = int(await session.scalar(select(func.count()).select_from(TradableEtf)) or 0)
+    etf_eligible = int(
+        await session.scalar(
+            select(func.count()).select_from(TradableEtf).where(TradableEtf.is_short_term_eligible.is_(True))
+        )
+        or 0
+    )
+    etf_default_assets = await list_computed_assets(session, asset_type=ASSET_TYPE_ETF, universe=UNIVERSE_DEFAULT)
+    etf_failed = int(
+        await session.scalar(
+            select(func.count()).select_from(EtfDataHealth).where(EtfDataHealth.status == "failed")
+        )
+        or 0
+    )
     if latest_run is not None:
         items = await list_signal_items(session, latest_run.id)
         observable_count = sum(1 for item in items if item.conclusion == CONCLUSION_WATCH)
@@ -790,6 +970,13 @@ async def status_summary(session: AsyncSession) -> dict[str, Any]:
         "asset_count": len(DEFAULT_SHORT_RESEARCH_ASSETS),
         "fund_count": len(DEFAULT_SHORT_RESEARCH_FUND_CODES),
         "etf_count": len(DEFAULT_SHORT_RESEARCH_ETF_CODES),
+        "etf_total_count": etf_total,
+        "etf_eligible_count": etf_eligible,
+        "etf_default_display_count": len(etf_default_assets),
+        "etf_data_stale_count": sum(
+            1 for item in health if item["asset_type"] == ASSET_TYPE_ETF and item["is_stale"]
+        ),
+        "etf_failed_count": etf_failed,
         "priced_asset_count": sum(1 for item in health if item["usable_days"] > 0),
         "observable_count": observable_count,
         "high_risk_count": high_risk_count,
@@ -801,7 +988,7 @@ async def status_summary(session: AsyncSession) -> dict[str, Any]:
 async def data_health(session: AsyncSession) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     today = date.today()
-    for metadata in DEFAULT_SHORT_RESEARCH_ASSETS:
+    for metadata in await _available_assets(session):
         series = await _series_for_asset(session, metadata)
         latest = series[-1].point_date if series else None
         provider = None
@@ -836,6 +1023,48 @@ def _result_count(result: dict[str, Any], key: str) -> int:
     return 0
 
 
+def _etf_sync_batch_size() -> int:
+    try:
+        return max(1, int(os.getenv("SHORT_RESEARCH_ETF_SYNC_BATCH_SIZE", str(DEFAULT_ETF_SYNC_BATCH_SIZE))))
+    except ValueError:
+        return DEFAULT_ETF_SYNC_BATCH_SIZE
+
+
+def _chunks(values: list[str], size: int) -> list[list[str]]:
+    return [values[index : index + size] for index in range(0, len(values), size)]
+
+
+async def _dynamic_etf_codes(session: AsyncSession, codes: list[str] | None = None) -> list[str]:
+    query = select(TradableEtf).where(TradableEtf.is_short_term_eligible.is_(True))
+    if codes:
+        query = query.where(TradableEtf.code.in_(codes))
+    rows = await session.scalars(query.order_by(TradableEtf.code.asc()))
+    return [row.code for row in rows.all()]
+
+
+async def _prioritize_etf_sync_codes(session: AsyncSession, codes: list[str]) -> list[str]:
+    if not codes:
+        return []
+    code_set = set(codes)
+    tracked_rows = await session.scalars(
+        select(TrackedPosition.asset_code).where(
+            TrackedPosition.asset_type == ASSET_TYPE_ETF,
+            TrackedPosition.status == "active",
+            TrackedPosition.asset_code.in_(codes),
+        )
+    )
+    tracked = list(dict.fromkeys(str(code) for code in tracked_rows.all()))
+    watchlist_rows = await session.scalars(
+        select(TradableEtf.code).where(
+            TradableEtf.code.in_(codes),
+            TradableEtf.is_watchlist.is_(True),
+        )
+    )
+    watchlist = list(dict.fromkeys(str(code) for code in watchlist_rows.all()))
+    remaining = sorted(code_set - set(tracked) - set(watchlist))
+    return [*tracked, *(code for code in watchlist if code not in tracked), *remaining]
+
+
 async def sync_short_research_data(
     session: AsyncSession,
     *,
@@ -852,19 +1081,30 @@ async def sync_short_research_data(
         and _matches_filters(item, asset_type=asset_type, codes=codes)
         and is_short_term_eligible_name(item.name)
     ]
-    etf_codes = [
-        item.code
-        for item in DEFAULT_SHORT_RESEARCH_ASSETS
-        if item.asset_type == ASSET_TYPE_ETF
-        and _matches_filters(item, asset_type=asset_type, codes=codes)
-        and is_short_term_eligible_name(item.name)
-    ]
+    etf_codes = await _dynamic_etf_codes(session, codes) if asset_type in (None, ASSET_TYPE_ETF) else []
+    etf_codes = await _prioritize_etf_sync_codes(session, etf_codes)
     fund_result = {"funds": 0, "rows_inserted": 0, "rows_updated": 0, "failed": 0, "failures": []}
-    etf_result = {"etfs": 0, "inserted": 0, "updated": 0, "failed": 0, "failures": []}
+    etf_result: dict[str, Any] = {
+        "etfs": 0,
+        "inserted": 0,
+        "updated": 0,
+        "failed": 0,
+        "failures": [],
+        "batches": 0,
+        "batch_size": _etf_sync_batch_size(),
+    }
     if fund_codes:
         fund_result = await sync_fund_nav_history(session, from_date, to_date, fund_codes)
     if etf_codes:
-        etf_result = await sync_etf_price_history(session, from_date, to_date, etf_codes)
+        batches = _chunks(etf_codes, _etf_sync_batch_size())
+        for batch in batches:
+            batch_result = await sync_etf_price_history(session, from_date, to_date, batch)
+            etf_result["etfs"] += _result_count(batch_result, "etfs")
+            etf_result["inserted"] += _result_count(batch_result, "inserted")
+            etf_result["updated"] += _result_count(batch_result, "updated")
+            etf_result["failed"] += _result_count(batch_result, "failed")
+            etf_result["failures"].extend(batch_result.get("failures", []))
+        etf_result["batches"] = len(batches)
     return {
         "from_date": from_date.isoformat(),
         "to_date": to_date.isoformat(),
@@ -872,4 +1112,75 @@ async def sync_short_research_data(
         "etfs": etf_result,
         "asset_count": len(fund_codes) + len(etf_codes),
         "failed": _result_count(fund_result, "failed") + _result_count(etf_result, "failed"),
+    }
+
+
+async def refresh_dynamic_etf_universe(session: AsyncSession) -> dict[str, Any]:
+    return await refresh_etf_universe(session)
+
+
+def _portfolio_exposure_for_asset(asset: ComputedAsset) -> float:
+    exposure = 0.25
+    if "杩介珮椋庨櫓" in asset.risk_flags or "追高风险" in asset.risk_flags:
+        exposure -= 0.05
+    if "楂樻尝鍔?" in asset.risk_flags or "高波动" in asset.risk_flags:
+        exposure -= 0.05
+    if not asset.metrics.get("default_display_eligible", False):
+        exposure -= 0.10
+    return max(0.05, min(0.30, exposure))
+
+
+async def etf_observation_portfolio(
+    session: AsyncSession,
+    *,
+    as_of_date: date | None = None,
+    limit: int = 5,
+    universe: str = UNIVERSE_DEFAULT,
+) -> dict[str, Any]:
+    assets = await list_computed_assets(
+        session,
+        as_of_date=as_of_date,
+        asset_type=ASSET_TYPE_ETF,
+        sort="score",
+        universe=universe,
+    )
+    selected = assets[: max(1, min(limit, 10))]
+    items: list[dict[str, Any]] = []
+    total_weight = 0.0
+    max_total_exposure = 0.75
+    high_risk_count = sum(1 for item in selected if item.conclusion == CONCLUSION_HIGH_WATCH or item.risk_flags)
+    if high_risk_count >= 2:
+        max_total_exposure = 0.55
+    for asset in selected:
+        if total_weight >= max_total_exposure:
+            break
+        target = min(_portfolio_exposure_for_asset(asset), max_total_exposure - total_weight)
+        if target <= 0:
+            continue
+        total_weight += target
+        items.append(
+            {
+                "asset_type": asset.metadata.asset_type,
+                "code": asset.metadata.code,
+                "name": asset.metadata.name,
+                "target_weight": round(target, 4),
+                "score": round(asset.total_score, 2),
+                "conclusion": asset.conclusion,
+                "data_date": asset.latest_date,
+                "evidence": [
+                    f"综合分 {asset.total_score:.1f}",
+                    f"近20日收益 {_format_percent(asset.metrics.get('return_20d'))}",
+                    f"近20日平均成交额 {float(asset.metrics.get('average_turnover_20d') or 0) / 100_000_000:.2f} 亿元",
+                ],
+                "risk_reasons": asset.risk_flags or ["暂未触发主要风险标签"],
+            }
+        )
+    return {
+        "as_of_date": as_of_date or await latest_data_date(session) or date.today(),
+        "asset_type": ASSET_TYPE_ETF,
+        "items": items,
+        "cash_weight": round(max(0.0, 1.0 - sum(item["target_weight"] for item in items)), 4),
+        "research_only": True,
+        "no_trade_instruction": True,
+        "note": "观察组合只用于手动研究参考，不连接券商、不自动下单。",
     }
