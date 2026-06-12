@@ -240,4 +240,53 @@ async def test_dynamic_etf_sync_batches_and_prioritizes_tracked_etfs(app, monkey
     assert calls[0][1] == "560202"
     assert calls[1] == ["560201"]
     assert result["etfs"]["batches"] == 2
+    assert result["etfs"]["skipped"] == 0
     assert result["asset_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_dynamic_etf_sync_limits_daily_batches_when_codes_are_not_explicit(app, monkeypatch) -> None:
+    async with app.state.db.session() as session:
+        session.add_all(
+            [
+                TradableEtf(
+                    code=f"56100{index}",
+                    name=f"批量测试ETF{index}",
+                    exchange="SH",
+                    theme_tags_json=["批量"],
+                    trading_rule_label="证券账户 T+1 ETF",
+                    asset_class="sector",
+                    is_short_term_eligible=True,
+                    is_watchlist=False,
+                )
+                for index in range(5)
+            ]
+        )
+        await session.commit()
+
+        calls: list[list[str]] = []
+
+        async def fake_etf_sync(
+            _session: Any, _from_date: date, _to_date: date, codes: list[str] | None = None
+        ) -> dict[str, Any]:
+            batch = list(codes or [])
+            calls.append(batch)
+            return {"etfs": len(batch), "inserted": 0, "updated": 0, "failed": 0, "failures": []}
+
+        monkeypatch.setenv("SHORT_RESEARCH_ETF_SYNC_BATCH_SIZE", "2")
+        monkeypatch.setenv("SHORT_RESEARCH_ETF_SYNC_MAX_BATCHES", "1")
+        monkeypatch.setattr(short_research_service, "sync_etf_price_history", fake_etf_sync)
+
+        result = await short_research_service.sync_short_research_data(
+            session,
+            from_date=date(2026, 6, 1),
+            to_date=date(2026, 6, 5),
+            asset_type="etf",
+        )
+
+    assert len(calls) == 1
+    assert len(calls[0]) == 2
+    assert result["etfs"]["batches"] == 1
+    assert result["etfs"]["batches_total"] >= 3
+    assert result["etfs"]["processed"] == 2
+    assert result["etfs"]["skipped"] >= 3

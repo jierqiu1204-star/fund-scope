@@ -48,6 +48,7 @@ CONCLUSION_INSUFFICIENT = "数据不足"
 STALE_DATA_DAYS = 7
 MIN_AVERAGE_TURNOVER = 50_000_000
 DEFAULT_ETF_SYNC_BATCH_SIZE = 100
+DEFAULT_ETF_SYNC_MAX_BATCHES = 1
 UNIVERSE_DEFAULT = "default"
 UNIVERSE_ALL = "all"
 UNIVERSE_ILLIQUID = "illiquid"
@@ -1030,6 +1031,16 @@ def _etf_sync_batch_size() -> int:
         return DEFAULT_ETF_SYNC_BATCH_SIZE
 
 
+def _etf_sync_max_batches() -> int:
+    try:
+        return max(
+            1,
+            int(os.getenv("SHORT_RESEARCH_ETF_SYNC_MAX_BATCHES", str(DEFAULT_ETF_SYNC_MAX_BATCHES))),
+        )
+    except ValueError:
+        return DEFAULT_ETF_SYNC_MAX_BATCHES
+
+
 def _chunks(values: list[str], size: int) -> list[list[str]]:
     return [values[index : index + size] for index in range(0, len(values), size)]
 
@@ -1091,12 +1102,19 @@ async def sync_short_research_data(
         "failed": 0,
         "failures": [],
         "batches": 0,
+        "batches_total": 0,
         "batch_size": _etf_sync_batch_size(),
+        "max_batches": None if codes else _etf_sync_max_batches(),
+        "total_candidates": len(etf_codes),
+        "processed": 0,
+        "skipped": 0,
     }
     if fund_codes:
         fund_result = await sync_fund_nav_history(session, from_date, to_date, fund_codes)
     if etf_codes:
-        batches = _chunks(etf_codes, _etf_sync_batch_size())
+        all_batches = _chunks(etf_codes, _etf_sync_batch_size())
+        max_batches = len(all_batches) if codes else _etf_sync_max_batches()
+        batches = all_batches[:max_batches]
         for batch in batches:
             batch_result = await sync_etf_price_history(session, from_date, to_date, batch)
             etf_result["etfs"] += _result_count(batch_result, "etfs")
@@ -1105,6 +1123,9 @@ async def sync_short_research_data(
             etf_result["failed"] += _result_count(batch_result, "failed")
             etf_result["failures"].extend(batch_result.get("failures", []))
         etf_result["batches"] = len(batches)
+        etf_result["batches_total"] = len(all_batches)
+        etf_result["processed"] = sum(len(batch) for batch in batches)
+        etf_result["skipped"] = max(0, len(etf_codes) - etf_result["processed"])
     return {
         "from_date": from_date.isoformat(),
         "to_date": to_date.isoformat(),
