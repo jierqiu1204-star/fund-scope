@@ -32,6 +32,7 @@ import type {
 
 type AssetTypeFilter = "all" | "fund" | "etf";
 type SortKey = "score" | "return_5d" | "return_20d" | "drawdown_low" | "liquidity" | "risk_low";
+type OrderTimeBucket = "before_15" | "after_15" | "unknown";
 
 const assetTypeOptions: Array<{ key: AssetTypeFilter; label: string }> = [
   { key: "all", label: "全部" },
@@ -193,6 +194,25 @@ function todayInputValue() {
   return new Date().toISOString().slice(0, 10);
 }
 
+function defaultOrderTimeBucket(): OrderTimeBucket {
+  return new Date().getHours() >= 15 ? "after_15" : "before_15";
+}
+
+function orderTimeBucketLabel(value: string) {
+  if (value === "before_15") {
+    return "15:00 前";
+  }
+  if (value === "after_15") {
+    return "15:00 后";
+  }
+  return "未填写";
+}
+
+function optionalNumber(value: string) {
+  const trimmed = value.trim();
+  return trimmed ? Number(trimmed) : undefined;
+}
+
 function trackingStatusLabel(status: string) {
   switch (status) {
     case "active":
@@ -279,6 +299,10 @@ export default function ShortTermPage() {
   const [trackingOpen, setTrackingOpen] = useState(false);
   const [trackingAmount, setTrackingAmount] = useState("3000");
   const [trackingDate, setTrackingDate] = useState(todayInputValue());
+  const [trackingOrderTime, setTrackingOrderTime] = useState<OrderTimeBucket>(defaultOrderTimeBucket());
+  const [trackingConfirmedNavDate, setTrackingConfirmedNavDate] = useState("");
+  const [trackingConfirmedNav, setTrackingConfirmedNav] = useState("");
+  const [trackingConfirmedShares, setTrackingConfirmedShares] = useState("");
   const [trackingNote, setTrackingNote] = useState("");
 
   const status = useQuery({
@@ -399,6 +423,10 @@ export default function ShortTermPage() {
           asset_code: selectedAsset.code,
           buy_amount: Number(trackingAmount),
           buy_date: trackingDate,
+          order_time_bucket: trackingOrderTime,
+          confirmed_nav_date: trackingConfirmedNavDate || undefined,
+          confirmed_nav: optionalNumber(trackingConfirmedNav),
+          confirmed_shares: optionalNumber(trackingConfirmedShares),
           note: trackingNote || undefined
         })
       ).data;
@@ -407,6 +435,10 @@ export default function ShortTermPage() {
       setTrackingOpen(false);
       setTrackingAmount("3000");
       setTrackingDate(todayInputValue());
+      setTrackingOrderTime(defaultOrderTimeBucket());
+      setTrackingConfirmedNavDate("");
+      setTrackingConfirmedNav("");
+      setTrackingConfirmedShares("");
       setTrackingNote("");
       await queryClient.invalidateQueries({ queryKey: ["tracked-positions"] });
     }
@@ -526,9 +558,18 @@ export default function ShortTermPage() {
                 </span>
               </div>
               <div className="mt-4 grid gap-2 text-sm text-ink/65">
-                <span>买入：{formatCurrency(item.buy_amount)} / {formatDate(item.buy_date)}</span>
+                <span>
+                  下单：{formatCurrency(item.buy_amount)} / {formatDate(item.buy_date)}（{orderTimeBucketLabel(item.order_time_bucket)}）
+                </span>
+                <span>确认净值日：{formatDate(item.confirmed_nav_date ?? item.entry_price_date)}</span>
+                <span>
+                  确认净值：{item.confirmed_nav?.toFixed(4) ?? item.entry_price?.toFixed(4) ?? "等待净值"}
+                </span>
                 <span>持有：{item.holding_days === null ? "等待数据" : `${item.holding_days} 天`}</span>
-                <span>估算份额：{item.estimated_shares === null ? "等待净值" : item.estimated_shares.toFixed(2)}</span>
+                <span>
+                  {item.confirmed_shares === null ? "估算份额" : "确认份额"}：
+                  {item.estimated_shares === null ? "等待净值" : item.estimated_shares.toFixed(2)}
+                </span>
                 <span className={pnlTone(item.current_snapshot.estimated_pnl)}>估算盈亏：{pnlText(item)}</span>
                 <span>最高盈利：{percentOrWaiting(item.max_profit_pct)}</span>
                 <span>高点回吐：{percentOrWaiting(item.profit_giveback_pct)}</span>
@@ -736,7 +777,7 @@ export default function ShortTermPage() {
                     <div>
                       <p className="text-sm font-semibold text-ink">我已买入，开始追踪</p>
                       <p className="mt-1 text-sm leading-6 text-ink/60">
-                        输入你手动买入的金额和日期。系统按公开净值估算份额，只做提醒，不会连接支付宝。
+                        输入你手动买入的金额和下单时间。15:00 后下单会按下一条公开净值估算；支付宝已确认份额时可以手动填入。
                       </p>
                     </div>
                     <button
@@ -747,7 +788,7 @@ export default function ShortTermPage() {
                     </button>
                   </div>
                   {trackingOpen ? (
-                    <div className="mt-4 grid gap-3 md:grid-cols-[1fr_1fr_1.4fr_auto]">
+                    <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                       <label className="text-sm text-ink/65">
                         买入金额
                         <input
@@ -758,12 +799,53 @@ export default function ShortTermPage() {
                         />
                       </label>
                       <label className="text-sm text-ink/65">
-                        买入日期
+                        下单日期
                         <input
                           className="mt-2 w-full rounded-2xl border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent"
                           type="date"
                           value={trackingDate}
                           onChange={(event) => setTrackingDate(event.target.value)}
+                        />
+                      </label>
+                      <label className="text-sm text-ink/65">
+                        下单时间
+                        <select
+                          className="mt-2 w-full rounded-2xl border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent"
+                          value={trackingOrderTime}
+                          onChange={(event) => setTrackingOrderTime(event.target.value as OrderTimeBucket)}
+                        >
+                          <option value="before_15">15:00 前</option>
+                          <option value="after_15">15:00 后</option>
+                          <option value="unknown">不确定，按旧方式估算</option>
+                        </select>
+                      </label>
+                      <label className="text-sm text-ink/65">
+                        确认净值日（可选）
+                        <input
+                          className="mt-2 w-full rounded-2xl border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent"
+                          type="date"
+                          value={trackingConfirmedNavDate}
+                          onChange={(event) => setTrackingConfirmedNavDate(event.target.value)}
+                        />
+                      </label>
+                      <label className="text-sm text-ink/65">
+                        支付宝确认净值（可选）
+                        <input
+                          className="mt-2 w-full rounded-2xl border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent"
+                          inputMode="decimal"
+                          placeholder="例如：7.3130"
+                          value={trackingConfirmedNav}
+                          onChange={(event) => setTrackingConfirmedNav(event.target.value)}
+                        />
+                      </label>
+                      <label className="text-sm text-ink/65">
+                        支付宝确认份额（可选）
+                        <input
+                          className="mt-2 w-full rounded-2xl border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent"
+                          inputMode="decimal"
+                          placeholder="确认份额最准确"
+                          value={trackingConfirmedShares}
+                          onChange={(event) => setTrackingConfirmedShares(event.target.value)}
                         />
                       </label>
                       <label className="text-sm text-ink/65">
@@ -832,7 +914,7 @@ export default function ShortTermPage() {
                       )}
                     </div>
                     <div className="mt-3 grid gap-2 text-sm text-ink/65 md:grid-cols-3">
-                      <span>买入点：{trackingEntry ? `${trackingEntry.label} / ${percentOrWaiting(trackingEntry.pnl)}` : "等待数据"}</span>
+                      <span>确认点：{trackingEntry ? `${trackingEntry.label} / ${percentOrWaiting(trackingEntry.pnl)}` : "等待数据"}</span>
                       <span>最高点：{trackingHigh ? `${trackingHigh.label} / ${percentOrWaiting(trackingHigh.pnl)}` : "等待数据"}</span>
                       <span>当前点：{trackingCurrent ? `${trackingCurrent.label} / ${percentOrWaiting(trackingCurrent.pnl)}` : "等待数据"}</span>
                     </div>

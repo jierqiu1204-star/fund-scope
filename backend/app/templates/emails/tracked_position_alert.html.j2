@@ -8,9 +8,11 @@
 
 <h2>这笔追踪</h2>
 <ul>
-  <li>买入日期：{{ buy_date }}</li>
+  <li>下单日期：{{ buy_date }}{% if order_time_label %}（{{ order_time_label }}）{% endif %}</li>
   <li>买入金额：{{ buy_amount }} 元</li>
-  <li>估算买入净值/价格：{{ entry_price or "暂无" }}{% if entry_price_date %}（{{ entry_price_date }}）{% endif %}</li>
+  <li>确认净值日：{{ confirmed_nav_date or entry_price_date or "暂无" }}</li>
+  <li>确认净值/价格：{{ confirmed_nav or entry_price or "暂无" }}</li>
+  <li>确认份额：{{ confirmed_shares or "未手填，按确认净值估算" }}</li>
   <li>当前净值/价格：{{ current_price or "暂无" }}{% if current_price_date %}（{{ current_price_date }}）{% endif %}</li>
   <li>估算当前金额：{{ estimated_value or "暂无" }} 元</li>
   <li>估算盈亏：{{ estimated_pnl or "暂无" }} 元{% if estimated_pnl_pct is not none %}（{{ estimated_pnl_pct }}%）{% endif %}</li>

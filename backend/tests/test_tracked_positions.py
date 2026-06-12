@@ -142,6 +142,106 @@ async def test_create_tracked_position_estimates_shares_from_latest_nav(client, 
 
 
 @pytest.mark.asyncio
+async def test_after_15_order_uses_next_available_nav_as_confirmed_nav(client, app) -> None:
+    await _seed_nav_series(
+        app,
+        [
+            (date(2026, 6, 8), 7.179),
+            (date(2026, 6, 9), 7.313),
+            (date(2026, 6, 10), 7.25),
+        ],
+        fund_code="001410",
+    )
+
+    response = await client.post(
+        "/api/tracked-positions",
+        json={
+            "asset_type": "fund",
+            "asset_code": "001410",
+            "buy_date": "2026-06-08",
+            "order_time_bucket": "after_15",
+            "buy_amount": 3000,
+        },
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["order_time_bucket"] == "after_15"
+    assert body["confirmed_nav_date"] == "2026-06-09"
+    assert body["entry_price_date"] == "2026-06-09"
+    assert body["entry_price"] == 7.313
+    assert body["estimated_shares"] == pytest.approx(3000 / 7.313)
+    assert body["current_snapshot"]["estimated_pnl"] == pytest.approx((3000 / 7.313) * 7.25 - 3000, abs=0.01)
+
+
+@pytest.mark.asyncio
+async def test_confirmed_shares_override_public_nav_estimate(client, app) -> None:
+    await _seed_nav_series(
+        app,
+        [
+            (date(2026, 6, 8), 7.179),
+            (date(2026, 6, 9), 7.313),
+            (date(2026, 6, 10), 7.25),
+        ],
+        fund_code="001410",
+    )
+
+    response = await client.post(
+        "/api/tracked-positions",
+        json={
+            "asset_type": "fund",
+            "asset_code": "001410",
+            "buy_date": "2026-06-08",
+            "order_time_bucket": "after_15",
+            "confirmed_nav_date": "2026-06-09",
+            "confirmed_nav": 7.313,
+            "confirmed_shares": 409.88,
+            "buy_amount": 3000,
+        },
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["confirmed_nav"] == 7.313
+    assert body["confirmed_shares"] == 409.88
+    assert body["entry_price"] == 7.313
+    assert body["estimated_shares"] == 409.88
+    assert body["current_snapshot"]["estimated_pnl"] == pytest.approx(409.88 * 7.25 - 3000, abs=0.01)
+
+
+@pytest.mark.asyncio
+async def test_tracking_chart_and_holding_days_start_from_confirmed_nav_date(client, app) -> None:
+    await _seed_nav_series(
+        app,
+        [
+            (date(2026, 6, 8), 1.0),
+            (date(2026, 6, 9), 2.0),
+            (date(2026, 6, 10), 2.2),
+        ],
+    )
+
+    create_response = await client.post(
+        "/api/tracked-positions",
+        json={
+            "asset_type": "fund",
+            "asset_code": "270042",
+            "buy_date": "2026-06-08",
+            "order_time_bucket": "after_15",
+            "buy_amount": 3000,
+        },
+    )
+    position_id = create_response.json()["id"]
+
+    response = await client.get(f"/api/tracked-positions/{position_id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["holding_days"] == 1
+    assert [point["date"] for point in body["chart"]] == ["2026-06-09", "2026-06-10"]
+    assert body["chart"][0]["is_entry"] is True
+
+
+@pytest.mark.asyncio
 async def test_high_watch_without_profit_does_not_send_sell_alert(client, app, settings, monkeypatch) -> None:
     await _seed_nav_series(app, [(date(2026, 6, 1), 1.5), (date(2026, 6, 5), 1.53)])
     await _seed_signal(app, conclusion="高位观察", risk_flags=["追高风险"], action_label="高位别追")

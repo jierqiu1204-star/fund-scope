@@ -5,17 +5,27 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+OrderTimeBucket = Literal["before_15", "after_15", "unknown"]
+
 
 class TrackedPositionCreate(BaseModel):
     asset_type: Literal["fund", "etf"]
     asset_code: str
     buy_date: date | None = None
+    order_time_bucket: OrderTimeBucket = "unknown"
+    confirmed_nav_date: date | None = None
+    confirmed_nav: float | None = Field(default=None, gt=0)
+    confirmed_shares: float | None = Field(default=None, gt=0)
     buy_amount: float = Field(default=3000, gt=0)
     note: str | None = None
 
 
 class TrackedPositionUpdate(BaseModel):
     buy_date: date | None = None
+    order_time_bucket: OrderTimeBucket | None = None
+    confirmed_nav_date: date | None = None
+    confirmed_nav: float | None = Field(default=None, gt=0)
+    confirmed_shares: float | None = Field(default=None, gt=0)
     buy_amount: float | None = Field(default=None, gt=0)
     note: str | None = None
     status: Literal["active", "handled", "closed", "stopped"] | None = None
@@ -83,6 +93,10 @@ class TrackedPositionOut(BaseModel):
     asset_code: str
     asset_name: str
     buy_date: date
+    order_time_bucket: str
+    confirmed_nav_date: date | None = None
+    confirmed_nav: float | None = None
+    confirmed_shares: float | None = None
     buy_amount: float
     entry_price: float | None
     entry_price_date: date | None

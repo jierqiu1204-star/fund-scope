@@ -7,7 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
 from app.models.entities import TrackedPosition
-from app.services.tracked_positions.service import ACTIVE_STATUS, create_alert_if_needed
+from app.services.tracked_positions.service import (
+    ACTIVE_STATUS,
+    create_alert_if_needed,
+    refresh_entry_if_waiting,
+)
 
 
 async def daily_tracked_position_alerts_job(
@@ -32,6 +36,7 @@ async def daily_tracked_position_alerts_job(
     }
     effective_settings = settings or get_settings()
     for position in rows:
+        await refresh_entry_if_waiting(session, position)
         alert, status = await create_alert_if_needed(session, position, effective_settings)
         if status == "deduplicated":
             result["deduplicated"] += 1
@@ -48,4 +53,3 @@ async def daily_tracked_position_alerts_job(
         elif status == "email_skipped":
             result["emails_skipped"] += 1
     return result
-

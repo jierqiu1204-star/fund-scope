@@ -25,12 +25,14 @@ from app.services.tracked_positions.service import (
     latest_signal_context,
     position_analysis,
     recalculate_entry,
+    refresh_entry_if_waiting,
 )
 
 router = APIRouter(prefix="/api/tracked-positions", tags=["tracked-positions"])
 
 
 async def _position_out(session: AsyncSession, row: TrackedPosition) -> TrackedPositionOut:
+    await refresh_entry_if_waiting(session, row)
     latest_alert = await latest_alert_for_position(session, row.id)
     _, item, _ = await latest_signal_context(session, row)
     analysis = await position_analysis(session, row, item=item)
@@ -40,6 +42,10 @@ async def _position_out(session: AsyncSession, row: TrackedPosition) -> TrackedP
         asset_code=row.asset_code,
         asset_name=row.asset_name,
         buy_date=row.buy_date,
+        order_time_bucket=row.order_time_bucket,
+        confirmed_nav_date=row.confirmed_nav_date,
+        confirmed_nav=row.confirmed_nav,
+        confirmed_shares=row.confirmed_shares,
         buy_amount=row.buy_amount,
         entry_price=row.entry_price,
         entry_price_date=row.entry_price_date,
@@ -111,6 +117,10 @@ async def create_tracked_position(
             asset_code=payload.asset_code,
             buy_amount=payload.buy_amount,
             buy_date=payload.buy_date or date.today(),
+            order_time_bucket=payload.order_time_bucket,
+            confirmed_nav_date=payload.confirmed_nav_date,
+            confirmed_nav=payload.confirmed_nav,
+            confirmed_shares=payload.confirmed_shares,
             note=payload.note,
         )
     except ValueError as exc:
@@ -138,15 +148,35 @@ async def update_tracked_position(
     row = await session.get(TrackedPosition, position_id)
     if row is None:
         raise HTTPException(status_code=404, detail="未找到这笔追踪")
+    recalculate_needed = False
+    changed_execution_rule = False
     if payload.buy_date is not None:
         row.buy_date = payload.buy_date
+        recalculate_needed = True
+        changed_execution_rule = True
+    if payload.order_time_bucket is not None:
+        row.order_time_bucket = payload.order_time_bucket
+        recalculate_needed = True
+        changed_execution_rule = True
+    if "confirmed_nav_date" in payload.model_fields_set:
+        row.confirmed_nav_date = payload.confirmed_nav_date
+        recalculate_needed = True
+    elif changed_execution_rule:
+        row.confirmed_nav_date = None
+    if "confirmed_nav" in payload.model_fields_set:
+        row.confirmed_nav = payload.confirmed_nav
+        recalculate_needed = True
+    if "confirmed_shares" in payload.model_fields_set:
+        row.confirmed_shares = payload.confirmed_shares
+        recalculate_needed = True
     if payload.buy_amount is not None:
         row.buy_amount = round(payload.buy_amount, 2)
+        recalculate_needed = True
     if payload.note is not None:
         row.note = payload.note
     if payload.status is not None:
         row.status = payload.status
-    if payload.buy_date is not None or payload.buy_amount is not None:
+    if recalculate_needed:
         await recalculate_entry(session, row)
     row.updated_at = utcnow()
     await session.commit()

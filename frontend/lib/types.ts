@@ -599,6 +599,10 @@ export type TrackedPosition = {
   asset_code: string;
   asset_name: string;
   buy_date: string;
+  order_time_bucket: "before_15" | "after_15" | "unknown";
+  confirmed_nav_date: string | null;
+  confirmed_nav: number | null;
+  confirmed_shares: number | null;
   buy_amount: number;
   entry_price: number | null;
   entry_price_date: string | null;

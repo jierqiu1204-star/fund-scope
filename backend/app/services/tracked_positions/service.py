@@ -46,6 +46,9 @@ from app.services.short_research.service import (
 )
 
 ACTIVE_STATUS = "active"
+ORDER_BEFORE_15 = "before_15"
+ORDER_AFTER_15 = "after_15"
+ORDER_UNKNOWN = "unknown"
 ALERT_EXIT_WATCH = "exit_watch"
 ALERT_RISK_WARNING = "risk_warning"
 ALERT_TAKE_PROFIT_WATCH = "take_profit_watch"
@@ -130,20 +133,73 @@ async def latest_price(
     asset_code: str,
     *,
     on_or_before: date | None = None,
+    on_or_after: date | None = None,
 ) -> PriceSnapshot | None:
+    if on_or_before is not None and on_or_after is not None:
+        raise ValueError("on_or_before 和 on_or_after 不能同时使用")
     if asset_type == ASSET_TYPE_FUND:
         fund_query = select(FundNavHistory).where(FundNavHistory.fund_code == asset_code)
         if on_or_before is not None:
             fund_query = fund_query.where(FundNavHistory.nav_date <= on_or_before)
-        row = await session.scalar(fund_query.order_by(FundNavHistory.nav_date.desc()))
+        if on_or_after is not None:
+            fund_query = fund_query.where(FundNavHistory.nav_date >= on_or_after)
+        order_by = FundNavHistory.nav_date.asc() if on_or_after is not None else FundNavHistory.nav_date.desc()
+        row = await session.scalar(fund_query.order_by(order_by))
         return PriceSnapshot(row.nav, row.nav_date) if row is not None else None
     if asset_type == ASSET_TYPE_ETF:
         etf_query = select(EtfPriceHistory).where(EtfPriceHistory.etf_code == asset_code)
         if on_or_before is not None:
             etf_query = etf_query.where(EtfPriceHistory.trade_date <= on_or_before)
-        row = await session.scalar(etf_query.order_by(EtfPriceHistory.trade_date.desc()))
+        if on_or_after is not None:
+            etf_query = etf_query.where(EtfPriceHistory.trade_date >= on_or_after)
+        order_by = EtfPriceHistory.trade_date.asc() if on_or_after is not None else EtfPriceHistory.trade_date.desc()
+        row = await session.scalar(etf_query.order_by(order_by))
         return PriceSnapshot(row.close, row.trade_date) if row is not None else None
     raise ValueError("资产类型只支持 fund 或 etf")
+
+
+def tracking_start_date(position: TrackedPosition) -> date:
+    if position.confirmed_nav_date is not None:
+        return position.confirmed_nav_date
+    if position.order_time_bucket in {ORDER_BEFORE_15, ORDER_AFTER_15} and position.entry_price_date is not None:
+        return position.entry_price_date
+    return position.buy_date
+
+
+async def resolve_entry_price(
+    session: AsyncSession,
+    *,
+    asset_type: str,
+    asset_code: str,
+    buy_date: date,
+    order_time_bucket: str,
+    confirmed_nav_date: date | None,
+    confirmed_nav: float | None,
+) -> tuple[PriceSnapshot | None, date | None]:
+    if confirmed_nav_date is not None:
+        if confirmed_nav is not None:
+            return PriceSnapshot(confirmed_nav, confirmed_nav_date), confirmed_nav_date
+        entry = await latest_price(session, asset_type, asset_code, on_or_after=confirmed_nav_date)
+        return entry, entry.price_date if entry is not None else confirmed_nav_date
+    if order_time_bucket == ORDER_AFTER_15:
+        entry = await latest_price(session, asset_type, asset_code, on_or_after=buy_date + timedelta(days=1))
+        return entry, entry.price_date if entry is not None else None
+    if order_time_bucket == ORDER_BEFORE_15:
+        entry = await latest_price(session, asset_type, asset_code, on_or_after=buy_date)
+        return entry, entry.price_date if entry is not None else None
+    entry = await latest_price(session, asset_type, asset_code, on_or_before=buy_date)
+    return entry, None
+
+
+def estimated_shares_for_position(
+    *,
+    buy_amount: float,
+    confirmed_shares: float | None,
+    entry: PriceSnapshot | None,
+) -> float | None:
+    if confirmed_shares is not None:
+        return confirmed_shares
+    return (buy_amount / entry.price) if entry and entry.price else None
 
 
 def _round_or_none(value: float | None, digits: int = 2) -> float | None:
@@ -187,6 +243,7 @@ def _performance_analysis(
     chart: list[TrackedPositionChartPoint],
     item: ShortResearchSignalItem | None,
 ) -> PositionAnalysis:
+    start_date = tracking_start_date(position)
     if not chart:
         return PositionAnalysis(
             chart=[],
@@ -206,7 +263,7 @@ def _performance_analysis(
             exit_signal=_exit_signal(reasons=["缺少买入净值或估算份额，暂不能计算卖出/减仓提醒。"]),
             max_profit_pct=None,
             profit_giveback_pct=None,
-            holding_days=(current_point.date - position.buy_date).days,
+            holding_days=(current_point.date - start_date).days,
             technical_metrics={"data_status": "等待买入净值"},
         )
 
@@ -304,7 +361,7 @@ def _performance_analysis(
         exit_signal=exit_signal,
         max_profit_pct=_round_or_none(max_profit_pct),
         profit_giveback_pct=_round_or_none(profit_giveback_pct),
-        holding_days=(current_point.date - position.buy_date).days,
+        holding_days=(current_point.date - start_date).days,
         technical_metrics=technical_metrics,
     )
 
@@ -355,6 +412,7 @@ async def current_snapshot(session: AsyncSession, position: TrackedPosition) -> 
 
 
 async def position_chart(session: AsyncSession, position: TrackedPosition) -> list[TrackedPositionChartPoint]:
+    start_date = tracking_start_date(position)
     points: list[tuple[date, float]]
     if position.asset_type == ASSET_TYPE_FUND:
         fund_rows = (
@@ -362,7 +420,7 @@ async def position_chart(session: AsyncSession, position: TrackedPosition) -> li
                 select(FundNavHistory)
                 .where(
                     FundNavHistory.fund_code == position.asset_code,
-                    FundNavHistory.nav_date >= position.buy_date,
+                    FundNavHistory.nav_date >= start_date,
                 )
                 .order_by(FundNavHistory.nav_date.asc())
             )
@@ -374,7 +432,7 @@ async def position_chart(session: AsyncSession, position: TrackedPosition) -> li
                 select(EtfPriceHistory)
                 .where(
                     EtfPriceHistory.etf_code == position.asset_code,
-                    EtfPriceHistory.trade_date >= position.buy_date,
+                    EtfPriceHistory.trade_date >= start_date,
                 )
                 .order_by(EtfPriceHistory.trade_date.asc())
             )
@@ -437,19 +495,39 @@ async def create_position(
     asset_code: str,
     buy_amount: float,
     buy_date: date,
+    order_time_bucket: str = ORDER_UNKNOWN,
+    confirmed_nav_date: date | None = None,
+    confirmed_nav: float | None = None,
+    confirmed_shares: float | None = None,
     note: str | None = None,
 ) -> TrackedPosition:
     asset_name = await resolve_asset_name(session, asset_type, asset_code)
-    entry = await latest_price(session, asset_type, asset_code, on_or_before=buy_date)
+    entry, effective_confirmed_nav_date = await resolve_entry_price(
+        session,
+        asset_type=asset_type,
+        asset_code=asset_code,
+        buy_date=buy_date,
+        order_time_bucket=order_time_bucket,
+        confirmed_nav_date=confirmed_nav_date,
+        confirmed_nav=confirmed_nav,
+    )
     position = TrackedPosition(
         asset_type=asset_type,
         asset_code=asset_code,
         asset_name=asset_name,
         buy_date=buy_date,
+        order_time_bucket=order_time_bucket,
+        confirmed_nav_date=effective_confirmed_nav_date,
+        confirmed_nav=confirmed_nav,
+        confirmed_shares=confirmed_shares,
         buy_amount=round(buy_amount, 2),
         entry_price=entry.price if entry else None,
         entry_price_date=entry.price_date if entry else None,
-        estimated_shares=(buy_amount / entry.price) if entry and entry.price else None,
+        estimated_shares=estimated_shares_for_position(
+            buy_amount=buy_amount,
+            confirmed_shares=confirmed_shares,
+            entry=entry,
+        ),
         status=ACTIVE_STATUS,
         note=note,
     )
@@ -459,12 +537,51 @@ async def create_position(
     return position
 
 
-async def recalculate_entry(session: AsyncSession, position: TrackedPosition) -> None:
-    entry = await latest_price(session, position.asset_type, position.asset_code, on_or_before=position.buy_date)
+async def recalculate_entry(session: AsyncSession, position: TrackedPosition) -> bool:
+    before = (
+        position.confirmed_nav_date,
+        position.entry_price,
+        position.entry_price_date,
+        position.estimated_shares,
+    )
+    entry, effective_confirmed_nav_date = await resolve_entry_price(
+        session,
+        asset_type=position.asset_type,
+        asset_code=position.asset_code,
+        buy_date=position.buy_date,
+        order_time_bucket=position.order_time_bucket,
+        confirmed_nav_date=position.confirmed_nav_date,
+        confirmed_nav=position.confirmed_nav,
+    )
+    position.confirmed_nav_date = effective_confirmed_nav_date
     position.entry_price = entry.price if entry else None
     position.entry_price_date = entry.price_date if entry else None
-    position.estimated_shares = (position.buy_amount / entry.price) if entry and entry.price else None
-    position.updated_at = utcnow()
+    position.estimated_shares = estimated_shares_for_position(
+        buy_amount=position.buy_amount,
+        confirmed_shares=position.confirmed_shares,
+        entry=entry,
+    )
+    after = (
+        position.confirmed_nav_date,
+        position.entry_price,
+        position.entry_price_date,
+        position.estimated_shares,
+    )
+    if after != before:
+        position.updated_at = utcnow()
+        return True
+    return False
+
+
+async def refresh_entry_if_waiting(session: AsyncSession, position: TrackedPosition) -> bool:
+    if position.estimated_shares is not None:
+        return False
+    changed = await recalculate_entry(session, position)
+    if not changed:
+        return False
+    await session.commit()
+    await session.refresh(position)
+    return position.estimated_shares is not None
 
 
 async def latest_alert_for_position(
@@ -633,6 +750,11 @@ def _email_payload(
     decision: AlertDecision,
 ) -> dict[str, Any]:
     title_prefix = _alert_type_label(alert.alert_type)
+    order_time_label = {
+        ORDER_BEFORE_15: "15:00 前",
+        ORDER_AFTER_15: "15:00 后",
+        ORDER_UNKNOWN: "未填写",
+    }.get(position.order_time_bucket, "未填写")
     return {
         "title": f"FundScope {title_prefix}：{position.asset_name}",
         "alert_title": title_prefix,
@@ -640,6 +762,10 @@ def _email_payload(
         "asset_code": position.asset_code,
         "asset_type": "ETF" if position.asset_type == ASSET_TYPE_ETF else "基金",
         "buy_date": position.buy_date.isoformat(),
+        "order_time_label": order_time_label,
+        "confirmed_nav_date": position.confirmed_nav_date.isoformat() if position.confirmed_nav_date else None,
+        "confirmed_nav": position.confirmed_nav,
+        "confirmed_shares": position.confirmed_shares,
         "buy_amount": position.buy_amount,
         "entry_price": position.entry_price,
         "entry_price_date": position.entry_price_date.isoformat() if position.entry_price_date else None,
