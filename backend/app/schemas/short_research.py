@@ -47,6 +47,13 @@ class ShortResearchSignalRunRequest(BaseModel):
     codes: list[str] | None = None
 
 
+class ShortResearchAdvisorRunRequest(BaseModel):
+    as_of_date: date | None = None
+    asset_type: str | None = None
+    theme: str | None = None
+    codes: list[str] | None = None
+
+
 class ShortResearchChartPointOut(BaseModel):
     date: date
     value: float

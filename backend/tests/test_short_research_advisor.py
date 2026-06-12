@@ -84,6 +84,37 @@ async def _seed_signal_run(app) -> int:
         return run.id
 
 
+async def _seed_fund_signal_run(app) -> int:
+    async with app.state.db.session() as session:
+        run = ShortResearchSignalRun(
+            status="success",
+            started_at=utcnow(),
+            finished_at=utcnow(),
+            as_of_date=date(2026, 6, 6),
+            config_json={"asset_type": "fund", "theme": None, "codes": [], "language": "research_only"},
+            summary_json={"item_count": 1, "fund_count": 1, "etf_count": 0},
+        )
+        session.add(run)
+        await session.commit()
+        await session.refresh(run)
+        session.add(
+            ShortResearchSignalItem(
+                run_id=run.id,
+                asset_type="fund",
+                asset_code="270042",
+                rank=1,
+                total_score=76.6,
+                conclusion="谨慎观察",
+                score_breakdown_json={"risk": {"score": 100}},
+                risk_flags_json=[],
+                rationale_json={"opposing_view": "风格可能切换。"},
+                metrics_json={"return_20d": 0.0425, "max_drawdown_60d": -0.0484},
+            )
+        )
+        await session.commit()
+        return run.id
+
+
 def test_validate_advisor_payload_downgrades_and_rejects_unsafe_language() -> None:
     downgraded = validate_advisor_payload(_valid_report(ACTION_FOCUS), rule_action=ACTION_CAUTION)
 
@@ -208,10 +239,6 @@ async def test_advisor_api_returns_reports_with_latest_short_research_items(clie
     assert advisor.status_code == 200
     assert advisor.json()["fallback"] == 2
 
-    admin_run = await client.post("/api/admin/jobs/daily_short_research_advisor/run")
-    assert admin_run.status_code == 200
-    assert admin_run.json()["selected"] == 2
-
     latest = await client.get("/api/short-research/signals/latest")
     assert latest.status_code == 200
     body = latest.json()
@@ -219,3 +246,30 @@ async def test_advisor_api_returns_reports_with_latest_short_research_items(clie
     assert first["code"] == "270042"
     assert first["advisor_report"]["action_label"] == ACTION_CAUTION
     assert first["advisor_report"]["source"] == "fallback"
+
+    admin_run = await client.post("/api/admin/jobs/daily_short_research_advisor/run")
+    assert admin_run.status_code == 200
+    assert admin_run.json()["selected"] > 0
+
+    latest_fund = await client.get("/api/short-research/signals/latest?asset_type=fund")
+    assert latest_fund.status_code == 200
+    fund_body = latest_fund.json()
+    assert fund_body["summary"]["etf_count"] == 0
+    assert all(item["asset_type"] == "fund" for item in fund_body["items"])
+
+
+@pytest.mark.asyncio
+async def test_advisor_api_can_limit_to_fund_signal_run(client, app) -> None:
+    await _seed_signal_run(app)
+    fund_run_id = await _seed_fund_signal_run(app)
+
+    advisor = await client.post("/api/short-research/advisor/run", json={"asset_type": "fund"})
+    assert advisor.status_code == 200
+    assert advisor.json()["selected"] == 1
+
+    latest_fund = await client.get("/api/short-research/signals/latest?asset_type=fund")
+    assert latest_fund.status_code == 200
+    body = latest_fund.json()
+    assert body["id"] == fund_run_id
+    assert all(item["asset_type"] == "fund" for item in body["items"])
+    assert body["items"][0]["advisor_report"]["source"] == "fallback"

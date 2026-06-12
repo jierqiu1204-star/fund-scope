@@ -6,6 +6,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
+from app.defaults.short_research import ASSET_TYPE_FUND
 from app.services.llm import LLMClient
 from app.services.short_research.advisor import run_advisor_generation
 from app.services.short_research.service import run_signal_generation, sync_short_research_data
@@ -13,11 +14,16 @@ from app.services.short_research.service import run_signal_generation, sync_shor
 
 async def daily_short_research_data_job(session: AsyncSession) -> dict[str, Any]:
     today = date.today()
-    return await sync_short_research_data(session, from_date=today - timedelta(days=120), to_date=today)
+    return await sync_short_research_data(
+        session,
+        from_date=today - timedelta(days=120),
+        to_date=today,
+        asset_type=ASSET_TYPE_FUND,
+    )
 
 
 async def daily_short_research_signals_job(session: AsyncSession) -> dict[str, Any]:
-    run = await run_signal_generation(session)
+    run = await run_signal_generation(session, asset_type=ASSET_TYPE_FUND)
     return {
         "run_id": run.id,
         "status": run.status,
@@ -38,4 +44,5 @@ async def daily_short_research_advisor_job(
         session,
         settings or get_settings(),
         llm_client=llm_client,
+        asset_type=ASSET_TYPE_FUND,
     )

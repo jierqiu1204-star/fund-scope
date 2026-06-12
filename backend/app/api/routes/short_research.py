@@ -3,13 +3,14 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db_session
 from app.models.entities import ShortResearchSignalRun
 from app.schemas.short_research import (
     ShortResearchAdvisorReportOut,
+    ShortResearchAdvisorRunRequest,
     ShortResearchAssetDetailOut,
     ShortResearchAssetListOut,
     ShortResearchAssetOut,
@@ -122,7 +123,7 @@ async def list_short_research_assets(
             for item in assets
             if keyword in item.metadata.code.lower() or keyword in item.metadata.name.lower()
         ]
-    run = await latest_signal_run(session)
+    run = await latest_signal_run(session, asset_type=asset_type, theme=theme)
     advisor_reports = await latest_reports_by_asset(session, run.id) if run is not None else {}
     return ShortResearchAssetListOut(
         items=[
@@ -146,7 +147,7 @@ async def get_short_research_asset_detail(
         asset, chart, sections = await get_asset_detail(session, asset_type, code)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    run = await latest_signal_run(session)
+    run = await latest_signal_run(session, asset_type=asset_type)
     advisor_reports = await latest_reports_by_asset(session, run.id) if run is not None else {}
     return ShortResearchAssetDetailOut(
         asset=_asset_out(asset, advisor_reports.get((asset.metadata.asset_type, asset.metadata.code))),
@@ -207,19 +208,27 @@ async def run_short_research_signals(
 @router.post("/advisor/run")
 async def run_short_research_advisor(
     request: Request,
+    payload: ShortResearchAdvisorRunRequest | None = Body(default=None),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
+    payload = payload or ShortResearchAdvisorRunRequest()
     return await run_advisor_generation(
         session,
         request.app.state.settings,
+        asset_type=payload.asset_type,
+        theme=payload.theme,
+        codes=payload.codes,
+        as_of_date=payload.as_of_date,
     )
 
 
 @router.get("/signals/latest", response_model=ShortResearchSignalRunOut | None)
 async def get_latest_short_research_signals(
+    asset_type: str | None = Query(default=None),
+    theme: str | None = Query(default=None),
     session: AsyncSession = Depends(get_db_session),
 ) -> ShortResearchSignalRunOut | None:
-    run = await latest_signal_run(session)
+    run = await latest_signal_run(session, asset_type=asset_type, theme=theme)
     if run is None:
         return None
     return await _signal_run_out(session, run)

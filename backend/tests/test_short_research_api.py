@@ -83,6 +83,20 @@ async def test_short_research_signal_generation_is_deterministic_and_research_on
     assert latest.status_code == 200
     assert latest.json()["id"] == body["id"]
 
+    fund_only = await client.post(
+        "/api/short-research/signals/run",
+        json={"as_of_date": "2026-06-05", "asset_type": "fund"},
+    )
+    assert fund_only.status_code == 200
+    fund_body = fund_only.json()
+    assert fund_body["summary"]["fund_count"] == fund_body["summary"]["item_count"]
+    assert fund_body["summary"]["etf_count"] == 0
+    assert all(item["asset_type"] == "fund" for item in fund_body["items"])
+
+    latest_fund = await client.get("/api/short-research/signals/latest?asset_type=fund")
+    assert latest_fund.status_code == 200
+    assert latest_fund.json()["id"] == fund_body["id"]
+
 
 @pytest.mark.asyncio
 async def test_short_research_asset_detail_returns_charts_and_beginner_explanations(client, app) -> None:

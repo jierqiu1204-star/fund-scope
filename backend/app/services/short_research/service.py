@@ -177,10 +177,32 @@ def _metadata(asset_type: str, code: str, name: str | None = None) -> ShortResea
     )
 
 
-async def _latest_signal_run(session: AsyncSession) -> ShortResearchSignalRun | None:
-    return cast(
-        ShortResearchSignalRun | None,
-        await session.scalar(
+def _matches_signal_config(
+    run: ShortResearchSignalRun,
+    *,
+    asset_type: str | None = None,
+    theme: str | None = None,
+    codes: list[str] | None = None,
+) -> bool:
+    config = run.config_json or {}
+    if asset_type is not None and config.get("asset_type") != asset_type:
+        return False
+    if theme is not None and config.get("theme") != theme:
+        return False
+    if codes is not None and sorted(config.get("codes") or []) != sorted(codes):
+        return False
+    return True
+
+
+async def _latest_signal_run(
+    session: AsyncSession,
+    *,
+    asset_type: str | None = None,
+    theme: str | None = None,
+    codes: list[str] | None = None,
+) -> ShortResearchSignalRun | None:
+    rows = (
+        await session.scalars(
             select(ShortResearchSignalRun)
             .where(ShortResearchSignalRun.status == RUN_STATUS_SUCCESS)
             .order_by(
@@ -188,12 +210,25 @@ async def _latest_signal_run(session: AsyncSession) -> ShortResearchSignalRun | 
                 ShortResearchSignalRun.finished_at.desc(),
                 ShortResearchSignalRun.id.desc(),
             )
-        ),
-    )
+            .limit(50)
+        )
+    ).all()
+    if asset_type is None and theme is None and codes is None:
+        return cast(ShortResearchSignalRun | None, rows[0] if rows else None)
+    for run in rows:
+        if _matches_signal_config(run, asset_type=asset_type, theme=theme, codes=codes):
+            return run
+    return None
 
 
-async def latest_signal_run(session: AsyncSession) -> ShortResearchSignalRun | None:
-    return await _latest_signal_run(session)
+async def latest_signal_run(
+    session: AsyncSession,
+    *,
+    asset_type: str | None = None,
+    theme: str | None = None,
+    codes: list[str] | None = None,
+) -> ShortResearchSignalRun | None:
+    return await _latest_signal_run(session, asset_type=asset_type, theme=theme, codes=codes)
 
 
 async def list_signal_items(session: AsyncSession, run_id: int) -> list[ShortResearchSignalItem]:

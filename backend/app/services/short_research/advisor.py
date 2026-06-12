@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 from typing import Any
 
 from sqlalchemy import select
@@ -389,10 +390,20 @@ async def run_advisor_generation(
     *,
     llm_client: LLMClient | None = None,
     max_assets: int | None = None,
+    asset_type: str | None = None,
+    theme: str | None = None,
+    codes: list[str] | None = None,
+    as_of_date: date | None = None,
 ) -> dict[str, Any]:
-    signal_run = await latest_signal_run(session)
+    signal_run = await latest_signal_run(session, asset_type=asset_type, theme=theme, codes=codes)
     if signal_run is None:
-        signal_run = await run_signal_generation(session)
+        signal_run = await run_signal_generation(
+            session,
+            as_of_date=as_of_date,
+            asset_type=asset_type,
+            theme=theme,
+            codes=codes,
+        )
 
     limit = max_assets or settings.llm_advisor_max_assets
     items, held_codes = await select_items_for_advisor(session, signal_run, max_assets=limit)
