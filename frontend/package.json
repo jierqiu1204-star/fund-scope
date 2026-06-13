@@ -9,6 +9,7 @@
     "start": "next start",
     "lint": "next lint",
     "test:recommendations": "node ./scripts/check-recommendations-page.mjs",
+    "test:short-pagination": "node ./scripts/check-short-term-pagination.mjs",
     "format": "prettier --check ."
   },
   "dependencies": {

@@ -36,6 +36,8 @@ type SortKey = "score" | "return_5d" | "return_20d" | "drawdown_low" | "risk_low
 type OrderTimeBucket = "before_15" | "after_15" | "unknown";
 type EtfUniverse = "default" | "all" | "illiquid";
 
+const ASSET_PAGE_SIZE = 12;
+
 const etfUniverseOptions: Array<{ key: EtfUniverse; label: string; description: string }> = [
   { key: "default", label: "默认精选", description: "只看数据新、历史够、成交额达标的 ETF。" },
   { key: "all", label: "全部可分析", description: "纳入有可用日线的 ETF，并显示排除原因。" },
@@ -389,6 +391,53 @@ function percentOrWaiting(value: number | null) {
   return value === null ? "等待数据" : formatPercent(value);
 }
 
+function AssetPaginationBar({
+  total,
+  offset,
+  visibleCount,
+  isFetching,
+  onPrevious,
+  onNext
+}: {
+  total: number;
+  offset: number;
+  visibleCount: number;
+  isFetching: boolean;
+  onPrevious: () => void;
+  onNext: () => void;
+}) {
+  if (total <= ASSET_PAGE_SIZE) {
+    return null;
+  }
+  const start = total === 0 ? 0 : offset + 1;
+  const end = Math.min(offset + visibleCount, total);
+  const canPrevious = offset > 0;
+  const canNext = offset + visibleCount < total;
+  return (
+    <div className="flex flex-col gap-3 rounded-[18px] bg-paper p-4 text-sm text-ink/65 md:flex-row md:items-center md:justify-between">
+      <span>
+        当前显示 {start} - {end} / {total} 只
+      </span>
+      <div className="flex gap-2">
+        <button
+          className="rounded-full border border-ink/10 bg-white px-4 py-2 font-semibold text-ink disabled:opacity-40"
+          disabled={!canPrevious || isFetching}
+          onClick={onPrevious}
+        >
+          上一页
+        </button>
+        <button
+          className="rounded-full bg-ink px-4 py-2 font-semibold text-white disabled:opacity-40"
+          disabled={!canNext || isFetching}
+          onClick={onNext}
+        >
+          下一页
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function ShortTermPage() {
   const queryClient = useQueryClient();
   const [assetType, setAssetType] = useState<AssetType>("etf");
@@ -420,7 +469,7 @@ export default function ShortTermPage() {
     queryFn: async () => {
       const params = new URLSearchParams();
       params.set("asset_type", assetType);
-      params.set("limit", "50");
+      params.set("limit", String(ASSET_PAGE_SIZE));
       params.set("offset", String(assetOffset));
       if (theme !== "all") {
         params.set("theme", theme);
@@ -599,8 +648,8 @@ export default function ShortTermPage() {
       : statusData?.data_issue_count ?? 0;
   const visibleAssets = assets.data?.items ?? [];
   const totalAssetCount = assets.data?.total ?? 0;
-  const canPageBackward = assetOffset > 0;
-  const canPageForward = assetOffset + visibleAssets.length < totalAssetCount;
+  const goToPreviousAssetPage = () => setAssetOffset((value) => Math.max(0, value - ASSET_PAGE_SIZE));
+  const goToNextAssetPage = () => setAssetOffset((value) => value + ASSET_PAGE_SIZE);
   const observableCount = visibleAssets.filter((item) => item.conclusion === "短线观察").length;
   const highRiskCount = visibleAssets.filter((item) => item.conclusion === "高位观察").length;
   const dataIssues =
@@ -921,6 +970,17 @@ export default function ShortTermPage() {
             </div>
           ) : null}
 
+          <div className="mt-5">
+            <AssetPaginationBar
+              total={totalAssetCount}
+              offset={assetOffset}
+              visibleCount={visibleAssets.length}
+              isFetching={assets.isFetching}
+              onPrevious={goToPreviousAssetPage}
+              onNext={goToNextAssetPage}
+            />
+          </div>
+
           <div className="mt-5 space-y-3">
             {assets.isLoading ? (
               <div className="rounded-[20px] border border-dashed border-ink/20 p-6 text-sm text-ink/55">
@@ -996,29 +1056,14 @@ export default function ShortTermPage() {
                 {mode.noResults}
               </div>
             ) : null}
-            {totalAssetCount > 50 ? (
-              <div className="flex flex-col gap-3 rounded-[18px] bg-paper p-4 text-sm text-ink/65 md:flex-row md:items-center md:justify-between">
-                <span>
-                  当前显示 {totalAssetCount === 0 ? 0 : assetOffset + 1} - {assetOffset + visibleAssets.length} / {totalAssetCount} 只
-                </span>
-                <div className="flex gap-2">
-                  <button
-                    className="rounded-full border border-ink/10 bg-white px-4 py-2 font-semibold text-ink disabled:opacity-40"
-                    disabled={!canPageBackward || assets.isFetching}
-                    onClick={() => setAssetOffset((value) => Math.max(0, value - 50))}
-                  >
-                    上一页
-                  </button>
-                  <button
-                    className="rounded-full bg-ink px-4 py-2 font-semibold text-white disabled:opacity-40"
-                    disabled={!canPageForward || assets.isFetching}
-                    onClick={() => setAssetOffset((value) => value + 50)}
-                  >
-                    下一页
-                  </button>
-                </div>
-              </div>
-            ) : null}
+            <AssetPaginationBar
+              total={totalAssetCount}
+              offset={assetOffset}
+              visibleCount={visibleAssets.length}
+              isFetching={assets.isFetching}
+              onPrevious={goToPreviousAssetPage}
+              onNext={goToNextAssetPage}
+            />
           </div>
         </Panel>
 
