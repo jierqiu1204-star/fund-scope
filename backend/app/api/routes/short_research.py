@@ -24,12 +24,11 @@ from app.schemas.short_research import (
 from app.services.short_research.advisor import latest_reports_by_asset, run_advisor_generation
 from app.services.short_research.service import (
     ComputedAsset,
+    cached_signal_assets,
     etf_observation_portfolio,
     get_asset_detail,
     latest_signal_run,
-    list_computed_assets,
     run_signal_generation,
-    signal_run_items_as_assets,
     status_summary,
     sync_short_research_data,
 )
@@ -90,14 +89,15 @@ async def _signal_run_out(
     theme: str | None = None,
     codes: list[str] | None = None,
 ) -> ShortResearchSignalRunOut:
-    assets = await signal_run_items_as_assets(session, run)
-    if asset_type is not None:
-        assets = [item for item in assets if item.metadata.asset_type == asset_type]
-    if theme is not None:
-        assets = [item for item in assets if theme in item.metadata.theme_tags]
-    if codes is not None:
-        code_set = set(codes)
-        assets = [item for item in assets if item.metadata.code in code_set]
+    assets, _total = await cached_signal_assets(
+        session,
+        run,
+        asset_type=asset_type,
+        theme=theme,
+        codes=codes,
+        sort="score",
+        universe="all",
+    )
     advisor_reports = await latest_reports_by_asset(session, run.id)
     summary = dict(run.summary_json or {})
     if asset_type is not None or theme is not None or codes is not None:
@@ -128,8 +128,11 @@ async def _signal_run_out(
 
 
 @router.get("/status", response_model=ShortResearchStatusOut)
-async def get_short_research_status(session: AsyncSession = Depends(get_db_session)) -> dict[str, Any]:
-    return await status_summary(session)
+async def get_short_research_status(
+    include_health: bool = Query(default=False),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    return await status_summary(session, include_health=include_health)
 
 
 @router.get("/assets", response_model=ShortResearchAssetListOut)
@@ -139,26 +142,27 @@ async def list_short_research_assets(
     sort: str = Query(default="score"),
     q: str | None = Query(default=None),
     universe: str = Query(default="default"),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_db_session),
 ) -> ShortResearchAssetListOut:
     try:
-        assets = await list_computed_assets(
+        run = await latest_signal_run(session, asset_type=asset_type, theme=theme)
+        if run is None:
+            return ShortResearchAssetListOut(items=[], total=0)
+        assets, total = await cached_signal_assets(
             session,
+            run,
             asset_type=asset_type,
             theme=theme,
+            q=q,
             sort=sort,
             universe=universe,
+            limit=limit,
+            offset=offset,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if q:
-        keyword = q.strip().lower()
-        assets = [
-            item
-            for item in assets
-            if keyword in item.metadata.code.lower() or keyword in item.metadata.name.lower()
-        ]
-    run = await latest_signal_run(session, asset_type=asset_type, theme=theme)
     advisor_reports = await latest_reports_by_asset(session, run.id) if run is not None else {}
     return ShortResearchAssetListOut(
         items=[
@@ -168,7 +172,9 @@ async def list_short_research_assets(
             )
             for item in assets
         ],
-        total=len(assets),
+        total=total,
+        generated_at=run.finished_at or run.started_at,
+        as_of_date=run.as_of_date,
     )
 
 

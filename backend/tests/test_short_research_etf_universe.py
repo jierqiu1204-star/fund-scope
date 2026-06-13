@@ -7,7 +7,13 @@ from typing import Any
 import pytest
 from sqlalchemy import func, select
 
-from app.models.entities import EtfPriceHistory, TrackedPosition, TradableEtf
+from app.models.entities import (
+    EtfPriceHistory,
+    ShortResearchSignalItem,
+    ShortResearchSignalRun,
+    TrackedPosition,
+    TradableEtf,
+)
 from app.services.short_research import service as short_research_service
 from app.services.short_research.universe import EtfUniverseRecord, refresh_etf_universe
 
@@ -56,6 +62,65 @@ async def _seed_etf_history(
                 )
             )
         await session.commit()
+
+
+async def _seed_cached_etf_signals(app: Any, count: int = 3) -> int:
+    async with app.state.db.session() as session:
+        run = ShortResearchSignalRun(
+            status="success",
+            as_of_date=date(2026, 6, 12),
+            config_json={"asset_type": "etf"},
+            summary_json={"item_count": count, "fund_count": 0, "etf_count": count},
+        )
+        session.add(run)
+        await session.flush()
+        for index in range(count):
+            code = f"5620{index:02d}"
+            session.add(
+                TradableEtf(
+                    code=code,
+                    name=f"Cached ETF {index}",
+                    exchange="SH",
+                    theme_tags_json=["cached"],
+                    trading_rule_label="T+1 ETF",
+                    asset_class="sector",
+                    is_short_term_eligible=True,
+                    is_watchlist=True,
+                )
+            )
+            session.add(
+                ShortResearchSignalItem(
+                    run_id=run.id,
+                    asset_type="etf",
+                    asset_code=code,
+                    rank=index + 1,
+                    total_score=90 - index,
+                    conclusion="短线观察",
+                    score_breakdown_json={
+                        "trend": {"score": 80 - index, "weight": 0.55},
+                        "risk": {"score": 70, "weight": 0.30},
+                        "liquidity": {"score": 90, "weight": 0.15},
+                        "metrics": {"return_20d": 0.02 + index / 100},
+                    },
+                    risk_flags_json=[],
+                    rationale_json={"key_reason": "cached", "risk_explanation": "cached"},
+                    metrics_json={
+                        "return_5d": 0.01,
+                        "return_20d": 0.02 + index / 100,
+                        "return_60d": 0.03,
+                        "max_drawdown_60d": -0.04,
+                        "average_turnover_20d": 100_000_000,
+                        "latest_date": "2026-06-12",
+                        "latest_value": 1.23 + index,
+                        "usable_days": 120,
+                        "sample_level": "样本充足",
+                        "source_note": "cached signal",
+                        "default_display_eligible": True,
+                    },
+                )
+            )
+        await session.commit()
+        return run.id
 
 
 @pytest.mark.asyncio
@@ -120,6 +185,9 @@ async def test_short_research_etf_status_universe_filter_and_dynamic_detail(clie
     await _seed_etf_history(app, code="560001", name="动态科技ETF", turnover=150_000_000)
     await _seed_etf_history(app, code="560002", name="低流动ETF", turnover=3_000_000)
 
+    async with app.state.db.session() as session:
+        await short_research_service.run_signal_generation(session, asset_type="etf")
+
     status = await client.get("/api/short-research/status")
     assert status.status_code == 200
     status_body = status.json()
@@ -155,6 +223,9 @@ async def test_etf_observation_portfolio_is_research_only_and_balances_cash(clie
     await _seed_etf_history(app, code="560101", name="观察科技ETF", turnover=200_000_000, daily_return=0.003)
     await _seed_etf_history(app, code="560102", name="观察红利ETF", turnover=180_000_000, daily_return=0.0015)
 
+    async with app.state.db.session() as session:
+        await short_research_service.run_signal_generation(session, asset_type="etf")
+
     response = await client.get("/api/short-research/observation-portfolio?asset_type=etf&limit=3")
 
     assert response.status_code == 200
@@ -169,6 +240,68 @@ async def test_etf_observation_portfolio_is_research_only_and_balances_cash(clie
     payload = json.dumps(body, ensure_ascii=False).lower()
     for forbidden in ["buy", "sell", "target_price", "expected_return", "guaranteed_profit"]:
         assert forbidden not in payload
+
+
+@pytest.mark.asyncio
+async def test_assets_endpoint_uses_cached_signal_items_and_paginates(client, app, monkeypatch) -> None:
+    await _seed_cached_etf_signals(app, count=4)
+
+    async def fail_full_recompute(*_args: Any, **_kwargs: Any) -> list[Any]:
+        raise AssertionError("assets endpoint should not recompute the full ETF universe")
+
+    monkeypatch.setattr(short_research_service, "list_computed_assets", fail_full_recompute)
+
+    response = await client.get(
+        "/api/short-research/assets?asset_type=etf&universe=default&limit=2&offset=1"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 4
+    assert [item["code"] for item in body["items"]] == ["562001", "562002"]
+    assert body["items"][0]["latest_date"] == "2026-06-12"
+    assert body["items"][0]["latest_value"] == 2.23
+    assert body["items"][0]["usable_days"] == 120
+
+
+@pytest.mark.asyncio
+async def test_observation_portfolio_uses_cached_signals(client, app, monkeypatch) -> None:
+    await _seed_cached_etf_signals(app, count=3)
+
+    async def fail_full_recompute(*_args: Any, **_kwargs: Any) -> list[Any]:
+        raise AssertionError("observation portfolio should not recompute the full ETF universe")
+
+    monkeypatch.setattr(short_research_service, "list_computed_assets", fail_full_recompute)
+
+    response = await client.get("/api/short-research/observation-portfolio?asset_type=etf&limit=2")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["research_only"] is True
+    assert len(body["items"]) == 2
+    assert [item["code"] for item in body["items"]] == ["562000", "562001"]
+    assert abs(sum(item["target_weight"] for item in body["items"]) + body["cash_weight"] - 1) < 0.01
+
+
+@pytest.mark.asyncio
+async def test_status_endpoint_is_lightweight_by_default(client, app, monkeypatch) -> None:
+    await _seed_cached_etf_signals(app, count=2)
+
+    async def fail_health_scan(*_args: Any, **_kwargs: Any) -> list[Any]:
+        raise AssertionError("status endpoint should not scan full data health by default")
+
+    async def fail_default_recompute(*_args: Any, **_kwargs: Any) -> list[Any]:
+        raise AssertionError("status endpoint should not recompute default ETF assets")
+
+    monkeypatch.setattr(short_research_service, "data_health", fail_health_scan)
+    monkeypatch.setattr(short_research_service, "list_computed_assets", fail_default_recompute)
+
+    response = await client.get("/api/short-research/status")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["etf_default_display_count"] == 2
+    assert body["data_health"] == []
 
 
 @pytest.mark.asyncio

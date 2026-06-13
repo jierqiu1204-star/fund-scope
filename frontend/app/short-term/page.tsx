@@ -396,6 +396,7 @@ export default function ShortTermPage() {
   const [theme, setTheme] = useState("all");
   const [sort, setSort] = useState<SortKey>("score");
   const [keyword, setKeyword] = useState("");
+  const [assetOffset, setAssetOffset] = useState(0);
   const [selected, setSelected] = useState<{ asset_type: "fund" | "etf"; code: string } | null>(null);
   const [lastResult, setLastResult] = useState<Record<string, unknown> | null>(null);
   const [trackingOpen, setTrackingOpen] = useState(false);
@@ -414,17 +415,13 @@ export default function ShortTermPage() {
     queryFn: async () => (await api.get<ShortResearchStatus>("/api/short-research/status")).data
   });
 
-  const latestSignals = useQuery({
-    queryKey: ["short-research", "signals", "latest", assetType],
-    queryFn: async () =>
-      (await api.get<ShortResearchSignalRun | null>(`/api/short-research/signals/latest?asset_type=${assetType}`)).data
-  });
-
   const assets = useQuery({
-    queryKey: ["short-research", "assets", assetType, etfUniverse, theme, sort, keyword],
+    queryKey: ["short-research", "assets", assetType, etfUniverse, theme, sort, keyword, assetOffset],
     queryFn: async () => {
       const params = new URLSearchParams();
       params.set("asset_type", assetType);
+      params.set("limit", "50");
+      params.set("offset", String(assetOffset));
       if (theme !== "all") {
         params.set("theme", theme);
       }
@@ -441,7 +438,7 @@ export default function ShortTermPage() {
 
   const observationPortfolio = useQuery({
     queryKey: ["short-research", "observation-portfolio", etfUniverse],
-    enabled: assetType === "etf",
+    enabled: assetType === "etf" && Boolean(assets.data?.items.length),
     queryFn: async () =>
       (
         await api.get<ShortResearchObservationPortfolio>(
@@ -465,6 +462,10 @@ export default function ShortTermPage() {
     queryKey: ["tracked-positions"],
     queryFn: async () => (await api.get<TrackedPositionList>("/api/tracked-positions")).data
   });
+
+  useEffect(() => {
+    setAssetOffset(0);
+  }, [assetType, etfUniverse, theme, sort, keyword]);
 
   useEffect(() => {
     const items = assets.data?.items ?? [];
@@ -591,17 +592,21 @@ export default function ShortTermPage() {
   const detailPoints = chartPoints(selectedDetail.data);
   const windowPoints = returnWindowChart(selectedAsset);
   const statusData = status.data;
-  const currentHealth = statusData?.data_health.filter((item) => item.asset_type === assetType) ?? [];
-  const currentDataIssues = currentHealth.filter((item) => item.status !== "success" || item.is_stale);
-  const currentDates = currentHealth
-    .map((item) => item.latest_date)
-    .filter((item): item is string => item !== null)
-    .sort();
-  const currentLatestDate = currentDates.length ? currentDates[currentDates.length - 1] : null;
+  const currentLatestDate = statusData?.latest_data_date ?? assets.data?.as_of_date ?? null;
+  const currentDataIssueCount =
+    assetType === "etf"
+      ? (statusData?.etf_data_stale_count ?? 0) + (statusData?.etf_failed_count ?? 0)
+      : statusData?.data_issue_count ?? 0;
   const visibleAssets = assets.data?.items ?? [];
+  const totalAssetCount = assets.data?.total ?? 0;
+  const canPageBackward = assetOffset > 0;
+  const canPageForward = assetOffset + visibleAssets.length < totalAssetCount;
   const observableCount = visibleAssets.filter((item) => item.conclusion === "短线观察").length;
   const highRiskCount = visibleAssets.filter((item) => item.conclusion === "高位观察").length;
-  const dataIssues = currentDataIssues.slice(0, 6);
+  const dataIssues =
+    statusData?.data_health
+      .filter((item) => item.asset_type === assetType && (item.status !== "success" || item.is_stale))
+      .slice(0, 6) ?? [];
   const activeTracked = (trackedPositions.data?.items ?? []).filter(
     (item) => item.status === "active" && item.asset_type === assetType
   );
@@ -679,7 +684,7 @@ export default function ShortTermPage() {
           <StatPill label="默认精选" value={`${statusData?.etf_default_display_count ?? 0} 只`} tone="bg-emerald-100 text-emerald-800" />
         ) : null}
         <StatPill label="分类口径" value={mode.classification} />
-        <StatPill label="已有数据" value={`${currentHealth.filter((item) => item.usable_days > 0).length} 只`} tone="bg-accentSoft text-ink" />
+        <StatPill label="当前页" value={`${visibleAssets.length}/${totalAssetCount} 只`} tone="bg-accentSoft text-ink" />
         <StatPill label={mode.latestLabel} value={formatDate(currentLatestDate)} tone="bg-white text-ink" />
         {assetType === "etf" ? (
           <StatPill label="滞后/失败" value={`${statusData?.etf_data_stale_count ?? 0} / ${statusData?.etf_failed_count ?? 0} 只`} tone="bg-amber-100 text-amber-900" />
@@ -795,8 +800,8 @@ export default function ShortTermPage() {
           <div className="rounded-[20px] bg-paper p-5">
             <p className="text-lg font-semibold text-ink">数据状态</p>
             <p className="mt-2 text-sm leading-6 text-ink/65">
-              最近一次排序日期：{formatDate(latestSignals.data?.as_of_date ?? statusData?.signal_date)}。
-              {mode.shortLabel}数据异常 {currentDataIssues.length} 只，主要是缺少历史或最新数据滞后。
+              最近一次排序日期：{formatDate(statusData?.signal_date)}。
+              {mode.shortLabel}数据异常 {currentDataIssueCount} 只，主要是缺少历史或最新数据滞后。
             </p>
             {lastResult ? (
               <pre className="mt-4 max-h-40 overflow-auto rounded-[16px] bg-white p-3 text-xs leading-5 text-ink/65">
@@ -922,7 +927,7 @@ export default function ShortTermPage() {
                 正在读取短线研究池...
               </div>
             ) : null}
-            {(assets.data?.items ?? []).slice(0, 30).map((item) => {
+            {visibleAssets.map((item) => {
               const isSelected = selected?.asset_type === item.asset_type && selected.code === item.code;
               const exclusionReasons = stringListMetric(item.metrics, "default_exclusion_reasons");
               const defaultEligible = boolMetric(item.metrics, "default_display_eligible");
@@ -989,6 +994,29 @@ export default function ShortTermPage() {
             {!assets.isLoading && (assets.data?.items ?? []).length === 0 ? (
               <div className="rounded-[20px] border border-dashed border-ink/20 p-6 text-sm leading-6 text-ink/55">
                 {mode.noResults}
+              </div>
+            ) : null}
+            {totalAssetCount > 50 ? (
+              <div className="flex flex-col gap-3 rounded-[18px] bg-paper p-4 text-sm text-ink/65 md:flex-row md:items-center md:justify-between">
+                <span>
+                  当前显示 {totalAssetCount === 0 ? 0 : assetOffset + 1} - {assetOffset + visibleAssets.length} / {totalAssetCount} 只
+                </span>
+                <div className="flex gap-2">
+                  <button
+                    className="rounded-full border border-ink/10 bg-white px-4 py-2 font-semibold text-ink disabled:opacity-40"
+                    disabled={!canPageBackward || assets.isFetching}
+                    onClick={() => setAssetOffset((value) => Math.max(0, value - 50))}
+                  >
+                    上一页
+                  </button>
+                  <button
+                    className="rounded-full bg-ink px-4 py-2 font-semibold text-white disabled:opacity-40"
+                    disabled={!canPageForward || assets.isFetching}
+                    onClick={() => setAssetOffset((value) => value + 50)}
+                  >
+                    下一页
+                  </button>
+                </div>
               </div>
             ) : null}
           </div>

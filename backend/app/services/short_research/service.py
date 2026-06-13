@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, replace
-from datetime import date
+from datetime import date, timedelta
 from statistics import mean, pstdev
 from typing import Any, cast
 
@@ -322,6 +322,157 @@ async def list_signal_items(session: AsyncSession, run_id: int) -> list[ShortRes
         .order_by(ShortResearchSignalItem.rank.asc(), ShortResearchSignalItem.asset_type.asc())
     )
     return list(rows.all())
+
+
+def _date_metric(value: Any) -> date | None:
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _float_metric(value: Any) -> float | None:
+    if isinstance(value, int | float):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _int_metric(value: Any) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(float(value))
+        except ValueError:
+            return None
+    return None
+
+
+async def _metadata_map_for_signal_items(
+    session: AsyncSession,
+    items: list[ShortResearchSignalItem],
+) -> dict[tuple[str, str], ShortResearchAsset]:
+    by_key: dict[tuple[str, str], ShortResearchAsset] = {}
+    missing_etf_codes: list[str] = []
+    missing_fund_codes: list[str] = []
+    for item in items:
+        key = (item.asset_type, item.asset_code)
+        static = SHORT_RESEARCH_ASSET_BY_KEY.get(key)
+        if static is not None:
+            by_key[key] = static
+        elif item.asset_type == ASSET_TYPE_ETF:
+            missing_etf_codes.append(item.asset_code)
+        elif item.asset_type == ASSET_TYPE_FUND:
+            missing_fund_codes.append(item.asset_code)
+    if missing_etf_codes:
+        rows = await session.scalars(select(TradableEtf).where(TradableEtf.code.in_(set(missing_etf_codes))))
+        for row in rows.all():
+            by_key[(ASSET_TYPE_ETF, row.code)] = _metadata_from_etf_row(row)
+    if missing_fund_codes:
+        rows = await session.scalars(select(Fund).where(Fund.code.in_(set(missing_fund_codes))))
+        for row in rows.all():
+            by_key[(ASSET_TYPE_FUND, row.code)] = _metadata(ASSET_TYPE_FUND, row.code, row.name)
+    return by_key
+
+
+def _cached_asset_from_signal_item(
+    item: ShortResearchSignalItem,
+    metadata: ShortResearchAsset,
+    *,
+    as_of_date: date | None,
+) -> ComputedAsset:
+    metrics = dict(item.metrics_json or {})
+    latest_date = _date_metric(metrics.pop("latest_date", None)) or as_of_date
+    latest_value = _float_metric(metrics.pop("latest_value", None))
+    usable_days = _int_metric(metrics.pop("usable_days", None)) or 0
+    sample_level = str(metrics.pop("sample_level", "") or _sample_level(usable_days))
+    source_note = str(
+        metrics.pop(
+            "source_note",
+            "公开 ETF 日线数据" if item.asset_type == ASSET_TYPE_ETF else "公开基金净值数据",
+        )
+    )
+    return ComputedAsset(
+        metadata=metadata,
+        rank=item.rank,
+        total_score=float(item.total_score),
+        conclusion=item.conclusion,
+        latest_date=latest_date,
+        latest_value=latest_value,
+        usable_days=usable_days,
+        sample_level=sample_level,
+        metrics=metrics,
+        score_breakdown=dict(item.score_breakdown_json or {}),
+        risk_flags=list(item.risk_flags_json or []),
+        rationale=dict(item.rationale_json or {}),
+        source_note=source_note,
+    )
+
+
+async def cached_signal_assets(
+    session: AsyncSession,
+    run: ShortResearchSignalRun,
+    *,
+    asset_type: str | None = None,
+    theme: str | None = None,
+    codes: list[str] | None = None,
+    q: str | None = None,
+    sort: str = "score",
+    universe: str = UNIVERSE_DEFAULT,
+    limit: int | None = None,
+    offset: int = 0,
+) -> tuple[list[ComputedAsset], int]:
+    if universe not in {UNIVERSE_DEFAULT, UNIVERSE_ALL, UNIVERSE_ILLIQUID}:
+        raise ValueError("ETF universe 只支持 default、all、illiquid")
+    query = select(ShortResearchSignalItem).where(ShortResearchSignalItem.run_id == run.id)
+    if asset_type is not None:
+        query = query.where(ShortResearchSignalItem.asset_type == asset_type)
+    if codes:
+        query = query.where(ShortResearchSignalItem.asset_code.in_(codes))
+    rows = await session.scalars(query.order_by(ShortResearchSignalItem.rank.asc()))
+    items = list(rows.all())
+    metadata_by_key = await _metadata_map_for_signal_items(session, items)
+    code_set = set(codes or [])
+    keyword = q.strip().lower() if q else None
+    assets: list[ComputedAsset] = []
+    for item in items:
+        metadata = metadata_by_key.get((item.asset_type, item.asset_code)) or _metadata(
+            item.asset_type,
+            item.asset_code,
+        )
+        if not _matches_filters(metadata, asset_type=asset_type, theme=theme, codes=list(code_set) if code_set else None):
+            continue
+        if keyword and keyword not in metadata.code.lower() and keyword not in metadata.name.lower():
+            continue
+        asset = _cached_asset_from_signal_item(item, metadata, as_of_date=run.as_of_date)
+        if item.asset_type == ASSET_TYPE_ETF and universe == UNIVERSE_DEFAULT and not bool(
+            asset.metrics.get("default_display_eligible", True)
+        ):
+            continue
+        if item.asset_type == ASSET_TYPE_ETF and universe == UNIVERSE_ILLIQUID and bool(
+            asset.metrics.get("default_display_eligible", True)
+        ):
+            continue
+        assets.append(asset)
+    assets.sort(key=lambda asset: _sort_key(asset, sort), reverse=True)
+    ranked = [replace(asset, rank=index) for index, asset in enumerate(assets, start=1)]
+    total = len(ranked)
+    if offset:
+        ranked = ranked[offset:]
+    if limit is not None:
+        ranked = ranked[:limit]
+    return ranked, total
 
 
 async def latest_data_date(session: AsyncSession) -> date | None:
@@ -874,8 +1025,17 @@ async def run_signal_generation(
             theme=theme,
             codes=codes,
             sort="score",
+            universe=UNIVERSE_ALL if asset_type == ASSET_TYPE_ETF else UNIVERSE_DEFAULT,
         )
         for asset in assets:
+            cached_metrics = {
+                **asset.metrics,
+                "latest_date": asset.latest_date.isoformat() if asset.latest_date else None,
+                "latest_value": asset.latest_value,
+                "usable_days": asset.usable_days,
+                "sample_level": asset.sample_level,
+                "source_note": asset.source_note,
+            }
             session.add(
                 ShortResearchSignalItem(
                     run_id=run.id,
@@ -887,7 +1047,7 @@ async def run_signal_generation(
                     score_breakdown_json=asset.score_breakdown,
                     risk_flags_json=asset.risk_flags,
                     rationale_json=asset.rationale,
-                    metrics_json=asset.metrics,
+                    metrics_json=cached_metrics,
                 )
             )
         conclusion_counts: dict[str, int] = {}
@@ -914,6 +1074,8 @@ async def run_signal_generation(
 
 
 async def signal_run_items_as_assets(session: AsyncSession, run: ShortResearchSignalRun) -> list[ComputedAsset]:
+    cached_assets, _total = await cached_signal_assets(session, run, sort="score", universe=UNIVERSE_ALL)
+    return cached_assets
     items = await list_signal_items(session, run.id)
     assets: list[ComputedAsset] = []
     for item in items:
@@ -939,11 +1101,11 @@ async def signal_run_items_as_assets(session: AsyncSession, run: ShortResearchSi
     return assets
 
 
-async def status_summary(session: AsyncSession) -> dict[str, Any]:
+async def status_summary(session: AsyncSession, *, include_health: bool = False) -> dict[str, Any]:
     await ensure_short_research_universe(session)
     latest_run = await latest_signal_run(session)
+    latest_etf_run = await latest_signal_run(session, asset_type=ASSET_TYPE_ETF)
     latest = await latest_data_date(session)
-    health = await data_health(session)
     etf_total = int(await session.scalar(select(func.count()).select_from(TradableEtf)) or 0)
     etf_eligible = int(
         await session.scalar(
@@ -951,10 +1113,41 @@ async def status_summary(session: AsyncSession) -> dict[str, Any]:
         )
         or 0
     )
-    etf_default_assets = await list_computed_assets(session, asset_type=ASSET_TYPE_ETF, universe=UNIVERSE_DEFAULT)
+    etf_default_display_count = 0
+    if latest_etf_run is not None:
+        latest_etf_items = await list_signal_items(session, latest_etf_run.id)
+        etf_default_display_count = sum(
+            1
+            for item in latest_etf_items
+            if item.asset_type == ASSET_TYPE_ETF and bool((item.metrics_json or {}).get("default_display_eligible", True))
+        )
     etf_failed = int(
         await session.scalar(
             select(func.count()).select_from(EtfDataHealth).where(EtfDataHealth.status == "failed")
+        )
+        or 0
+    )
+    stale_cutoff = date.today() - timedelta(days=STALE_DATA_DAYS)
+    fresh_etf_count = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(EtfDataHealth)
+            .join(TradableEtf, TradableEtf.code == EtfDataHealth.etf_code)
+            .where(
+                TradableEtf.is_short_term_eligible.is_(True),
+                EtfDataHealth.status == "success",
+                EtfDataHealth.latest_price_date >= stale_cutoff,
+            )
+        )
+        or 0
+    )
+    etf_data_stale_count = max(0, etf_eligible - fresh_etf_count)
+    fund_priced_count = int(
+        await session.scalar(select(func.count(func.distinct(FundNavHistory.fund_code)))) or 0
+    )
+    etf_priced_count = int(
+        await session.scalar(
+            select(func.count(func.distinct(EtfDataHealth.etf_code))).where(EtfDataHealth.successful_rows > 0)
         )
         or 0
     )
@@ -965,6 +1158,16 @@ async def status_summary(session: AsyncSession) -> dict[str, Any]:
     else:
         observable_count = 0
         high_risk_count = 0
+    health = await data_health(session) if include_health else []
+    if include_health:
+        etf_data_stale_count = sum(
+            1 for item in health if item["asset_type"] == ASSET_TYPE_ETF and item["is_stale"]
+        )
+        priced_asset_count = sum(1 for item in health if item["usable_days"] > 0)
+        data_issue_count = sum(1 for item in health if item["status"] != "success" or item["is_stale"])
+    else:
+        priced_asset_count = fund_priced_count + etf_priced_count
+        data_issue_count = etf_data_stale_count + etf_failed
     return {
         "latest_data_date": latest,
         "signal_date": latest_run.as_of_date if latest_run else None,
@@ -973,15 +1176,13 @@ async def status_summary(session: AsyncSession) -> dict[str, Any]:
         "etf_count": len(DEFAULT_SHORT_RESEARCH_ETF_CODES),
         "etf_total_count": etf_total,
         "etf_eligible_count": etf_eligible,
-        "etf_default_display_count": len(etf_default_assets),
-        "etf_data_stale_count": sum(
-            1 for item in health if item["asset_type"] == ASSET_TYPE_ETF and item["is_stale"]
-        ),
+        "etf_default_display_count": etf_default_display_count,
+        "etf_data_stale_count": etf_data_stale_count,
         "etf_failed_count": etf_failed,
-        "priced_asset_count": sum(1 for item in health if item["usable_days"] > 0),
+        "priced_asset_count": priced_asset_count,
         "observable_count": observable_count,
         "high_risk_count": high_risk_count,
-        "data_issue_count": sum(1 for item in health if item["status"] != "success" or item["is_stale"]),
+        "data_issue_count": data_issue_count,
         "data_health": health,
     }
 
@@ -1158,12 +1359,24 @@ async def etf_observation_portfolio(
     limit: int = 5,
     universe: str = UNIVERSE_DEFAULT,
 ) -> dict[str, Any]:
-    assets = await list_computed_assets(
+    run = await latest_signal_run(session, asset_type=ASSET_TYPE_ETF)
+    if run is None:
+        return {
+            "as_of_date": as_of_date or await latest_data_date(session) or date.today(),
+            "asset_type": ASSET_TYPE_ETF,
+            "items": [],
+            "cash_weight": 1.0,
+            "research_only": True,
+            "no_trade_instruction": True,
+            "note": "暂无 ETF 排序快照，先生成短线排序后再查看观察组合。",
+        }
+    assets, _total = await cached_signal_assets(
         session,
-        as_of_date=as_of_date,
+        run,
         asset_type=ASSET_TYPE_ETF,
         sort="score",
         universe=universe,
+        limit=max(1, min(limit, 10)),
     )
     selected = assets[: max(1, min(limit, 10))]
     items: list[dict[str, Any]] = []
@@ -1197,7 +1410,7 @@ async def etf_observation_portfolio(
             }
         )
     return {
-        "as_of_date": as_of_date or await latest_data_date(session) or date.today(),
+        "as_of_date": as_of_date or run.as_of_date,
         "asset_type": ASSET_TYPE_ETF,
         "items": items,
         "cash_weight": round(max(0.0, 1.0 - sum(item["target_weight"] for item in items)), 4),
