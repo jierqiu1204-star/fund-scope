@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes.admin import router as admin_router
 from app.api.routes.admin_data import router as admin_data_router
+from app.api.routes.etf_quotes import router as etf_quotes_router
 from app.api.routes.health import router as health_router
 from app.api.routes.news import router as news_router
 from app.api.routes.onboarding import router as onboarding_router
@@ -81,6 +82,7 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
     app.include_router(strategy_lab_router)
     app.include_router(short_etf_router)
     app.include_router(short_research_router)
+    app.include_router(etf_quotes_router)
     app.include_router(tracked_positions_router)
     app.include_router(news_router)
     app.include_router(settings_router)

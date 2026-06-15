@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db_session
 from app.models.entities import JobRun, NewsItem, NewsSummary
+from app.services.intraday_etf.jobs import intraday_etf_watch_job
 from app.services.job_runner import run_job
 from app.services.jobs import (
     daily_asset_recommendations_job,
@@ -184,6 +185,17 @@ async def run_job_by_name(
             lambda tracked_session: daily_tracked_position_alerts_job(
                 tracked_session,
                 request.app.state.settings,
+            ),
+        )
+    if job_name == "intraday_etf_watch":
+        return await run_job(
+            request.app.state.db.session,
+            job_name,
+            lambda tracked_session: intraday_etf_watch_job(
+                tracked_session,
+                settings=request.app.state.settings,
+                run_type="manual",
+                force=True,
             ),
         )
     if job_name == "news_summary_backfill":

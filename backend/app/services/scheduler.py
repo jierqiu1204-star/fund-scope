@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.db import DatabaseManager
+from app.services.intraday_etf.jobs import intraday_etf_watch_job
 from app.services.job_runner import run_job
 from app.services.jobs import (
     daily_asset_recommendations_job,
@@ -59,6 +60,9 @@ def register_default_jobs(
 
     async def daily_tracked_position_alerts_tracked(session: AsyncSession) -> dict[str, Any]:
         return await daily_tracked_position_alerts_job(session, settings)
+
+    async def intraday_etf_watch_tracked(session: AsyncSession) -> dict[str, Any]:
+        return await intraday_etf_watch_job(session, settings=settings, run_type="scheduled")
 
     scheduler.add_job(
         _run_tracked_job,
@@ -169,3 +173,24 @@ def register_default_jobs(
         id="daily_tracked_position_alerts",
         replace_existing=True,
     )
+    intraday_windows = [
+        ("intraday_etf_watch_0930", 9, "30-59"),
+        ("intraday_etf_watch_10", 10, "*"),
+        ("intraday_etf_watch_11", 11, "0-30"),
+        ("intraday_etf_watch_13_14", "13-14", "*"),
+        ("intraday_etf_watch_1500", 15, "0"),
+    ]
+    for job_id, hour, minute in intraday_windows:
+        scheduler.add_job(
+            _run_tracked_job,
+            "cron",
+            args=[db, "intraday_etf_watch", intraday_etf_watch_tracked],
+            day_of_week="mon-fri",
+            hour=hour,
+            minute=minute,
+            second=0,
+            id=job_id,
+            max_instances=1,
+            coalesce=True,
+            replace_existing=True,
+        )

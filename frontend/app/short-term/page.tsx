@@ -26,6 +26,7 @@ import type {
   ShortResearchObservationPortfolio,
   ShortResearchSignalRun,
   ShortResearchStatus,
+  IntradayEtfWatchStatus,
   TrackedPosition,
   TrackedPositionDetail,
   TrackedPositionList
@@ -391,6 +392,55 @@ function percentOrWaiting(value: number | null) {
   return value === null ? "等待数据" : formatPercent(value);
 }
 
+function priceSourceLabel(value: string | null | undefined) {
+  if (value === "intraday_quote") {
+    return "盘中公开行情";
+  }
+  if (value === "daily_close") {
+    return "日线收盘价";
+  }
+  if (value === "manual_entry") {
+    return "手填成交价";
+  }
+  return "暂无价格";
+}
+
+function marketStatusLabel(value: string | undefined) {
+  if (value === "open") {
+    return "交易中";
+  }
+  if (value === "closed") {
+    return "非交易时段";
+  }
+  return "等待状态";
+}
+
+function formatDateTime(value: string | null | undefined) {
+  if (!value) {
+    return "暂无";
+  }
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  }).format(new Date(value));
+}
+
+function alertLevelLabel(value: string | null | undefined) {
+  if (value === "urgent") {
+    return "紧急";
+  }
+  if (value === "warning") {
+    return "提醒";
+  }
+  if (value === "watch") {
+    return "观察";
+  }
+  return "记录";
+}
+
 function AssetPaginationBar({
   total,
   offset,
@@ -509,7 +559,15 @@ export default function ShortTermPage() {
 
   const trackedPositions = useQuery({
     queryKey: ["tracked-positions"],
-    queryFn: async () => (await api.get<TrackedPositionList>("/api/tracked-positions")).data
+    queryFn: async () => (await api.get<TrackedPositionList>("/api/tracked-positions")).data,
+    refetchInterval: assetType === "etf" ? 30_000 : false
+  });
+
+  const intradayWatch = useQuery({
+    queryKey: ["etf-quotes", "tracked"],
+    enabled: assetType === "etf",
+    queryFn: async () => (await api.get<IntradayEtfWatchStatus>("/api/etf-quotes/tracked")).data,
+    refetchInterval: assetType === "etf" ? 30_000 : false
   });
 
   useEffect(() => {
@@ -619,7 +677,10 @@ export default function ShortTermPage() {
       setTrackingConfirmedNav("");
       setTrackingConfirmedShares("");
       setTrackingNote("");
-      await queryClient.invalidateQueries({ queryKey: ["tracked-positions"] });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["tracked-positions"] }),
+        queryClient.invalidateQueries({ queryKey: ["etf-quotes"] })
+      ]);
     }
   });
 
@@ -632,7 +693,10 @@ export default function ShortTermPage() {
         })
       ).data,
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["tracked-positions"] });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["tracked-positions"] }),
+        queryClient.invalidateQueries({ queryKey: ["etf-quotes"] })
+      ]);
     }
   });
 
@@ -656,9 +720,7 @@ export default function ShortTermPage() {
     statusData?.data_health
       .filter((item) => item.asset_type === assetType && (item.status !== "success" || item.is_stale))
       .slice(0, 6) ?? [];
-  const activeTracked = (trackedPositions.data?.items ?? []).filter(
-    (item) => item.status === "active" && item.asset_type === assetType
-  );
+  const activeTracked = (trackedPositions.data?.items ?? []).filter((item) => item.status === "active");
   const selectedTracked = activeTracked.filter(
     (item) => selectedAsset && item.asset_type === selectedAsset.asset_type && item.asset_code === selectedAsset.code
   );
@@ -742,11 +804,35 @@ export default function ShortTermPage() {
         <StatPill label="高位观察" value={`${highRiskCount} 只`} tone="bg-rose-100 text-rose-800" />
       </div>
 
-      {(syncData.isError || runSignals.isError || runAdvisor.isError || status.isError) && (
+      {(syncData.isError || runSignals.isError || runAdvisor.isError || status.isError || intradayWatch.isError) && (
         <p className="rounded-[18px] bg-rose-50 px-4 py-3 text-sm text-rose-700">
-          {errorText(syncData.error ?? runSignals.error ?? runAdvisor.error ?? status.error)}
+          {errorText(syncData.error ?? runSignals.error ?? runAdvisor.error ?? status.error ?? intradayWatch.error)}
         </p>
       )}
+
+      {assetType === "etf" ? (
+        <Panel className="rounded-[24px]">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.22em] text-accent">盘中盯盘</p>
+              <h2 className="mt-2 text-2xl font-semibold text-ink">每天评分前 20 ETF + 你已追踪的 ETF</h2>
+              <p className="mt-2 text-sm leading-6 text-ink/65">
+                页面每 30 秒读取后端缓存；后端只在 A 股交易时段按公开行情刷新，不连接券商账户，不会自动交易。
+              </p>
+            </div>
+            <div className="grid gap-3 text-sm text-ink/65 md:grid-cols-2 xl:grid-cols-4">
+              <StatPill label="市场状态" value={marketStatusLabel(intradayWatch.data?.market_status)} tone="bg-white text-ink" />
+              <StatPill label="盯盘 ETF" value={`${intradayWatch.data?.watched_count ?? 0} 只`} tone="bg-accentSoft text-ink" />
+              <StatPill label="评分日期" value={formatDate(intradayWatch.data?.signal_as_of_date)} />
+              <StatPill label="最近运行" value={formatDateTime(intradayWatch.data?.latest_run?.finished_at)} tone="bg-white text-ink" />
+            </div>
+          </div>
+          <p className="mt-4 rounded-[18px] bg-paper px-4 py-3 text-sm leading-6 text-ink/65">
+            {intradayWatch.data?.message ?? "等待 ETF 盯盘状态。"}
+            {intradayWatch.data?.latest_run?.error_message ? ` 行情源提示：${intradayWatch.data.latest_run.error_message}` : ""}
+          </p>
+        </Panel>
+      ) : null}
 
       <Panel className="rounded-[24px]">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -800,6 +886,37 @@ export default function ShortTermPage() {
                 <span>最高盈利：{percentOrWaiting(item.max_profit_pct)}</span>
                 <span>高点回吐：{percentOrWaiting(item.profit_giveback_pct)}</span>
                 <span>当前价：{item.current_snapshot.current_price?.toFixed(4) ?? "暂无"}</span>
+                {item.asset_type === "etf" ? (
+                  <>
+                    <span>价格来源：{priceSourceLabel(item.intraday_snapshot?.price_source)}</span>
+                    <span>行情时间：{formatDateTime(item.intraday_snapshot?.quote_time)}</span>
+                    <span>
+                      动态止损线：
+                      {item.dynamic_thresholds?.hard_stop_pct === null || item.dynamic_thresholds?.hard_stop_pct === undefined
+                        ? "等待数据"
+                        : formatPercent(item.dynamic_thresholds.hard_stop_pct)}
+                    </span>
+                    <span>
+                      止盈启动线：
+                      {item.dynamic_thresholds?.profit_start_pct === null || item.dynamic_thresholds?.profit_start_pct === undefined
+                        ? "等待数据"
+                        : formatPercent(item.dynamic_thresholds.profit_start_pct)}
+                    </span>
+                    <span>
+                      买卖价差：
+                      {item.intraday_snapshot?.spread_pct === null || item.intraday_snapshot?.spread_pct === undefined
+                        ? "暂无"
+                        : formatPercent(item.intraday_snapshot.spread_pct)}
+                    </span>
+                    <span>
+                      折溢价：
+                      {item.intraday_snapshot?.premium_discount_pct === null ||
+                      item.intraday_snapshot?.premium_discount_pct === undefined
+                        ? "暂无"
+                        : formatPercent(item.intraday_snapshot.premium_discount_pct)}
+                    </span>
+                  </>
+                ) : null}
               </div>
               <div className={`mt-4 rounded-[16px] p-3 text-sm leading-6 ${exitSignalTone(item.exit_signal.level)}`}>
                 <p className="font-semibold">{item.exit_signal.label}</p>
@@ -807,13 +924,34 @@ export default function ShortTermPage() {
               </div>
               {item.latest_alert ? (
                 <div className="mt-4 rounded-[16px] bg-rose-50 p-3 text-sm leading-6 text-rose-800">
-                  {alertTypeLabel(item.latest_alert.alert_type)}：{item.latest_alert.reasons[0] ?? item.latest_alert.trigger_label}
+                  <p className="font-semibold">
+                    {alertTypeLabel(item.latest_alert.alert_type)}（{alertLevelLabel(item.latest_alert.alert_level)}）
+                  </p>
+                  <p>{item.latest_alert.reasons[0] ?? item.latest_alert.trigger_label}</p>
+                  {item.latest_alert.alert_source ? (
+                    <p className="mt-1 text-xs">
+                      来源：{priceSourceLabel(item.latest_alert.alert_source)}；行情时间：
+                      {formatDateTime(item.latest_alert.quote_time)}
+                      {item.latest_alert.suppression_status === "suppressed" ? "；已被冷却去重，不重复发邮件" : ""}
+                    </p>
+                  ) : null}
                 </div>
               ) : (
                 <p className="mt-4 rounded-[16px] bg-paper p-3 text-sm leading-6 text-ink/55">
                   暂无邮件提醒。高位观察不会单独触发邮件，必须同时有盈利保护、趋势转弱或明显风险。
                 </p>
               )}
+              {item.recent_intraday_alerts.length ? (
+                <div className="mt-3 rounded-[16px] bg-paper p-3 text-xs leading-5 text-ink/60">
+                  <p className="font-semibold text-ink">最近盘中提醒</p>
+                  {item.recent_intraday_alerts.slice(0, 3).map((alert) => (
+                    <p key={alert.id} className="mt-1">
+                      {formatDateTime(alert.quote_time)} · {alertTypeLabel(alert.alert_type)} ·{" "}
+                      {alert.suppression_status === "suppressed" ? "冷却去重" : alert.email_status}
+                    </p>
+                  ))}
+                </div>
+              ) : null}
               <button
                 className="mt-4 rounded-full border border-ink/10 px-4 py-2 text-sm font-semibold text-ink transition hover:border-accent hover:text-accent disabled:opacity-60"
                 disabled={closeTracking.isPending}

@@ -603,6 +603,10 @@ export type TrackedPositionAlert = {
   reasons: string[];
   risk_flags: string[];
   advisor_summary: string | null;
+  alert_level: string | null;
+  quote_time: string | null;
+  alert_source: string | null;
+  suppression_status: string | null;
   email_status: string;
   email_error_message: string | null;
   sent_at: string | null;
@@ -644,6 +648,9 @@ export type TrackedPosition = {
   profit_giveback_pct: number | null;
   holding_days: number | null;
   technical_metrics: Record<string, unknown>;
+  intraday_snapshot: TrackedEtfIntradaySnapshot | null;
+  dynamic_thresholds: DynamicExitThresholds | null;
+  recent_intraday_alerts: TrackedPositionAlert[];
   latest_alert: TrackedPositionAlert | null;
 };
 
@@ -657,4 +664,89 @@ export type TrackedPositionList = {
   total: number;
   email_configured: boolean;
   recipient_email: string;
+};
+
+export type EtfIntradayQuote = {
+  etf_code: string;
+  etf_name: string | null;
+  quote_time: string;
+  trade_date: string;
+  latest_price: number;
+  change_percent: number | null;
+  volume: number | null;
+  turnover: number | null;
+  bid_price: number | null;
+  ask_price: number | null;
+  iopv: number | null;
+  premium_discount_pct: number | null;
+  source: string;
+  freshness_status: string;
+  is_stale: boolean;
+};
+
+export type IntradayEtfWatchItem = {
+  etf_code: string;
+  etf_name: string | null;
+  rank: number | null;
+  sources: string[];
+  quote: EtfIntradayQuote | null;
+};
+
+export type IntradayEtfWatchRun = {
+  id: number;
+  run_type: string;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+  market_session: string | null;
+  watched_count: number;
+  updated_quote_count: number;
+  stale_quote_count: number;
+  alert_count: number;
+  email_sent_count: number;
+  suppressed_count: number;
+  skipped_reason: string | null;
+  error_message: string | null;
+  details: Record<string, unknown>;
+};
+
+export type IntradayEtfWatchStatus = {
+  market_status: string;
+  market_session: string | null;
+  message: string;
+  quote_refresh_seconds: number;
+  page_poll_seconds: number;
+  watched_count: number;
+  top20_signal_run_id: number | null;
+  signal_as_of_date: string | null;
+  signal_status: string;
+  latest_run: IntradayEtfWatchRun | null;
+  items: IntradayEtfWatchItem[];
+};
+
+export type TrackedEtfIntradaySnapshot = {
+  current_price: number | null;
+  quote_time: string | null;
+  trade_date: string | null;
+  price_source: string;
+  is_stale: boolean;
+  freshness_status: string | null;
+  bid_price: number | null;
+  ask_price: number | null;
+  spread_pct: number | null;
+  iopv: number | null;
+  premium_discount_pct: number | null;
+  turnover: number | null;
+  source: string | null;
+  message: string | null;
+};
+
+export type DynamicExitThresholds = {
+  volatility_unit_pct: number | null;
+  hard_stop_pct: number | null;
+  profit_start_pct: number | null;
+  trailing_giveback_pct: number | null;
+  trend_weakening: boolean;
+  liquidity_warnings: string[];
+  structure_warnings: string[];
 };

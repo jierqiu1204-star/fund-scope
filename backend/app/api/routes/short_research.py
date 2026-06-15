@@ -148,6 +148,8 @@ async def list_short_research_assets(
 ) -> ShortResearchAssetListOut:
     try:
         run = await latest_signal_run(session, asset_type=asset_type, theme=theme)
+        if run is None and theme is not None:
+            run = await latest_signal_run(session, asset_type=asset_type)
         if run is None:
             return ShortResearchAssetListOut(items=[], total=0)
         assets, total = await cached_signal_assets(

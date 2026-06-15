@@ -97,6 +97,12 @@ const jobGroups: Array<{ title: string; description: string; actions: JobAction[
         endpoint: "/api/admin/jobs/daily_short_research_signals/run"
       },
       {
+        key: "intraday_etf_watch",
+        label: "运行 ETF 盘中盯盘",
+        description: "手动刷新前 20 ETF 和已追踪 ETF 的公开盘中行情，并检查是否需要发卖出/减仓提醒。",
+        endpoint: "/api/admin/jobs/intraday_etf_watch/run"
+      },
+      {
         key: "daily_short_research_advisor",
         label: "生成 AI 研究报告",
         description: "为最新短线榜单生成重点观察、高位别追、谨慎等保守说明；AI 不改变榜单。",

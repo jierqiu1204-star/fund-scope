@@ -17,7 +17,7 @@ from app.models.entities import Fund, Index, Portfolio, User
 
 @pytest.fixture
 def tmp_path() -> AsyncIterator[Path]:
-    temp_dir = Path(__file__).resolve().parent / ".test-tmp" / uuid4().hex
+    temp_dir = Path(__file__).resolve().parents[2] / ".test-tmp" / uuid4().hex
     temp_dir.mkdir(parents=True, exist_ok=True)
 
     yield temp_dir

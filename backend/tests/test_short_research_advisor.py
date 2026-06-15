@@ -239,7 +239,7 @@ async def test_advisor_api_returns_reports_with_latest_short_research_items(clie
     assert advisor.status_code == 200
     assert advisor.json()["fallback"] == 2
 
-    latest = await client.get("/api/short-research/signals/latest")
+    latest = await client.get("/api/short-research/signals/latest?asset_type=fund")
     assert latest.status_code == 200
     body = latest.json()
     first = body["items"][0]

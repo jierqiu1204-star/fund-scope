@@ -51,8 +51,13 @@ async def test_short_research_status_seeds_about_200_assets(client) -> None:
     assert body["asset_count"] == 200
     assert body["fund_count"] == 117
     assert body["etf_count"] == 83
-    assert len(body["data_health"]) == 200
-    assert all("一年持有" not in item["name"] for item in body["data_health"])
+    assert body["data_health"] == []
+
+    detailed = await client.get("/api/short-research/status?include_health=true")
+    assert detailed.status_code == 200
+    detailed_body = detailed.json()
+    assert len(detailed_body["data_health"]) == 200
+    assert all("一年持有" not in item["name"] for item in detailed_body["data_health"])
 
 
 @pytest.mark.asyncio
@@ -117,6 +122,11 @@ async def test_short_research_asset_detail_returns_charts_and_beginner_explanati
 @pytest.mark.asyncio
 async def test_short_research_filters_sort_and_data_sync_endpoint(client, app, monkeypatch) -> None:
     await _seed_short_research_history(app)
+    signal = await client.post(
+        "/api/short-research/signals/run",
+        json={"as_of_date": "2026-06-05", "asset_type": "etf"},
+    )
+    assert signal.status_code == 200
 
     filtered = await client.get("/api/short-research/assets?asset_type=etf&theme=半导体&sort=return_20d")
 

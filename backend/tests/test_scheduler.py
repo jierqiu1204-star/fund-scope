@@ -40,6 +40,11 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     assert "daily_short_research_data" in job_ids
     assert "daily_short_research_signals" in job_ids
     assert "daily_short_research_advisor" in job_ids
+    assert "intraday_etf_watch_0930" in job_ids
+    assert "intraday_etf_watch_10" in job_ids
+    assert "intraday_etf_watch_11" in job_ids
+    assert "intraday_etf_watch_13_14" in job_ids
+    assert "intraday_etf_watch_1500" in job_ids
     assert "daily_short_etf_data" not in job_ids
     assert "daily_short_etf_signals" not in job_ids
     assert "daily_short_etf_paper" not in job_ids

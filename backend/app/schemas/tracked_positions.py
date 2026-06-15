@@ -5,6 +5,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.schemas.etf_quotes import DynamicExitThresholdsOut, TrackedEtfIntradaySnapshotOut
+
 OrderTimeBucket = Literal["before_15", "after_15", "unknown"]
 
 
@@ -70,6 +72,10 @@ class TrackedPositionAlertOut(BaseModel):
     reasons: list[str]
     risk_flags: list[str]
     advisor_summary: str | None
+    alert_level: str | None = None
+    quote_time: datetime | None = None
+    alert_source: str | None = None
+    suppression_status: str | None = None
     email_status: str
     email_error_message: str | None
     sent_at: datetime | None
@@ -111,6 +117,9 @@ class TrackedPositionOut(BaseModel):
     profit_giveback_pct: float | None = None
     holding_days: int | None = None
     technical_metrics: dict[str, Any] = Field(default_factory=dict)
+    intraday_snapshot: TrackedEtfIntradaySnapshotOut | None = None
+    dynamic_thresholds: DynamicExitThresholdsOut | None = None
+    recent_intraday_alerts: list[TrackedPositionAlertOut] = Field(default_factory=list)
     latest_alert: TrackedPositionAlertOut | None = None
 
 

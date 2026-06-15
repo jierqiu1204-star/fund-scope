@@ -289,6 +289,47 @@ class EtfDataHealth(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
+class EtfIntradayQuote(Base):
+    __tablename__ = "etf_intraday_quotes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    etf_code: Mapped[str] = mapped_column(ForeignKey("tradable_etfs.code", ondelete="CASCADE"))
+    quote_time: Mapped[datetime] = mapped_column(DateTime)
+    trade_date: Mapped[date] = mapped_column(Date)
+    latest_price: Mapped[float] = mapped_column(Float)
+    change_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+    turnover: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bid_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ask_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    iopv: Mapped[float | None] = mapped_column(Float, nullable=True)
+    premium_discount_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source: Mapped[str] = mapped_column(String(64), default="akshare")
+    freshness_status: Mapped[str] = mapped_column(String(32), default="fresh")
+    raw_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class IntradayEtfWatchRun(Base):
+    __tablename__ = "intraday_etf_watch_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_type: Mapped[str] = mapped_column(String(32), default="scheduled")
+    status: Mapped[str] = mapped_column(String(32))
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    market_session: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    watched_count: Mapped[int] = mapped_column(Integer, default=0)
+    updated_quote_count: Mapped[int] = mapped_column(Integer, default=0)
+    stale_quote_count: Mapped[int] = mapped_column(Integer, default=0)
+    alert_count: Mapped[int] = mapped_column(Integer, default=0)
+    email_sent_count: Mapped[int] = mapped_column(Integer, default=0)
+    suppressed_count: Mapped[int] = mapped_column(Integer, default=0)
+    skipped_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    details_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
 class ShortEtfSignalRun(Base):
     __tablename__ = "short_etf_signal_runs"
 
@@ -532,14 +573,6 @@ class TrackedPosition(Base):
 
 class TrackedPositionAlert(Base):
     __tablename__ = "tracked_position_alerts"
-    __table_args__ = (
-        UniqueConstraint(
-            "tracked_position_id",
-            "alert_date",
-            "alert_type",
-            name="uq_tracked_position_alert_day_type",
-        ),
-    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     tracked_position_id: Mapped[int] = mapped_column(
@@ -556,6 +589,10 @@ class TrackedPositionAlert(Base):
     reasons_json: Mapped[list[str]] = mapped_column(JSON, default=list)
     risk_flags_json: Mapped[list[str]] = mapped_column(JSON, default=list)
     advisor_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    alert_level: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    quote_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    alert_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    suppression_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     email_status: Mapped[str] = mapped_column(String(32), default="pending")
     email_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

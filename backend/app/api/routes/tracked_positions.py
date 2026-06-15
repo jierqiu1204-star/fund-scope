@@ -25,6 +25,7 @@ from app.services.tracked_positions.service import (
     latest_signal_context,
     position_analysis,
     recalculate_entry,
+    recent_intraday_alerts_for_position,
     refresh_entry_if_waiting,
 )
 
@@ -36,6 +37,7 @@ async def _position_out(session: AsyncSession, row: TrackedPosition) -> TrackedP
     latest_alert = await latest_alert_for_position(session, row.id)
     _, item, _ = await latest_signal_context(session, row)
     analysis = await position_analysis(session, row, item=item)
+    recent_intraday_alerts = await recent_intraday_alerts_for_position(session, row.id)
     return TrackedPositionOut(
         id=row.id,
         asset_type=row.asset_type,
@@ -60,6 +62,9 @@ async def _position_out(session: AsyncSession, row: TrackedPosition) -> TrackedP
         profit_giveback_pct=analysis.profit_giveback_pct,
         holding_days=analysis.holding_days,
         technical_metrics=analysis.technical_metrics,
+        intraday_snapshot=analysis.intraday_snapshot,
+        dynamic_thresholds=analysis.dynamic_thresholds,
+        recent_intraday_alerts=[alert_out(item) for item in recent_intraday_alerts],
         latest_alert=alert_out(latest_alert) if latest_alert is not None else None,
     )
 

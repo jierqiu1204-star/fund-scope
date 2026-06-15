@@ -4,18 +4,22 @@
 TBD - created by archiving change add-short-etf-research-lab. Update Purpose after archive.
 ## Requirements
 ### Requirement: ETF Universe Excludes Non-Short-Term Funds
-The system SHALL maintain a short-term research universe containing tradable on-exchange ETFs and SHALL exclude ordinary off-exchange funds, one-year holding period funds, closed-period funds, and other products unsuitable for short-term trading simulation.
+The system SHALL maintain a dynamic short-term research universe containing tradable on-exchange ETFs and SHALL exclude ordinary off-exchange funds, money market ETFs, LOF products, one-year holding period funds, closed-period funds, and other products unsuitable for short-term ETF research.
 
 #### Scenario: One-year holding fund is excluded
 - **WHEN** the system builds the short-term ETF universe from available fund and ETF metadata
 - **THEN** products whose names or metadata indicate one-year holding, fixed holding, closed period, or off-exchange-only trading are not included in the short-term ETF universe
 
+#### Scenario: Non-ETF products are excluded
+- **WHEN** the system refreshes the ETF universe from public exchange or fund data sources
+- **THEN** money market ETFs, LOF products, off-exchange funds, closed products, and products without ETF-style exchange trading are not marked as default short-term ETF candidates
+
 #### Scenario: ETF universe is visible
 - **WHEN** the client requests the short-term ETF universe
-- **THEN** the API returns ETF code, name, theme labels, exchange, trading rule label, and latest data status for each included ETF
+- **THEN** the API returns ETF code, name, theme labels, exchange, trading rule label, universe membership, default-display eligibility, and latest data status for each included ETF
 
 ### Requirement: ETF Market Data Is Synchronizable
-The system SHALL synchronize ETF daily market data including date, open, high, low, close, volume, turnover, and percentage change for the configured short-term ETF universe.
+The system SHALL synchronize ETF daily market data including date, open, high, low, close, volume, turnover, and percentage change for the dynamic short-term ETF universe.
 
 #### Scenario: Data sync stores daily prices
 - **WHEN** the user runs ETF data sync from the web UI
@@ -24,6 +28,14 @@ The system SHALL synchronize ETF daily market data including date, open, high, l
 #### Scenario: Data source failure is reported
 - **WHEN** one ETF data source request fails during synchronization
 - **THEN** the task records the ETF code and readable error message while continuing with other ETFs
+
+#### Scenario: Large universe sync is batched
+- **WHEN** the system synchronizes a large ETF universe
+- **THEN** the task processes ETFs in bounded batches and records progress counts for total, succeeded, updated, failed, and skipped ETFs
+
+#### Scenario: Higher priority ETFs update first
+- **WHEN** the daily ETF sync task runs
+- **THEN** tracked ETFs, default-display ETFs, and high-turnover ETFs are synchronized before low-priority ETF records
 
 ### Requirement: ETF Metrics Identify Trend And Risk
 The system SHALL compute deterministic ETF metrics for trend, liquidity, volatility, drawdown, short-term return, medium-term return, and overextension risk.
@@ -37,15 +49,19 @@ The system SHALL compute deterministic ETF metrics for trend, liquidity, volatil
 - **THEN** the ETF metric output includes a liquidity-risk flag
 
 ### Requirement: Short ETF Signals Use Research Language
-The system SHALL generate ranked short-term ETF signal items using deterministic trend, liquidity, and risk metrics, and SHALL frame every conclusion as research observation rather than trading instruction.
+The system SHALL generate ranked short-term ETF signal items using deterministic trend, liquidity, data-quality, and risk metrics, and SHALL frame every conclusion as research observation rather than trading instruction.
 
 #### Scenario: Latest signals are returned
 - **WHEN** the user runs short-term ETF signal generation
-- **THEN** the system persists a signal run with ranked items, score breakdowns, risk flags, theme labels, and observation-oriented conclusions
+- **THEN** the system persists a signal run with ranked items, score breakdowns, risk flags, theme labels, data-quality flags, and observation-oriented conclusions
 
 #### Scenario: Prohibited trade language is absent
 - **WHEN** the API returns a short-term ETF signal item
 - **THEN** it does not include buy, sell, target price, expected return, or guaranteed profit fields
+
+#### Scenario: Low-quality ETF is not shown as default candidate
+- **WHEN** an ETF has insufficient history, stale data, repeated sync failures, or low recent turnover
+- **THEN** it can remain in the all-analyzable universe but is excluded from the default selected ranking and displays a readable data or liquidity risk reason
 
 ### Requirement: Short ETF Paper Trading Simulates Conservative Daily Trades
 The system SHALL provide a short-term ETF paper portfolio that creates virtual orders, positions, cash, equity curve, drawdown, and trading statistics using daily ETF prices and conservative trading constraints.
@@ -70,13 +86,54 @@ The system SHALL generate a rule-first multi-role review for short-term ETF sign
 - **THEN** the original signal item ranks and scores remain unchanged
 
 ### Requirement: Short ETF Frontend Is Operable From The Web
-The system SHALL expose a Chinese web interface for data preparation, signal generation, signal review, paper portfolio updates, and visual result inspection.
+The system SHALL expose a Chinese web interface for data preparation, signal generation, signal review, paper portfolio updates, universe filtering, and visual result inspection.
 
 #### Scenario: User opens short ETF tab
-- **WHEN** the user opens `/strategy-lab?view=short-etf`
-- **THEN** the UI displays ETF data status, sync actions, latest signals, risk labels, paper trading charts, and empty/error states in Chinese
+- **WHEN** the user opens the ETF mode in `/short-term`
+- **THEN** the UI displays ETF universe counts, data status, sync actions, latest signals, risk labels, chart details, tracking actions, and empty/error states in Chinese
 
 #### Scenario: High risk is visually prominent
-- **WHEN** a signal item has chase-risk, high-volatility, or liquidity-risk flags
+- **WHEN** a signal item has chase-risk, high-volatility, liquidity-risk, stale-data, or insufficient-history flags
 - **THEN** the UI displays those risks prominently near the ETF name and score
+
+#### Scenario: User switches ETF universe view
+- **WHEN** the user changes the ETF universe filter between default selected, all analyzable, and low-liquidity-inclusive views
+- **THEN** the list refreshes without mixing off-exchange funds into the ETF result set
+
+### Requirement: ETF Universe Is Refreshable From Public Sources
+The system SHALL provide a web-runnable job that refreshes the tradable ETF universe from public data sources and upserts ETF metadata into persistent storage.
+
+#### Scenario: Universe refresh is idempotent
+- **WHEN** the ETF universe refresh job is run repeatedly
+- **THEN** existing ETF records are updated without duplicate ETF rows and newly discovered eligible ETFs are inserted
+
+#### Scenario: Universe refresh reports counts
+- **WHEN** the ETF universe refresh job completes
+- **THEN** the result reports total discovered ETFs, inserted ETFs, updated ETFs, excluded ETFs, default-display ETFs, and failures
+
+### Requirement: ETF Default Display Uses Quality Gates
+The system SHALL separate all stored ETFs from the default short-term display by applying deterministic quality gates.
+
+#### Scenario: Qualified ETF appears in default display
+- **WHEN** an ETF has sufficient history, current data, valid daily prices, and recent average turnover above the configured threshold
+- **THEN** it is eligible for the default ETF ranking view
+
+#### Scenario: Unqualified ETF remains searchable
+- **WHEN** an ETF fails a default-display quality gate but still has analyzable data
+- **THEN** it remains available in the all-analyzable view with the failing quality reason shown to the user
+
+### Requirement: ETF Observation Portfolio Produces Target Weights
+The system SHALL generate a rule-based ETF observation portfolio that expresses selected ETF exposure as target weights plus a cash weight for manual user reference.
+
+#### Scenario: Observation portfolio returns weights
+- **WHEN** the system generates the latest ETF observation portfolio
+- **THEN** the result includes ETF codes, names, target weights, cash weight, score evidence, risk reasons, and data date
+
+#### Scenario: High-risk conditions increase cash
+- **WHEN** top-ranked ETFs are overextended, volatile, illiquid, or data-stale
+- **THEN** the observation portfolio reduces ETF exposure or increases cash weight rather than presenting a fully invested portfolio
+
+#### Scenario: Observation portfolio is not a trade instruction
+- **WHEN** the observation portfolio is returned by API or UI
+- **THEN** it is labeled as research-only manual reference and does not include automatic order instructions
 
