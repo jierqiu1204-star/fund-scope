@@ -62,5 +62,5 @@
 - [x] 8.4 Add backend tests for dynamic hard stop, trailing profit, trend weakening, liquidity risk, premium/discount risk, and alert cooldown.
 - [x] 8.5 Add API tests for tracked-position intraday fields and `GET /api/etf-quotes/tracked`.
 - [x] 8.6 Run `uv run pytest`, `uv run ruff check .`, `uv run mypy app`, `corepack pnpm exec tsc --noEmit`, and `corepack pnpm build:static`.
-- [ ] 8.7 Deploy to `110.42.222.9`, run migrations, manually run `intraday_etf_watch`, and verify `/short-term` shows fresh ETF quote status.
+- [x] 8.7 Deploy to `110.42.222.9`, run migrations, manually run `intraday_etf_watch`, and verify `/short-term` shows fresh ETF quote status.
 
