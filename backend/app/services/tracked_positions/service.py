@@ -58,6 +58,12 @@ ALERT_TAKE_PROFIT_WATCH = "take_profit_watch"
 ALERT_TRAILING_TAKE_PROFIT = "trailing_take_profit"
 ALERT_TREND_WEAKENING = "trend_weakening"
 ALERT_HARD_STOP = "hard_stop"
+EMAIL_ALERT_TYPES = {
+    ALERT_EXIT_WATCH,
+    ALERT_TRAILING_TAKE_PROFIT,
+    ALERT_TREND_WEAKENING,
+    ALERT_HARD_STOP,
+}
 
 TAKE_PROFIT_WATCH_PCT = 3.0
 TRAILING_START_PROFIT_PCT = 5.0
@@ -398,13 +404,23 @@ def _exit_signal(
 
 def _alert_type_label(alert_type: str) -> str:
     return {
-        ALERT_EXIT_WATCH: "退出观察提醒",
-        ALERT_RISK_WARNING: "风险提醒",
-        ALERT_TAKE_PROFIT_WATCH: "止盈观察提醒",
-        ALERT_TRAILING_TAKE_PROFIT: "移动止盈提醒",
-        ALERT_TREND_WEAKENING: "趋势转弱提醒",
-        ALERT_HARD_STOP: "硬止损提醒",
-    }.get(alert_type, "风险提醒")
+        ALERT_EXIT_WATCH: "卖出/减仓提醒",
+        ALERT_TRAILING_TAKE_PROFIT: "卖出/减仓提醒",
+        ALERT_TREND_WEAKENING: "卖出/减仓提醒",
+        ALERT_HARD_STOP: "止损提醒",
+    }.get(alert_type, "网页风险提示")
+
+
+def _should_send_email(alert_type: str) -> bool:
+    return alert_type in EMAIL_ALERT_TYPES
+
+
+def _web_only_message(alert_type: str) -> str:
+    if alert_type == ALERT_RISK_WARNING:
+        return "仅网页提示：这是数据质量或盘中结构提示，不是明确卖出/减仓信号。"
+    if alert_type == ALERT_TAKE_PROFIT_WATCH:
+        return "仅网页提示：止盈观察用于提醒你关注利润，不是明确卖出/减仓信号。"
+    return "仅网页提示：不是明确卖出/减仓信号。"
 
 
 def _performance_analysis(
@@ -1111,6 +1127,14 @@ async def create_alert_if_needed(
     session.add(alert)
     await session.commit()
     await session.refresh(alert)
+
+    if not _should_send_email(alert.alert_type):
+        alert.suppression_status = "web_only"
+        alert.email_status = "skipped"
+        alert.email_error_message = _web_only_message(alert.alert_type)
+        await session.commit()
+        await session.refresh(alert)
+        return alert, "web_only"
 
     user = await session.get(User, 1)
     assert user is not None

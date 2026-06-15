@@ -342,7 +342,7 @@ async def test_high_watch_without_profit_does_not_send_sell_alert(client, app, s
 
 
 @pytest.mark.asyncio
-async def test_take_profit_watch_sends_alert_for_profitable_high_watch(client, app, settings, monkeypatch) -> None:
+async def test_take_profit_watch_is_web_only_for_profitable_high_watch(client, app, settings, monkeypatch) -> None:
     await _seed_nav_series(app, [(date(2026, 6, 1), 1.0), (date(2026, 6, 5), 1.04)])
     await _seed_signal(app, conclusion="高位观察", risk_flags=["追高风险"], action_label="高位别追")
     await client.post(
@@ -366,9 +366,12 @@ async def test_take_profit_watch_sends_alert_for_profitable_high_watch(client, a
         alerts = (await session.scalars(select(TrackedPositionAlert))).all()
 
     assert result["alerts_created"] == 1
+    assert result.get("web_only", 0) == 1
+    assert result["emails_sent"] == 0
     assert alerts[0].alert_type == "take_profit_watch"
-    assert "止盈观察" in sent[0]["title"]
+    assert alerts[0].email_status == "skipped"
     assert any("盈利" in reason for reason in alerts[0].reasons_json)
+    assert sent == []
 
 
 @pytest.mark.asyncio
@@ -552,4 +555,4 @@ async def test_exit_watch_sends_email_once_per_signal_day(client, app, settings,
     assert alerts[0].email_status == "sent"
     assert sent[0]["recipient"] == "19535838578@163.com"
     assert sent[0]["template_name"] == "tracked_position_alert.html.j2"
-    assert "退出观察提醒" in sent[0]["payload"]["title"]
+    assert "卖出/减仓提醒" in sent[0]["payload"]["title"]

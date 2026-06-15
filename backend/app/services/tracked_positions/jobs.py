@@ -31,6 +31,7 @@ async def daily_tracked_position_alerts_job(
         "emails_sent": 0,
         "emails_failed": 0,
         "emails_skipped": 0,
+        "web_only": 0,
         "deduplicated": 0,
         "no_signal": 0,
     }
@@ -52,4 +53,6 @@ async def daily_tracked_position_alerts_job(
             result["emails_failed"] += 1
         elif status == "email_skipped":
             result["emails_skipped"] += 1
+        elif status == "web_only":
+            result["web_only"] += 1
     return result

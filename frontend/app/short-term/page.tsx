@@ -91,7 +91,7 @@ const assetModes: Record<
     dataButton: "拉取近 120 天 ETF 日线",
     trackingTitle: "标注你已经在证券账户买入的场内 ETF",
     trackingDescription:
-      "ETF 追踪按公开日线收盘价估算，不连接券商账户。系统每天检查价格、成交额、趋势转弱和止盈保护，触发风险时发邮件提醒你人工判断。",
+      "ETF 追踪按公开行情估算，不连接券商账户。数据滞后、暂无 IOPV 这类问题只在网页提示；只有硬止损、移动止盈、趋势转弱、退出观察才发邮件提醒你人工判断。",
     trackingEmpty: "还没有追踪记录。左侧选择一只场内 ETF 后，点“我已买入，开始追踪”。",
     detailEmpty: "左侧选择一只 ETF 后，这里会显示走势、回撤、成交额、近期涨跌和解释。",
     noResults: "当前筛选条件下没有 ETF 结果。可以换一个方向，或先点击“拉取近 120 天 ETF 日线”。",
@@ -334,24 +334,57 @@ function trackingStatusLabel(status: string) {
 
 function alertTypeLabel(alertType: string) {
   if (alertType === "exit_watch") {
-    return "退出观察提醒";
+    return "卖出/减仓提醒";
   }
   if (alertType === "risk_warning") {
-    return "风险提醒";
+    return "数据质量提示";
   }
   if (alertType === "take_profit_watch") {
-    return "止盈观察提醒";
+    return "止盈观察（网页提示）";
   }
   if (alertType === "trailing_take_profit") {
-    return "移动止盈提醒";
+    return "卖出/减仓提醒";
   }
   if (alertType === "trend_weakening") {
-    return "趋势转弱提醒";
+    return "卖出/减仓提醒";
   }
   if (alertType === "hard_stop") {
-    return "硬止损提醒";
+    return "止损提醒";
   }
   return alertType;
+}
+
+function isEmailExitAlert(alertType: string) {
+  return ["exit_watch", "trailing_take_profit", "trend_weakening", "hard_stop"].includes(alertType);
+}
+
+function alertDeliveryLabel(alert: { alert_type: string; email_status: string; suppression_status: string | null }) {
+  if (alert.suppression_status === "web_only" || !isEmailExitAlert(alert.alert_type)) {
+    return "仅网页提示";
+  }
+  if (alert.suppression_status === "suppressed") {
+    return "冷却去重，未重复发邮件";
+  }
+  if (alert.email_status === "sent") {
+    return "已发邮件";
+  }
+  if (alert.email_status === "failed") {
+    return "邮件发送失败";
+  }
+  if (alert.email_status === "skipped") {
+    return "未发邮件";
+  }
+  return "等待发送";
+}
+
+function latestAlertTone(alert: { alert_type: string; email_status: string; suppression_status: string | null }) {
+  if (alert.alert_type === "hard_stop") {
+    return "bg-rose-50 text-rose-800";
+  }
+  if (alert.suppression_status === "web_only" || !isEmailExitAlert(alert.alert_type)) {
+    return "bg-sky-50 text-sky-800";
+  }
+  return "bg-amber-50 text-amber-900";
 }
 
 function exitSignalTone(level: string) {
@@ -426,19 +459,6 @@ function formatDateTime(value: string | null | undefined) {
     minute: "2-digit",
     second: "2-digit"
   }).format(new Date(value));
-}
-
-function alertLevelLabel(value: string | null | undefined) {
-  if (value === "urgent") {
-    return "紧急";
-  }
-  if (value === "warning") {
-    return "提醒";
-  }
-  if (value === "watch") {
-    return "观察";
-  }
-  return "记录";
 }
 
 function AssetPaginationBar({
@@ -862,7 +882,7 @@ export default function ShortTermPage() {
                   </h3>
                 </div>
                 <span className={`rounded-full px-3 py-1 text-xs font-semibold ${conclusionTone(item.current_snapshot.current_label ?? "数据不足")}`}>
-                  {item.current_snapshot.current_label ?? "等待排序"}
+                  买入观察：{item.current_snapshot.current_label ?? "等待排序"}
                 </span>
               </div>
               <div className="mt-4 grid gap-2 text-sm text-ink/65">
@@ -919,26 +939,27 @@ export default function ShortTermPage() {
                 ) : null}
               </div>
               <div className={`mt-4 rounded-[16px] p-3 text-sm leading-6 ${exitSignalTone(item.exit_signal.level)}`}>
+                <p className="text-xs font-semibold opacity-75">持仓处理状态</p>
                 <p className="font-semibold">{item.exit_signal.label}</p>
                 <p className="mt-1">{item.exit_signal.reason ?? "暂无卖出/减仓提醒，继续观察公开数据。"}</p>
               </div>
               {item.latest_alert ? (
-                <div className="mt-4 rounded-[16px] bg-rose-50 p-3 text-sm leading-6 text-rose-800">
+                <div className={`mt-4 rounded-[16px] p-3 text-sm leading-6 ${latestAlertTone(item.latest_alert)}`}>
                   <p className="font-semibold">
-                    {alertTypeLabel(item.latest_alert.alert_type)}（{alertLevelLabel(item.latest_alert.alert_level)}）
+                    {alertTypeLabel(item.latest_alert.alert_type)} · {alertDeliveryLabel(item.latest_alert)}
                   </p>
                   <p>{item.latest_alert.reasons[0] ?? item.latest_alert.trigger_label}</p>
                   {item.latest_alert.alert_source ? (
                     <p className="mt-1 text-xs">
                       来源：{priceSourceLabel(item.latest_alert.alert_source)}；行情时间：
                       {formatDateTime(item.latest_alert.quote_time)}
-                      {item.latest_alert.suppression_status === "suppressed" ? "；已被冷却去重，不重复发邮件" : ""}
+                      {item.latest_alert.email_error_message ? `；${item.latest_alert.email_error_message}` : ""}
                     </p>
                   ) : null}
                 </div>
               ) : (
                 <p className="mt-4 rounded-[16px] bg-paper p-3 text-sm leading-6 text-ink/55">
-                  暂无邮件提醒。高位观察不会单独触发邮件，必须同时有盈利保护、趋势转弱或明显风险。
+                  暂无卖出/减仓邮件。数据滞后、暂无 IOPV 等质量提示只在网页展示，不打扰邮箱。
                 </p>
               )}
               {item.recent_intraday_alerts.length ? (
@@ -947,7 +968,7 @@ export default function ShortTermPage() {
                   {item.recent_intraday_alerts.slice(0, 3).map((alert) => (
                     <p key={alert.id} className="mt-1">
                       {formatDateTime(alert.quote_time)} · {alertTypeLabel(alert.alert_type)} ·{" "}
-                      {alert.suppression_status === "suppressed" ? "冷却去重" : alert.email_status}
+                      {alertDeliveryLabel(alert)}
                     </p>
                   ))}
                 </div>
@@ -1183,6 +1204,11 @@ export default function ShortTermPage() {
                         : `未进默认精选：${exclusionReasons.length ? exclusionReasons.join("；") : "数据质量或流动性未达标"}。`}
                     </div>
                   ) : null}
+                  {assetType === "etf" ? (
+                    <p className={`mt-3 text-xs leading-5 ${isSelected ? "text-white/60" : "text-ink/50"}`}>
+                      评分高代表适合放进买入观察清单；你已经买入后的去留，要看买入价、当前盈亏、趋势转弱和止盈/止损提醒。
+                    </p>
+                  ) : null}
                   <p className={`mt-3 line-clamp-2 text-sm leading-6 ${isSelected ? "text-white/65" : "text-ink/60"}`}>
                     {rationaleText(item, "key_reason", "按近期趋势、风险和数据质量生成。")}
                   </p>
@@ -1220,6 +1246,9 @@ export default function ShortTermPage() {
                     </h2>
                     <p className="mt-2 rounded-[14px] bg-paper px-4 py-3 text-sm leading-6 text-ink/65">
                       {assetTradingNote(selectedAsset.asset_type, selectedAsset.name)}
+                      {selectedAsset.asset_type === "etf"
+                        ? " 评分和标签是买入观察状态；持仓处理状态会根据你的买入价、盘中价格、止盈/止损和趋势变化单独计算。"
+                        : ""}
                     </p>
                     <p className="mt-2 text-sm leading-6 text-ink/65">{selectedAsset.investment_direction}</p>
                     {selectedTracked.length ? (

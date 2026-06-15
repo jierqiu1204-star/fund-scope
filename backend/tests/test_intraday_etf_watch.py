@@ -319,6 +319,69 @@ async def test_dynamic_hard_stop_and_intraday_cooldown(app, settings, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_intraday_structure_warning_is_web_only(app, settings, monkeypatch) -> None:
+    await _seed_signal_run(app, count=1)
+    await _seed_price_history_from_closes(
+        app,
+        "510000",
+        [1.00, 1.002, 1.001, 1.003, 1.002, 1.001, 1.000, 1.001, 1.000, 1.001],
+        start=datetime.now().date() - timedelta(days=14),
+    )
+    now = datetime.now().replace(microsecond=0)
+    sent: list[dict] = []
+
+    async def fake_send_template(self, session, *, recipient: str, template_name: str, payload: dict) -> str:
+        sent.append(payload)
+        return "sent"
+
+    monkeypatch.setattr("app.services.notifier.Notifier.send_template", fake_send_template)
+
+    async with app.state.db.session() as session:
+        position = TrackedPosition(
+            asset_type="etf",
+            asset_code="510000",
+            asset_name="Structure ETF",
+            buy_date=now.date() - timedelta(days=10),
+            buy_amount=3000,
+            entry_price=1.0,
+            entry_price_date=now.date() - timedelta(days=10),
+            estimated_shares=3000,
+            status="active",
+        )
+        session.add(position)
+        session.add(
+            EtfIntradayQuote(
+                etf_code="510000",
+                quote_time=now,
+                trade_date=now.date(),
+                latest_price=1.001,
+                bid_price=0.995,
+                ask_price=1.007,
+                turnover=5_000_000,
+                iopv=None,
+                premium_discount_pct=1.2,
+                source="test",
+                freshness_status="fresh",
+                raw_json={},
+            )
+        )
+        user = await session.get(User, 1)
+        assert user is not None
+        user.smtp_host = "smtp.163.com"
+        await session.commit()
+        await session.refresh(position)
+
+        alert, status = await create_alert_if_needed(session, position, settings)
+
+    assert alert is not None
+    assert alert.alert_type == "risk_warning"
+    assert alert.alert_level == "watch"
+    assert alert.email_status == "skipped"
+    assert status == "web_only"
+    assert sent == []
+
+
+@pytest.mark.asyncio
 async def test_dynamic_trailing_profit_trend_and_structure_warnings(app) -> None:
     today = datetime.now().date()
     base = today - timedelta(days=14)

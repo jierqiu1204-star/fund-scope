@@ -111,7 +111,7 @@ const jobGroups: Array<{ title: string; description: string; actions: JobAction[
       {
         key: "daily_tracked_position_alerts",
         label: "检查追踪提醒",
-        description: "检查你标注买入的基金/ETF，触发退出观察或明显风险时发送邮件提醒。",
+        description: "检查你标注买入的基金/ETF；只有退出观察、移动止盈、趋势转弱或硬止损才发邮件，数据质量问题只在网页提示。",
         endpoint: "/api/admin/jobs/daily_tracked_position_alerts/run"
       }
     ]
