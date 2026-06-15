@@ -192,6 +192,7 @@ async def test_quote_normalization_stale_handling_and_persist_only_watched(app) 
                     "code": "510000",
                     "latest_price": 1.25,
                     "quote_time": quote_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "provider_timestamp": pd.Timestamp(quote_time),
                 },
                 {
                     "code": "999999",
@@ -208,6 +209,7 @@ async def test_quote_normalization_stale_handling_and_persist_only_watched(app) 
     assert result["details"]["signal_run_id"] == run_id
     assert result["updated_quote_count"] == 1
     assert [row.etf_code for row in rows] == ["510000"]
+    assert rows[0].raw_json["provider_timestamp"] == quote_time.isoformat()
 
 
 @pytest.mark.asyncio

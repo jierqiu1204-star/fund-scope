@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
+from math import isfinite
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
@@ -130,6 +131,32 @@ def _parse_quote_time(record: dict[str, Any], fallback: datetime | None = None) 
     return (fallback or datetime.now(ASIA_SHANGHAI)).astimezone(ASIA_SHANGHAI).replace(tzinfo=None)
 
 
+def _json_safe(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, datetime | date):
+        return value.isoformat()
+    if isinstance(value, float):
+        return value if isfinite(value) else None
+    if isinstance(value, int | str | bool):
+        return value
+    if hasattr(value, "item"):
+        try:
+            return _json_safe(value.item())
+        except (TypeError, ValueError):
+            pass
+    if hasattr(value, "isoformat"):
+        try:
+            return str(value.isoformat())
+        except (TypeError, ValueError):
+            pass
+    return str(value)
+
+
+def _json_safe_record(record: dict[str, Any]) -> dict[str, Any]:
+    return {str(key): _json_safe(value) for key, value in record.items()}
+
+
 def normalize_spot_record(record: dict[str, Any], *, fallback_time: datetime | None = None) -> NormalizedQuote | None:
     code = _text(record, "代码", "code", "symbol")
     price = _number(record, "最新价", "现价", "最新", "price", "latest_price")
@@ -149,7 +176,7 @@ def normalize_spot_record(record: dict[str, Any], *, fallback_time: datetime | N
         iopv=_number(record, "IOPV", "iopv"),
         premium_discount_pct=_number(record, "折价率", "溢价率", "折溢价率", "premium_discount_pct"),
         source=QUOTE_SOURCE_AKSHARE,
-        raw=dict(record),
+        raw=_json_safe_record(record),
     )
 
 
