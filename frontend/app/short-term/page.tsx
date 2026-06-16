@@ -1,7 +1,8 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ReactNode, useEffect, useMemo, useState } from "react";
+import type { CSSProperties, ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Area,
   AreaChart,
@@ -563,6 +564,8 @@ function SectionKicker({ eyebrow, title, description }: { eyebrow: string; title
 
 export default function ShortTermPage() {
   const queryClient = useQueryClient();
+  const detailColumnRef = useRef<HTMLDivElement | null>(null);
+  const [detailColumnHeight, setDetailColumnHeight] = useState<number | null>(null);
   const [assetType, setAssetType] = useState<AssetType>("etf");
   const [etfUniverse, setEtfUniverse] = useState<EtfUniverse>("default");
   const [theme, setTheme] = useState("all");
@@ -807,6 +810,31 @@ export default function ShortTermPage() {
   const trackingEntry = trackingPoints.find((point) => point.isEntry);
   const trackingHigh = trackingPoints.find((point) => point.isHigh);
   const trackingCurrent = trackingPoints.find((point) => point.isCurrent);
+  const workbenchStyle = {
+    "--short-term-detail-height": detailColumnHeight ? `${detailColumnHeight}px` : undefined
+  } as CSSProperties & { "--short-term-detail-height"?: string };
+
+  useEffect(() => {
+    const node = detailColumnRef.current;
+    if (!node || typeof ResizeObserver === "undefined") {
+      setDetailColumnHeight(null);
+      return;
+    }
+
+    const updateHeight = () => {
+      const nextHeight = Math.ceil(node.getBoundingClientRect().height);
+      setDetailColumnHeight((currentHeight) => (currentHeight === nextHeight ? currentHeight : nextHeight));
+    };
+
+    updateHeight();
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(node);
+    window.addEventListener("resize", updateHeight);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", updateHeight);
+    };
+  }, []);
 
   return (
     <div className="space-y-6">
@@ -901,8 +929,8 @@ export default function ShortTermPage() {
         </p>
       )}
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(360px,0.78fr)_minmax(0,1.22fr)]">
-        <Panel className="rounded-[24px] xl:max-h-[calc(100vh-7rem)] xl:overflow-auto">
+      <div className="grid gap-6 xl:grid-cols-[minmax(360px,0.78fr)_minmax(0,1.22fr)]" style={workbenchStyle}>
+        <Panel className="rounded-[24px] xl:h-[var(--short-term-detail-height)] xl:overflow-auto">
           <div className="mb-5 flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
             <SectionKicker
               eyebrow="买入观察榜单"
@@ -1061,7 +1089,7 @@ export default function ShortTermPage() {
           </div>
         </Panel>
 
-        <div className="space-y-6 xl:sticky xl:top-6 xl:self-start">
+        <div ref={detailColumnRef} className="space-y-6 xl:sticky xl:top-6 xl:self-start">
           <Panel className="rounded-[24px]">
             {selectedAsset ? (
               <>
