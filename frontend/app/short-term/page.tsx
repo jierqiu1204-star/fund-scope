@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { ReactNode, useEffect, useMemo, useState } from "react";
 import {
   Area,
   AreaChart,
@@ -16,7 +16,7 @@ import {
   YAxis
 } from "recharts";
 
-import { Panel, SectionHeader, StatPill } from "@/components/ui";
+import { Panel, StatPill } from "@/components/ui";
 import { api } from "@/lib/api";
 import { formatCurrency, formatDate, formatPercent } from "@/lib/format";
 import type {
@@ -508,6 +508,59 @@ function AssetPaginationBar({
   );
 }
 
+function TaskButton({
+  children,
+  variant = "secondary",
+  disabled,
+  onClick
+}: {
+  children: ReactNode;
+  variant?: "primary" | "secondary";
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  const className =
+    variant === "primary"
+      ? "bg-ink text-white hover:bg-pine"
+      : "border border-ink/10 bg-white text-ink hover:border-accent hover:text-accent";
+  return (
+    <button
+      className={`rounded-full px-4 py-2 text-sm font-semibold transition disabled:opacity-60 ${className}`}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      {children}
+    </button>
+  );
+}
+
+function WorkbenchMetric({
+  label,
+  value,
+  tone = "bg-white text-ink"
+}: {
+  label: string;
+  value: string;
+  tone?: string;
+}) {
+  return (
+    <div className={`rounded-[18px] border border-ink/10 px-4 py-3 ${tone}`}>
+      <p className="text-[11px] font-semibold uppercase tracking-[0.18em] opacity-60">{label}</p>
+      <p className="mt-1 text-base font-semibold leading-tight">{value}</p>
+    </div>
+  );
+}
+
+function SectionKicker({ eyebrow, title, description }: { eyebrow: string; title: string; description?: string }) {
+  return (
+    <div>
+      <p className="text-xs font-semibold uppercase tracking-[0.22em] text-accent">{eyebrow}</p>
+      <h2 className="mt-2 text-2xl font-semibold text-ink">{title}</h2>
+      {description ? <p className="mt-2 text-sm leading-6 text-ink/65">{description}</p> : null}
+    </div>
+  );
+}
+
 export default function ShortTermPage() {
   const queryClient = useQueryClient();
   const [assetType, setAssetType] = useState<AssetType>("etf");
@@ -756,73 +809,91 @@ export default function ShortTermPage() {
   const trackingCurrent = trackingPoints.find((point) => point.isCurrent);
 
   return (
-    <div className="space-y-8">
-      <SectionHeader
-        eyebrow="短线研究"
-        title={mode.title}
-        description={mode.description}
-        action={
-          <div className="flex flex-wrap gap-3">
-            <button
-              className="rounded-full border border-ink/10 bg-white px-5 py-3 text-sm font-semibold text-ink transition hover:border-accent disabled:opacity-60"
-              disabled={syncData.isPending}
-              onClick={() => syncData.mutate()}
-            >
-              {syncData.isPending ? "正在准备数据..." : mode.dataButton}
-            </button>
-            <button
-              className="rounded-full bg-ink px-5 py-3 text-sm font-semibold text-white transition hover:bg-pine disabled:opacity-60"
-              disabled={runSignals.isPending}
-              onClick={() => runSignals.mutate()}
-            >
-              {runSignals.isPending ? "正在生成排序..." : "生成短线排序"}
-            </button>
-            <button
-              className="rounded-full border border-ink/10 bg-white px-5 py-3 text-sm font-semibold text-ink transition hover:border-accent disabled:opacity-60"
-              disabled={runAdvisor.isPending}
-              onClick={() => runAdvisor.mutate()}
-            >
-              {runAdvisor.isPending ? "正在生成报告..." : "生成 AI 研究报告"}
-            </button>
+    <div className="space-y-6">
+      <Panel className="rounded-[24px] bg-white/90">
+        <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-start">
+          <SectionKicker eyebrow="短线研究工作台" title={mode.title} description={mode.description} />
+          <div className="flex flex-wrap gap-2 xl:justify-end">
+            <TaskButton disabled={syncData.isPending} onClick={() => syncData.mutate()}>
+              {syncData.isPending ? "准备数据中" : mode.dataButton}
+            </TaskButton>
+            <TaskButton variant="primary" disabled={runSignals.isPending} onClick={() => runSignals.mutate()}>
+              {runSignals.isPending ? "排序生成中" : "生成短线排序"}
+            </TaskButton>
+            <TaskButton disabled={runAdvisor.isPending} onClick={() => runAdvisor.mutate()}>
+              {runAdvisor.isPending ? "报告生成中" : "AI 研究说明"}
+            </TaskButton>
           </div>
-        }
-      />
+        </div>
 
-      <div className="flex flex-wrap gap-3 rounded-[24px] border border-ink/10 bg-white p-3">
-        {(["etf", "fund"] as AssetType[]).map((item) => {
-          const isActive = assetType === item;
-          return (
-            <button
-              key={item}
-              className={`rounded-full px-5 py-3 text-sm font-semibold transition ${
-                isActive ? "bg-ink text-white" : "bg-paper text-ink hover:bg-accentSoft"
-              }`}
-              onClick={() => {
-                setAssetType(item);
-                setTheme("all");
-                setSelected(null);
-              }}
-            >
-              {assetModes[item].label}
-            </button>
-          );
-        })}
-      </div>
+        <div className="mt-5 flex flex-wrap gap-2 rounded-[20px] bg-paper p-2">
+          {(["etf", "fund"] as AssetType[]).map((item) => {
+            const isActive = assetType === item;
+            return (
+              <button
+                key={item}
+                className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
+                  isActive ? "bg-ink text-white shadow-sm" : "bg-white text-ink hover:text-accent"
+                }`}
+                onClick={() => {
+                  setAssetType(item);
+                  setTheme("all");
+                  setSelected(null);
+                }}
+              >
+                {assetModes[item].label}
+              </button>
+            );
+          })}
+        </div>
 
-      <div className="grid gap-4 md:grid-cols-3 xl:grid-cols-6">
-        <StatPill label={assetType === "etf" ? "ETF 全量池" : mode.poolLabel} value={`${assetCount(statusData, assetType)} 只`} tone="bg-white text-ink" />
+        <div className="mt-5 grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+          <WorkbenchMetric label={assetType === "etf" ? "ETF 全量池" : mode.poolLabel} value={`${assetCount(statusData, assetType)} 只`} />
+          {assetType === "etf" ? (
+            <WorkbenchMetric label="默认精选" value={`${statusData?.etf_default_display_count ?? 0} 只`} tone="bg-emerald-50 text-emerald-800" />
+          ) : null}
+          <WorkbenchMetric label="当前列表" value={`${visibleAssets.length}/${totalAssetCount} 只`} tone="bg-accentSoft/45 text-ink" />
+          <WorkbenchMetric label={mode.latestLabel} value={formatDate(currentLatestDate)} />
+          <WorkbenchMetric label="短线观察" value={`${observableCount} 只`} tone="bg-emerald-50 text-emerald-800" />
+          <WorkbenchMetric label="高位观察" value={`${highRiskCount} 只`} tone="bg-rose-50 text-rose-800" />
+          {assetType === "etf" ? (
+            <WorkbenchMetric label="滞后/失败" value={`${statusData?.etf_data_stale_count ?? 0} / ${statusData?.etf_failed_count ?? 0} 只`} tone="bg-amber-50 text-amber-900" />
+          ) : null}
+          {assetType !== "etf" ? (
+            <WorkbenchMetric label="数据异常" value={`${currentDataIssueCount} 只`} tone="bg-amber-50 text-amber-900" />
+          ) : null}
+        </div>
+
         {assetType === "etf" ? (
-          <StatPill label="默认精选" value={`${statusData?.etf_default_display_count ?? 0} 只`} tone="bg-emerald-100 text-emerald-800" />
+          <div className="mt-4 grid gap-3 rounded-[20px] border border-ink/10 bg-ink px-4 py-3 text-white md:grid-cols-4">
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-white/50">盘中盯盘</p>
+              <p className="mt-1 text-sm text-white/75">评分前 20 + 已追踪 ETF</p>
+            </div>
+            <div>
+              <p className="text-xs text-white/50">市场状态</p>
+              <p className="font-semibold">{marketStatusLabel(intradayWatch.data?.market_status)}</p>
+            </div>
+            <div>
+              <p className="text-xs text-white/50">盯盘数量</p>
+              <p className="font-semibold">{intradayWatch.data?.watched_count ?? 0} 只</p>
+            </div>
+            <div>
+              <p className="text-xs text-white/50">最近运行</p>
+              <p className="font-semibold">{formatDateTime(intradayWatch.data?.latest_run?.finished_at)}</p>
+            </div>
+          </div>
         ) : null}
-        <StatPill label="分类口径" value={mode.classification} />
-        <StatPill label="当前页" value={`${visibleAssets.length}/${totalAssetCount} 只`} tone="bg-accentSoft text-ink" />
-        <StatPill label={mode.latestLabel} value={formatDate(currentLatestDate)} tone="bg-white text-ink" />
-        {assetType === "etf" ? (
-          <StatPill label="滞后/失败" value={`${statusData?.etf_data_stale_count ?? 0} / ${statusData?.etf_failed_count ?? 0} 只`} tone="bg-amber-100 text-amber-900" />
+
+        {lastResult ? (
+          <details className="mt-4 rounded-[18px] bg-paper px-4 py-3 text-sm text-ink/65">
+            <summary className="cursor-pointer font-semibold text-ink">查看最近一次任务结果</summary>
+            <pre className="mt-3 max-h-40 overflow-auto rounded-[14px] bg-white p-3 text-xs leading-5">
+              {safeSummary(lastResult)}
+            </pre>
+          </details>
         ) : null}
-        <StatPill label="短线观察" value={`${observableCount} 只`} tone="bg-emerald-100 text-emerald-800" />
-        <StatPill label="高位观察" value={`${highRiskCount} 只`} tone="bg-rose-100 text-rose-800" />
-      </div>
+      </Panel>
 
       {(syncData.isError || runSignals.isError || runAdvisor.isError || status.isError || intradayWatch.isError) && (
         <p className="rounded-[18px] bg-rose-50 px-4 py-3 text-sm text-rose-700">
@@ -830,249 +901,18 @@ export default function ShortTermPage() {
         </p>
       )}
 
-      {assetType === "etf" ? (
-        <Panel className="rounded-[24px]">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.22em] text-accent">盘中盯盘</p>
-              <h2 className="mt-2 text-2xl font-semibold text-ink">每天评分前 20 ETF + 你已追踪的 ETF</h2>
-              <p className="mt-2 text-sm leading-6 text-ink/65">
-                页面每 30 秒读取后端缓存；后端只在 A 股交易时段按公开行情刷新，不连接券商账户，不会自动交易。
-              </p>
-            </div>
-            <div className="grid gap-3 text-sm text-ink/65 md:grid-cols-2 xl:grid-cols-4">
-              <StatPill label="市场状态" value={marketStatusLabel(intradayWatch.data?.market_status)} tone="bg-white text-ink" />
-              <StatPill label="盯盘 ETF" value={`${intradayWatch.data?.watched_count ?? 0} 只`} tone="bg-accentSoft text-ink" />
-              <StatPill label="评分日期" value={formatDate(intradayWatch.data?.signal_as_of_date)} />
-              <StatPill label="最近运行" value={formatDateTime(intradayWatch.data?.latest_run?.finished_at)} tone="bg-white text-ink" />
-            </div>
-          </div>
-          <p className="mt-4 rounded-[18px] bg-paper px-4 py-3 text-sm leading-6 text-ink/65">
-            {intradayWatch.data?.message ?? "等待 ETF 盯盘状态。"}
-            {intradayWatch.data?.latest_run?.error_message ? ` 行情源提示：${intradayWatch.data.latest_run.error_message}` : ""}
-          </p>
-        </Panel>
-      ) : null}
-
-      <Panel className="rounded-[24px]">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.22em] text-accent">我的短线追踪</p>
-            <h2 className="mt-2 text-2xl font-semibold text-ink">{mode.trackingTitle}</h2>
-            <p className="mt-2 text-sm leading-6 text-ink/65">
-              {mode.trackingDescription}
-            </p>
-          </div>
-          <div className="rounded-[18px] bg-paper px-4 py-3 text-sm leading-6 text-ink/65">
-            收件邮箱：{trackedPositions.data?.recipient_email ?? "19535838578@163.com"}
-            <br />
-            邮件通道：{trackedPositions.data?.email_configured ? "已配置" : "未配置授权码"}
-          </div>
-        </div>
-
-        <div className="mt-5 grid gap-3 xl:grid-cols-3">
-          {activeTracked.map((item) => (
-            <div key={item.id} className="rounded-[20px] border border-ink/10 bg-white p-4">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <p className="text-xs font-semibold text-accent">{trackingStatusLabel(item.status)}</p>
-                  <h3 className="mt-1 text-lg font-semibold text-ink">
-                    {item.asset_name}
-                    <span className="ml-2 text-sm font-normal text-ink/45">{item.asset_code}</span>
-                  </h3>
-                </div>
-                <span className={`rounded-full px-3 py-1 text-xs font-semibold ${conclusionTone(item.current_snapshot.current_label ?? "数据不足")}`}>
-                  买入观察：{item.current_snapshot.current_label ?? "等待排序"}
-                </span>
-              </div>
-              <div className="mt-4 grid gap-2 text-sm text-ink/65">
-                <span>
-                  下单：{formatCurrency(item.buy_amount)} / {formatDate(item.buy_date)}（{orderTimeBucketLabel(item.order_time_bucket)}）
-                </span>
-                <span>
-                  {item.asset_type === "etf" ? "买入价格日" : "确认净值日"}：
-                  {formatDate(item.confirmed_nav_date ?? item.entry_price_date)}
-                </span>
-                <span>
-                  {item.asset_type === "etf" ? "买入价" : "确认净值"}：
-                  {item.confirmed_nav?.toFixed(4) ?? item.entry_price?.toFixed(4) ?? "等待价格"}
-                </span>
-                <span>持有：{item.holding_days === null ? "等待数据" : `${item.holding_days} 天`}</span>
-                <span>
-                  {item.confirmed_shares === null ? "估算份额" : "确认份额"}：
-                  {item.estimated_shares === null ? "等待价格" : item.estimated_shares.toFixed(2)}
-                </span>
-                <span className={pnlTone(item.current_snapshot.estimated_pnl)}>估算盈亏：{pnlText(item)}</span>
-                <span>最高盈利：{percentOrWaiting(item.max_profit_pct)}</span>
-                <span>高点回吐：{percentOrWaiting(item.profit_giveback_pct)}</span>
-                <span>当前价：{item.current_snapshot.current_price?.toFixed(4) ?? "暂无"}</span>
-                {item.asset_type === "etf" ? (
-                  <>
-                    <span>价格来源：{priceSourceLabel(item.intraday_snapshot?.price_source)}</span>
-                    <span>行情时间：{formatDateTime(item.intraday_snapshot?.quote_time)}</span>
-                    <span>
-                      动态止损线：
-                      {item.dynamic_thresholds?.hard_stop_pct === null || item.dynamic_thresholds?.hard_stop_pct === undefined
-                        ? "等待数据"
-                        : formatPercent(item.dynamic_thresholds.hard_stop_pct)}
-                    </span>
-                    <span>
-                      止盈启动线：
-                      {item.dynamic_thresholds?.profit_start_pct === null || item.dynamic_thresholds?.profit_start_pct === undefined
-                        ? "等待数据"
-                        : formatPercent(item.dynamic_thresholds.profit_start_pct)}
-                    </span>
-                    <span>
-                      买卖价差：
-                      {item.intraday_snapshot?.spread_pct === null || item.intraday_snapshot?.spread_pct === undefined
-                        ? "暂无"
-                        : formatPercent(item.intraday_snapshot.spread_pct)}
-                    </span>
-                    <span>
-                      折溢价：
-                      {item.intraday_snapshot?.premium_discount_pct === null ||
-                      item.intraday_snapshot?.premium_discount_pct === undefined
-                        ? "暂无"
-                        : formatPercent(item.intraday_snapshot.premium_discount_pct)}
-                    </span>
-                  </>
-                ) : null}
-              </div>
-              <div className={`mt-4 rounded-[16px] p-3 text-sm leading-6 ${exitSignalTone(item.exit_signal.level)}`}>
-                <p className="text-xs font-semibold opacity-75">持仓处理状态</p>
-                <p className="font-semibold">{item.exit_signal.label}</p>
-                <p className="mt-1">{item.exit_signal.reason ?? "暂无卖出/减仓提醒，继续观察公开数据。"}</p>
-              </div>
-              {item.latest_alert ? (
-                <div className={`mt-4 rounded-[16px] p-3 text-sm leading-6 ${latestAlertTone(item.latest_alert)}`}>
-                  <p className="font-semibold">
-                    {alertTypeLabel(item.latest_alert.alert_type)} · {alertDeliveryLabel(item.latest_alert)}
-                  </p>
-                  <p>{item.latest_alert.reasons[0] ?? item.latest_alert.trigger_label}</p>
-                  {item.latest_alert.alert_source ? (
-                    <p className="mt-1 text-xs">
-                      来源：{priceSourceLabel(item.latest_alert.alert_source)}；行情时间：
-                      {formatDateTime(item.latest_alert.quote_time)}
-                      {item.latest_alert.email_error_message ? `；${item.latest_alert.email_error_message}` : ""}
-                    </p>
-                  ) : null}
-                </div>
-              ) : (
-                <p className="mt-4 rounded-[16px] bg-paper p-3 text-sm leading-6 text-ink/55">
-                  暂无卖出/减仓邮件。数据滞后、暂无 IOPV 等质量提示只在网页展示，不打扰邮箱。
-                </p>
-              )}
-              {item.recent_intraday_alerts.length ? (
-                <div className="mt-3 rounded-[16px] bg-paper p-3 text-xs leading-5 text-ink/60">
-                  <p className="font-semibold text-ink">最近盘中提醒</p>
-                  {item.recent_intraday_alerts.slice(0, 3).map((alert) => (
-                    <p key={alert.id} className="mt-1">
-                      {formatDateTime(alert.quote_time)} · {alertTypeLabel(alert.alert_type)} ·{" "}
-                      {alertDeliveryLabel(alert)}
-                    </p>
-                  ))}
-                </div>
-              ) : null}
-              <button
-                className="mt-4 rounded-full border border-ink/10 px-4 py-2 text-sm font-semibold text-ink transition hover:border-accent hover:text-accent disabled:opacity-60"
-                disabled={closeTracking.isPending}
-                onClick={() => closeTracking.mutate(item.id)}
-              >
-                标记已卖出 / 停止提醒
-              </button>
-            </div>
-          ))}
-          {!trackedPositions.isLoading && activeTracked.length === 0 ? (
-            <div className="rounded-[20px] border border-dashed border-ink/20 bg-white p-5 text-sm leading-7 text-ink/55 xl:col-span-3">
-              {mode.trackingEmpty}
-            </div>
-          ) : null}
-        </div>
-      </Panel>
-
-      <Panel className="rounded-[24px]">
-        <div className="grid gap-4 lg:grid-cols-[1.5fr_0.9fr]">
-          <div>
-            <p className="text-lg font-semibold text-ink">标签怎么理解</p>
-            <div className="mt-4 grid gap-3 md:grid-cols-2">
-              {["短线观察", "高位观察", "谨慎观察", "不适合短线", "数据不足"].map((label) => (
-                <div key={label} className="rounded-[18px] border border-ink/10 bg-white px-4 py-3">
-                  <span className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${conclusionTone(label)}`}>
-                    {label}
-                  </span>
-                  <p className="mt-2 text-sm leading-6 text-ink/65">{labelMeaning(label)}</p>
-                </div>
-              ))}
-            </div>
-          </div>
-          <div className="rounded-[20px] bg-paper p-5">
-            <p className="text-lg font-semibold text-ink">数据状态</p>
-            <p className="mt-2 text-sm leading-6 text-ink/65">
-              最近一次排序日期：{formatDate(statusData?.signal_date)}。
-              {mode.shortLabel}数据异常 {currentDataIssueCount} 只，主要是缺少历史或最新数据滞后。
-            </p>
-            {lastResult ? (
-              <pre className="mt-4 max-h-40 overflow-auto rounded-[16px] bg-white p-3 text-xs leading-5 text-ink/65">
-                {safeSummary(lastResult)}
-              </pre>
-            ) : null}
-          </div>
-        </div>
-      </Panel>
-
-      {assetType === "etf" ? (
-        <Panel className="rounded-[24px]">
-          <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.22em] text-accent">ETF 观察组合</p>
-              <h2 className="mt-2 text-2xl font-semibold text-ink">把排名结果翻译成仓位参考</h2>
-              <p className="mt-2 text-sm leading-6 text-ink/65">
-                这里只是研究用目标权重：风险高时提高现金比例，不连接证券账户，不自动下单。
-              </p>
-            </div>
-            <StatPill
-              label="现金比例"
-              value={observationPortfolio.data ? formatPercent(observationPortfolio.data.cash_weight * 100) : "暂无"}
-              tone="bg-accentSoft text-ink"
+      <div className="grid gap-6 xl:grid-cols-[minmax(360px,0.78fr)_minmax(0,1.22fr)]">
+        <Panel className="rounded-[24px] xl:max-h-[calc(100vh-7rem)] xl:overflow-auto">
+          <div className="mb-5 flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+            <SectionKicker
+              eyebrow="买入观察榜单"
+              title={`${mode.shortLabel}排序`}
+              description="先扫分数、标签和关键指标；详细解释会在右侧展示。"
             />
+            <span className="w-fit rounded-full bg-paper px-3 py-1 text-xs font-semibold text-ink/60">
+              每页 12 只
+            </span>
           </div>
-          <div className="mt-5 grid gap-3 lg:grid-cols-3">
-            {(observationPortfolio.data?.items ?? []).map((item) => (
-              <div key={item.code} className="rounded-[18px] border border-ink/10 bg-white p-4">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <p className="text-sm font-semibold text-ink">{item.name}</p>
-                    <p className="mt-1 text-xs text-ink/45">{item.code} · {formatDate(item.data_date)}</p>
-                  </div>
-                  <span className="rounded-full bg-ink px-3 py-1 text-xs font-semibold text-white">
-                    {formatPercent(item.target_weight * 100)}
-                  </span>
-                </div>
-                <p className="mt-3 text-sm text-ink/65">综合分 {item.score.toFixed(1)} · {item.conclusion}</p>
-                <ul className="mt-3 space-y-1 text-xs leading-5 text-ink/55">
-                  {item.evidence.slice(0, 3).map((text) => (
-                    <li key={text}>{text}</li>
-                  ))}
-                </ul>
-                <p className="mt-3 rounded-[14px] bg-paper px-3 py-2 text-xs leading-5 text-ink/55">
-                  风险：{item.risk_reasons.join("；")}
-                </p>
-              </div>
-            ))}
-          </div>
-          {!observationPortfolio.isLoading && !(observationPortfolio.data?.items ?? []).length ? (
-            <p className="mt-4 rounded-[18px] bg-paper px-4 py-3 text-sm text-ink/55">
-              暂无可用观察组合。先更新 ETF 数据，或切到“全部可分析”查看低流动性样本。
-            </p>
-          ) : null}
-          <p className="mt-4 text-xs leading-5 text-ink/50">
-            {observationPortfolio.data?.note ?? "观察组合只用于手动研究参考。"}
-          </p>
-        </Panel>
-      ) : null}
-
-      <div className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
-        <Panel className="rounded-[24px]">
           <div className="grid gap-3 md:grid-cols-2">
             <div className="rounded-full border border-ink/10 bg-white px-4 py-2 text-sm font-semibold text-ink">
               {mode.classification}
@@ -1169,8 +1009,8 @@ export default function ShortTermPage() {
                           {item.code}
                         </span>
                       </h3>
-                      <p className={`mt-2 text-xs leading-5 ${isSelected ? "text-white/55" : "text-ink/50"}`}>
-                        {assetTradingNote(item.asset_type, item.name)}
+                      <p className={`mt-2 line-clamp-2 text-sm leading-6 ${isSelected ? "text-white/65" : "text-ink/60"}`}>
+                        {rationaleText(item, "key_reason", "按近期趋势、风险和数据质量生成。")}
                       </p>
                     </div>
                     <div className="flex flex-wrap gap-2">
@@ -1197,21 +1037,11 @@ export default function ShortTermPage() {
                     ) : null}
                     <span>样本：{item.usable_days} 天</span>
                   </div>
-                  {assetType === "etf" ? (
-                    <div className={`mt-3 rounded-[14px] px-3 py-2 text-xs leading-5 ${isSelected ? "bg-white/10 text-white/70" : "bg-paper text-ink/60"}`}>
-                      {defaultEligible
-                        ? "已通过默认精选门槛：数据较新、样本可用、成交额达标。"
-                        : `未进默认精选：${exclusionReasons.length ? exclusionReasons.join("；") : "数据质量或流动性未达标"}。`}
-                    </div>
-                  ) : null}
-                  {assetType === "etf" ? (
-                    <p className={`mt-3 text-xs leading-5 ${isSelected ? "text-white/60" : "text-ink/50"}`}>
-                      评分高代表适合放进买入观察清单；你已经买入后的去留，要看买入价、当前盈亏、趋势转弱和止盈/止损提醒。
+                  {assetType === "etf" && !defaultEligible ? (
+                    <p className={`mt-3 line-clamp-1 text-xs leading-5 ${isSelected ? "text-white/55" : "text-ink/45"}`}>
+                      未进默认精选：{exclusionReasons.length ? exclusionReasons.join("；") : "数据质量或流动性未达标"}。
                     </p>
                   ) : null}
-                  <p className={`mt-3 line-clamp-2 text-sm leading-6 ${isSelected ? "text-white/65" : "text-ink/60"}`}>
-                    {rationaleText(item, "key_reason", "按近期趋势、风险和数据质量生成。")}
-                  </p>
                 </button>
               );
             })}
@@ -1231,7 +1061,7 @@ export default function ShortTermPage() {
           </div>
         </Panel>
 
-        <div className="space-y-6">
+        <div className="space-y-6 xl:sticky xl:top-6 xl:self-start">
           <Panel className="rounded-[24px]">
             {selectedAsset ? (
               <>
@@ -1262,6 +1092,24 @@ export default function ShortTermPage() {
                     <span className={`rounded-full px-4 py-2 text-sm font-semibold ${conclusionTone(selectedAsset.conclusion)}`}>
                       {selectedAsset.conclusion}
                     </span>
+                  </div>
+                </div>
+
+                <div className="mt-5 grid gap-3 md:grid-cols-[1fr_0.82fr]">
+                  <div className="rounded-[20px] bg-paper p-4">
+                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">当前结论</p>
+                    <p className="mt-2 text-lg font-semibold text-ink">
+                      {selectedAsset.conclusion} · 综合分 {selectedAsset.total_score.toFixed(1)}
+                    </p>
+                    <p className="mt-2 text-sm leading-7 text-ink/65">
+                      {rationaleText(selectedAsset, "key_reason", "按近期趋势、回撤、波动、成交额和数据质量综合生成。")}
+                    </p>
+                  </div>
+                  <div className="rounded-[20px] bg-ink p-4 text-white">
+                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-white/50">持仓口径</p>
+                    <p className="mt-2 text-sm leading-7 text-white/75">
+                      评分高代表适合放入买入观察清单；如果你已经买入，是否卖出或减仓要看买入价、当前盈亏、趋势转弱、移动止盈和硬止损。
+                    </p>
                   </div>
                 </div>
 
@@ -1621,6 +1469,171 @@ export default function ShortTermPage() {
           ) : null}
         </div>
       </div>
+
+      <Panel className="rounded-[24px]">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <SectionKicker eyebrow="我的持仓观察" title={mode.trackingTitle} description={mode.trackingDescription} />
+          <div className="rounded-[18px] bg-paper px-4 py-3 text-sm leading-6 text-ink/65">
+            收件邮箱：{trackedPositions.data?.recipient_email ?? "19535838578@163.com"}
+            <br />
+            邮件通道：{trackedPositions.data?.email_configured ? "已配置" : "未配置授权码"}
+          </div>
+        </div>
+
+        <div className="mt-5 grid gap-4 xl:grid-cols-3">
+          {activeTracked.map((item) => (
+            <div key={item.id} className="rounded-[22px] border border-ink/10 bg-white p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold text-accent">{trackingStatusLabel(item.status)}</p>
+                  <h3 className="mt-1 text-xl font-semibold text-ink">
+                    {item.asset_name}
+                    <span className="ml-2 text-sm font-normal text-ink/45">{item.asset_code}</span>
+                  </h3>
+                  <p className="mt-1 text-xs text-ink/45">{assetTypeLabel(item.asset_type)}</p>
+                </div>
+                <span className={`shrink-0 rounded-full px-3 py-1 text-xs font-semibold ${conclusionTone(item.current_snapshot.current_label ?? "数据不足")}`}>
+                  买入观察：{item.current_snapshot.current_label ?? "等待排序"}
+                </span>
+              </div>
+
+              <div className="mt-4 grid gap-2 text-sm text-ink/65">
+                <span>下单：{formatCurrency(item.buy_amount)} / {formatDate(item.buy_date)}（{orderTimeBucketLabel(item.order_time_bucket)}）</span>
+                <span>{item.asset_type === "etf" ? "买入价格日" : "确认净值日"}：{formatDate(item.confirmed_nav_date ?? item.entry_price_date)}</span>
+                <span>{item.asset_type === "etf" ? "买入价" : "确认净值"}：{item.confirmed_nav?.toFixed(4) ?? item.entry_price?.toFixed(4) ?? "等待价格"}</span>
+                <span>当前价：{item.current_snapshot.current_price?.toFixed(4) ?? "暂无"}</span>
+                <span>持有：{item.holding_days === null ? "等待数据" : `${item.holding_days} 天`}</span>
+                <span>{item.confirmed_shares === null ? "估算份额" : "确认份额"}：{item.estimated_shares === null ? "等待价格" : item.estimated_shares.toFixed(2)}</span>
+                <span className={pnlTone(item.current_snapshot.estimated_pnl)}>估算盈亏：{pnlText(item)}</span>
+              </div>
+
+              <div className={`mt-4 rounded-[16px] p-3 text-sm leading-6 ${exitSignalTone(item.exit_signal.level)}`}>
+                <p className="text-xs font-semibold opacity-75">持仓处理状态</p>
+                <p className="font-semibold">{item.exit_signal.label}</p>
+                <p className="mt-1">{item.exit_signal.reason ?? "暂无卖出/减仓提醒，继续观察公开数据。"}</p>
+              </div>
+
+              {item.latest_alert ? (
+                <div className={`mt-4 rounded-[16px] p-3 text-sm leading-6 ${latestAlertTone(item.latest_alert)}`}>
+                  <p className="font-semibold">
+                    {alertTypeLabel(item.latest_alert.alert_type)} · {alertDeliveryLabel(item.latest_alert)}
+                  </p>
+                  <p>{item.latest_alert.reasons[0] ?? item.latest_alert.trigger_label}</p>
+                  <p className="mt-1 text-xs">
+                    {item.latest_alert.alert_source ? `来源：${priceSourceLabel(item.latest_alert.alert_source)}；` : ""}
+                    行情时间：{formatDateTime(item.latest_alert.quote_time)}
+                    {item.latest_alert.email_error_message ? `；${item.latest_alert.email_error_message}` : ""}
+                  </p>
+                </div>
+              ) : (
+                <p className="mt-4 rounded-[16px] bg-paper p-3 text-sm leading-6 text-ink/55">
+                  暂无卖出/减仓邮件。数据滞后、暂无 IOPV 等质量提示只在网页展示，不打扰邮箱。
+                </p>
+              )}
+
+              <details className="mt-3 rounded-[16px] bg-paper p-3 text-xs leading-5 text-ink/60">
+                <summary className="cursor-pointer font-semibold text-ink">更多风控数据</summary>
+                <div className="mt-2 grid gap-1">
+                  <span>最高盈利：{percentOrWaiting(item.max_profit_pct)}</span>
+                  <span>高点回吐：{percentOrWaiting(item.profit_giveback_pct)}</span>
+                  {item.asset_type === "etf" ? (
+                    <>
+                      <span>价格来源：{priceSourceLabel(item.intraday_snapshot?.price_source)}</span>
+                      <span>行情时间：{formatDateTime(item.intraday_snapshot?.quote_time)}</span>
+                      <span>
+                        动态止损线：
+                        {item.dynamic_thresholds?.hard_stop_pct === null || item.dynamic_thresholds?.hard_stop_pct === undefined
+                          ? "等待数据"
+                          : formatPercent(item.dynamic_thresholds.hard_stop_pct)}
+                      </span>
+                      <span>
+                        止盈启动线：
+                        {item.dynamic_thresholds?.profit_start_pct === null || item.dynamic_thresholds?.profit_start_pct === undefined
+                          ? "等待数据"
+                          : formatPercent(item.dynamic_thresholds.profit_start_pct)}
+                      </span>
+                      <span>
+                        买卖价差：
+                        {item.intraday_snapshot?.spread_pct === null || item.intraday_snapshot?.spread_pct === undefined
+                          ? "暂无"
+                          : formatPercent(item.intraday_snapshot.spread_pct)}
+                      </span>
+                      <span>
+                        折溢价：
+                        {item.intraday_snapshot?.premium_discount_pct === null ||
+                        item.intraday_snapshot?.premium_discount_pct === undefined
+                          ? "暂无"
+                          : formatPercent(item.intraday_snapshot.premium_discount_pct)}
+                      </span>
+                    </>
+                  ) : null}
+                  {item.recent_intraday_alerts.slice(0, 3).map((alert) => (
+                    <span key={alert.id}>
+                      {formatDateTime(alert.quote_time)} · {alertTypeLabel(alert.alert_type)} · {alertDeliveryLabel(alert)}
+                    </span>
+                  ))}
+                </div>
+              </details>
+
+              <button
+                className="mt-4 rounded-full border border-ink/10 px-4 py-2 text-sm font-semibold text-ink transition hover:border-accent hover:text-accent disabled:opacity-60"
+                disabled={closeTracking.isPending}
+                onClick={() => closeTracking.mutate(item.id)}
+              >
+                标记已卖出 / 停止提醒
+              </button>
+            </div>
+          ))}
+          {!trackedPositions.isLoading && activeTracked.length === 0 ? (
+            <div className="rounded-[20px] border border-dashed border-ink/20 bg-white p-5 text-sm leading-7 text-ink/55 xl:col-span-3">
+              {mode.trackingEmpty}
+            </div>
+          ) : null}
+        </div>
+      </Panel>
+
+      {assetType === "etf" ? (
+        <Panel className="rounded-[24px] bg-white/70">
+          <details>
+            <summary className="cursor-pointer text-lg font-semibold text-ink">
+              ETF 观察组合参考
+              <span className="ml-3 rounded-full bg-accentSoft/60 px-3 py-1 text-xs text-ink">
+                现金比例 {observationPortfolio.data ? formatPercent(observationPortfolio.data.cash_weight * 100) : "暂无"}
+              </span>
+            </summary>
+            <p className="mt-2 text-sm leading-6 text-ink/60">
+              这里只是研究用目标权重：风险高时提高现金比例，不连接证券账户，不自动下单。
+            </p>
+            <div className="mt-5 grid gap-3 lg:grid-cols-3">
+              {(observationPortfolio.data?.items ?? []).map((item) => (
+                <div key={item.code} className="rounded-[18px] border border-ink/10 bg-white p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-ink">{item.name}</p>
+                      <p className="mt-1 text-xs text-ink/45">{item.code} · {formatDate(item.data_date)}</p>
+                    </div>
+                    <span className="rounded-full bg-ink px-3 py-1 text-xs font-semibold text-white">
+                      {formatPercent(item.target_weight * 100)}
+                    </span>
+                  </div>
+                  <p className="mt-3 text-sm text-ink/65">综合分 {item.score.toFixed(1)} · {item.conclusion}</p>
+                  <p className="mt-3 rounded-[14px] bg-paper px-3 py-2 text-xs leading-5 text-ink/55">
+                    风险：{item.risk_reasons.join("；")}
+                  </p>
+                </div>
+              ))}
+            </div>
+            {!observationPortfolio.isLoading && !(observationPortfolio.data?.items ?? []).length ? (
+              <p className="mt-4 rounded-[18px] bg-paper px-4 py-3 text-sm text-ink/55">
+                暂无可用观察组合。先更新 ETF 数据，或切到“全部可分析”查看低流动性样本。
+              </p>
+            ) : null}
+            <p className="mt-4 text-xs leading-5 text-ink/50">
+              {observationPortfolio.data?.note ?? "观察组合只用于手动研究参考。"}
+            </p>
+          </details>
+        </Panel>
+      ) : null}
 
       {dataIssues.length ? (
         <Panel className="rounded-[24px]">
