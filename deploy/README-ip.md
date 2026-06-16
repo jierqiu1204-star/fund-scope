@@ -85,7 +85,8 @@ git pull
 cd /srv/fundscope/deploy
 cat > .env <<'EOF'
 POSTGRES_PASSWORD=<换成一个新的强数据库密码>
-NEXT_PUBLIC_API_BASE_URL=http://110.42.222.9
+NEXT_PUBLIC_API_BASE_URL=
+# 留空时默认同源 /api；如需固定接口源可显式写 IP 或域名
 EOF
 ```
 

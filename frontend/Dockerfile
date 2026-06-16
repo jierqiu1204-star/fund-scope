@@ -8,7 +8,7 @@ RUN corepack enable \
   && corepack pnpm install --frozen-lockfile
 
 COPY . .
-ARG NEXT_PUBLIC_API_BASE_URL=http://110.42.222.9
+ARG NEXT_PUBLIC_API_BASE_URL=
 ENV NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL
 RUN corepack pnpm build:static
 

@@ -22,7 +22,7 @@ services:
     build:
       context: ../frontend
       args:
-        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://110.42.222.9}
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-}
     command: sh -c "rm -rf /exported/* && cp -R /app/out/. /exported/"
     volumes:
       - frontend-static:/exported

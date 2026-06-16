@@ -37,6 +37,7 @@ type AssetType = "fund" | "etf";
 type SortKey = "score" | "return_5d" | "return_20d" | "drawdown_low" | "risk_low" | "liquidity";
 type OrderTimeBucket = "before_15" | "after_15" | "unknown";
 type EtfUniverse = "default" | "all" | "illiquid";
+type MobileTab = "ranking" | "detail" | "tracking" | "explanation";
 
 const ASSET_PAGE_SIZE = 12;
 
@@ -573,6 +574,7 @@ export default function ShortTermPage() {
   const [keyword, setKeyword] = useState("");
   const [assetOffset, setAssetOffset] = useState(0);
   const [selected, setSelected] = useState<{ asset_type: "fund" | "etf"; code: string } | null>(null);
+  const [mobileTab, setMobileTab] = useState<MobileTab>("ranking");
   const [lastResult, setLastResult] = useState<Record<string, unknown> | null>(null);
   const [trackingOpen, setTrackingOpen] = useState(false);
   const [trackingAmount, setTrackingAmount] = useState("3000");
@@ -814,6 +816,465 @@ export default function ShortTermPage() {
     "--short-term-detail-height": detailColumnHeight ? `${detailColumnHeight}px` : undefined
   } as CSSProperties & { "--short-term-detail-height"?: string };
 
+  const mobileTabs: Array<{ id: MobileTab; label: string }> = [
+    { id: "ranking", label: "榜单" },
+    { id: "detail", label: "详情" },
+    { id: "tracking", label: "追踪" },
+    { id: "explanation", label: "说明" }
+  ];
+
+  const isMobileLayout = () => typeof window !== "undefined" && window.matchMedia("(max-width: 1023px)").matches;
+
+  const selectAsset = (item: ShortResearchAsset) => {
+    setSelected({ asset_type: item.asset_type, code: item.code });
+    if (isMobileLayout()) {
+      setMobileTab("detail");
+    }
+  };
+
+  useEffect(() => {
+    if (!visibleAssets.length) {
+      setSelected(null);
+      setMobileTab("ranking");
+    }
+  }, [visibleAssets.length]);
+
+  const mobileTrackingButtonLabel = trackingOpen ? "收起" : "我已买入，开始追踪";
+  const rankingPanelContent = ({ compact }: { compact: boolean }) => {
+    const cardPadding = compact ? "p-3" : "p-4";
+    const cardGap = compact ? "gap-2" : "gap-3";
+    const listGap = compact ? "space-y-2" : "space-y-3";
+    return (
+      <>
+        <div className={`mb-5 flex flex-col ${compact ? "gap-1" : "gap-2"} md:flex-row md:items-end md:justify-between`}>
+          <SectionKicker
+            eyebrow="榜单"
+            title={`${mode.shortLabel} 排序`}
+            description="筛选、关键词与主题设置，快速定位候选标的。"
+          />
+          <span className="w-fit rounded-full bg-paper px-3 py-1 text-xs font-semibold text-ink/60">
+            每页 12 条
+          </span>
+        </div>
+        <div className={`grid gap-3 ${compact ? "" : "md:grid-cols-2"}`}>
+          <div className="rounded-full border border-ink/10 bg-white px-4 py-2 text-sm font-semibold text-ink">{mode.classification}</div>
+          <input
+            className="rounded-full border border-ink/10 bg-white px-4 py-2 text-sm outline-none transition focus:border-accent"
+            placeholder="搜索代码/名称"
+            value={keyword}
+            onChange={(event) => setKeyword(event.target.value)}
+          />
+          <select
+            className="rounded-full border border-ink/10 bg-white px-4 py-2 text-sm outline-none transition focus:border-accent"
+            value={theme}
+            onChange={(event) => setTheme(event.target.value)}
+          >
+            {themes.map((item) => (
+              <option key={item} value={item}>
+                {item === "all" ? "全部主题" : item}
+              </option>
+            ))}
+          </select>
+          <select
+            className="rounded-full border border-ink/10 bg-white px-4 py-2 text-sm outline-none transition focus:border-accent"
+            value={sort}
+            onChange={(event) => setSort(event.target.value as SortKey)}
+          >
+            {sortOptions.map((option) => (
+              <option key={option.key} value={option.key}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        {assetType === "etf" ? (
+          <div className="mt-5 grid gap-3 md:grid-cols-3">
+            {etfUniverseOptions.map((option) => {
+              const active = etfUniverse === option.key;
+              return (
+                <button
+                  key={option.key}
+                  className={`rounded-[18px] border px-4 py-3 text-left transition ${
+                    active ? "border-ink bg-ink text-white" : "border-ink/10 bg-white text-ink hover:border-accent"
+                  }`}
+                  onClick={() => setEtfUniverse(option.key)}
+                >
+                  <span className="text-sm font-semibold">{option.label}</span>
+                  <span className={`mt-1 block text-xs leading-5 ${active ? "text-white/65" : "text-ink/55"}`}>
+                    {option.description}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
+        <div className="mt-5">
+          <AssetPaginationBar
+            total={totalAssetCount}
+            offset={assetOffset}
+            visibleCount={visibleAssets.length}
+            isFetching={assets.isFetching}
+            onPrevious={goToPreviousAssetPage}
+            onNext={goToNextAssetPage}
+          />
+        </div>
+        <div className={`mt-5 ${listGap}`}>
+          {assets.isLoading ? (
+            <div className="rounded-[20px] border border-dashed border-ink/20 p-6 text-sm text-ink/55">正在加载榜单...</div>
+          ) : null}
+          {visibleAssets.map((item) => {
+            const isSelected = selected?.asset_type === item.asset_type && selected.code === item.code;
+            const exclusionReasons = stringListMetric(item.metrics, "default_exclusion_reasons");
+            const defaultEligible = boolMetric(item.metrics, "default_display_eligible");
+            return (
+              <button
+                key={`${item.asset_type}-${item.code}`}
+                className={`w-full ${compact ? "rounded-[16px]" : "rounded-[20px]"} ${cardPadding} text-left transition ${
+                  isSelected ? "border-ink bg-ink text-white" : "border-ink/10 bg-white text-ink hover:border-accent"
+                }`}
+                onClick={() => selectAsset(item)}
+              >
+                <div className={`flex flex-col ${cardGap} md:flex-row md:items-start md:justify-between`}>
+                  <div>
+                    <p className={`text-xs font-semibold ${isSelected ? "text-white/60" : "text-accent"}`}>
+                      #{item.rank ?? "-"} · {assetTypeLabel(item.asset_type)} · {item.theme_tags.slice(0, 3).join(" / ")}
+                    </p>
+                    <h3 className="mt-2 text-xl font-semibold">
+                      {item.name}
+                      <span className={`ml-2 text-sm font-normal ${isSelected ? "text-white/45" : "text-ink/45"}`}>
+                        {item.code}
+                      </span>
+                    </h3>
+                    <p className={`mt-2 line-clamp-2 text-sm leading-6 ${isSelected ? "text-white/65" : "text-ink/60"}`}>
+                      {rationaleText(item, "key_reason", "暂无")}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white text-ink" : "bg-ink text-white"}`}>
+                      {item.total_score.toFixed(1)} 分
+                    </span>
+                    <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : conclusionTone(item.conclusion)}`}>
+                      {item.conclusion}
+                    </span>
+                    {item.advisor_report ? (
+                      <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : advisorTone(item.advisor_report.action_label)}`}>
+                        {item.advisor_report.action_label}
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
+                <div
+                  className={`mt-4 grid gap-2 text-sm ${assetType === "etf" ? "md:grid-cols-6" : "md:grid-cols-5"} ${
+                    isSelected ? "text-white/70" : "text-ink/60"
+                  }`}
+                >
+                  <span>5日:{percentMetric(item.metrics, "return_5d")}</span>
+                  <span>20日:{percentMetric(item.metrics, "return_20d")}</span>
+                  <span>60日:{percentMetric(item.metrics, "return_60d")}</span>
+                  <span>60日回撤:{percentMetric(item.metrics, "max_drawdown_60d")}</span>
+                  {assetType === "etf" ? <span>20日换手:{formatTurnover(numericMetric(item.metrics, "average_turnover_20d"))}</span> : null}
+                  <span>样本天数:{item.usable_days}</span>
+                </div>
+                {assetType === "etf" && !defaultEligible ? (
+                  <p className={`mt-3 line-clamp-1 text-xs leading-5 ${isSelected ? "text-white/55" : "text-ink/45"}`}>
+                    默认展示说明: {exclusionReasons.length ? exclusionReasons.join(" / ") : "数据不足未标注"}
+                  </p>
+                ) : null}
+              </button>
+            );
+          })}
+          {!assets.isLoading && (assets.data?.items ?? []).length === 0 ? (
+            <div className="rounded-[20px] border border-dashed border-ink/20 p-6 text-sm leading-6 text-ink/55">
+              {mode.noResults}
+            </div>
+          ) : null}
+          <AssetPaginationBar
+            total={totalAssetCount}
+            offset={assetOffset}
+            visibleCount={visibleAssets.length}
+            isFetching={assets.isFetching}
+            onPrevious={goToPreviousAssetPage}
+            onNext={goToNextAssetPage}
+          />
+        </div>
+      </>
+    );
+  };
+
+  const renderMobileDetailPanel = () => {
+    if (!selectedAsset) {
+      return <div className="rounded-[20px] border border-dashed border-ink/20 p-6 text-sm leading-6 text-ink/55">{mode.detailEmpty}</div>;
+    }
+    return (
+      <Panel className="rounded-[24px]">
+        <div className="flex flex-col gap-3">
+          <div>
+            <p className="text-sm text-ink/50">
+              {assetTypeLabel(selectedAsset.asset_type)} · {selectedAsset.trading_rule_label}
+            </p>
+            <h2 className="mt-2 text-2xl font-semibold text-ink">
+              {selectedAsset.name}
+              <span className="ml-2 text-lg font-normal text-ink/45">{selectedAsset.code}</span>
+            </h2>
+            <p className="mt-2 rounded-[14px] bg-paper px-4 py-3 text-sm leading-6 text-ink/65">
+              {assetTradingNote(selectedAsset.asset_type, selectedAsset.name)}
+            </p>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="rounded-[16px] bg-paper px-4 py-3">
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">当前结论</p>
+              <p className="mt-2 text-lg font-semibold text-ink">
+                {selectedAsset.conclusion} · {selectedAsset.total_score.toFixed(1)} 分
+              </p>
+              <p className="mt-2 text-sm leading-6 text-ink/65">
+                {rationaleText(selectedAsset, "key_reason", "暂无")}
+              </p>
+            </div>
+            <div className="rounded-[16px] bg-ink p-4 text-white">
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-white/50">持有建议</p>
+              <p className="mt-2 text-sm leading-7 text-white/75">
+                {rationaleText(selectedAsset, "holding_plan", "建议结合数据与风险控制后再操作。")}
+              </p>
+            </div>
+          </div>
+          <div className={`grid gap-2 text-sm ${assetType === "etf" ? "sm:grid-cols-5" : "sm:grid-cols-4"}`}>
+            <StatPill label={mode.latestLabel} value={formatDate(selectedAsset.latest_date)} tone="bg-white text-ink" />
+            <StatPill label={mode.priceLabel} value={selectedAsset.latest_value === null ? "暂无" : selectedAsset.latest_value.toFixed(4)} />
+            <StatPill label="样本天数" value={`${selectedAsset.usable_days} 天`} tone="bg-accentSoft text-ink" />
+            <StatPill label="样本标签" value={selectedAsset.conclusion} tone="bg-white text-ink" />
+            {assetType === "etf" ? (
+              <StatPill
+                label="20日换手"
+                value={formatTurnover(numericMetric(selectedAsset.metrics, "average_turnover_20d"))}
+                tone="bg-white text-ink"
+              />
+            ) : null}
+          </div>
+
+          <div className="rounded-[20px] bg-ink text-white p-4">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="text-sm font-semibold">追踪入口</p>
+                <p className="mt-1 text-sm leading-6 text-white/75">提交买入记录并开始追踪该标的，显示持仓与预警信息。</p>
+              </div>
+              <button
+                className="rounded-full bg-accent px-5 py-3 text-sm font-semibold text-white transition hover:bg-pine"
+                onClick={() => setTrackingOpen((value) => !value)}
+              >
+                {mobileTrackingButtonLabel}
+              </button>
+            </div>
+            {trackingOpen ? (
+              <div className="mt-4 grid gap-3 md:grid-cols-2">
+                <label className="text-sm text-ink/65">
+                  买入金额
+                  <input
+                    className="mt-2 w-full rounded-2xl border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent"
+                    inputMode="decimal"
+                    value={trackingAmount}
+                    onChange={(event) => setTrackingAmount(event.target.value)}
+                  />
+                </label>
+                <label className="text-sm text-ink/65">
+                  买入日期
+                  <input
+                    className="mt-2 w-full rounded-2xl border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent"
+                    type="date"
+                    value={trackingDate}
+                    onChange={(event) => setTrackingDate(event.target.value)}
+                  />
+                </label>
+                <label className="text-sm text-ink/65">
+                  下单时段
+                  <select
+                    className="mt-2 w-full rounded-2xl border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent"
+                    value={trackingOrderTime}
+                    onChange={(event) => setTrackingOrderTime(event.target.value as OrderTimeBucket)}
+                  >
+                    <option value="before_15">15:00 前</option>
+                    <option value="after_15">15:00 后</option>
+                    <option value="unknown">未知</option>
+                  </select>
+                </label>
+                <label className="text-sm text-ink/65">
+                  {assetType === "etf" ? "买入价格日（可选）" : "确认净值日（可选）"}
+                  <input
+                    className="mt-2 w-full rounded-2xl border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent"
+                    type="date"
+                    value={trackingConfirmedNavDate}
+                    onChange={(event) => setTrackingConfirmedNavDate(event.target.value)}
+                  />
+                </label>
+                <label className="text-sm text-ink/65">
+                  {assetType === "etf" ? "实际成交价（可选）" : "支付宝确认净值（可选）"}
+                  <input
+                    className="mt-2 w-full rounded-2xl border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent"
+                    inputMode="decimal"
+                    placeholder={assetType === "etf" ? "例如：0.815" : "例如：7.3130"}
+                    value={trackingConfirmedNav}
+                    onChange={(event) => setTrackingConfirmedNav(event.target.value)}
+                  />
+                </label>
+                <label className="text-sm text-ink/65">
+                  {assetType === "etf" ? "实际成交份额（可选）" : "支付宝确认份额（可选）"}
+                  <input
+                    className="mt-2 w-full rounded-2xl border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent"
+                    inputMode="decimal"
+                    placeholder="确认份额最准确"
+                    value={trackingConfirmedShares}
+                    onChange={(event) => setTrackingConfirmedShares(event.target.value)}
+                  />
+                </label>
+                <label className="text-sm text-ink/65">
+                  备注
+                  <input
+                    className="mt-2 w-full rounded-2xl border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent"
+                    placeholder="可选备注"
+                    value={trackingNote}
+                    onChange={(event) => setTrackingNote(event.target.value)}
+                  />
+                </label>
+                <button
+                  className="self-end rounded-full bg-ink px-5 py-3 text-sm font-semibold text-white transition hover:bg-pine disabled:opacity-60"
+                  disabled={createTracking.isPending || Number(trackingAmount) <= 0}
+                  onClick={() => createTracking.mutate()}
+                >
+                  {createTracking.isPending ? "保存中..." : "保存追踪"}
+                </button>
+              </div>
+            ) : null}
+            {createTracking.isError ? (
+              <p className="mt-3 rounded-[16px] bg-rose-50 px-4 py-3 text-sm text-rose-700">
+                保存追踪失败：{errorText(createTracking.error)}
+              </p>
+            ) : null}
+          </div>
+        </div>
+      </Panel>
+    );
+  };
+
+  const renderMobileTrackingPanel = () => (
+    <Panel className="rounded-[24px]">
+      {activeTracked.length ? (
+        <div className="grid gap-3">
+          {activeTracked.map((item) => (
+            <div key={item.id} className="rounded-[18px] border border-ink/10 bg-white p-4">
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <p className="text-xs font-semibold text-accent">{trackingStatusLabel(item.status)}</p>
+                  <h3 className="mt-1 text-lg font-semibold text-ink">
+                    {item.asset_name}
+                    <span className="ml-2 text-sm font-normal text-ink/45">{item.asset_code}</span>
+                  </h3>
+                  <p className="mt-1 text-xs text-ink/45">{assetTypeLabel(item.asset_type)}</p>
+                </div>
+                <span className={`shrink-0 rounded-full px-3 py-1 text-xs font-semibold ${conclusionTone(item.current_snapshot.current_label ?? "数据不足")}`}>
+                  持仓:{item.current_snapshot.current_label ?? "待确认"}
+                </span>
+              </div>
+              <div className="mt-3 grid gap-1 text-sm text-ink/65 sm:grid-cols-2">
+                <span>盈亏: {pnlText(item)}</span>
+                <span>
+                  持有天数: {item.holding_days === null ? "暂无" : `${item.holding_days} 天`}
+                </span>
+                <span>实时价: {item.current_snapshot.current_price?.toFixed(4) ?? "暂无"}</span>
+                <span>持仓状态: {item.exit_signal.label}</span>
+              </div>
+              {item.latest_alert ? (
+                <p className="mt-3 rounded-[12px] bg-paper px-3 py-2 text-xs text-ink/65">
+                  最新预警: {alertTypeLabel(item.latest_alert.alert_type)} / {alertDeliveryLabel(item.latest_alert)}
+                </p>
+              ) : null}
+              <button
+                className="mt-4 rounded-full border border-ink/10 px-4 py-2 text-sm font-semibold text-ink transition hover:border-accent hover:text-accent disabled:opacity-60"
+                disabled={closeTracking.isPending}
+                onClick={() => closeTracking.mutate(item.id)}
+              >
+                停止追踪
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="rounded-[20px] border border-dashed border-ink/20 bg-white p-5 text-sm leading-7 text-ink/55">
+          {mode.trackingEmpty}
+        </div>
+      )}
+    </Panel>
+  );
+
+  const renderMobileExplanationPanel = () => (
+    <Panel className="rounded-[24px]">
+      {selectedAsset ? (
+        <div className="space-y-4">
+          <p className="font-semibold text-ink">{selectedAsset.name} - 低频说明</p>
+          <div className="rounded-[18px] bg-paper p-4">
+            <p className="text-xs uppercase tracking-[0.18em] text-accent">图表</p>
+            <div className="mt-3 h-52">
+              {detailPoints.length ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart data={detailPoints}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#eadfd2" />
+                    <XAxis dataKey="label" tickLine={false} axisLine={false} minTickGap={28} />
+                    <YAxis tickLine={false} axisLine={false} width={56} domain={["dataMin", "dataMax"]} />
+                    <Tooltip formatter={(value) => Number(value).toFixed(4)} />
+                    <Area
+                      type="monotone"
+                      dataKey="value"
+                      name={assetType === "etf" ? "净值" : "净值"}
+                      stroke="#1f5c4b"
+                      fill="#dce9df"
+                    />
+                  </AreaChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="flex h-full items-center justify-center rounded-[14px] bg-white text-sm text-ink/50">暂无图表数据</div>
+              )}
+            </div>
+          </div>
+          <div className="rounded-[18px] bg-paper p-4">
+            <p className="font-semibold text-ink">AI/规则解释</p>
+            <p className="mt-2 text-sm leading-6 text-ink/65">
+              {advisorReport ? `${advisorReport.plain_summary}` : "暂无完整解释结果。"}
+            </p>
+          </div>
+          <div className="rounded-[18px] border border-ink/10 bg-white p-4">
+            <p className="font-semibold text-ink">标签原因</p>
+            <p className="mt-2 text-sm leading-7 text-ink/65">
+              {selectedAsset.conclusion === "数据不足" ? labelMeaning("数据不足") : rationaleText(selectedAsset, "label_meaning", labelMeaning(selectedAsset.conclusion))}
+            </p>
+          </div>
+          <div className="rounded-[18px] border border-ink/10 bg-white p-4">
+            <p className="font-semibold text-ink">观察组合</p>
+            <p className="mt-2 text-sm leading-7 text-ink/65">
+              {assetType === "etf" ? observationPortfolio.data?.note ?? "暂无观察组合说明" : "非 ETF 模式下暂不显示观察组合"}
+            </p>
+          </div>
+          {dataIssues.length ? (
+            <div className="rounded-[18px] border border-ink/10 bg-white p-4">
+              <p className="font-semibold text-ink">数据问题</p>
+              <div className="mt-2 grid gap-2 text-sm text-ink/65">
+                {dataIssues.slice(0, 4).map((item) => (
+                  <p key={`${item.asset_type}-${item.code}`}>
+                    {item.name} · {assetTypeLabel(item.asset_type)} · {formatDate(item.latest_date)}
+                  </p>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          <p className="rounded-[16px] bg-white/70 px-4 py-3 text-xs text-ink/60">
+            {mode.sourceSummary}
+          </p>
+        </div>
+      ) : (
+        <div className="rounded-[20px] border border-dashed border-ink/20 p-6 text-sm leading-6 text-ink/55">
+          先在“榜单”选择标的后查看说明信息
+        </div>
+      )}
+    </Panel>
+  );
+
   useEffect(() => {
     const node = detailColumnRef.current;
     if (!node || typeof ResizeObserver === "undefined") {
@@ -929,7 +1390,33 @@ export default function ShortTermPage() {
         </p>
       )}
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(360px,0.78fr)_minmax(0,1.22fr)]" style={workbenchStyle}>
+      <div className="lg:hidden">
+        <div className="rounded-[18px] bg-white/90 p-1">
+          <div className="grid grid-cols-4 gap-2">
+            {mobileTabs.map((item) => (
+              <button
+                key={item.id}
+                className={`rounded-full px-3 py-2 text-sm font-semibold transition ${
+                  mobileTab === item.id ? "bg-ink text-white" : "bg-white text-ink hover:text-accent"
+                }`}
+                onClick={() => setMobileTab(item.id)}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="mt-4">
+          {mobileTab === "ranking" ? (
+            <Panel className="rounded-[24px]">{rankingPanelContent({ compact: true })}</Panel>
+          ) : null}
+          {mobileTab === "detail" ? renderMobileDetailPanel() : null}
+          {mobileTab === "tracking" ? renderMobileTrackingPanel() : null}
+          {mobileTab === "explanation" ? renderMobileExplanationPanel() : null}
+        </div>
+      </div>
+
+      <div className="hidden lg:grid gap-6 xl:grid-cols-[minmax(360px,0.78fr)_minmax(0,1.22fr)]" style={workbenchStyle}>
         <Panel className="rounded-[24px] xl:h-[var(--short-term-detail-height)] xl:overflow-auto">
           <div className="mb-5 flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
             <SectionKicker
@@ -1498,6 +1985,7 @@ export default function ShortTermPage() {
         </div>
       </div>
 
+      <div className="hidden lg:block">
       <Panel className="rounded-[24px]">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <SectionKicker eyebrow="我的持仓观察" title={mode.trackingTitle} description={mode.trackingDescription} />
@@ -1687,6 +2175,7 @@ export default function ShortTermPage() {
         页面里的排序、标签和 AI 说明都用于研究观察，不代表未来收益，也不会触发真实操作；
         真实买卖仍需要你在{assetType === "etf" ? "证券账户" : "支付宝"}手动确认。
       </p>
+      </div>
     </div>
   );
 }
