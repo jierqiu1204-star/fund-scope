@@ -36,8 +36,8 @@
 
 - [x] 5.1 Update IP/domain nginx deployment configs to remove Basic Auth while keeping static frontend and `/api/` proxy behavior.
 - [x] 5.2 Update deployment docs or env examples with JWT secret and bootstrap qje admin env names, without committing secrets.
-- [ ] 5.3 Run migration on the server and verify qje can log in with the configured email/password.
-- [ ] 5.4 Verify existing tracked positions are still visible under qje and reminders use qje's bound email.
+- [x] 5.3 Run migration on the server and verify qje can log in with the configured email/password.
+- [x] 5.4 Verify existing tracked positions are still visible under qje and reminders use qje's bound email.
 
 ## 6. Verification And Review
 
