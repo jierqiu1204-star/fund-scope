@@ -818,6 +818,7 @@ async def create_position(
     *,
     asset_type: str,
     asset_code: str,
+    user_id: int = 1,
     buy_amount: float,
     buy_date: date,
     order_time_bucket: str = ORDER_UNKNOWN,
@@ -837,6 +838,7 @@ async def create_position(
         confirmed_nav=confirmed_nav,
     )
     position = TrackedPosition(
+        user_id=user_id,
         asset_type=asset_type,
         asset_code=asset_code,
         asset_name=asset_name,
@@ -1190,7 +1192,7 @@ async def create_alert_if_needed(
         await session.refresh(alert)
         return alert, "web_only"
 
-    user = await session.get(User, 1)
+    user = await session.get(User, position.user_id)
     assert user is not None
     if not email_configured(user, settings):
         alert.email_status = "skipped"

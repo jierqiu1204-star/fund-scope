@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import require_approved_user
 from app.core.db import get_db_session
 from app.models.entities import User
 from app.schemas.settings import (
@@ -17,19 +17,18 @@ router = APIRouter(prefix="/api/settings/notifications", tags=["settings"])
 
 
 @router.get("", response_model=NotificationSettingsRead)
-async def get_notification_settings(session: AsyncSession = Depends(get_db_session)) -> NotificationSettingsRead:
-    user = await session.scalar(select(User).where(User.id == 1))
-    assert user is not None
+async def get_notification_settings(
+    user: User = Depends(require_approved_user),
+) -> NotificationSettingsRead:
     return NotificationSettingsRead.model_validate(user, from_attributes=True)
 
 
 @router.put("", response_model=NotificationSettingsRead)
 async def update_notification_settings(
     payload: NotificationSettingsUpdate,
+    user: User = Depends(require_approved_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> NotificationSettingsRead:
-    user = await session.scalar(select(User).where(User.id == 1))
-    assert user is not None
     user.recipient_email = payload.recipient_email
     user.reminder_day = payload.reminder_day
     user.reference_index_code = payload.reference_index_code

@@ -3,6 +3,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { ReactNode } from "react";
 
+import { AuthStatus } from "./auth-status";
 import { Providers } from "./providers";
 
 export const metadata: Metadata = {
@@ -62,6 +63,9 @@ export default function RootLayout({ children }: { children: ReactNode }) {
                     {item.label}
                   </Link>
                 ))}
+                <div className="ml-auto">
+                  <AuthStatus />
+                </div>
               </nav>
             </header>
             <main className="flex-1">{children}</main>

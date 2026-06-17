@@ -371,14 +371,34 @@ async def monthly_dca_reminder_job(
     session: AsyncSession,
     notifier_or_settings: Notifier | Settings,
 ) -> dict[str, Any]:
-    user = await session.scalar(select(User).where(User.id == 1))
-    assert user is not None
-    notifier = (
-        notifier_or_settings
-        if isinstance(notifier_or_settings, Notifier)
-        else _build_notifier_for_user(user, notifier_or_settings)
-    )
+    users = (
+        await session.scalars(
+            select(User)
+            .where(User.is_approved.is_(True))
+            .order_by(User.is_super_admin.desc(), User.id.asc())
+        )
+    ).all()
+    if not users:
+        return {"amount": 0.0, "reason": "没有已批准用户", "send_status": "skipped"}
 
+    results = []
+    for user in users:
+        notifier = (
+            notifier_or_settings
+            if isinstance(notifier_or_settings, Notifier)
+            else _build_notifier_for_user(user, notifier_or_settings)
+        )
+        result = await _send_monthly_dca_reminder_for_user(session, user, notifier)
+        results.append(result)
+    first_result = results[0]
+    return {**first_result, "user_results": results}
+
+
+async def _send_monthly_dca_reminder_for_user(
+    session: AsyncSession,
+    user: User,
+    notifier: Notifier,
+) -> dict[str, Any]:
     valuation = await session.scalar(
         select(IndexValuationHistory)
         .where(IndexValuationHistory.index_code == user.reference_index_code)
@@ -416,7 +436,13 @@ async def monthly_dca_reminder_job(
             "critical_events": [dict(row._mapping) for row in critical_events],
         },
     )
-    return {"amount": dca.amount, "reason": dca.reason, "send_status": send_status}
+    return {
+        "user_id": user.id,
+        "recipient": user.recipient_email,
+        "amount": dca.amount,
+        "reason": dca.reason,
+        "send_status": send_status,
+    }
 
 
 async def daily_recommendation_metrics_job(session: AsyncSession) -> dict[str, int]:

@@ -27,8 +27,12 @@ def utcnow() -> datetime:
 class User(Base):
     __tablename__ = "users"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     email: Mapped[str] = mapped_column(String(255), unique=True)
+    password_hash: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    is_approved: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_super_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     recipient_email: Mapped[str] = mapped_column(String(255))
     reminder_day: Mapped[int] = mapped_column(Integer, default=1)
     reference_index_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -38,6 +42,7 @@ class User(Base):
     smtp_username: Mapped[str | None] = mapped_column(String(255), nullable=True)
     smtp_password_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
     smtp_from: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
@@ -553,6 +558,7 @@ class TrackedPosition(Base):
     __tablename__ = "tracked_positions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), default=1)
     asset_type: Mapped[str] = mapped_column(String(16))
     asset_code: Mapped[str] = mapped_column(String(32))
     asset_name: Mapped[str] = mapped_column(String(255))

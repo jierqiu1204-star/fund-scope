@@ -32,6 +32,14 @@ class Settings(BaseSettings):
     smtp_username: str = Field(default="", alias="SMTP_USERNAME")
     smtp_password: str = Field(default="", alias="SMTP_PASSWORD")
     smtp_from: str = Field(default="", alias="SMTP_FROM")
+    auth_jwt_secret: str = Field(default="dev-only-fundscope-secret", alias="AUTH_JWT_SECRET")
+    auth_token_expire_days: int = Field(default=30, alias="AUTH_TOKEN_EXPIRE_DAYS")
+    auth_bootstrap_admin_email: str = Field(
+        default="19535838578@163.com",
+        alias="AUTH_BOOTSTRAP_ADMIN_EMAIL",
+    )
+    auth_bootstrap_admin_display_name: str = Field(default="qje", alias="AUTH_BOOTSTRAP_ADMIN_DISPLAY_NAME")
+    auth_bootstrap_admin_password: str = Field(default="", alias="AUTH_BOOTSTRAP_ADMIN_PASSWORD")
     nginx_basic_auth_user: str = Field(default="", alias="NGINX_BASIC_AUTH_USER")
     nginx_basic_auth_pass: str = Field(default="", alias="NGINX_BASIC_AUTH_PASS")
     cors_origins: Annotated[list[str], NoDecode] = Field(

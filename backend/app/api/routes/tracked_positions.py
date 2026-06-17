@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import require_approved_user
 from app.core.db import get_db_session
 from app.models.entities import TrackedPosition, TrackedPositionAlert, User, utcnow
 from app.schemas.tracked_positions import (
@@ -92,20 +93,24 @@ async def _position_detail_out(session: AsyncSession, row: TrackedPosition) -> T
 @router.get("", response_model=TrackedPositionListOut)
 async def list_tracked_positions(
     request: Request,
+    user: User = Depends(require_approved_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> TrackedPositionListOut:
     rows = (
         await session.scalars(
-            select(TrackedPosition).order_by(
+            select(TrackedPosition).where(TrackedPosition.user_id == user.id).order_by(
                 TrackedPosition.status.asc(),
                 TrackedPosition.created_at.desc(),
                 TrackedPosition.id.desc(),
             )
         )
     ).all()
-    total = await session.scalar(select(func.count()).select_from(TrackedPosition)) or 0
-    user = await session.get(User, 1)
-    assert user is not None
+    total = (
+        await session.scalar(
+            select(func.count()).select_from(TrackedPosition).where(TrackedPosition.user_id == user.id)
+        )
+        or 0
+    )
     return TrackedPositionListOut(
         items=[await _position_out(session, row) for row in rows],
         total=total,
@@ -117,6 +122,7 @@ async def list_tracked_positions(
 @router.post("", response_model=TrackedPositionOut, status_code=status.HTTP_201_CREATED)
 async def create_tracked_position(
     payload: TrackedPositionCreate,
+    user: User = Depends(require_approved_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> TrackedPositionOut:
     try:
@@ -124,6 +130,7 @@ async def create_tracked_position(
             session,
             asset_type=payload.asset_type,
             asset_code=payload.asset_code,
+            user_id=user.id,
             buy_amount=payload.buy_amount,
             buy_date=payload.buy_date or date.today(),
             order_time_bucket=payload.order_time_bucket,
@@ -140,10 +147,11 @@ async def create_tracked_position(
 @router.get("/{position_id}", response_model=TrackedPositionDetailOut)
 async def get_tracked_position(
     position_id: int,
+    user: User = Depends(require_approved_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> TrackedPositionDetailOut:
     row = await session.get(TrackedPosition, position_id)
-    if row is None:
+    if row is None or row.user_id != user.id:
         raise HTTPException(status_code=404, detail="未找到这笔追踪")
     return await _position_detail_out(session, row)
 
@@ -152,10 +160,11 @@ async def get_tracked_position(
 async def update_tracked_position(
     position_id: int,
     payload: TrackedPositionUpdate,
+    user: User = Depends(require_approved_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> TrackedPositionOut:
     row = await session.get(TrackedPosition, position_id)
-    if row is None:
+    if row is None or row.user_id != user.id:
         raise HTTPException(status_code=404, detail="未找到这笔追踪")
     recalculate_needed = False
     changed_execution_rule = False
@@ -197,10 +206,11 @@ async def update_tracked_position(
 async def close_tracked_position(
     position_id: int,
     payload: TrackedPositionCloseRequest,
+    user: User = Depends(require_approved_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> TrackedPositionOut:
     row = await session.get(TrackedPosition, position_id)
-    if row is None:
+    if row is None or row.user_id != user.id:
         raise HTTPException(status_code=404, detail="未找到这笔追踪")
     row.status = payload.status
     if payload.note:

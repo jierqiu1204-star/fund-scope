@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from logging.config import dictConfig
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.routes.admin import router as admin_router
 from app.api.routes.admin_data import router as admin_data_router
+from app.api.routes.admin_users import router as admin_users_router
+from app.api.routes.auth import router as auth_router
 from app.api.routes.etf_quotes import router as etf_quotes_router
 from app.api.routes.health import router as health_router
 from app.api.routes.news import router as news_router
@@ -22,9 +26,12 @@ from app.api.routes.strategy_lab import router as strategy_lab_router
 from app.api.routes.tracked_positions import router as tracked_positions_router
 from app.api.routes.transactions import router as transactions_router
 from app.api.routes.valuation import router as valuation_router
+from app.core.auth import ensure_bootstrap_admin, require_approved_user, require_super_admin
 from app.core.config import Settings, get_settings
 from app.core.db import DatabaseManager
 from app.services.scheduler import build_scheduler, register_default_jobs
+
+logger = logging.getLogger(__name__)
 
 
 def _configure_logging() -> None:
@@ -54,6 +61,11 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+        try:
+            async with application.state.db.session() as session:
+                await ensure_bootstrap_admin(session, application.state.settings)
+        except SQLAlchemyError:
+            logger.warning("认证字段迁移尚未完成，已跳过 qje 管理员启动补齐。请先运行 alembic upgrade head。")
         if start_scheduler:
             application.state.scheduler.start()
         yield
@@ -74,21 +86,26 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
         allow_headers=["*"],
     )
 
+    approved_dependencies = [Depends(require_approved_user)]
+    super_admin_dependencies = [Depends(require_super_admin)]
+
     app.include_router(health_router)
-    app.include_router(transactions_router)
-    app.include_router(portfolio_router)
-    app.include_router(valuation_router)
-    app.include_router(recommendations_router)
-    app.include_router(strategy_lab_router)
-    app.include_router(short_etf_router)
-    app.include_router(short_research_router)
-    app.include_router(etf_quotes_router)
-    app.include_router(tracked_positions_router)
-    app.include_router(news_router)
-    app.include_router(settings_router)
-    app.include_router(onboarding_router)
-    app.include_router(admin_data_router)
-    app.include_router(admin_router)
+    app.include_router(auth_router)
+    app.include_router(transactions_router, dependencies=approved_dependencies)
+    app.include_router(portfolio_router, dependencies=approved_dependencies)
+    app.include_router(valuation_router, dependencies=approved_dependencies)
+    app.include_router(recommendations_router, dependencies=approved_dependencies)
+    app.include_router(strategy_lab_router, dependencies=approved_dependencies)
+    app.include_router(short_etf_router, dependencies=approved_dependencies)
+    app.include_router(short_research_router, dependencies=approved_dependencies)
+    app.include_router(etf_quotes_router, dependencies=approved_dependencies)
+    app.include_router(tracked_positions_router, dependencies=approved_dependencies)
+    app.include_router(news_router, dependencies=approved_dependencies)
+    app.include_router(settings_router, dependencies=approved_dependencies)
+    app.include_router(onboarding_router, dependencies=approved_dependencies)
+    app.include_router(admin_data_router, dependencies=super_admin_dependencies)
+    app.include_router(admin_router, dependencies=super_admin_dependencies)
+    app.include_router(admin_users_router)
     return app
 
 
