@@ -8,15 +8,14 @@ public IP before buying or configuring a domain, use `README-ip.md` instead.
 - `postgres`: application database
 - `backend`: FastAPI API and APScheduler jobs
 - `frontend-static-builder`: Next.js static export builder
-- `nginx`: static hosting, reverse proxy, and basic auth
+- `nginx`: static hosting and `/api/` reverse proxy. Access control is handled by the FundScope application login.
 - `certbot`: certificate issuance helper
 
 ## Required Local Files
 
 Create these files on the deployment host. Do not commit private values.
 
-- `/srv/fundscope/.env`: copy from `.env.example` and replace database, OpenAI, SMTP, and auth placeholders.
-- `/srv/fundscope/deploy/.htpasswd`: generate with `./create-htpasswd.sh <user> <pass>`.
+- `/srv/fundscope/.env`: copy from `.env.example` and replace database, OpenAI, SMTP, JWT, and bootstrap admin placeholders.
 - `POSTGRES_PASSWORD`: export in the shell or provide through a host-level environment file before running Compose.
 - `FQDN`: export the public hostname used by nginx and Certbot.
 
@@ -41,11 +40,14 @@ The list should include `VPS_HOST`, `VPS_USER`, and `VPS_SSH_KEY`. The values ar
 1. Clone the repository to `/srv/fundscope`.
 2. Copy `.env.example` to `.env` and replace placeholder values.
 3. Export `POSTGRES_PASSWORD=<strong-password>` and `FQDN=<your-domain>`.
-4. Generate basic-auth credentials:
+4. Ensure `.env` contains the application login settings:
 
    ```bash
-   cd /srv/fundscope/deploy
-   ./create-htpasswd.sh <user> <pass>
+   AUTH_JWT_SECRET=<random-long-secret>
+   AUTH_TOKEN_EXPIRE_DAYS=30
+   AUTH_BOOTSTRAP_ADMIN_EMAIL=19535838578@163.com
+   AUTH_BOOTSTRAP_ADMIN_DISPLAY_NAME=qje
+   AUTH_BOOTSTRAP_ADMIN_PASSWORD=<qje-login-password>
    ```
 
 5. Build and start the local stack:
@@ -66,7 +68,7 @@ The list should include `VPS_HOST`, `VPS_USER`, and `VPS_SSH_KEY`. The values ar
    docker compose exec backend alembic upgrade head
    ```
 
-8. Visit `/onboarding` and apply the default portfolio seed.
+8. Visit `/login`, log in as the bootstrap admin, then open `/onboarding` if default data still needs seeding.
 
 ## Local Compose Verification
 
@@ -90,10 +92,10 @@ If startup is blocked, record the failing command, full output, and next action 
 After deployment, verify these items before calling the release ready:
 
 - HTTPS: `curl -I https://$FQDN` returns a 2xx or 3xx response with a valid certificate.
-- Basic auth: unauthenticated `curl -I https://$FQDN` returns `401`, and authenticated `curl -I -u <user>:<pass> https://$FQDN` reaches the app.
-- Backend health: `curl -f -u <user>:<pass> https://$FQDN/api/health`.
-- nginx proxying: `curl -f -u <user>:<pass> https://$FQDN/api/valuation/current`.
-- Static frontend: open `/portfolio`, `/valuation`, `/news`, and `/recommendations`.
+- Application login: open `/login`, sign in as the bootstrap admin, and confirm `/admin/users` is visible.
+- Backend health: `curl -f https://$FQDN/api/health`.
+- nginx proxying: log in through the browser, then confirm business pages load their `/api/` data.
+- Static frontend: open `/portfolio`, `/valuation`, `/news`, `/short-term`, and `/recommendations`.
 - Scheduler: temporarily set one job to run in the next few minutes, then check `docker compose logs -f backend` and `/api/admin/jobs`.
 - Backups: run `./backup.sh`, confirm a new dump exists under `/var/backups/fundscope/`, and confirm old dumps rotate.
 - Recovery note: document the latest successful commit SHA and database backup path.

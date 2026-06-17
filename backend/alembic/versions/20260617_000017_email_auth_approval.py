@@ -23,8 +23,6 @@ def upgrade() -> None:
         """
         UPDATE users
         SET
-            email = '19535838578@163.com',
-            recipient_email = '19535838578@163.com',
             display_name = 'qje',
             is_approved = true,
             is_super_admin = true

@@ -558,7 +558,7 @@ class TrackedPosition(Base):
     __tablename__ = "tracked_positions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), default=1)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     asset_type: Mapped[str] = mapped_column(String(16))
     asset_code: Mapped[str] = mapped_column(String(32))
     asset_name: Mapped[str] = mapped_column(String(255))

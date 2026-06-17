@@ -39,6 +39,7 @@ def settings(tmp_path: Path) -> Settings:
         smtp_username="mailer@example.com",
         smtp_password="secret",
         smtp_from="FundScope <mailer@example.com>",
+        auth_jwt_secret="test-auth-secret",
         cors_origins=["http://localhost:3000"],
     )
 

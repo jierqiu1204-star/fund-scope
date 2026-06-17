@@ -388,7 +388,18 @@ async def monthly_dca_reminder_job(
             if isinstance(notifier_or_settings, Notifier)
             else _build_notifier_for_user(user, notifier_or_settings)
         )
-        result = await _send_monthly_dca_reminder_for_user(session, user, notifier)
+        try:
+            result = await _send_monthly_dca_reminder_for_user(session, user, notifier)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("monthly_dca_reminder_user_failed", extra={"user_id": user.id})
+            result = {
+                "user_id": user.id,
+                "recipient": user.recipient_email,
+                "amount": 0.0,
+                "reason": "用户提醒发送失败",
+                "send_status": "failed",
+                "error": str(exc),
+            }
         results.append(result)
     first_result = results[0]
     return {**first_result, "user_results": results}

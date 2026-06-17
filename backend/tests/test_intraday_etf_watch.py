@@ -138,6 +138,7 @@ async def test_watchlist_uses_top20_and_merges_active_tracked_etfs(app) -> None:
         session.add(_etf("159999", "Tracked ETF"))
         session.add(
             TrackedPosition(
+                user_id=1,
                 asset_type="etf",
                 asset_code="159999",
                 asset_name="Tracked ETF",
@@ -234,6 +235,7 @@ async def test_etf_entry_uses_manual_price_then_fresh_intraday_fallback(app) -> 
             session,
             asset_type="etf",
             asset_code="512800",
+            user_id=1,
             buy_amount=3000,
             buy_date=now.date(),
             order_time_bucket="before_15",
@@ -244,6 +246,7 @@ async def test_etf_entry_uses_manual_price_then_fresh_intraday_fallback(app) -> 
             session,
             asset_type="etf",
             asset_code="512800",
+            user_id=1,
             buy_amount=3000,
             buy_date=now.date(),
             order_time_bucket="before_15",
@@ -271,6 +274,7 @@ async def test_dynamic_hard_stop_and_intraday_cooldown(app, settings, monkeypatc
 
     async with app.state.db.session() as session:
         position = TrackedPosition(
+            user_id=1,
             asset_type="etf",
             asset_code="510000",
             asset_name="ETF510000",
@@ -338,6 +342,7 @@ async def test_intraday_structure_warning_is_web_only(app, settings, monkeypatch
 
     async with app.state.db.session() as session:
         position = TrackedPosition(
+            user_id=1,
             asset_type="etf",
             asset_code="510000",
             asset_name="Structure ETF",
@@ -408,6 +413,7 @@ async def test_dynamic_trailing_profit_trend_and_structure_warnings(app) -> None
 
     async with app.state.db.session() as session:
         trailing_position = TrackedPosition(
+            user_id=1,
             asset_type="etf",
             asset_code="510880",
             asset_name="Trailing ETF",
@@ -419,6 +425,7 @@ async def test_dynamic_trailing_profit_trend_and_structure_warnings(app) -> None
             status="active",
         )
         trend_position = TrackedPosition(
+            user_id=1,
             asset_type="etf",
             asset_code="510881",
             asset_name="Trend ETF",
@@ -430,6 +437,7 @@ async def test_dynamic_trailing_profit_trend_and_structure_warnings(app) -> None
             status="active",
         )
         structure_position = TrackedPosition(
+            user_id=1,
             asset_type="etf",
             asset_code="510882",
             asset_name="Structure ETF",
@@ -527,6 +535,7 @@ async def test_high_volatility_etf_receives_wider_dynamic_thresholds(app) -> Non
 
     async with app.state.db.session() as session:
         low_position = TrackedPosition(
+            user_id=1,
             asset_type="etf",
             asset_code="510890",
             asset_name="Low Vol ETF",
@@ -538,6 +547,7 @@ async def test_high_volatility_etf_receives_wider_dynamic_thresholds(app) -> Non
             status="active",
         )
         high_position = TrackedPosition(
+            user_id=1,
             asset_type="etf",
             asset_code="510891",
             asset_name="High Vol ETF",
@@ -574,6 +584,7 @@ async def test_intraday_watch_status_api_and_tracked_position_fields(client, app
     async with app.state.db.session() as session:
         session.add(
             TrackedPosition(
+                user_id=1,
                 asset_type="etf",
                 asset_code="510000",
                 asset_name="ETF510000",

@@ -5,6 +5,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
 from app.core.auth import create_access_token, hash_password
+from app.core.config import Settings
 from app.models.entities import User
 
 
@@ -69,6 +70,56 @@ async def test_protected_api_requires_token(app) -> None:
         response = await bare_client.get("/api/tracked-positions")
 
     assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_settings_test_send_requires_token(app) -> None:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as bare_client:
+        response = await bare_client.post(
+            "/api/settings/notifications/test-send",
+            json={
+                "smtp_host": "smtp.example.com",
+                "smtp_port": 587,
+                "smtp_username": "mailer@example.com",
+                "smtp_password": "secret",
+                "recipient_email": "owner@example.com",
+            },
+        )
+
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_normal_user_cannot_run_admin_job(client, app) -> None:
+    async with app.state.db.session() as session:
+        normal = User(
+            email="normal-job@example.com",
+            password_hash=hash_password("password-123"),
+            recipient_email="normal-job@example.com",
+            is_approved=True,
+            is_super_admin=False,
+        )
+        session.add(normal)
+        await session.commit()
+        await session.refresh(normal)
+        token, _ = create_access_token(normal, app.state.settings)
+
+    response = await client.post(
+        "/api/admin/jobs/daily_fund_nav/run",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_jwt_secret_is_required(app) -> None:
+    async with app.state.db.session() as session:
+        user = await session.get(User, 1)
+        assert user is not None
+
+    with pytest.raises(RuntimeError, match="AUTH_JWT_SECRET"):
+        create_access_token(user, Settings(_env_file=None))
 
 
 @pytest.mark.asyncio

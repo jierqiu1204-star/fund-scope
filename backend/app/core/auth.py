@@ -56,6 +56,8 @@ def _b64decode(data: str) -> bytes:
 
 
 def create_access_token(user: User, settings: Settings) -> tuple[str, datetime]:
+    if not settings.auth_jwt_secret:
+        raise RuntimeError("AUTH_JWT_SECRET is required for authentication")
     expires_at = utcnow() + timedelta(days=settings.auth_token_expire_days)
     header = {"alg": "HS256", "typ": "JWT"}
     payload = {
@@ -79,6 +81,8 @@ def create_access_token(user: User, settings: Settings) -> tuple[str, datetime]:
 
 
 def decode_access_token(token: str, settings: Settings) -> dict[str, Any]:
+    if not settings.auth_jwt_secret:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="认证配置缺少 AUTH_JWT_SECRET")
     try:
         header_raw, payload_raw, signature_raw = token.split(".", 2)
         signing_input = f"{header_raw}.{payload_raw}"
@@ -139,21 +143,28 @@ async def require_super_admin(user: User = Depends(require_approved_user)) -> Us
 
 async def ensure_bootstrap_admin(session: AsyncSession, settings: Settings) -> None:
     email = settings.auth_bootstrap_admin_email.strip().lower()
-    if not email:
+    if not email or not settings.auth_bootstrap_admin_password:
         return
     user = await session.scalar(select(User).where(User.email == email))
     if user is None:
-        user = await session.get(User, 1)
-    if user is None:
-        user = User(
-            email=email,
-            recipient_email=email,
-            reminder_day=1,
-            reference_index_code="CSI300",
-            base_monthly_amount=833.0,
-        )
-        session.add(user)
-        await session.flush()
+        legacy_user = await session.get(User, 1)
+        if (
+            legacy_user is not None
+            and legacy_user.is_super_admin
+            and legacy_user.display_name == settings.auth_bootstrap_admin_display_name
+            and not legacy_user.password_hash
+        ):
+            user = legacy_user
+        else:
+            user = User(
+                email=email,
+                recipient_email=email,
+                reminder_day=1,
+                reference_index_code="CSI300",
+                base_monthly_amount=833.0,
+            )
+            session.add(user)
+            await session.flush()
     user.email = email
     user.recipient_email = email
     user.display_name = settings.auth_bootstrap_admin_display_name or "qje"

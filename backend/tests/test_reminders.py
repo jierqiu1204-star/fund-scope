@@ -14,6 +14,7 @@ from app.models.entities import (
     User,
 )
 from app.services.dca_calculator import compute_dca_amount
+from app.services.jobs import monthly_dca_reminder_job
 from app.services.notifier import Notifier
 
 
@@ -205,6 +206,49 @@ async def test_manual_monthly_reminder_uses_saved_notification_settings(
     payload = captured["payload"]
     assert payload["valuation_statuses"][0]["index_code"] == "CSI300"
     assert payload["portfolio_return"]["pnl"] == 50.0
+
+
+@pytest.mark.asyncio
+async def test_monthly_reminder_continues_when_one_user_fails(app, monkeypatch) -> None:
+    async def fake_send_template(self, session, *, recipient: str, template_name: str, payload: dict) -> str:
+        if recipient == "19535838578@163.com":
+            raise RuntimeError("first smtp failed")
+        return "sent"
+
+    monkeypatch.setattr("app.services.notifier.Notifier.send_template", fake_send_template)
+
+    async with app.state.db.session() as session:
+        session.add(
+            User(
+                email="second@example.com",
+                recipient_email="second@example.com",
+                is_approved=True,
+                is_super_admin=False,
+                reference_index_code="CSI300",
+                base_monthly_amount=833.0,
+            )
+        )
+        session.add(
+            IndexValuationHistory(
+                index_code="CSI300",
+                valuation_date=date(2026, 5, 1),
+                pe=12.3,
+                pb=1.4,
+                dividend_yield=2.1,
+                pe_percentile=40,
+                pb_percentile=20,
+                effective_window=3650,
+            )
+        )
+        await session.commit()
+
+        result = await monthly_dca_reminder_job(session, app.state.settings)
+
+    assert result["send_status"] == "failed"
+    assert result["user_results"][0]["recipient"] == "19535838578@163.com"
+    assert result["user_results"][0]["send_status"] == "failed"
+    assert result["user_results"][1]["recipient"] == "second@example.com"
+    assert result["user_results"][1]["send_status"] == "sent"
 
 
 @pytest.mark.asyncio

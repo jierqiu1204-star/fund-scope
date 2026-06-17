@@ -392,6 +392,7 @@ async def test_fund_dynamic_thresholds_use_daily_nav_behavior(app) -> None:
             session,
             asset_type="fund",
             asset_code="001410",
+            user_id=1,
             buy_amount=3000,
             buy_date=date(2026, 6, 1),
         )

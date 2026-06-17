@@ -45,4 +45,4 @@
 - [x] 6.2 Add backend tests for tracked-position user isolation and owner-recipient alert sending.
 - [x] 6.3 Add frontend type/build checks for login flow, approval page, and tokenized API client.
 - [x] 6.4 Run `uv run pytest`, `uv run ruff check .`, `uv run mypy app`, `corepack pnpm exec tsc --noEmit`, and `corepack pnpm build:static`.
-- [ ] 6.5 Have 5.3codex execute implementation groups after task assignment, then run a final human-level review for auth boundary leaks, user data isolation, and deployment safety before marking the change done.
+- [x] 6.5 Have 5.3codex execute implementation groups after task assignment, then run a final human-level review for auth boundary leaks, user data isolation, and deployment safety before marking the change done.

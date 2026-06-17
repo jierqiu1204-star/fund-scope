@@ -818,7 +818,7 @@ async def create_position(
     *,
     asset_type: str,
     asset_code: str,
-    user_id: int = 1,
+    user_id: int,
     buy_amount: float,
     buy_date: date,
     order_time_bucket: str = ORDER_UNKNOWN,
