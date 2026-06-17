@@ -499,6 +499,22 @@ function formatDateTime(value: string | null | undefined) {
   }).format(new Date(value));
 }
 
+function formatUtcDateTime(value: string | null | undefined) {
+  if (!value) {
+    return "暂无";
+  }
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value);
+  const date = new Date(hasTimezone ? value : `${value}Z`);
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  }).format(date);
+}
+
 function AssetPaginationBar({
   total,
   offset,
@@ -1485,7 +1501,7 @@ export default function ShortTermPage() {
             </div>
             <div>
               <p className="text-xs text-white/50">最近运行</p>
-              <p className="font-semibold">{formatDateTime(intradayWatch.data?.latest_run?.finished_at)}</p>
+              <p className="font-semibold">{formatUtcDateTime(intradayWatch.data?.latest_run?.finished_at)}</p>
             </div>
           </div>
         ) : null}
