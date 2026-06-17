@@ -509,6 +509,64 @@ async def test_dynamic_trailing_profit_trend_and_structure_warnings(app) -> None
 
 
 @pytest.mark.asyncio
+async def test_high_volatility_etf_receives_wider_dynamic_thresholds(app) -> None:
+    today = datetime.now().date()
+    start = today - timedelta(days=10)
+    await _seed_price_history_from_closes(
+        app,
+        "510890",
+        [1.000, 1.002, 1.001, 1.003, 1.004, 1.003, 1.005, 1.006, 1.005, 1.007],
+        start=start,
+    )
+    await _seed_price_history_from_closes(
+        app,
+        "510891",
+        [1.00, 1.06, 1.01, 1.09, 1.02, 1.11, 1.04, 1.13, 1.05, 1.12],
+        start=start,
+    )
+
+    async with app.state.db.session() as session:
+        low_position = TrackedPosition(
+            asset_type="etf",
+            asset_code="510890",
+            asset_name="Low Vol ETF",
+            buy_date=start,
+            buy_amount=3000,
+            entry_price=1.0,
+            entry_price_date=start,
+            estimated_shares=3000,
+            status="active",
+        )
+        high_position = TrackedPosition(
+            asset_type="etf",
+            asset_code="510891",
+            asset_name="High Vol ETF",
+            buy_date=start,
+            buy_amount=3000,
+            entry_price=1.0,
+            entry_price_date=start,
+            estimated_shares=3000,
+            status="active",
+        )
+        session.add_all([low_position, high_position])
+        await session.commit()
+        await session.refresh(low_position)
+        await session.refresh(high_position)
+
+        low = await position_analysis(session, low_position)
+        high = await position_analysis(session, high_position)
+
+    assert low.dynamic_thresholds is not None
+    assert high.dynamic_thresholds is not None
+    assert high.dynamic_thresholds.hard_stop_pct is not None
+    assert low.dynamic_thresholds.hard_stop_pct is not None
+    assert high.dynamic_thresholds.trailing_giveback_pct is not None
+    assert low.dynamic_thresholds.trailing_giveback_pct is not None
+    assert high.dynamic_thresholds.hard_stop_pct < low.dynamic_thresholds.hard_stop_pct
+    assert high.dynamic_thresholds.trailing_giveback_pct > low.dynamic_thresholds.trailing_giveback_pct
+
+
+@pytest.mark.asyncio
 async def test_intraday_watch_status_api_and_tracked_position_fields(client, app) -> None:
     await _seed_signal_run(app, count=1)
     await _seed_price_history(app, "510000")

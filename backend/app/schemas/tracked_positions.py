@@ -104,6 +104,8 @@ class TrackedPositionOut(BaseModel):
     confirmed_nav: float | None = None
     confirmed_shares: float | None = None
     buy_amount: float
+    cost_basis: float | None = None
+    cost_basis_source: str | None = None
     entry_price: float | None
     entry_price_date: date | None
     estimated_shares: float | None

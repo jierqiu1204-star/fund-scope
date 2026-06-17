@@ -319,6 +319,19 @@ function optionalNumber(value: string) {
   return trimmed ? Number(trimmed) : undefined;
 }
 
+function costBasisSourceLabel(value: string | null | undefined) {
+  if (value === "confirmed_shares_entry_price") {
+    return "按成交份额 × 买入价";
+  }
+  if (value === "estimated_shares_entry_price") {
+    return "按买入金额 ÷ 买入价估算份额";
+  }
+  if (value === "buy_amount_estimate") {
+    return "按下单金额估算";
+  }
+  return "等待成本数据";
+}
+
 function trackingStatusLabel(status: string) {
   switch (status) {
     case "active":
@@ -356,35 +369,50 @@ function alertTypeLabel(alertType: string) {
   return alertType;
 }
 
+const EXIT_ALERT_TYPES = new Set(["exit_watch", "trailing_take_profit", "trend_weakening", "hard_stop"]);
+
 function isEmailExitAlert(alertType: string) {
-  return ["exit_watch", "trailing_take_profit", "trend_weakening", "hard_stop"].includes(alertType);
+  return EXIT_ALERT_TYPES.has(alertType);
 }
 
-function alertDeliveryLabel(alert: { alert_type: string; email_status: string; suppression_status: string | null }) {
+function alertDeliveryLabel(alert: {
+  alert_type: string;
+  email_status: string;
+  suppression_status: string | null;
+  quote_time?: string | null;
+}) {
   if (alert.suppression_status === "web_only" || !isEmailExitAlert(alert.alert_type)) {
     return "仅网页提示";
   }
   if (alert.suppression_status === "suppressed") {
-    return "冷却去重，未重复发邮件";
+    return "已去重";
   }
   if (alert.email_status === "sent") {
     return "已发邮件";
   }
-  if (alert.email_status === "failed") {
-    return "邮件发送失败";
+  if (alert.quote_time === null || alert.quote_time === undefined) {
+    return "等待数据";
   }
-  if (alert.email_status === "skipped") {
-    return "未发邮件";
-  }
-  return "等待发送";
+  return "仅网页提示";
 }
-
-function latestAlertTone(alert: { alert_type: string; email_status: string; suppression_status: string | null }) {
+function latestAlertTone(alert: {
+  alert_type: string;
+  email_status: string;
+  suppression_status: string | null;
+  quote_time?: string | null;
+}) {
+  const deliveryLabel = alertDeliveryLabel(alert);
   if (alert.alert_type === "hard_stop") {
     return "bg-rose-50 text-rose-800";
   }
-  if (alert.suppression_status === "web_only" || !isEmailExitAlert(alert.alert_type)) {
+  if (deliveryLabel === "仅网页提示") {
     return "bg-sky-50 text-sky-800";
+  }
+  if (deliveryLabel === "已去重") {
+    return "bg-rose-50 text-rose-800";
+  }
+  if (deliveryLabel === "等待数据") {
+    return "bg-stone-50 text-stone-700";
   }
   return "bg-amber-50 text-amber-900";
 }
@@ -425,6 +453,14 @@ function pnlText(position: TrackedPosition) {
 
 function percentOrWaiting(value: number | null) {
   return value === null ? "等待数据" : formatPercent(value);
+}
+
+function percentValueOrWaiting(value: number | null | undefined) {
+  return value === null || value === undefined ? "暂无" : formatPercent(value);
+}
+
+function scoreOrWaiting(value: number | null) {
+  return value === null ? "等待数据" : value.toFixed(1);
 }
 
 function priceSourceLabel(value: string | null | undefined) {
@@ -509,7 +545,6 @@ function AssetPaginationBar({
     </div>
   );
 }
-
 function TaskButton({
   children,
   variant = "secondary",
@@ -799,10 +834,27 @@ export default function ShortTermPage() {
       .filter((item) => item.asset_type === assetType && (item.status !== "success" || item.is_stale))
       .slice(0, 6) ?? [];
   const activeTracked = (trackedPositions.data?.items ?? []).filter((item) => item.status === "active");
+  const trackedByAsset = useMemo(() => {
+    const map = new Map<string, TrackedPosition>();
+    for (const item of activeTracked) {
+      map.set(`${item.asset_type}-${item.asset_code}`, item);
+    }
+    return map;
+  }, [activeTracked]);
   const selectedTracked = activeTracked.filter(
     (item) => selectedAsset && item.asset_type === selectedAsset.asset_type && item.asset_code === selectedAsset.code
   );
   const primaryTracked = selectedTracked[0] ?? null;
+  const selectedAssetMetrics = selectedAsset?.metrics ?? {};
+  const selectedAssetTrendScore = numericMetric(selectedAssetMetrics, "trend_score");
+  const selectedAssetSource = selectedAsset?.source_note ?? "暂无";
+  const selectedHoldingStatus = primaryTracked?.current_snapshot.current_label ?? "未持仓";
+  const selectedHoldingDecision = primaryTracked?.exit_signal.label ?? "未触发持仓处理";
+  const selectedLatestReason =
+    primaryTracked?.exit_signal.reason ??
+    primaryTracked?.exit_signal.reasons?.[0] ??
+    primaryTracked?.latest_alert?.trigger_label ??
+    "暂无持仓原因";
   const trackedDetail = useQuery({
     queryKey: ["tracked-position", primaryTracked?.id],
     enabled: primaryTracked !== null,
@@ -822,6 +874,53 @@ export default function ShortTermPage() {
     { id: "tracking", label: "追踪" },
     { id: "explanation", label: "说明" }
   ];
+
+  const renderAssetStatusSummary = () => {
+    if (!selectedAsset) {
+      return null;
+    }
+
+    const trendWeakening = primaryTracked?.dynamic_thresholds?.trend_weakening
+      ? "是"
+      : primaryTracked?.dynamic_thresholds
+      ? "否"
+      : "暂无";
+    const thresholds = primaryTracked?.dynamic_thresholds
+      ? {
+          hardStop: percentValueOrWaiting(primaryTracked.dynamic_thresholds.hard_stop_pct),
+          profitStart: percentValueOrWaiting(primaryTracked.dynamic_thresholds.profit_start_pct),
+          giveback: percentValueOrWaiting(primaryTracked.dynamic_thresholds.trailing_giveback_pct),
+          trendWeakening
+        }
+      : null;
+
+    return (
+      <div className="mt-5 rounded-[20px] border border-ink/10 bg-white p-4">
+        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">观察与持仓摘要</p>
+        <div className="mt-3 grid gap-2 text-sm text-ink/70 md:grid-cols-2">
+          <span>买入观察状态：{selectedAsset.conclusion}</span>
+          <span>持仓状态：{selectedHoldingStatus}</span>
+          <span>近5日涨跌：{percentMetric(selectedAssetMetrics, "return_5d")}</span>
+          <span>近20日涨跌：{percentMetric(selectedAssetMetrics, "return_20d")}</span>
+          <span>近60日涨跌：{percentMetric(selectedAssetMetrics, "return_60d")}</span>
+          <span>60日回撤：{percentMetric(selectedAssetMetrics, "max_drawdown_60d")}</span>
+          <span>波动（20日）：{percentMetric(selectedAssetMetrics, "volatility_20d")}</span>
+          <span>趋势强度：{scoreOrWaiting(selectedAssetTrendScore)}</span>
+          <span>数据来源：{selectedAssetSource}</span>
+          <span>持仓处理状态：{selectedHoldingDecision}</span>
+          <span>最新原因：{selectedLatestReason}</span>
+        </div>
+        <details className="mt-3 rounded-[14px] bg-paper px-3 py-2">
+          <summary className="cursor-pointer text-sm font-semibold">动态阈值</summary>
+          <p className="mt-2 text-xs text-ink/65">
+            {thresholds
+              ? `硬止损${thresholds.hardStop}；止盈起点${thresholds.profitStart}；回撤减仓${thresholds.giveback}；趋势减弱预警${thresholds.trendWeakening}`
+              : "暂无追踪动态阈值"}
+          </p>
+        </details>
+      </div>
+    );
+  };
 
   const isMobileLayout = () => typeof window !== "undefined" && window.matchMedia("(max-width: 1023px)").matches;
 
@@ -926,6 +1025,7 @@ export default function ShortTermPage() {
             const isSelected = selected?.asset_type === item.asset_type && selected.code === item.code;
             const exclusionReasons = stringListMetric(item.metrics, "default_exclusion_reasons");
             const defaultEligible = boolMetric(item.metrics, "default_display_eligible");
+            const trackedForItem = trackedByAsset.get(`${item.asset_type}-${item.code}`);
             return (
               <button
                 key={`${item.asset_type}-${item.code}`}
@@ -954,7 +1054,14 @@ export default function ShortTermPage() {
                       {item.total_score.toFixed(1)} 分
                     </span>
                     <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : conclusionTone(item.conclusion)}`}>
-                      {item.conclusion}
+                      买入观察：{item.conclusion}
+                    </span>
+                    <span
+                      className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                        isSelected ? "bg-white/15 text-white" : exitSignalTone(trackedForItem?.exit_signal.level ?? "none")
+                      }`}
+                    >
+                      持仓处理：{trackedForItem?.exit_signal.label ?? "未追踪"}
                     </span>
                     {item.advisor_report ? (
                       <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : advisorTone(item.advisor_report.action_label)}`}>
@@ -1050,6 +1157,8 @@ export default function ShortTermPage() {
               />
             ) : null}
           </div>
+
+          {renderAssetStatusSummary()}
 
           <div className="rounded-[20px] bg-ink text-white p-4">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1170,7 +1279,7 @@ export default function ShortTermPage() {
                   <p className="mt-1 text-xs text-ink/45">{assetTypeLabel(item.asset_type)}</p>
                 </div>
                 <span className={`shrink-0 rounded-full px-3 py-1 text-xs font-semibold ${conclusionTone(item.current_snapshot.current_label ?? "数据不足")}`}>
-                  持仓:{item.current_snapshot.current_label ?? "待确认"}
+                  买入观察:{item.current_snapshot.current_label ?? "待确认"}
                 </span>
               </div>
               <div className="mt-3 grid gap-1 text-sm text-ink/65 sm:grid-cols-2">
@@ -1179,13 +1288,20 @@ export default function ShortTermPage() {
                   持有天数: {item.holding_days === null ? "暂无" : `${item.holding_days} 天`}
                 </span>
                 <span>实时价: {item.current_snapshot.current_price?.toFixed(4) ?? "暂无"}</span>
-                <span>持仓状态: {item.exit_signal.label}</span>
+                <span>
+                  成本口径: {item.cost_basis === null ? "等待成本数据" : `${formatCurrency(item.cost_basis)} / ${costBasisSourceLabel(item.cost_basis_source)}`}
+                </span>
+                <span>持仓处理状态: {item.exit_signal.label}</span>
               </div>
               {item.latest_alert ? (
                 <p className="mt-3 rounded-[12px] bg-paper px-3 py-2 text-xs text-ink/65">
                   最新预警: {alertTypeLabel(item.latest_alert.alert_type)} / {alertDeliveryLabel(item.latest_alert)}
                 </p>
-              ) : null}
+              ) : (
+                <p className="mt-3 rounded-[12px] bg-paper px-3 py-2 text-xs leading-5 text-ink/65">
+                  暂无追踪告警。数据质量/IOPV/流动性问题只在网页提示，不触发卖出邮件。
+                </p>
+              )}
               <button
                 className="mt-4 rounded-full border border-ink/10 px-4 py-2 text-sm font-semibold text-ink transition hover:border-accent hover:text-accent disabled:opacity-60"
                 disabled={closeTracking.isPending}
@@ -1628,6 +1744,8 @@ export default function ShortTermPage() {
                   </div>
                 </div>
 
+                {renderAssetStatusSummary()}
+
                 <div className="mt-5 rounded-[20px] border border-ink/10 bg-white p-4">
                   <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                     <div>
@@ -1777,7 +1895,7 @@ export default function ShortTermPage() {
                       <span>当前点：{trackingCurrent ? `${trackingCurrent.label} / ${percentOrWaiting(trackingCurrent.pnl)}` : "等待数据"}</span>
                     </div>
                     <p className="mt-3 rounded-[16px] bg-paper px-4 py-3 text-sm leading-6 text-ink/65">
-                      {primaryTracked.exit_signal.reason ?? "暂无卖出/减仓提醒，继续观察公开数据。"}
+                      {primaryTracked.exit_signal.reason ?? "暂无持仓处理原因，继续观察公开数据。"}
                     </p>
                   </div>
                 ) : null}
@@ -2018,6 +2136,9 @@ export default function ShortTermPage() {
                 <span>{item.asset_type === "etf" ? "买入价格日" : "确认净值日"}：{formatDate(item.confirmed_nav_date ?? item.entry_price_date)}</span>
                 <span>{item.asset_type === "etf" ? "买入价" : "确认净值"}：{item.confirmed_nav?.toFixed(4) ?? item.entry_price?.toFixed(4) ?? "等待价格"}</span>
                 <span>当前价：{item.current_snapshot.current_price?.toFixed(4) ?? "暂无"}</span>
+                <span>
+                  成本口径：{item.cost_basis === null ? "等待成本数据" : `${formatCurrency(item.cost_basis)} / ${costBasisSourceLabel(item.cost_basis_source)}`}
+                </span>
                 <span>持有：{item.holding_days === null ? "等待数据" : `${item.holding_days} 天`}</span>
                 <span>{item.confirmed_shares === null ? "估算份额" : "确认份额"}：{item.estimated_shares === null ? "等待价格" : item.estimated_shares.toFixed(2)}</span>
                 <span className={pnlTone(item.current_snapshot.estimated_pnl)}>估算盈亏：{pnlText(item)}</span>
@@ -2026,7 +2147,7 @@ export default function ShortTermPage() {
               <div className={`mt-4 rounded-[16px] p-3 text-sm leading-6 ${exitSignalTone(item.exit_signal.level)}`}>
                 <p className="text-xs font-semibold opacity-75">持仓处理状态</p>
                 <p className="font-semibold">{item.exit_signal.label}</p>
-                <p className="mt-1">{item.exit_signal.reason ?? "暂无卖出/减仓提醒，继续观察公开数据。"}</p>
+                <p className="mt-1">{item.exit_signal.reason ?? "暂无持仓处理原因，继续观察公开数据。"}</p>
               </div>
 
               {item.latest_alert ? (
@@ -2043,7 +2164,7 @@ export default function ShortTermPage() {
                 </div>
               ) : (
                 <p className="mt-4 rounded-[16px] bg-paper p-3 text-sm leading-6 text-ink/55">
-                  暂无卖出/减仓邮件。数据滞后、暂无 IOPV 等质量提示只在网页展示，不打扰邮箱。
+                  暂无可展示告警。数据质量/IOPV/流动性问题只在网页提示，不触发卖出邮件。
                 </p>
               )}
 

@@ -635,6 +635,8 @@ export type TrackedPosition = {
   confirmed_nav: number | null;
   confirmed_shares: number | null;
   buy_amount: number;
+  cost_basis: number | null;
+  cost_basis_source: string | null;
   entry_price: number | null;
   entry_price_date: string | null;
   estimated_shares: number | null;

@@ -278,6 +278,15 @@ def _round_or_none(value: float | None, digits: int = 2) -> float | None:
     return round(value, digits) if value is not None else None
 
 
+def cost_basis_for_position(position: TrackedPosition) -> tuple[float | None, str | None]:
+    if position.estimated_shares and position.entry_price:
+        source = "confirmed_shares_entry_price" if position.confirmed_shares is not None else "estimated_shares_entry_price"
+        return position.estimated_shares * position.entry_price, source
+    if position.buy_amount:
+        return position.buy_amount, "buy_amount_estimate"
+    return None, None
+
+
 def _mean_or_none(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
@@ -300,6 +309,49 @@ async def dynamic_thresholds_for_position(
     chart: list[TrackedPositionChartPoint],
     intraday_snapshot: TrackedEtfIntradaySnapshotOut | None,
 ) -> DynamicExitThresholdsOut | None:
+    if position.asset_type == ASSET_TYPE_FUND:
+        prices = [point.price for point in chart if point.price]
+        returns = [
+            prices[index] / prices[index - 1] - 1.0
+            for index in range(1, len(prices))
+            if prices[index - 1]
+        ][-20:]
+        realized_vol_pct = pstdev(returns) * 100 if len(returns) >= 5 else None
+        peak = prices[0] if prices else None
+        max_drawdown_pct = 0.0
+        if peak is not None:
+            for price in prices:
+                peak = max(peak, price)
+                if peak:
+                    max_drawdown_pct = min(max_drawdown_pct, (price / peak - 1.0) * 100)
+        drawdown_unit_pct = abs(max_drawdown_pct) / 3 if len(prices) >= 5 else None
+        volatility_unit_pct = max(
+            value
+            for value in [realized_vol_pct, drawdown_unit_pct, 1.5]
+            if value is not None
+        )
+        ma5 = _mean_or_none(prices[-5:]) if len(prices) >= 5 else None
+        ma10 = _mean_or_none(prices[-10:]) if len(prices) >= 10 else None
+        return_5d_pct = ((prices[-1] / prices[-6] - 1.0) * 100) if len(prices) >= 6 and prices[-6] else None
+        trend_weakening = (
+            len(prices) > 0
+            and ma5 is not None
+            and ma10 is not None
+            and return_5d_pct is not None
+            and prices[-1] < ma5
+            and prices[-1] < ma10
+            and return_5d_pct < 0
+        )
+        warnings = ["净值样本偏少，动态阈值使用保守下限。"] if len(returns) < 5 else []
+        return DynamicExitThresholdsOut(
+            volatility_unit_pct=_round_or_none(volatility_unit_pct),
+            hard_stop_pct=_round_or_none(-_clamp(1.35 * volatility_unit_pct, 2.0, 6.5)),
+            profit_start_pct=_round_or_none(max(TRAILING_START_PROFIT_PCT, 1.5 * volatility_unit_pct)),
+            trailing_giveback_pct=_round_or_none(_clamp(0.85 * volatility_unit_pct, 1.2, 3.5)),
+            trend_weakening=trend_weakening,
+            liquidity_warnings=warnings,
+            structure_warnings=[],
+        )
     if position.asset_type != ASSET_TYPE_ETF:
         return None
     rows = (
@@ -469,16 +521,16 @@ def _performance_analysis(
     dynamic_hard_stop_pct = dynamic_thresholds.hard_stop_pct if dynamic_thresholds else None
     dynamic_profit_start_pct = dynamic_thresholds.profit_start_pct if dynamic_thresholds else None
     dynamic_trailing_giveback_pct = dynamic_thresholds.trailing_giveback_pct if dynamic_thresholds else None
-    hard_stop_pct = dynamic_hard_stop_pct if position.asset_type == ASSET_TYPE_ETF and dynamic_hard_stop_pct is not None else HARD_STOP_LOSS_PCT
+    hard_stop_pct = dynamic_hard_stop_pct if dynamic_hard_stop_pct is not None else HARD_STOP_LOSS_PCT
     profit_start_pct = (
         dynamic_profit_start_pct
-        if position.asset_type == ASSET_TYPE_ETF and dynamic_profit_start_pct is not None
+        if dynamic_profit_start_pct is not None
         else TRAILING_START_PROFIT_PCT
     )
     if max_profit_pct >= profit_start_pct:
         trailing_threshold = (
             dynamic_trailing_giveback_pct
-            if position.asset_type == ASSET_TYPE_ETF and dynamic_trailing_giveback_pct is not None
+            if dynamic_trailing_giveback_pct is not None
             else min(TRAILING_GIVEBACK_POINTS, max_profit_pct * TRAILING_GIVEBACK_RATIO)
         )
     else:
@@ -598,7 +650,7 @@ def _performance_analysis(
             f"当前价 {current_point.price:.4f}；{source_message} 这不是卖出指令，只提醒你检查是否需要止盈或减仓。",
         ]
         exit_signal.reason = exit_signal.reasons[0]
-    elif dynamic_thresholds and not exit_signal.alert_type and (
+    elif position.asset_type == ASSET_TYPE_ETF and dynamic_thresholds and not exit_signal.alert_type and (
         dynamic_thresholds.liquidity_warnings or dynamic_thresholds.structure_warnings
     ):
         warnings = [*dynamic_thresholds.liquidity_warnings, *dynamic_thresholds.structure_warnings]
@@ -625,10 +677,11 @@ def _estimate_snapshot(position: TrackedPosition, price: PriceSnapshot | None) -
     estimated_value: float | None = None
     estimated_pnl: float | None = None
     estimated_pnl_pct: float | None = None
+    cost_basis, _source = cost_basis_for_position(position)
     if price is not None and position.estimated_shares:
         estimated_value = position.estimated_shares * price.price
-        estimated_pnl = estimated_value - position.buy_amount
-        estimated_pnl_pct = estimated_pnl / position.buy_amount * 100 if position.buy_amount else None
+        estimated_pnl = estimated_value - cost_basis if cost_basis is not None else None
+        estimated_pnl_pct = estimated_pnl / cost_basis * 100 if estimated_pnl is not None and cost_basis else None
     return TrackedPositionSnapshot(
         current_price=_round_or_none(price.price, 6) if price else None,
         current_price_date=price.price_date if price else None,
@@ -698,11 +751,12 @@ async def position_chart(session: AsyncSession, position: TrackedPosition) -> li
             else:
                 points.append((quote.trade_date, quote.latest_price))
     chart: list[TrackedPositionChartPoint] = []
+    cost_basis, _source = cost_basis_for_position(position)
     for point_date, price in points[-240:]:
         estimated_value = position.estimated_shares * price if position.estimated_shares else None
         pnl_pct = (
-            (estimated_value - position.buy_amount) / position.buy_amount * 100
-            if estimated_value is not None and position.buy_amount
+            (estimated_value - cost_basis) / cost_basis * 100
+            if estimated_value is not None and cost_basis
             else None
         )
         chart.append(
@@ -749,7 +803,7 @@ async def position_analysis(
     dynamic_thresholds = None
     if position.asset_type == ASSET_TYPE_ETF:
         _price, intraday_snapshot = await latest_tracking_price(session, position.asset_type, position.asset_code)
-        dynamic_thresholds = await dynamic_thresholds_for_position(session, position, chart, intraday_snapshot)
+    dynamic_thresholds = await dynamic_thresholds_for_position(session, position, chart, intraday_snapshot)
     return _performance_analysis(
         position,
         chart,

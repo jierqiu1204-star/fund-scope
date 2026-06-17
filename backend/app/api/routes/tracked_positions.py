@@ -18,6 +18,7 @@ from app.schemas.tracked_positions import (
 )
 from app.services.tracked_positions.service import (
     alert_out,
+    cost_basis_for_position,
     create_position,
     current_snapshot,
     email_configured,
@@ -38,6 +39,7 @@ async def _position_out(session: AsyncSession, row: TrackedPosition) -> TrackedP
     _, item, _ = await latest_signal_context(session, row)
     analysis = await position_analysis(session, row, item=item)
     recent_intraday_alerts = await recent_intraday_alerts_for_position(session, row.id)
+    cost_basis, cost_basis_source = cost_basis_for_position(row)
     return TrackedPositionOut(
         id=row.id,
         asset_type=row.asset_type,
@@ -49,6 +51,8 @@ async def _position_out(session: AsyncSession, row: TrackedPosition) -> TrackedP
         confirmed_nav=row.confirmed_nav,
         confirmed_shares=row.confirmed_shares,
         buy_amount=row.buy_amount,
+        cost_basis=round(cost_basis, 2) if cost_basis is not None else None,
+        cost_basis_source=cost_basis_source,
         entry_price=row.entry_price,
         entry_price_date=row.entry_price_date,
         estimated_shares=row.estimated_shares,

@@ -6,15 +6,18 @@ import pytest
 from sqlalchemy import select
 
 from app.models.entities import (
+    EtfPriceHistory,
     FundNavHistory,
     ShortResearchAdvisorReport,
     ShortResearchSignalItem,
     ShortResearchSignalRun,
     TrackedPositionAlert,
+    TradableEtf,
     User,
     utcnow,
 )
 from app.services.tracked_positions.jobs import daily_tracked_position_alerts_job
+from app.services.tracked_positions.service import create_position, position_analysis
 
 
 async def _seed_nav(app, fund_code: str = "270042") -> None:
@@ -276,7 +279,61 @@ async def test_confirmed_shares_override_public_nav_estimate(client, app) -> Non
     assert body["confirmed_shares"] == 409.88
     assert body["entry_price"] == 7.313
     assert body["estimated_shares"] == 409.88
-    assert body["current_snapshot"]["estimated_pnl"] == pytest.approx(409.88 * 7.25 - 3000, abs=0.01)
+    assert body["cost_basis"] == pytest.approx(409.88 * 7.313, abs=0.01)
+    assert body["cost_basis_source"] == "confirmed_shares_entry_price"
+    assert body["current_snapshot"]["estimated_pnl"] == pytest.approx(409.88 * (7.25 - 7.313), abs=0.01)
+
+
+@pytest.mark.asyncio
+async def test_confirmed_etf_shares_use_entry_price_cost_basis(client, app) -> None:
+    async with app.state.db.session() as session:
+        session.add(
+            TradableEtf(
+                code="513520",
+                name="日经ETF",
+                exchange="SH",
+                theme_tags_json=["跨境"],
+                trading_rule_label="T+1",
+                asset_class="ETF",
+            )
+        )
+        session.add_all(
+            [
+                EtfPriceHistory(
+                    etf_code="513520",
+                    trade_date=date(2026, 6, 17),
+                    open=2.491,
+                    high=2.5,
+                    low=2.45,
+                    close=2.47,
+                    volume=1_000_000,
+                    turnover=2_470_000,
+                    pct_change=-0.8,
+                )
+            ]
+        )
+        await session.commit()
+
+    response = await client.post(
+        "/api/tracked-positions",
+        json={
+            "asset_type": "etf",
+            "asset_code": "513520",
+            "buy_date": "2026-06-17",
+            "confirmed_nav": 2.491,
+            "confirmed_shares": 1300,
+            "buy_amount": 3000,
+        },
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["entry_price"] == 2.491
+    assert body["estimated_shares"] == 1300
+    assert body["cost_basis"] == pytest.approx(3238.3)
+    assert body["cost_basis_source"] == "confirmed_shares_entry_price"
+    assert body["current_snapshot"]["estimated_pnl"] == pytest.approx(-27.3, abs=0.01)
+    assert body["current_snapshot"]["estimated_pnl_pct"] == pytest.approx(-0.84, abs=0.01)
 
 
 @pytest.mark.asyncio
@@ -309,6 +366,71 @@ async def test_tracking_chart_and_holding_days_start_from_confirmed_nav_date(cli
     assert body["holding_days"] == 1
     assert [point["date"] for point in body["chart"]] == ["2026-06-09", "2026-06-10"]
     assert body["chart"][0]["is_entry"] is True
+
+
+@pytest.mark.asyncio
+async def test_fund_dynamic_thresholds_use_daily_nav_behavior(app) -> None:
+    await _seed_nav_series(
+        app,
+        [
+            (date(2026, 6, 1), 1.00),
+            (date(2026, 6, 2), 1.04),
+            (date(2026, 6, 3), 1.01),
+            (date(2026, 6, 4), 1.07),
+            (date(2026, 6, 5), 1.02),
+            (date(2026, 6, 6), 1.10),
+            (date(2026, 6, 7), 1.05),
+            (date(2026, 6, 8), 1.13),
+            (date(2026, 6, 9), 1.08),
+            (date(2026, 6, 10), 1.12),
+        ],
+        fund_code="001410",
+    )
+
+    async with app.state.db.session() as session:
+        position = await create_position(
+            session,
+            asset_type="fund",
+            asset_code="001410",
+            buy_amount=3000,
+            buy_date=date(2026, 6, 1),
+        )
+        analysis = await position_analysis(session, position)
+
+    assert analysis.dynamic_thresholds is not None
+    assert analysis.dynamic_thresholds.hard_stop_pct is not None
+    assert analysis.dynamic_thresholds.hard_stop_pct < -4.0
+    assert analysis.dynamic_thresholds.profit_start_pct is not None
+    assert analysis.technical_metrics["price_source"] == "daily_close"
+
+
+@pytest.mark.asyncio
+async def test_ranking_label_and_holding_exit_signal_are_separate(client, app) -> None:
+    await _seed_nav_series(
+        app,
+        [
+            (date(2026, 6, 1), 1.00),
+            (date(2026, 6, 2), 1.03),
+            (date(2026, 6, 3), 1.06),
+            (date(2026, 6, 4), 1.09),
+            (date(2026, 6, 5), 1.11),
+            (date(2026, 6, 6), 1.08),
+            (date(2026, 6, 7), 1.06),
+        ],
+    )
+    await _seed_signal(app, conclusion="短线观察", risk_flags=[], action_label="重点观察")
+
+    await client.post(
+        "/api/tracked-positions",
+        json={"asset_type": "fund", "asset_code": "270042", "buy_date": "2026-06-01"},
+    )
+    response = await client.get("/api/tracked-positions")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["current_snapshot"]["current_label"] == "短线观察"
+    assert item["exit_signal"]["alert_type"] == "trailing_take_profit"
+    assert item["exit_signal"]["level"] == "warning"
 
 
 @pytest.mark.asyncio
