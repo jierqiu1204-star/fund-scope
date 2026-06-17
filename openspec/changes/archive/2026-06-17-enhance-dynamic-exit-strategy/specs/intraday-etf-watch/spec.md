@@ -23,6 +23,8 @@ The system SHALL produce dynamic ETF sell-or-reduce reminders using volatility, 
 - **WHEN** an ETF remains highly ranked during intraday monitoring but the tracked holding breaches an exit threshold
 - **THEN** the system keeps the ranked observation label and tracked-position handling signal as separate fields and explanations
 
+## ADDED Requirements
+
 ### Requirement: Intraday Watch Surfaces Dynamic Threshold Context
 The system SHALL expose enough dynamic-threshold context for users to understand ETF intraday holding alerts.
 
