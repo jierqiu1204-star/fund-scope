@@ -18,6 +18,8 @@ from app.services.short_research.advisor import (
     ACTION_CAUTION,
     ACTION_FOCUS,
     ACTION_SKIP,
+    PROHIBITED_TERMS,
+    fallback_report,
     run_advisor_generation,
     validate_advisor_payload,
 )
@@ -127,6 +129,38 @@ def test_validate_advisor_payload_downgrades_and_rejects_unsafe_language() -> No
 
     with pytest.raises(ValueError):
         validate_advisor_payload("{bad json", rule_action=ACTION_SKIP)
+
+
+def test_advisor_chinese_text_has_no_mojibake() -> None:
+    report = fallback_report(
+        ShortResearchSignalItem(
+            run_id=1,
+            asset_type="fund",
+            asset_code="270042",
+            rank=1,
+            total_score=76.6,
+            conclusion="谨慎观察",
+            score_breakdown_json={},
+            risk_flags_json=["追高风险"],
+            rationale_json={},
+            metrics_json={"return_5d": 0.01, "return_20d": 0.04},
+        ),
+        is_held=False,
+        reason="未配置或未启用大模型",
+    )
+    combined = "\n".join(
+        [
+            *[str(item) for item in report.values()],
+            *PROHIBITED_TERMS,
+        ]
+    )
+
+    for marker in ("锛", "銆", "鐭", "姝㈢", "瑙傚", "鍏滃"):
+        assert marker not in combined
+    assert "当前为谨慎观察" in report["plain_summary"]
+    assert "未配置或未启用大模型" in report["plain_summary"]
+    assert "买入" in PROHIBITED_TERMS
+    assert "止盈" in PROHIBITED_TERMS
 
 
 def test_validate_advisor_payload_accepts_single_text_list_fields() -> None:

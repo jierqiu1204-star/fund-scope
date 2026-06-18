@@ -60,6 +60,7 @@ ALERT_TREND_WEAKENING = "trend_weakening"
 ALERT_HARD_STOP = "hard_stop"
 EMAIL_ALERT_TYPES = {
     ALERT_EXIT_WATCH,
+    ALERT_TAKE_PROFIT_WATCH,
     ALERT_TRAILING_TAKE_PROFIT,
     ALERT_TREND_WEAKENING,
     ALERT_HARD_STOP,
@@ -88,7 +89,7 @@ class AlertDecision:
     reasons: list[str]
     risk_flags: list[str]
     advisor_summary: str | None
-    signal_item: ShortResearchSignalItem
+    signal_item: ShortResearchSignalItem | None
     advisor_report: ShortResearchAdvisorReport | None
     alert_level: str = "warning"
     alert_source: str = "daily_close"
@@ -457,6 +458,7 @@ def _exit_signal(
 def _alert_type_label(alert_type: str) -> str:
     return {
         ALERT_EXIT_WATCH: "卖出/减仓提醒",
+        ALERT_TAKE_PROFIT_WATCH: "止盈观察提醒",
         ALERT_TRAILING_TAKE_PROFIT: "卖出/减仓提醒",
         ALERT_TREND_WEAKENING: "卖出/减仓提醒",
         ALERT_HARD_STOP: "止损提醒",
@@ -604,10 +606,11 @@ def _performance_analysis(
                 f"近 5 日收益 {return_5d_pct:.2f}%，上涨趋势开始转弱。",
             ],
         )
-    elif current_pnl_pct >= take_profit_watch_threshold and (
-        current_label == "高位观察" or bool(risk_flags.intersection(TAKE_PROFIT_RISKS))
-    ):
-        risk_text = "、".join(sorted(risk_flags.intersection(TAKE_PROFIT_RISKS))) or "高位观察"
+    elif current_pnl_pct >= take_profit_watch_threshold:
+        risk_text = (
+            "、".join(sorted(risk_flags.intersection(TAKE_PROFIT_RISKS)))
+            or ("高位观察" if current_label == "高位观察" else "达到动态止盈观察线")
+        )
         exit_signal = _exit_signal(
             alert_type=ALERT_TAKE_PROFIT_WATCH,
             label="止盈观察提醒",
@@ -1020,29 +1023,47 @@ async def evaluate_alert_decision_v2(
     position: TrackedPosition,
 ) -> tuple[AlertDecision | None, date | None]:
     run, item, report = await latest_signal_context(session, position)
-    if run is None:
-        return None, None
-    if item is None:
-        return None, run.as_of_date
-
-    trigger_label = report.action_label if report is not None else conservative_action_for_item(item, is_held=True)
-    risk_flags = list(item.risk_flags_json or [])
-    exit_risks = sorted(set(risk_flags).intersection(EXIT_RISKS))
     analysis = await position_analysis(session, position, item=item)
     technical_signal = analysis.exit_signal if analysis.exit_signal.alert_type is not None else None
+    if run is None and technical_signal is None:
+        return None, None
+
+    if item is None and technical_signal is not None:
+        trigger_label = technical_signal.label
+    elif item is not None and report is not None:
+        trigger_label = report.action_label
+    elif item is not None:
+        trigger_label = conservative_action_for_item(item, is_held=True)
+    else:
+        trigger_label = ""
+    risk_flags = list(item.risk_flags_json or []) if item is not None else []
+    exit_risks = sorted(set(risk_flags).intersection(EXIT_RISKS))
     alert_source = analysis.intraday_snapshot.price_source if analysis.intraday_snapshot else "daily_close"
     quote_time = analysis.intraday_snapshot.quote_time if analysis.intraday_snapshot else None
-    alert_date = (
-        analysis.intraday_snapshot.trade_date
-        if analysis.intraday_snapshot and analysis.intraday_snapshot.trade_date is not None
-        else run.as_of_date
-    )
+    if analysis.intraday_snapshot and analysis.intraday_snapshot.trade_date is not None:
+        alert_date = analysis.intraday_snapshot.trade_date
+    elif analysis.chart:
+        alert_date = analysis.chart[-1].date
+    elif run is not None:
+        alert_date = run.as_of_date
+    else:
+        alert_date = date.today()
     alert_level = "warning"
 
     if technical_signal is not None and technical_signal.alert_type == ALERT_HARD_STOP:
         alert_type = ALERT_HARD_STOP
         trigger_label = technical_signal.label
         reasons = list(technical_signal.reasons)
+        alert_level = technical_signal.level
+    elif item is None:
+        if technical_signal is None:
+            return None, alert_date
+        alert_type = cast(str, technical_signal.alert_type)
+        trigger_label = technical_signal.label
+        reasons = [
+            *technical_signal.reasons,
+            "该资产未进入最新短线榜单上下文，本提醒只基于你的持仓价格和动态线计算。",
+        ]
         alert_level = technical_signal.level
     elif item.conclusion in {"不适合短线", "数据不足"}:
         alert_type = ALERT_EXIT_WATCH
@@ -1148,7 +1169,7 @@ async def create_alert_if_needed(
         if existing is not None:
             return existing, "deduplicated"
 
-    if decision.alert_type == ALERT_TAKE_PROFIT_WATCH and not is_intraday_alert:
+    if decision.alert_type == ALERT_TAKE_PROFIT_WATCH:
         recent_take_profit = await session.scalar(
             select(TrackedPositionAlert)
             .where(
@@ -1253,7 +1274,7 @@ def _email_payload(
         "alert_level": alert.alert_level,
         "alert_source": alert.alert_source,
         "quote_time": alert.quote_time.isoformat() if alert.quote_time else None,
-        "current_label": decision.signal_item.conclusion,
+        "current_label": decision.signal_item.conclusion if decision.signal_item is not None else "未进入最新榜单",
         "reasons": list(alert.reasons_json or []),
         "risk_flags": list(alert.risk_flags_json or []),
         "watch_conditions": (

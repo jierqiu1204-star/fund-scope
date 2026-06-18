@@ -608,6 +608,68 @@ async def test_high_volatility_etf_receives_wider_dynamic_thresholds(app) -> Non
 
 
 @pytest.mark.asyncio
+async def test_missing_iopv_warning_is_web_only(app, settings, monkeypatch) -> None:
+    today = datetime.now().date()
+    start = today - timedelta(days=10)
+    await _seed_signal_run(app, count=1)
+    await _seed_price_history_from_closes(
+        app,
+        "510000",
+        [1.00, 1.01, 1.00, 1.01, 1.00, 1.01, 1.00, 1.01, 1.00, 1.01],
+        start=start,
+    )
+    sent: list[dict[str, object]] = []
+
+    async def fake_send_template(self, session, *, recipient: str, template_name: str, payload: dict) -> str:
+        sent.append(payload)
+        return "sent"
+
+    monkeypatch.setattr("app.services.notifier.Notifier.send_template", fake_send_template)
+
+    async with app.state.db.session() as session:
+        user = await session.get(User, 1)
+        assert user is not None
+        user.smtp_host = "smtp.163.com"
+        position = TrackedPosition(
+            user_id=1,
+            asset_type="etf",
+            asset_code="510000",
+            asset_name="ETF510000",
+            buy_date=start,
+            buy_amount=3000,
+            entry_price=1.0,
+            entry_price_date=start,
+            estimated_shares=3000,
+            status="active",
+        )
+        session.add(position)
+        session.add(
+            EtfIntradayQuote(
+                etf_code="510000",
+                quote_time=datetime.now().replace(microsecond=0),
+                trade_date=today,
+                latest_price=1.01,
+                bid_price=1.009,
+                ask_price=1.011,
+                turnover=100_000_000,
+                iopv=None,
+                source="test",
+                freshness_status="fresh",
+                raw_json={},
+            )
+        )
+        await session.commit()
+        await session.refresh(position)
+        alert, status = await create_alert_if_needed(session, position, settings)
+
+    assert alert is not None
+    assert status == "web_only"
+    assert alert.alert_type == "risk_warning"
+    assert alert.email_status == "skipped"
+    assert sent == []
+
+
+@pytest.mark.asyncio
 async def test_intraday_watch_status_api_and_tracked_position_fields(client, app) -> None:
     await _seed_signal_run(app, count=1)
     await _seed_price_history(app, "510000")

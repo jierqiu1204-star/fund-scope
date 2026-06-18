@@ -355,7 +355,7 @@ function alertTypeLabel(alertType: string) {
     return "数据质量提示";
   }
   if (alertType === "take_profit_watch") {
-    return "止盈观察（网页提示）";
+    return "止盈观察提醒";
   }
   if (alertType === "trailing_take_profit") {
     return "卖出/减仓提醒";
@@ -369,7 +369,7 @@ function alertTypeLabel(alertType: string) {
   return alertType;
 }
 
-const EXIT_ALERT_TYPES = new Set(["exit_watch", "trailing_take_profit", "trend_weakening", "hard_stop"]);
+const EXIT_ALERT_TYPES = new Set(["exit_watch", "take_profit_watch", "trailing_take_profit", "trend_weakening", "hard_stop"]);
 
 function isEmailExitAlert(alertType: string) {
   return EXIT_ALERT_TYPES.has(alertType);
@@ -972,6 +972,9 @@ export default function ShortTermPage() {
             {thresholds
               ? `硬止损${thresholds.hardStop}；止盈起点${thresholds.profitStart}；回撤减仓${thresholds.giveback}；趋势减弱预警${thresholds.trendWeakening}`
               : "暂无追踪动态阈值"}
+          </p>
+          <p className="mt-2 text-xs leading-5 text-ink/55">
+            动态线由公开行情和规则计算，AI只解释依据和风险，不改写止盈/止损线。
           </p>
         </details>
       </div>
@@ -1979,8 +1982,11 @@ export default function ShortTermPage() {
                       </h3>
                       <p className="mt-2 text-sm leading-6 text-ink/60">
                         {advisorReport
-                          ? `${advisorReport.source === "llm" ? "大模型辅助" : "规则降级"} · ${advisorReport.model_name} · ${formatDate(advisorReport.generated_at)}`
+                          ? `${advisorReport.source === "llm" ? "AI生成" : "规则兜底"} · ${advisorReport.model_name} · ${formatDate(advisorReport.generated_at)}`
                           : "点击页面顶部“生成 AI 研究报告”后，会在这里显示多角度说明。没有报告时，排序和图表仍然正常可用。"}
+                      </p>
+                      <p className="mt-2 text-sm leading-6 text-ink/60">
+                        排序、买入观察标签和持仓动态线由规则计算；AI只解释依据和风险，不直接决定买卖。
                       </p>
                     </div>
                     <span className={`w-fit rounded-full px-4 py-2 text-sm font-semibold ${advisorTone(advisorReport?.action_label ?? "暂不考虑")}`}>
@@ -2245,6 +2251,14 @@ export default function ShortTermPage() {
                           ? "等待数据"
                           : formatPercent(item.dynamic_thresholds.profit_start_pct)}
                       </span>
+                      <span>
+                        移动止盈回吐线：
+                        {item.dynamic_thresholds?.trailing_giveback_pct === null ||
+                        item.dynamic_thresholds?.trailing_giveback_pct === undefined
+                          ? "等待数据"
+                          : formatPercent(item.dynamic_thresholds.trailing_giveback_pct)}
+                      </span>
+                      <span>动态线由规则计算，AI只做解释，不改写这些线。</span>
                       <span>
                         买卖价差：
                         {item.intraday_snapshot?.spread_pct === null || item.intraday_snapshot?.spread_pct === undefined

@@ -17,7 +17,11 @@ from app.models.entities import (
     utcnow,
 )
 from app.services.tracked_positions.jobs import daily_tracked_position_alerts_job
-from app.services.tracked_positions.service import create_position, position_analysis
+from app.services.tracked_positions.service import (
+    create_alert_if_needed,
+    create_position,
+    position_analysis,
+)
 
 
 async def _seed_nav(app, fund_code: str = "270042") -> None:
@@ -465,7 +469,7 @@ async def test_high_watch_without_profit_does_not_send_sell_alert(client, app, s
 
 
 @pytest.mark.asyncio
-async def test_take_profit_watch_is_web_only_for_profitable_high_watch(client, app, settings, monkeypatch) -> None:
+async def test_take_profit_watch_sends_soft_email_for_profitable_high_watch(client, app, settings, monkeypatch) -> None:
     await _seed_nav_series(app, [(date(2026, 6, 1), 1.0), (date(2026, 6, 5), 1.04)])
     await _seed_signal(app, conclusion="高位观察", risk_flags=["追高风险"], action_label="高位别追")
     await client.post(
@@ -483,18 +487,21 @@ async def test_take_profit_watch_is_web_only_for_profitable_high_watch(client, a
     async with app.state.db.session() as session:
         user = await session.get(User, 1)
         assert user is not None
+        user.recipient_email = "19535838578@163.com"
         user.smtp_host = "smtp.163.com"
         await session.commit()
         result = await daily_tracked_position_alerts_job(session, settings)
         alerts = (await session.scalars(select(TrackedPositionAlert))).all()
 
     assert result["alerts_created"] == 1
-    assert result.get("web_only", 0) == 1
-    assert result["emails_sent"] == 0
+    assert result.get("web_only", 0) == 0
+    assert result["emails_sent"] == 1
     assert alerts[0].alert_type == "take_profit_watch"
-    assert alerts[0].email_status == "skipped"
+    assert alerts[0].email_status == "sent"
+    assert alerts[0].trigger_label == "止盈观察提醒"
     assert any("盈利" in reason for reason in alerts[0].reasons_json)
-    assert sent == []
+    assert sent
+    assert "止盈观察提醒" in str(sent[0]["title"])
 
 
 @pytest.mark.asyncio
@@ -602,6 +609,60 @@ async def test_hard_stop_triggers_at_four_percent_loss(client, app, settings, mo
     assert alert is not None
     assert alert.alert_type == "hard_stop"
     assert any("亏损" in reason for reason in alert.reasons_json)
+
+
+@pytest.mark.asyncio
+async def test_tracked_position_hard_stop_without_latest_signal_item(app, settings, monkeypatch) -> None:
+    await _seed_nav_series(app, [(date(2026, 6, 1), 1.0), (date(2026, 6, 5), 0.94)])
+    async with app.state.db.session() as session:
+        run = ShortResearchSignalRun(
+            status="success",
+            started_at=utcnow(),
+            finished_at=utcnow(),
+            as_of_date=date(2026, 6, 5),
+            config_json={"asset_type": "fund"},
+            summary_json={"item_count": 1},
+        )
+        session.add(run)
+        await session.commit()
+        await session.refresh(run)
+        session.add(
+            ShortResearchSignalItem(
+                run_id=run.id,
+                asset_type="fund",
+                asset_code="999999",
+                rank=1,
+                total_score=80,
+                conclusion="短线观察",
+                score_breakdown_json={},
+                risk_flags_json=[],
+                rationale_json={},
+                metrics_json={},
+            )
+        )
+        position = await create_position(
+            session,
+            asset_type="fund",
+            asset_code="270042",
+            user_id=1,
+            buy_amount=3000,
+            buy_date=date(2026, 6, 1),
+        )
+
+        async def fake_send_template(self, session, *, recipient: str, template_name: str, payload: dict) -> str:
+            return "sent"
+
+        monkeypatch.setattr("app.services.notifier.Notifier.send_template", fake_send_template)
+        user = await session.get(User, 1)
+        assert user is not None
+        user.smtp_host = "smtp.163.com"
+        await session.commit()
+        alert, status = await create_alert_if_needed(session, position, settings)
+
+    assert status == "email_sent"
+    assert alert is not None
+    assert alert.alert_type == "hard_stop"
+    assert alert.trigger_label == "硬止损提醒"
 
 
 @pytest.mark.asyncio
