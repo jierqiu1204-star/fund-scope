@@ -44,7 +44,10 @@ async def update_notification_settings(
 
 
 @router.post("/test-send")
-async def test_send(payload: NotificationTestSend) -> dict[str, str]:
+async def test_send(
+    payload: NotificationTestSend,
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, str]:
     notifier = Notifier(
         smtp_host=payload.smtp_host,
         smtp_port=payload.smtp_port,
@@ -56,4 +59,8 @@ async def test_send(payload: NotificationTestSend) -> dict[str, str]:
         await notifier.test_connection()
     except SMTPError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        await notifier.send_test_email(session, recipient=payload.recipient_email)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f"SMTP 登录或发送失败：{exc}") from exc
     return {"status": "sent"}

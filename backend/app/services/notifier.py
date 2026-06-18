@@ -114,3 +114,59 @@ class Notifier:
             )
             await session.commit()
             raise
+
+    async def send_test_email(self, session: AsyncSession, *, recipient: str) -> str:
+        message = EmailMessage()
+        message["To"] = recipient
+        message["From"] = self.smtp_from or f"FundScope <{self.smtp_username}>"
+        message["Subject"] = "FundScope 测试邮件"
+        message.set_content(
+            "<p>这是一封测试邮件，用于确认 FundScope 邮件通道可以正常发送。</p>"
+            "<p>它不代表买入、卖出或减仓提醒。</p>",
+            subtype="html",
+        )
+        payload = {
+            "title": "FundScope 测试邮件",
+            "message": "这是一封测试邮件，不代表买入、卖出或减仓提醒。",
+        }
+
+        try:
+            if self.smtp_host and not self.smtp_host.endswith("example.com"):
+                await retry_async(
+                    "smtp_test_send",
+                    lambda: aiosmtplib.send(
+                        message,
+                        hostname=self.smtp_host,
+                        port=self.smtp_port,
+                        start_tls=self.smtp_port != 465,
+                        use_tls=self.smtp_port == 465,
+                        username=self.smtp_username,
+                        password=self.smtp_password,
+                    ),
+                    retries=2,
+                )
+
+            session.add(
+                NotificationLog(
+                    notification_type="email",
+                    recipient=recipient,
+                    template_name="test_email",
+                    status="sent",
+                    payload_json=payload,
+                )
+            )
+            await session.commit()
+            return "sent"
+        except Exception as exc:  # noqa: BLE001
+            session.add(
+                NotificationLog(
+                    notification_type="email",
+                    recipient=recipient,
+                    template_name="test_email",
+                    status="failed",
+                    payload_json=payload,
+                    error_message=str(exc),
+                )
+            )
+            await session.commit()
+            raise

@@ -53,7 +53,7 @@ async def test_invalid_smtp_credentials_are_not_persisted(client) -> None:
 
 
 @pytest.mark.asyncio
-async def test_notification_test_send_uses_submitted_smtp_fields(client, monkeypatch) -> None:
+async def test_notification_test_send_uses_submitted_smtp_fields(client, app, monkeypatch) -> None:
     captured: dict[str, object] = {}
 
     class FakeSMTP:
@@ -72,7 +72,15 @@ async def test_notification_test_send_uses_submitted_smtp_fields(client, monkeyp
         async def quit(self) -> None:
             captured["quit"] = True
 
+    async def fake_send(message, **kwargs) -> None:
+        captured["send_to"] = message["To"]
+        captured["send_from"] = message["From"]
+        captured["send_subject"] = message["Subject"]
+        captured["send_body"] = message.get_content()
+        captured["send_kwargs"] = kwargs
+
     monkeypatch.setattr("app.services.notifier.aiosmtplib.SMTP", FakeSMTP)
+    monkeypatch.setattr("app.services.notifier.aiosmtplib.send", fake_send)
 
     response = await client.post(
         "/api/settings/notifications/test-send",
@@ -87,15 +95,34 @@ async def test_notification_test_send_uses_submitted_smtp_fields(client, monkeyp
     )
 
     assert response.status_code == 200
-    assert captured == {
+    assert captured["hostname"] == "smtp.real.local"
+    assert captured["port"] == 2525
+    assert captured["use_tls"] is False
+    assert captured["connected"] is True
+    assert captured["username"] == "saved-user"
+    assert captured["password"] == "saved-password"
+    assert captured["quit"] is True
+    assert captured["send_to"] == "saved-recipient@example.com"
+    assert captured["send_from"] == "FundScope <saved@example.com>"
+    assert captured["send_subject"] == "FundScope 测试邮件"
+    assert "这是一封测试邮件" in str(captured["send_body"])
+    assert captured["send_kwargs"] == {
         "hostname": "smtp.real.local",
         "port": 2525,
-        "use_tls": False,
-        "connected": True,
         "username": "saved-user",
         "password": "saved-password",
-        "quit": True,
+        "start_tls": True,
+        "use_tls": False,
     }
+
+    async with app.state.db.session() as session:
+        log = await session.scalar(select(NotificationLog).order_by(NotificationLog.id.desc()))
+
+    assert log is not None
+    assert log.notification_type == "email"
+    assert log.recipient == "saved-recipient@example.com"
+    assert log.template_name == "test_email"
+    assert log.status == "sent"
 
 
 @pytest.mark.asyncio

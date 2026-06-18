@@ -88,8 +88,8 @@ export default function NotificationSettingsPage() {
         smtp_from: form.smtp_from,
         recipient_email: form.recipient_email
       }),
-    onSuccess: () => setStatusText("测试邮件已提交。"),
-    onError: () => setStatusText("SMTP 测试失败，请检查邮箱服务器配置。")
+    onSuccess: () => setStatusText("测试邮件已发送，请检查收件箱。"),
+    onError: () => setStatusText("SMTP 登录或发送失败，请检查授权码、端口和发件邮箱。")
   });
 
   return (
