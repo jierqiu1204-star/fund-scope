@@ -587,6 +587,9 @@ export type TrackedPositionExitSignal = {
   level: "none" | "watch" | "warning" | "urgent";
   reason: string | null;
   reasons: string[];
+  email_eligible: boolean;
+  email_eligibility_reason: string | null;
+  data_reliability: string | null;
 };
 
 export type TrackedPositionAlert = {
@@ -731,6 +734,9 @@ export type TrackedEtfIntradaySnapshot = {
   quote_time: string | null;
   trade_date: string | null;
   price_source: string;
+  reliability_level: string;
+  email_eligible: boolean;
+  email_eligibility_reason: string | null;
   is_stale: boolean;
   freshness_status: string | null;
   bid_price: number | null;

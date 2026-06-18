@@ -123,11 +123,12 @@ async def _check_tracked_etf_alerts(session: AsyncSession, settings: Settings) -
         "web_only": 0,
         "deduplicated": 0,
         "suppressed": 0,
+        "data_ineligible": 0,
         "no_signal": 0,
     }
     for position in rows:
         await refresh_entry_if_waiting(session, position)
-        alert, status = await create_alert_if_needed(session, position, settings)
+        alert, status = await create_alert_if_needed(session, position, settings, evaluation_mode="intraday")
         if status == "deduplicated":
             result["deduplicated"] += 1
             continue
@@ -136,6 +137,9 @@ async def _check_tracked_etf_alerts(session: AsyncSession, settings: Settings) -
             continue
         if status == "no_signal":
             result["no_signal"] += 1
+            continue
+        if status == "data_ineligible":
+            result["data_ineligible"] += 1
             continue
         if alert is not None:
             result["alerts_created"] += 1

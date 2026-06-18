@@ -57,19 +57,22 @@ PROMPT_SCHEMA: dict[str, Any] = {
 }
 
 PROHIBITED_TERMS = (
-    "买入",
-    "卖出",
-    "止盈",
-    "止损",
+    "建议买入",
+    "建议卖出",
+    "建议止盈",
+    "建议止损",
+    "马上买",
+    "马上卖",
+    "立刻买",
+    "立刻卖",
+    "清仓卖",
+    "满仓买",
     "目标价",
     "保证收益",
     "稳赚",
     "自动交易",
+    "已连接券商",
     "支付宝实时同步",
-    "立刻买",
-    "马上买",
-    "建议买",
-    "建议卖",
     "buy",
     "sell",
     "take_profit",
@@ -77,6 +80,16 @@ PROHIBITED_TERMS = (
     "target_price",
     "expected_return",
     "guaranteed_profit",
+)
+
+NEUTRAL_ALLOWED_TERMS = (
+    "止盈观察",
+    "移动止盈",
+    "硬止损",
+    "趋势转弱",
+    "不代表买入建议",
+    "不是卖出指令",
+    "不是直接操作命令",
 )
 
 WEAK_ACTIONS = {ACTION_CAUTION, ACTION_SKIP, ACTION_EXIT}
@@ -124,6 +137,8 @@ def _coerce_string_list(value: Any, field: str) -> list[str]:
 def _reject_prohibited_language(value: Any) -> None:
     if isinstance(value, str):
         lowered = value.lower()
+        for allowed in NEUTRAL_ALLOWED_TERMS:
+            lowered = lowered.replace(allowed.lower(), "")
         for term in PROHIBITED_TERMS:
             if term.lower() in lowered:
                 raise ValueError(f"LLM output contains prohibited language: {term}")
@@ -156,19 +171,24 @@ def validate_advisor_payload(
         action_label = rule_action
     if _is_stronger(str(action_label), rule_action):
         action_label = rule_action
+    fallback_used = False
 
     def text_field(key: str, limit: int) -> str:
+        nonlocal fallback_used
         value = str(parsed.get(key, "")).strip()
         if not value and fallback_payload is not None:
             value = str(fallback_payload.get(key, "")).strip()
+            fallback_used = True
         return value[:limit]
 
     def list_field(key: str) -> list[str]:
+        nonlocal fallback_used
         try:
             return _coerce_string_list(parsed.get(key), key)
         except ValueError:
             if fallback_payload is None:
                 raise
+            fallback_used = True
             return _coerce_string_list(fallback_payload.get(key), key)
 
     report = {
@@ -180,6 +200,7 @@ def validate_advisor_payload(
         "watch_conditions": list_field("watch_conditions"),
         "holding_note": text_field("holding_note", 500),
         "data_limitations": text_field("data_limitations", 500),
+        "_fallback_used": fallback_used,
     }
     for key in ("plain_summary", "opposing_view", "holding_note", "data_limitations"):
         if not report[key]:
@@ -411,6 +432,7 @@ async def run_advisor_generation(
     succeeded = 0
     failed = 0
     fallback = 0
+    partial_fallback = 0
     failures: list[dict[str, str]] = []
 
     for item in items:
@@ -471,6 +493,9 @@ async def run_advisor_generation(
                 rule_action=rule_action,
                 fallback_payload=model_fallback,
             )
+            source = "partial_fallback" if report.get("_fallback_used") else "llm"
+            if source == "partial_fallback":
+                partial_fallback += 1
             attempt.status = "success"
             attempt.finished_at = utcnow()
             attempt.response_json = report
@@ -481,7 +506,7 @@ async def run_advisor_generation(
                 report=report,
                 model_name=client.model_name,
                 prompt_version=settings.llm_advisor_prompt_version,
-                source="llm",
+                source=source,
                 snapshot=snapshot,
                 raw_response=report,
             )
@@ -519,6 +544,7 @@ async def run_advisor_generation(
         "succeeded": succeeded,
         "failed": failed,
         "fallback": fallback,
+        "partial_fallback": partial_fallback,
         "model_enabled": settings.llm_advisor_enabled and bool(settings.openai_api_key),
         "failures": failures,
     }

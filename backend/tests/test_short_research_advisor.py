@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -122,6 +123,11 @@ def test_validate_advisor_payload_downgrades_and_rejects_unsafe_language() -> No
 
     assert downgraded["action_label"] == ACTION_CAUTION
 
+    neutral = json.loads(_valid_report(ACTION_SKIP))
+    neutral["plain_summary"] = "系统规则名：止盈观察、移动止盈、硬止损和趋势转弱都只是标签。"
+    neutral_report = validate_advisor_payload(neutral, rule_action=ACTION_SKIP)
+    assert "止盈观察" in neutral_report["plain_summary"]
+
     unsafe = json.loads(_valid_report(ACTION_SKIP))
     unsafe["plain_summary"] = "建议买入，目标价很快到。"
     with pytest.raises(ValueError):
@@ -159,8 +165,24 @@ def test_advisor_chinese_text_has_no_mojibake() -> None:
         assert marker not in combined
     assert "当前为谨慎观察" in report["plain_summary"]
     assert "未配置或未启用大模型" in report["plain_summary"]
-    assert "买入" in PROHIBITED_TERMS
-    assert "止盈" in PROHIBITED_TERMS
+    assert "建议买入" in PROHIBITED_TERMS
+    assert "目标价" in PROHIBITED_TERMS
+
+
+def test_advisor_prompt_contains_safe_language_contract() -> None:
+    prompt = (
+        Path(__file__).resolve().parents[1]
+        / "app"
+        / "services"
+        / "prompts"
+        / "short_research_advisor.txt"
+    ).read_text(encoding="utf-8")
+
+    assert "进入观察名单" in prompt
+    assert "需要人工复核" in prompt
+    assert "不代表买入建议" in prompt
+    assert "建议买入" in prompt
+    assert "目标价" in prompt
 
 
 def test_validate_advisor_payload_accepts_single_text_list_fields() -> None:
@@ -207,6 +229,7 @@ def test_validate_advisor_payload_uses_fallback_for_missing_fields() -> None:
 
     assert report["plain_summary"] == "规则兜底说明。"
     assert report["opportunity"] == ["规则机会。"]
+    assert report["_fallback_used"] is True
 
 
 @pytest.mark.asyncio
@@ -263,6 +286,36 @@ async def test_advisor_generation_is_idempotent_and_does_not_change_signal_items
         report_count = await session.scalar(select(func.count(ShortResearchAdvisorReport.id)))
 
     assert report_count == 2
+
+
+@pytest.mark.asyncio
+async def test_advisor_generation_marks_partial_rule_completion(app, settings) -> None:
+    run_id = await _seed_signal_run(app)
+
+    class PartialClient:
+        model_name = "fake-model"
+
+        async def generate_short_research_report(self, *_args: Any, **_kwargs: Any) -> str:
+            payload = json.loads(_valid_report(ACTION_FOCUS))
+            payload["opportunity"] = []
+            payload["plain_summary"] = ""
+            return json.dumps(payload, ensure_ascii=False)
+
+    enabled_settings = settings.model_copy(
+        update={"llm_advisor_enabled": True, "llm_advisor_max_assets": 1}
+    )
+
+    async with app.state.db.session() as session:
+        result = await run_advisor_generation(session, enabled_settings, llm_client=PartialClient(), max_assets=1)
+        report = await session.scalar(
+            select(ShortResearchAdvisorReport).where(ShortResearchAdvisorReport.signal_run_id == run_id)
+        )
+
+    assert result["selected"] == 1
+    assert result["succeeded"] == 1
+    assert result["partial_fallback"] == 1
+    assert report is not None
+    assert report.source == "partial_fallback"
 
 
 @pytest.mark.asyncio

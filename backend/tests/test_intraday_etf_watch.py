@@ -337,8 +337,8 @@ async def test_dynamic_hard_stop_and_intraday_cooldown(app, settings, monkeypatc
         await session.commit()
         await session.refresh(position)
 
-        first_alert, first_status = await create_alert_if_needed(session, position, settings)
-        second_alert, second_status = await create_alert_if_needed(session, position, settings)
+        first_alert, first_status = await create_alert_if_needed(session, position, settings, evaluation_mode="intraday")
+        second_alert, second_status = await create_alert_if_needed(session, position, settings, evaluation_mode="intraday")
         alerts = (await session.scalars(select(TrackedPositionAlert))).all()
 
     assert first_status == "email_sent"
@@ -348,9 +348,60 @@ async def test_dynamic_hard_stop_and_intraday_cooldown(app, settings, monkeypatc
     assert first_alert.alert_source == "intraday_quote"
     assert second_status == "suppressed"
     assert second_alert is not None
-    assert second_alert.suppression_status == "suppressed"
-    assert len(alerts) == 2
+    assert second_alert.id == first_alert.id
+    assert len(alerts) == 1
     assert len(sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_intraday_email_requires_fresh_quote_and_skips_daily_close_fallback(app, settings, monkeypatch) -> None:
+    await _seed_signal_run(app, count=1)
+    await _seed_price_history_from_closes(
+        app,
+        "510000",
+        [1.00, 0.99, 0.98, 0.97, 0.96, 0.95],
+        start=datetime.now().date() - timedelta(days=8),
+    )
+    sent: list[dict] = []
+
+    async def fake_send_template(self, session, *, recipient: str, template_name: str, payload: dict) -> str:
+        sent.append(payload)
+        return "sent"
+
+    monkeypatch.setattr("app.services.notifier.Notifier.send_template", fake_send_template)
+
+    async with app.state.db.session() as session:
+        position = TrackedPosition(
+            user_id=1,
+            asset_type="etf",
+            asset_code="510000",
+            asset_name="ETF510000",
+            buy_date=date(2026, 6, 1),
+            buy_amount=3000,
+            entry_price=1.0,
+            entry_price_date=date(2026, 6, 1),
+            estimated_shares=3000,
+            status="active",
+        )
+        session.add(position)
+        user = await session.get(User, 1)
+        assert user is not None
+        user.smtp_host = "smtp.163.com"
+        await session.commit()
+        await session.refresh(position)
+
+        alert, status = await create_alert_if_needed(session, position, settings, evaluation_mode="intraday")
+        alerts = (await session.scalars(select(TrackedPositionAlert))).all()
+        analysis = await position_analysis(session, position)
+
+    assert alert is None
+    assert status == "data_ineligible"
+    assert alerts == []
+    assert sent == []
+    assert analysis.intraday_snapshot is not None
+    assert analysis.intraday_snapshot.price_source == "daily_close"
+    assert analysis.intraday_snapshot.email_eligible is False
+    assert analysis.exit_signal.email_eligible is False
 
 
 @pytest.mark.asyncio

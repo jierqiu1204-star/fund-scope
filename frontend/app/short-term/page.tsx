@@ -476,6 +476,35 @@ function priceSourceLabel(value: string | null | undefined) {
   return "暂无价格";
 }
 
+function reliabilityLabel(value: string | null | undefined) {
+  if (value === "fresh_intraday") {
+    return "新鲜盘中行情";
+  }
+  if (value === "daily_close") {
+    return "日线收盘价，不是实时";
+  }
+  if (value === "stale_quote") {
+    return "盘中行情滞后";
+  }
+  if (value === "missing") {
+    return "等待行情";
+  }
+  return "数据口径未知";
+}
+
+function advisorSourceLabel(source: string | null | undefined) {
+  if (source === "llm") {
+    return "AI生成";
+  }
+  if (source === "partial_fallback") {
+    return "AI生成，部分规则补齐";
+  }
+  if (source === "fallback") {
+    return "规则兜底";
+  }
+  return "规则解释";
+}
+
 function marketStatusLabel(value: string | undefined) {
   if (value === "open") {
     return "交易中";
@@ -1346,11 +1375,15 @@ export default function ShortTermPage() {
                 <span>
                   持有天数: {item.holding_days === null ? "暂无" : `${item.holding_days} 天`}
                 </span>
-                <span>实时价: {item.current_snapshot.current_price?.toFixed(4) ?? "暂无"}</span>
+                <span>当前价: {item.current_snapshot.current_price?.toFixed(4) ?? "暂无"}</span>
+                {item.asset_type === "etf" ? (
+                  <span>数据口径: {reliabilityLabel(item.intraday_snapshot?.reliability_level)}</span>
+                ) : null}
                 <span>
                   成本口径: {item.cost_basis === null ? "等待成本数据" : `${formatCurrency(item.cost_basis)} / ${costBasisSourceLabel(item.cost_basis_source)}`}
                 </span>
                 <span>持仓处理状态: {item.exit_signal.label}</span>
+                <span>{item.exit_signal.email_eligible ? "满足邮件提醒条件" : "不会发邮件"}</span>
               </div>
               {item.latest_alert ? (
                 <p className="mt-3 rounded-[12px] bg-paper px-3 py-2 text-xs text-ink/65">
@@ -1982,7 +2015,7 @@ export default function ShortTermPage() {
                       </h3>
                       <p className="mt-2 text-sm leading-6 text-ink/60">
                         {advisorReport
-                          ? `${advisorReport.source === "llm" ? "AI生成" : "规则兜底"} · ${advisorReport.model_name} · ${formatDate(advisorReport.generated_at)}`
+                          ? `${advisorSourceLabel(advisorReport.source)} · ${advisorReport.model_name} · ${formatDate(advisorReport.generated_at)}`
                           : "点击页面顶部“生成 AI 研究报告”后，会在这里显示多角度说明。没有报告时，排序和图表仍然正常可用。"}
                       </p>
                       <p className="mt-2 text-sm leading-6 text-ink/60">
@@ -2198,6 +2231,12 @@ export default function ShortTermPage() {
                 <span>{item.asset_type === "etf" ? "买入价格日" : "确认净值日"}：{formatDate(item.confirmed_nav_date ?? item.entry_price_date)}</span>
                 <span>{item.asset_type === "etf" ? "买入价" : "确认净值"}：{item.confirmed_nav?.toFixed(4) ?? item.entry_price?.toFixed(4) ?? "等待价格"}</span>
                 <span>当前价：{item.current_snapshot.current_price?.toFixed(4) ?? "暂无"}</span>
+                {item.asset_type === "etf" ? (
+                  <span>
+                    数据口径：{reliabilityLabel(item.intraday_snapshot?.reliability_level)}
+                    {item.intraday_snapshot?.email_eligible ? "，可用于盘中提醒" : "，仅网页/估算参考"}
+                  </span>
+                ) : null}
                 <span>
                   成本口径：{item.cost_basis === null ? "等待成本数据" : `${formatCurrency(item.cost_basis)} / ${costBasisSourceLabel(item.cost_basis_source)}`}
                 </span>
@@ -2210,6 +2249,10 @@ export default function ShortTermPage() {
                 <p className="text-xs font-semibold opacity-75">持仓处理状态</p>
                 <p className="font-semibold">{item.exit_signal.label}</p>
                 <p className="mt-1">{item.exit_signal.reason ?? "暂无持仓处理原因，继续观察公开数据。"}</p>
+                <p className="mt-1 text-xs opacity-75">
+                  {item.exit_signal.email_eligible ? "满足邮件提醒条件" : "不会发邮件"}
+                  {item.exit_signal.email_eligibility_reason ? `：${item.exit_signal.email_eligibility_reason}` : ""}
+                </p>
               </div>
 
               {item.latest_alert ? (
@@ -2238,7 +2281,9 @@ export default function ShortTermPage() {
                   {item.asset_type === "etf" ? (
                     <>
                       <span>价格来源：{priceSourceLabel(item.intraday_snapshot?.price_source)}</span>
+                      <span>可靠性：{reliabilityLabel(item.intraday_snapshot?.reliability_level)}</span>
                       <span>行情时间：{formatDateTime(item.intraday_snapshot?.quote_time)}</span>
+                      <span>{item.intraday_snapshot?.message ?? "暂无数据口径说明。"}</span>
                       <span>
                         动态止损线：
                         {item.dynamic_thresholds?.hard_stop_pct === null || item.dynamic_thresholds?.hard_stop_pct === undefined

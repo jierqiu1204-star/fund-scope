@@ -69,6 +69,9 @@ class TrackedEtfIntradaySnapshotOut(BaseModel):
     quote_time: datetime | None = None
     trade_date: date | None = None
     price_source: str = "unavailable"
+    reliability_level: str = "missing"
+    email_eligible: bool = False
+    email_eligibility_reason: str | None = None
     is_stale: bool = False
     freshness_status: str | None = None
     bid_price: float | None = None

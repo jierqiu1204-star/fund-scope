@@ -75,6 +75,11 @@ TAKE_PROFIT_WATCH_COOLDOWN_DAYS = 3
 
 TAKE_PROFIT_RISKS = {"追高风险", "连续大涨"}
 
+RELIABILITY_FRESH_INTRADAY = "fresh_intraday"
+RELIABILITY_DAILY_CLOSE = "daily_close"
+RELIABILITY_STALE_QUOTE = "stale_quote"
+RELIABILITY_MISSING = "missing"
+
 
 @dataclass(frozen=True)
 class PriceSnapshot:
@@ -191,6 +196,9 @@ async def latest_tracking_price(
             quote_time=quote.quote_time,
             trade_date=quote.trade_date,
             price_source="intraday_quote",
+            reliability_level=RELIABILITY_FRESH_INTRADAY,
+            email_eligible=True,
+            email_eligibility_reason="新鲜盘中公开行情，可用于盘中提醒判断。",
             is_stale=False,
             freshness_status=quote.freshness_status,
             bid_price=quote.bid_price,
@@ -200,14 +208,27 @@ async def latest_tracking_price(
             premium_discount_pct=quote.premium_discount_pct,
             turnover=quote.turnover,
             source=quote.source,
-            message="使用公开 ETF 盘中行情估算。",
+            message="使用公开 ETF 盘中行情估算，仍可能和券商盘口存在延迟。",
         )
         return PriceSnapshot(quote.latest_price, quote.trade_date), intraday
     daily = await latest_price(session, asset_type, asset_code)
+    reliability_level = RELIABILITY_STALE_QUOTE if quote is not None else (
+        RELIABILITY_DAILY_CLOSE if daily is not None else RELIABILITY_MISSING
+    )
+    message = (
+        "盘中行情已滞后，暂用最近 ETF 日线收盘价估算；这不是盘中实时价格。"
+        if quote is not None and daily is not None
+        else "盘中行情缺失，暂用最近 ETF 日线收盘价估算；这不是盘中实时价格。"
+        if daily is not None
+        else "暂无可用盘中行情或日线收盘价，等待数据更新。"
+    )
     intraday = TrackedEtfIntradaySnapshotOut(
         current_price=round(daily.price, 6) if daily else None,
         trade_date=daily.price_date if daily else None,
         price_source="daily_close" if daily else "unavailable",
+        reliability_level=reliability_level,
+        email_eligible=False,
+        email_eligibility_reason="非新鲜盘中行情，只能用于估算或收盘后复盘，不能触发盘中邮件。",
         is_stale=True,
         freshness_status="stale" if quote is not None else "missing",
         quote_time=quote.quote_time if quote is not None else None,
@@ -217,7 +238,7 @@ async def latest_tracking_price(
         premium_discount_pct=quote.premium_discount_pct if quote is not None else None,
         turnover=quote.turnover if quote is not None else None,
         source=quote.source if quote is not None else None,
-        message="盘中行情缺失或滞后，暂用最近日线收盘价估算。",
+        message=message,
     )
     return daily, intraday
 
@@ -298,7 +319,11 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
 
 def _quote_source_message(snapshot: TrackedEtfIntradaySnapshotOut | None) -> str:
     if snapshot is None:
-        return "数据源：公开日线。"
+        return "数据源：公开基金净值或 ETF 日线。"
+    if snapshot.price_source == "daily_close":
+        return "数据源：ETF 日线收盘价，不是盘中实时行情。"
+    if snapshot.price_source == "intraday_quote" and snapshot.quote_time is not None:
+        return f"数据源：公开 ETF 盘中行情，行情时间 {snapshot.quote_time:%Y-%m-%d %H:%M:%S}。"
     if snapshot.quote_time is not None:
         return f"数据源：{snapshot.price_source}，行情时间 {snapshot.quote_time:%Y-%m-%d %H:%M:%S}。"
     return f"数据源：{snapshot.price_source}。"
@@ -444,6 +469,9 @@ def _exit_signal(
     label: str = "暂无卖出/减仓提醒",
     level: str = "none",
     reasons: list[str] | None = None,
+    email_eligible: bool = False,
+    email_eligibility_reason: str | None = None,
+    data_reliability: str | None = None,
 ) -> TrackedPositionExitSignal:
     reason_list = reasons or []
     return TrackedPositionExitSignal(
@@ -452,6 +480,9 @@ def _exit_signal(
         level=cast(Any, level),
         reason=reason_list[0] if reason_list else None,
         reasons=reason_list,
+        email_eligible=email_eligible,
+        email_eligibility_reason=email_eligibility_reason,
+        data_reliability=data_reliability,
     )
 
 
@@ -467,6 +498,67 @@ def _alert_type_label(alert_type: str) -> str:
 
 def _should_send_email(alert_type: str) -> bool:
     return alert_type in EMAIL_ALERT_TYPES
+
+
+def _is_fresh_intraday_snapshot(snapshot: TrackedEtfIntradaySnapshotOut | None) -> bool:
+    return bool(
+        snapshot is not None
+        and snapshot.price_source == "intraday_quote"
+        and snapshot.reliability_level == RELIABILITY_FRESH_INTRADAY
+        and not snapshot.is_stale
+        and snapshot.current_price is not None
+    )
+
+
+def _data_reliability_for_position(
+    position: TrackedPosition,
+    intraday_snapshot: TrackedEtfIntradaySnapshotOut | None,
+) -> str:
+    if position.asset_type == ASSET_TYPE_FUND:
+        return "daily_nav"
+    if intraday_snapshot is None:
+        return RELIABILITY_DAILY_CLOSE
+    return intraday_snapshot.reliability_level
+
+
+def _annotate_exit_signal_email_eligibility(
+    position: TrackedPosition,
+    signal: TrackedPositionExitSignal,
+    intraday_snapshot: TrackedEtfIntradaySnapshotOut | None,
+) -> TrackedPositionExitSignal:
+    reliability = _data_reliability_for_position(position, intraday_snapshot)
+    signal.data_reliability = reliability
+    if signal.alert_type is None:
+        signal.email_eligible = False
+        signal.email_eligibility_reason = "暂无明确持仓处理信号。"
+        return signal
+    if not _should_send_email(signal.alert_type):
+        signal.email_eligible = False
+        signal.email_eligibility_reason = "数据质量或结构提示只在网页展示，不发送邮件。"
+        return signal
+    if position.asset_type == ASSET_TYPE_ETF and not _is_fresh_intraday_snapshot(intraday_snapshot):
+        signal.email_eligible = False
+        signal.email_eligibility_reason = "当前不是新鲜盘中行情，盘中邮件不会用日线兜底或旧行情触发。"
+        return signal
+    signal.email_eligible = True
+    signal.email_eligibility_reason = "满足当前数据口径下的邮件提醒条件。"
+    return signal
+
+
+def _decision_email_data_eligible(
+    position: TrackedPosition,
+    decision: AlertDecision,
+    intraday_snapshot: TrackedEtfIntradaySnapshotOut | None,
+    *,
+    evaluation_mode: str,
+) -> bool:
+    if not _should_send_email(decision.alert_type):
+        return True
+    if evaluation_mode != "intraday":
+        return True
+    if position.asset_type != ASSET_TYPE_ETF:
+        return True
+    return _is_fresh_intraday_snapshot(intraday_snapshot)
 
 
 def _web_only_message(alert_type: str) -> str:
@@ -487,9 +579,10 @@ def _performance_analysis(
 ) -> PositionAnalysis:
     start_date = tracking_start_date(position)
     if not chart:
+        exit_signal = _exit_signal(reasons=["等待公开净值或 ETF 日线数据，暂不能计算卖出/减仓提醒。"])
         return PositionAnalysis(
             chart=[],
-            exit_signal=_exit_signal(reasons=["等待公开净值或 ETF 日线数据，暂不能计算卖出/减仓提醒。"]),
+            exit_signal=_annotate_exit_signal_email_eligibility(position, exit_signal, intraday_snapshot),
             max_profit_pct=None,
             profit_giveback_pct=None,
             holding_days=None,
@@ -502,9 +595,10 @@ def _performance_analysis(
     current_pnl_pct = current_point.estimated_pnl_pct
     pnl_points = [point for point in chart if point.estimated_pnl_pct is not None]
     if current_pnl_pct is None or not pnl_points:
+        exit_signal = _exit_signal(reasons=["缺少买入净值或估算份额，暂不能计算卖出/减仓提醒。"])
         return PositionAnalysis(
             chart=chart,
-            exit_signal=_exit_signal(reasons=["缺少买入净值或估算份额，暂不能计算卖出/减仓提醒。"]),
+            exit_signal=_annotate_exit_signal_email_eligibility(position, exit_signal, intraday_snapshot),
             max_profit_pct=None,
             profit_giveback_pct=None,
             holding_days=(current_point.date - start_date).days,
@@ -663,6 +757,8 @@ def _performance_analysis(
             level="watch",
             reasons=warnings,
         )
+
+    exit_signal = _annotate_exit_signal_email_eligibility(position, exit_signal, intraday_snapshot)
 
     return PositionAnalysis(
         chart=chart,
@@ -1105,6 +1201,8 @@ async def create_alert_if_needed(
     session: AsyncSession,
     position: TrackedPosition,
     settings: Settings,
+    *,
+    evaluation_mode: str = "daily",
 ) -> tuple[TrackedPositionAlert | None, str]:
     decision, signal_date = await evaluate_alert_decision_v2(session, position)
     if decision is None or signal_date is None:
@@ -1113,6 +1211,14 @@ async def create_alert_if_needed(
     current, intraday_snapshot = await latest_tracking_price(session, position.asset_type, position.asset_code)
     snapshot = _estimate_snapshot(position, current)
     is_intraday_alert = position.asset_type == ASSET_TYPE_ETF and decision.alert_source == "intraday_quote"
+
+    if not _decision_email_data_eligible(
+        position,
+        decision,
+        intraday_snapshot,
+        evaluation_mode=evaluation_mode,
+    ):
+        return None, "data_ineligible"
 
     if is_intraday_alert:
         recent_intraday = await session.scalar(
@@ -1134,30 +1240,7 @@ async def create_alert_if_needed(
             and decision.quote_time != recent_intraday.quote_time
         )
         if recent_intraday is not None and not escalated_hard_stop:
-            suppressed = TrackedPositionAlert(
-                tracked_position_id=position.id,
-                alert_date=signal_date,
-                alert_type=decision.alert_type,
-                trigger_label=decision.trigger_label,
-                current_price=snapshot.current_price,
-                current_price_date=snapshot.current_price_date,
-                estimated_value=snapshot.estimated_value,
-                estimated_pnl=snapshot.estimated_pnl,
-                estimated_pnl_pct=snapshot.estimated_pnl_pct,
-                reasons_json=decision.reasons,
-                risk_flags_json=decision.risk_flags,
-                advisor_summary=decision.advisor_summary,
-                alert_level=decision.alert_level,
-                quote_time=decision.quote_time,
-                alert_source=decision.alert_source,
-                suppression_status="suppressed",
-                email_status="skipped",
-                email_error_message="同一 ETF 同类盘中提醒 30 分钟内只发一次。",
-            )
-            session.add(suppressed)
-            await session.commit()
-            await session.refresh(suppressed)
-            return suppressed, "suppressed"
+            return recent_intraday, "suppressed"
     else:
         existing = await session.scalar(
             select(TrackedPositionAlert).where(
@@ -1176,6 +1259,7 @@ async def create_alert_if_needed(
                 TrackedPositionAlert.tracked_position_id == position.id,
                 TrackedPositionAlert.alert_type == ALERT_TAKE_PROFIT_WATCH,
                 TrackedPositionAlert.alert_date >= signal_date - timedelta(days=TAKE_PROFIT_WATCH_COOLDOWN_DAYS),
+                TrackedPositionAlert.email_status == "sent",
             )
             .order_by(TrackedPositionAlert.alert_date.desc(), TrackedPositionAlert.id.desc())
         )

@@ -689,6 +689,7 @@ async def test_take_profit_watch_uses_three_day_cooldown(client, app, settings, 
                 trigger_label="止盈观察",
                 reasons_json=["旧提醒"],
                 risk_flags_json=[],
+                email_status="sent",
             )
         )
         user = await session.get(User, 1)
@@ -701,6 +702,70 @@ async def test_take_profit_watch_uses_three_day_cooldown(client, app, settings, 
     assert result["alerts_created"] == 0
     assert result["deduplicated"] == 1
     assert len(alerts) == 1
+
+
+@pytest.mark.asyncio
+async def test_take_profit_watch_cooldown_ignores_non_sent_history(client, app, settings, monkeypatch) -> None:
+    await _seed_nav_series(app, [(date(2026, 6, 1), 1.0), (date(2026, 6, 5), 1.04)])
+    await _seed_signal(app, conclusion="高位观察", risk_flags=["追高风险"], action_label="高位别追")
+    response = await client.post(
+        "/api/tracked-positions",
+        json={"asset_type": "fund", "asset_code": "270042", "buy_date": "2026-06-01"},
+    )
+    position_id = response.json()["id"]
+    sent: list[dict[str, object]] = []
+
+    async def fake_send_template(self, session, *, recipient: str, template_name: str, payload: dict) -> str:
+        sent.append(payload)
+        return "sent"
+
+    monkeypatch.setattr("app.services.notifier.Notifier.send_template", fake_send_template)
+
+    async with app.state.db.session() as session:
+        session.add_all(
+            [
+                TrackedPositionAlert(
+                    tracked_position_id=position_id,
+                    alert_date=date(2026, 6, 3),
+                    alert_type="take_profit_watch",
+                    trigger_label="止盈观察",
+                    reasons_json=["网页提示"],
+                    risk_flags_json=[],
+                    suppression_status="web_only",
+                    email_status="skipped",
+                ),
+                TrackedPositionAlert(
+                    tracked_position_id=position_id,
+                    alert_date=date(2026, 6, 4),
+                    alert_type="take_profit_watch",
+                    trigger_label="止盈观察",
+                    reasons_json=["去重"],
+                    risk_flags_json=[],
+                    suppression_status="suppressed",
+                    email_status="skipped",
+                ),
+                TrackedPositionAlert(
+                    tracked_position_id=position_id,
+                    alert_date=date(2026, 6, 4),
+                    alert_type="take_profit_watch",
+                    trigger_label="止盈观察",
+                    reasons_json=["失败"],
+                    risk_flags_json=[],
+                    email_status="failed",
+                ),
+            ]
+        )
+        user = await session.get(User, 1)
+        assert user is not None
+        user.smtp_host = "smtp.163.com"
+        await session.commit()
+        result = await daily_tracked_position_alerts_job(session, settings)
+        alerts = (await session.scalars(select(TrackedPositionAlert))).all()
+
+    assert result["alerts_created"] == 1
+    assert result["emails_sent"] == 1
+    assert len(alerts) == 4
+    assert sent
 
 
 @pytest.mark.asyncio

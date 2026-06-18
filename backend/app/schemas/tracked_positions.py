@@ -56,6 +56,9 @@ class TrackedPositionExitSignal(BaseModel):
     level: Literal["none", "watch", "warning", "urgent"] = "none"
     reason: str | None = None
     reasons: list[str] = Field(default_factory=list)
+    email_eligible: bool = False
+    email_eligibility_reason: str | None = None
+    data_reliability: str | None = None
 
 
 class TrackedPositionAlertOut(BaseModel):

@@ -1,41 +1,4 @@
-# intraday-etf-watch Specification
-
-## Purpose
-TBD - created by archiving change add-intraday-etf-watch-top20. Update Purpose after archive.
-## Requirements
-### Requirement: Intraday ETF Watchlist Is Derived From Daily Signals
-The system SHALL build the intraday ETF watchlist from the latest daily short-term ETF ranking plus active tracked ETF positions.
-
-#### Scenario: Top 20 ETFs are selected
-- **WHEN** a successful ETF short-term signal run exists
-- **THEN** the intraday watchlist includes the top 20 ranked ETF signal items from that run
-
-#### Scenario: Held ETFs remain watched
-- **WHEN** an active tracked ETF is not in the latest top 20 ranking
-- **THEN** the intraday watchlist still includes that ETF and marks its source as `tracked_position`
-
-#### Scenario: Daily signal is unavailable
-- **WHEN** no successful ETF signal run exists
-- **THEN** the intraday watchlist includes active tracked ETFs only and returns a readable stale-or-missing-signal status
-
-### Requirement: Intraday ETF Quotes Are Refreshed During Market Hours
-The system SHALL refresh public ETF spot quotes for the intraday watchlist during A-share trading hours.
-
-#### Scenario: Scheduled market-hour refresh
-- **WHEN** the server time is within `09:30-11:30` or `13:00-15:00` Asia/Shanghai on a trading weekday
-- **THEN** the scheduler runs the ETF intraday watch job every 60 seconds
-
-#### Scenario: Off-hours refresh is skipped
-- **WHEN** the intraday watch job is invoked outside configured market hours
-- **THEN** the job skips external quote fetching and returns an off-hours status without sending trade alerts
-
-#### Scenario: Quote snapshot is stored
-- **WHEN** public ETF spot quotes are fetched successfully
-- **THEN** the system stores latest price, quote time, change percent, volume, turnover, bid price, ask price, IOPV, premium/discount percent, source, and raw snapshot for watched ETFs
-
-#### Scenario: Stale quote is visible
-- **WHEN** the latest stored quote for an ETF is older than 3 minutes during market hours
-- **THEN** the API marks the quote as stale and the UI does not present it as fresh real-time data
+## MODIFIED Requirements
 
 ### Requirement: ETF Tracking Uses Intraday Price First
 The system SHALL calculate active ETF tracking snapshots using fresh intraday quotes before falling back to daily close data, while clearly marking fallback data as non-intraday.
@@ -101,32 +64,6 @@ The system SHALL avoid duplicate intraday alert emails while preserving meaningf
 #### Scenario: Alert history is returned
 - **WHEN** the user opens a tracked ETF detail view
 - **THEN** the API returns recent meaningful intraday and daily alert records with alert type, level, trigger reason, quote time, email status, and suppression status when stored
-
-### Requirement: Intraday ETF Watch Is Visible In The Web UI
-The system SHALL expose intraday ETF monitoring status and tracked ETF snapshots in the Chinese web interface.
-
-#### Scenario: User opens short-term page
-- **WHEN** the user opens `/short-term` in ETF mode
-- **THEN** the page shows intraday watch status, latest quote refresh time, watched ETF count, top-20 source status, and data freshness in Chinese
-
-#### Scenario: Tracked ETF card shows real-time fields
-- **WHEN** an active ETF tracking card is displayed
-- **THEN** it shows latest price, quote time, price source, estimated P&L, max profit, giveback, dynamic stop line, and current reminder status
-
-#### Scenario: Public-data boundary is visible
-- **WHEN** intraday ETF data is displayed
-- **THEN** the UI states that prices come from public data, may be delayed, do not connect to the broker account, and do not execute trades
-
-### Requirement: Intraday Watch Surfaces Dynamic Threshold Context
-The system SHALL expose enough dynamic-threshold context for users to understand ETF intraday holding alerts.
-
-#### Scenario: Tracked ETF card is displayed
-- **WHEN** an active tracked ETF appears in the short-term page or quote API
-- **THEN** the response includes current price, price source, quote freshness, estimated profit/loss, highest profit, giveback, hard-stop threshold, trailing threshold, trend status, and latest actionable or web-only alert status
-
-#### Scenario: Quote is stale during market hours
-- **WHEN** a tracked ETF quote is older than the freshness threshold during market hours
-- **THEN** the UI marks the quote as stale and MUST NOT treat stale quote structure warnings as a sell-or-reduce email trigger
 
 ### Requirement: Intraday ETF Profit Watch Can Notify Without Treating Data Warnings As Sell Signals
 The system SHALL allow profitable tracked ETFs to send soft take-profit-watch emails while keeping stale quote, missing IOPV, fallback price, and structure warnings as web-only data quality messages.
