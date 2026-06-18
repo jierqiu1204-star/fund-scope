@@ -27,7 +27,8 @@ import type {
   ShortResearchObservationPortfolio,
   ShortResearchSignalRun,
   ShortResearchStatus,
-  IntradayEtfWatchStatus,
+  IntradayEtfLiveRankingItem,
+  IntradayEtfLiveRankingList,
   TrackedPosition,
   TrackedPositionDetail,
   TrackedPositionList
@@ -36,16 +37,11 @@ import type {
 type AssetType = "fund" | "etf";
 type SortKey = "score" | "return_5d" | "return_20d" | "drawdown_low" | "risk_low" | "liquidity";
 type OrderTimeBucket = "before_15" | "after_15" | "unknown";
-type EtfUniverse = "default" | "all" | "illiquid";
 type MobileTab = "ranking" | "detail" | "tracking" | "explanation";
+type RankedAssetItem = ShortResearchAsset | IntradayEtfLiveRankingItem;
+type RankedAssetResponse = ShortResearchAssetList | IntradayEtfLiveRankingList;
 
 const ASSET_PAGE_SIZE = 12;
-
-const etfUniverseOptions: Array<{ key: EtfUniverse; label: string; description: string }> = [
-  { key: "default", label: "默认精选", description: "只看数据新、历史够、成交额达标的 ETF。" },
-  { key: "all", label: "全部可分析", description: "纳入有可用日线的 ETF，并显示排除原因。" },
-  { key: "illiquid", label: "含低流动性", description: "把成交额偏低的 ETF 也放进来对比。" }
-];
 
 const baseSortOptions: Array<{ key: SortKey; label: string }> = [
   { key: "score", label: "综合排序" },
@@ -56,8 +52,7 @@ const baseSortOptions: Array<{ key: SortKey; label: string }> = [
 ];
 
 const etfSortOptions: Array<{ key: SortKey; label: string }> = [
-  ...baseSortOptions,
-  { key: "liquidity", label: "成交额高" }
+  { key: "score", label: "实时综合排序" }
 ];
 
 const assetModes: Record<
@@ -163,15 +158,6 @@ function percentMetric(metrics: Record<string, unknown>, key: string) {
   return value === null ? "暂无" : formatPercent(value * 100);
 }
 
-function stringListMetric(metrics: Record<string, unknown>, key: string) {
-  const value = metrics[key];
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
-}
-
-function boolMetric(metrics: Record<string, unknown>, key: string) {
-  return metrics[key] === true;
-}
-
 function conclusionTone(conclusion: string) {
   if (conclusion === "短线观察") {
     return "bg-emerald-100 text-emerald-800";
@@ -188,6 +174,19 @@ function conclusionTone(conclusion: string) {
   return "bg-slate-200 text-slate-800";
 }
 
+function entryTimingTone(label: string) {
+  if (label === "健康回踩" || label === "趋势延续") {
+    return "bg-emerald-100 text-emerald-800";
+  }
+  if (label === "冲高别追" || label === "放量转弱") {
+    return "bg-rose-100 text-rose-800";
+  }
+  if (label === "跌破等待") {
+    return "bg-amber-100 text-amber-900";
+  }
+  return "bg-stone-200 text-stone-700";
+}
+
 function advisorTone(action: string) {
   if (action === "重点观察") {
     return "bg-emerald-100 text-emerald-800";
@@ -199,6 +198,56 @@ function advisorTone(action: string) {
     return "bg-amber-100 text-amber-900";
   }
   return "bg-stone-200 text-stone-700";
+}
+
+function isLiveRankingItem(item: RankedAssetItem): item is IntradayEtfLiveRankingItem {
+  return "live_rank" in item && "etf_code" in item;
+}
+
+function getItemAssetType(item: RankedAssetItem) {
+  return isLiveRankingItem(item) ? "etf" : item.asset_type;
+}
+
+function toEtfItemCode(item: RankedAssetItem) {
+  return isLiveRankingItem(item) ? item.etf_code : item.code;
+}
+
+function toEtfItemName(item: RankedAssetItem) {
+  return isLiveRankingItem(item) ? item.etf_name : item.name;
+}
+
+function toEtfItemRank(item: RankedAssetItem) {
+  return isLiveRankingItem(item) ? item.live_rank : item.rank;
+}
+
+function itemConclusion(item: RankedAssetItem) {
+  return item.conclusion ?? "数据不足";
+}
+
+function etfLiveRankChangeText(rankChange: number | null) {
+  if (rankChange === null || rankChange === 0) {
+    return "持平";
+  }
+  if (rankChange > 0) {
+    return `↑${rankChange}`;
+  }
+  return `↓${Math.abs(rankChange)}`;
+}
+
+function formatLiveScore(value: number | null | undefined) {
+  return value === null || value === undefined ? "暂无" : value.toFixed(1);
+}
+
+function isLiveRankingResponse(value: RankedAssetResponse | undefined): value is IntradayEtfLiveRankingList {
+  return Boolean(value && "signal_as_of_date" in value && "latest_run" in value);
+}
+
+function liveRankingQuote(item: RankedAssetItem) {
+  return isLiveRankingItem(item) ? item.quote : null;
+}
+
+function shortResearchThemeTags(item: RankedAssetItem): string[] {
+  return isLiveRankingItem(item) ? [] : item.theme_tags;
 }
 
 function assetTypeLabel(assetType: string) {
@@ -665,7 +714,6 @@ export default function ShortTermPage() {
   const detailColumnRef = useRef<HTMLDivElement | null>(null);
   const [detailColumnHeight, setDetailColumnHeight] = useState<number | null>(null);
   const [assetType, setAssetType] = useState<AssetType>("etf");
-  const [etfUniverse, setEtfUniverse] = useState<EtfUniverse>("default");
   const [theme, setTheme] = useState("all");
   const [sort, setSort] = useState<SortKey>("score");
   const [keyword, setKeyword] = useState("");
@@ -692,8 +740,17 @@ export default function ShortTermPage() {
   });
 
   const assets = useQuery({
-    queryKey: ["short-research", "assets", assetType, etfUniverse, theme, sort, keyword, assetOffset],
+    queryKey: ["short-research", "assets", assetType, theme, sort, keyword, assetOffset],
     queryFn: async () => {
+      if (assetType === "etf") {
+        const params = new URLSearchParams();
+        params.set("limit", String(ASSET_PAGE_SIZE));
+        params.set("offset", String(assetOffset));
+        if (keyword.trim()) {
+          params.set("q", keyword.trim());
+        }
+        return (await api.get<IntradayEtfLiveRankingList>(`/api/etf-quotes/live-rankings?${params.toString()}`)).data;
+      }
       const params = new URLSearchParams();
       params.set("asset_type", assetType);
       params.set("limit", String(ASSET_PAGE_SIZE));
@@ -705,20 +762,27 @@ export default function ShortTermPage() {
         params.set("q", keyword.trim());
       }
       params.set("sort", sort);
-      if (assetType === "etf") {
-        params.set("universe", etfUniverse);
-      }
       return (await api.get<ShortResearchAssetList>(`/api/short-research/assets?${params.toString()}`)).data;
+    },
+    refetchInterval: (query) => {
+      const data = query.state.data as RankedAssetResponse | undefined;
+      return isEtfTradingPollWindow && isLiveRankingResponse(data) && data.market_status === "open" ? 30_000 : false;
     }
   });
 
+  const etfLiveData = isLiveRankingResponse(assets.data) ? assets.data : null;
+  const isEtfLiveRanking = etfLiveData !== null && assetType === "etf";
+  const shortAssetData = isEtfLiveRanking ? null : (assets.data as ShortResearchAssetList | undefined);
+  const shouldRefreshIntradayQueries =
+    isEtfTradingPollWindow && isEtfLiveRanking && etfLiveData?.market_status === "open";
+
   const observationPortfolio = useQuery({
-    queryKey: ["short-research", "observation-portfolio", etfUniverse],
+    queryKey: ["short-research", "observation-portfolio", "default"],
     enabled: assetType === "etf" && Boolean(assets.data?.items.length),
     queryFn: async () =>
       (
         await api.get<ShortResearchObservationPortfolio>(
-          `/api/short-research/observation-portfolio?asset_type=etf&universe=${etfUniverse}`
+          "/api/short-research/observation-portfolio?asset_type=etf&universe=default"
         )
       ).data
   });
@@ -733,18 +797,6 @@ export default function ShortTermPage() {
         )
       ).data
   });
-
-  const intradayWatch = useQuery({
-    queryKey: ["etf-quotes", "tracked"],
-    enabled: assetType === "etf",
-    queryFn: async () => (await api.get<IntradayEtfWatchStatus>("/api/etf-quotes/tracked")).data,
-    refetchInterval: (query) => {
-      const data = query.state.data as IntradayEtfWatchStatus | undefined;
-      return isEtfTradingPollWindow && data?.market_status === "open" ? 30_000 : false;
-    }
-  });
-
-  const shouldRefreshIntradayQueries = isEtfTradingPollWindow && intradayWatch.data?.market_status === "open";
 
   const trackedPositions = useQuery({
     queryKey: ["tracked-positions"],
@@ -761,7 +813,7 @@ export default function ShortTermPage() {
   useEffect(() => {
     if (!previousTradingPollWindow.current && isEtfTradingPollWindow) {
       void Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["etf-quotes", "tracked"] }),
+        queryClient.invalidateQueries({ queryKey: ["short-research", "assets"] }),
         queryClient.invalidateQueries({ queryKey: ["tracked-positions"] })
       ]);
     }
@@ -770,7 +822,7 @@ export default function ShortTermPage() {
 
   useEffect(() => {
     setAssetOffset(0);
-  }, [assetType, etfUniverse, theme, sort, keyword]);
+  }, [assetType, theme, sort, keyword]);
 
   useEffect(() => {
     const items = assets.data?.items ?? [];
@@ -779,8 +831,8 @@ export default function ShortTermPage() {
       setSelected(null);
       return;
     }
-    if (!selected || !items.some((item) => item.asset_type === selected.asset_type && item.code === selected.code)) {
-      setSelected({ asset_type: first.asset_type, code: first.code });
+    if (!selected || !items.some((item) => getItemAssetType(item) === selected.asset_type && toEtfItemCode(item) === selected.code)) {
+      setSelected({ asset_type: getItemAssetType(first), code: toEtfItemCode(first) });
     }
   }, [assets.data, selected]);
 
@@ -791,12 +843,17 @@ export default function ShortTermPage() {
   }, [assetType, sort]);
 
   const themes = useMemo(() => {
+    if (assetType === "etf") {
+      return ["all"];
+    }
     const seen = new Set<string>(fallbackThemes);
     for (const item of assets.data?.items ?? []) {
-      item.theme_tags.forEach((tag) => seen.add(tag));
+      for (const tag of (item as ShortResearchAsset).theme_tags) {
+        seen.add(tag);
+      }
     }
     return ["all", ...Array.from(seen).sort((left, right) => left.localeCompare(right, "zh-CN"))];
-  }, [assets.data]);
+  }, [assetType, assets.data]);
 
   const syncData = useMutation({
     mutationFn: async () =>
@@ -903,17 +960,21 @@ export default function ShortTermPage() {
   const detailPoints = chartPoints(selectedDetail.data);
   const windowPoints = returnWindowChart(selectedAsset);
   const statusData = status.data;
-  const currentLatestDate = statusData?.latest_data_date ?? assets.data?.as_of_date ?? null;
+  const currentLatestDate =
+    statusData?.latest_data_date ??
+    (etfLiveData?.signal_as_of_date ?? shortAssetData?.as_of_date) ??
+    null;
+  const etfLiveStatus = isEtfLiveRanking ? etfLiveData : null;
   const currentDataIssueCount =
     assetType === "etf"
       ? (statusData?.etf_data_stale_count ?? 0) + (statusData?.etf_failed_count ?? 0)
       : statusData?.data_issue_count ?? 0;
-  const visibleAssets = assets.data?.items ?? [];
+  const visibleAssets = (assets.data?.items ?? []) as RankedAssetItem[];
   const totalAssetCount = assets.data?.total ?? 0;
   const goToPreviousAssetPage = () => setAssetOffset((value) => Math.max(0, value - ASSET_PAGE_SIZE));
   const goToNextAssetPage = () => setAssetOffset((value) => value + ASSET_PAGE_SIZE);
-  const observableCount = visibleAssets.filter((item) => item.conclusion === "短线观察").length;
-  const highRiskCount = visibleAssets.filter((item) => item.conclusion === "高位观察").length;
+  const observableCount = visibleAssets.filter((item) => itemConclusion(item) === "短线观察").length;
+  const highRiskCount = visibleAssets.filter((item) => itemConclusion(item) === "高位观察").length;
   const dataIssues =
     statusData?.data_health
       .filter((item) => item.asset_type === assetType && (item.status !== "success" || item.is_stale))
@@ -984,7 +1045,10 @@ export default function ShortTermPage() {
         <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">观察与持仓摘要</p>
         <div className="mt-3 grid gap-2 text-sm text-ink/70 md:grid-cols-2">
           <span>买入观察状态：{selectedAsset.conclusion}</span>
+          <span>今日买点状态：{selectedAsset.entry_timing_label}</span>
+          <span className="md:col-span-2">今日买点原因：{selectedAsset.entry_timing_reason}</span>
           <span>持仓状态：{selectedHoldingStatus}</span>
+          <span>今天涨跌：{percentMetric(selectedAssetMetrics, "today_return_pct")}</span>
           <span>近5日涨跌：{percentMetric(selectedAssetMetrics, "return_5d")}</span>
           <span>近20日涨跌：{percentMetric(selectedAssetMetrics, "return_20d")}</span>
           <span>近60日涨跌：{percentMetric(selectedAssetMetrics, "return_60d")}</span>
@@ -1012,8 +1076,8 @@ export default function ShortTermPage() {
 
   const isMobileLayout = () => typeof window !== "undefined" && window.matchMedia("(max-width: 1023px)").matches;
 
-  const selectAsset = (item: ShortResearchAsset) => {
-    setSelected({ asset_type: item.asset_type, code: item.code });
+  const selectAsset = (item: RankedAssetItem) => {
+    setSelected({ asset_type: getItemAssetType(item), code: toEtfItemCode(item) });
     if (isMobileLayout()) {
       setMobileTab("detail");
     }
@@ -1074,27 +1138,6 @@ export default function ShortTermPage() {
             ))}
           </select>
         </div>
-        {assetType === "etf" ? (
-          <div className="mt-5 grid gap-3 md:grid-cols-3">
-            {etfUniverseOptions.map((option) => {
-              const active = etfUniverse === option.key;
-              return (
-                <button
-                  key={option.key}
-                  className={`rounded-[18px] border px-4 py-3 text-left transition ${
-                    active ? "border-ink bg-ink text-white" : "border-ink/10 bg-white text-ink hover:border-accent"
-                  }`}
-                  onClick={() => setEtfUniverse(option.key)}
-                >
-                  <span className="text-sm font-semibold">{option.label}</span>
-                  <span className={`mt-1 block text-xs leading-5 ${active ? "text-white/65" : "text-ink/55"}`}>
-                    {option.description}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        ) : null}
         <div className="mt-5">
           <AssetPaginationBar
             total={totalAssetCount}
@@ -1110,13 +1153,17 @@ export default function ShortTermPage() {
             <div className="rounded-[20px] border border-dashed border-ink/20 p-6 text-sm text-ink/55">正在加载榜单...</div>
           ) : null}
           {visibleAssets.map((item) => {
-            const isSelected = selected?.asset_type === item.asset_type && selected.code === item.code;
-            const exclusionReasons = stringListMetric(item.metrics, "default_exclusion_reasons");
-            const defaultEligible = boolMetric(item.metrics, "default_display_eligible");
-            const trackedForItem = trackedByAsset.get(`${item.asset_type}-${item.code}`);
+            const itemAssetType = getItemAssetType(item);
+            const itemCode = toEtfItemCode(item);
+            const isSelected = selected?.asset_type === itemAssetType && selected.code === itemCode;
+            const trackedForItem = trackedByAsset.get(`${itemAssetType}-${itemCode}`);
+            const isLiveItem = isLiveRankingItem(item);
+            const quote = liveRankingQuote(item);
+            const quotedTime = quote?.quote_time;
+            const livePrice = quote?.latest_price;
             return (
               <button
-                key={`${item.asset_type}-${item.code}`}
+                key={`${itemAssetType}-${itemCode}`}
                 className={`w-full ${compact ? "rounded-[16px]" : "rounded-[20px]"} ${cardPadding} text-left transition ${
                   isSelected ? "border-ink bg-ink text-white" : "border-ink/10 bg-white text-ink hover:border-accent"
                 }`}
@@ -1125,56 +1172,83 @@ export default function ShortTermPage() {
                 <div className={`flex flex-col ${cardGap} md:flex-row md:items-start md:justify-between`}>
                   <div>
                     <p className={`text-xs font-semibold ${isSelected ? "text-white/60" : "text-accent"}`}>
-                      #{item.rank ?? "-"} · {assetTypeLabel(item.asset_type)} · {item.theme_tags.slice(0, 3).join(" / ")}
+                      {isLiveItem ? "实时排名" : `#${item.rank ?? "-"}`}
+                      {isLiveItem ? "" : ` · ${assetTypeLabel(item.asset_type)}`}
+                      {!isLiveItem ? ` · ${shortResearchThemeTags(item).slice(0, 3).join(" / ")}` : ""}
                     </p>
                     <h3 className="mt-2 text-xl font-semibold">
-                      {item.name}
+                      {isLiveItem ? toEtfItemName(item) : item.name}
                       <span className={`ml-2 text-sm font-normal ${isSelected ? "text-white/45" : "text-ink/45"}`}>
-                        {item.code}
+                        {isLiveItem ? itemCode : item.code}
                       </span>
                     </h3>
                     <p className={`mt-2 line-clamp-2 text-sm leading-6 ${isSelected ? "text-white/65" : "text-ink/60"}`}>
-                      {rationaleText(item, "key_reason", "暂无")}
+                      {isLiveItem ? item.live_entry_timing_reason : rationaleText(item, "key_reason", "暂无")}
                     </p>
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white text-ink" : "bg-ink text-white"}`}>
-                      {item.total_score.toFixed(1)} 分
-                    </span>
-                    <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : conclusionTone(item.conclusion)}`}>
-                      买入观察：{item.conclusion}
+                      {isLiveItem
+                        ? `实时综合分 ${formatLiveScore(item.live_total_score)} 分`
+                        : `${item.total_score.toFixed(1)} 分`}
                     </span>
                     <span
                       className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                        isSelected ? "bg-white/15 text-white" : exitSignalTone(trackedForItem?.exit_signal.level ?? "none")
+                        isSelected ? "bg-white/15 text-white" : conclusionTone(itemConclusion(item))
                       }`}
                     >
-                      持仓处理：{trackedForItem?.exit_signal.label ?? "未追踪"}
+                      买入观察状态：{itemConclusion(item)}
                     </span>
-                    {item.advisor_report ? (
+                    <span
+                      className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : entryTimingTone(isLiveItem ? item.live_entry_timing_label : item.entry_timing_label)}`}
+                    >
+                      {isLiveItem ? "盘中买点状态" : "今日买点"}：{isLiveItem ? item.live_entry_timing_label : item.entry_timing_label}
+                    </span>
+                    {isLiveItem ? (
+                      <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : ""}`}>
+                        实时排名变化：{etfLiveRankChangeText(item.rank_change)}
+                      </span>
+                    ) : item.advisor_report ? (
                       <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : advisorTone(item.advisor_report.action_label)}`}>
                         {item.advisor_report.action_label}
+                      </span>
+                    ) : null}
+                    {trackedForItem?.exit_signal ? (
+                      <span
+                        className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                          isSelected ? "bg-white/15 text-white" : exitSignalTone(trackedForItem.exit_signal.level)
+                        }`}
+                      >
+                        持仓处理：{trackedForItem.exit_signal.label}
                       </span>
                     ) : null}
                   </div>
                 </div>
                 <div
-                  className={`mt-4 grid gap-2 text-sm ${assetType === "etf" ? "md:grid-cols-6" : "md:grid-cols-5"} ${
+                  className={`mt-4 grid gap-2 text-sm md:grid-cols-6 ${
                     isSelected ? "text-white/70" : "text-ink/60"
                   }`}
                 >
-                  <span>5日:{percentMetric(item.metrics, "return_5d")}</span>
-                  <span>20日:{percentMetric(item.metrics, "return_20d")}</span>
-                  <span>60日:{percentMetric(item.metrics, "return_60d")}</span>
-                  <span>60日回撤:{percentMetric(item.metrics, "max_drawdown_60d")}</span>
-                  {assetType === "etf" ? <span>20日换手:{formatTurnover(numericMetric(item.metrics, "average_turnover_20d"))}</span> : null}
-                  <span>样本天数:{item.usable_days}</span>
+                  {isLiveItem ? (
+                    <>
+                      <span>实时排名 #{toEtfItemRank(item) ?? "-"}</span>
+                      <span>日线基础分：{formatLiveScore(item.base_score)}</span>
+                      <span>来源：{item.sources.length ? item.sources.join(" / ") : "暂无来源"}</span>
+                      <span>行情时间：{quote ? formatDateTime(quotedTime) : "暂无新鲜盘中行情"}</span>
+                      <span>当前价：{quote ? (livePrice === null || livePrice === undefined ? "暂无" : livePrice.toFixed(4)) : "暂无新鲜盘中行情"}</span>
+                    </>
+                  ) : (
+                    <>
+                      <span>今天:{percentMetric(item.metrics, "today_return_pct")}</span>
+                      <span>5日:{percentMetric(item.metrics, "return_5d")}</span>
+                      <span>20日:{percentMetric(item.metrics, "return_20d")}</span>
+                      <span>60日:{percentMetric(item.metrics, "return_60d")}</span>
+                      <span>60日回撤:{percentMetric(item.metrics, "max_drawdown_60d")}</span>
+                      <span>20日换手:{formatTurnover(numericMetric(item.metrics, "average_turnover_20d"))}</span>
+                      <span>样本天数:{item.usable_days}</span>
+                    </>
+                  )}
                 </div>
-                {assetType === "etf" && !defaultEligible ? (
-                  <p className={`mt-3 line-clamp-1 text-xs leading-5 ${isSelected ? "text-white/55" : "text-ink/45"}`}>
-                    默认展示说明: {exclusionReasons.length ? exclusionReasons.join(" / ") : "数据不足未标注"}
-                  </p>
-                ) : null}
               </button>
             );
           })}
@@ -1225,6 +1299,11 @@ export default function ShortTermPage() {
                 {rationaleText(selectedAsset, "key_reason", "暂无")}
               </p>
             </div>
+            <div className="rounded-[16px] bg-paper px-4 py-3">
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">今日买点</p>
+              <p className="mt-2 text-lg font-semibold text-ink">{selectedAsset.entry_timing_label}</p>
+              <p className="mt-2 text-sm leading-6 text-ink/65">{selectedAsset.entry_timing_reason}</p>
+            </div>
             <div className="rounded-[16px] bg-ink p-4 text-white">
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-white/50">持有建议</p>
               <p className="mt-2 text-sm leading-7 text-white/75">
@@ -1232,11 +1311,12 @@ export default function ShortTermPage() {
               </p>
             </div>
           </div>
-          <div className={`grid gap-2 text-sm ${assetType === "etf" ? "sm:grid-cols-5" : "sm:grid-cols-4"}`}>
+          <div className={`grid gap-2 text-sm ${assetType === "etf" ? "sm:grid-cols-6" : "sm:grid-cols-5"}`}>
             <StatPill label={mode.latestLabel} value={formatDate(selectedAsset.latest_date)} tone="bg-white text-ink" />
             <StatPill label={mode.priceLabel} value={selectedAsset.latest_value === null ? "暂无" : selectedAsset.latest_value.toFixed(4)} />
             <StatPill label="样本天数" value={`${selectedAsset.usable_days} 天`} tone="bg-accentSoft text-ink" />
             <StatPill label="样本标签" value={selectedAsset.conclusion} tone="bg-white text-ink" />
+            <StatPill label="今日买点" value={selectedAsset.entry_timing_label} tone="bg-white text-ink" />
             {assetType === "etf" ? (
               <StatPill
                 label="20日换手"
@@ -1565,19 +1645,19 @@ export default function ShortTermPage() {
           <div className="mt-4 grid gap-3 rounded-[20px] border border-ink/10 bg-ink px-4 py-3 text-white md:grid-cols-4">
             <div>
               <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-white/50">盘中盯盘</p>
-              <p className="mt-1 text-sm text-white/75">评分前 20 + 已追踪 ETF</p>
+              <p className="mt-1 text-sm text-white/75">评分前 20 + 短线/高位观察 + 已追踪 ETF</p>
             </div>
             <div>
               <p className="text-xs text-white/50">市场状态</p>
-              <p className="font-semibold">{marketStatusLabel(intradayWatch.data?.market_status)}</p>
+              <p className="font-semibold">{marketStatusLabel(etfLiveStatus?.market_status)}</p>
             </div>
             <div>
               <p className="text-xs text-white/50">盯盘数量</p>
-              <p className="font-semibold">{intradayWatch.data?.watched_count ?? 0} 只</p>
+              <p className="font-semibold">{etfLiveStatus?.watched_count ?? 0} 只</p>
             </div>
             <div>
               <p className="text-xs text-white/50">最近运行</p>
-              <p className="font-semibold">{formatUtcDateTime(intradayWatch.data?.latest_run?.finished_at)}</p>
+              <p className="font-semibold">{formatUtcDateTime(etfLiveStatus?.latest_run?.finished_at)}</p>
             </div>
           </div>
         ) : null}
@@ -1592,9 +1672,9 @@ export default function ShortTermPage() {
         ) : null}
       </Panel>
 
-      {(syncData.isError || runSignals.isError || runAdvisor.isError || status.isError || intradayWatch.isError) && (
+      {(syncData.isError || runSignals.isError || runAdvisor.isError || status.isError || assets.isError) && (
         <p className="rounded-[18px] bg-rose-50 px-4 py-3 text-sm text-rose-700">
-          {errorText(syncData.error ?? runSignals.error ?? runAdvisor.error ?? status.error ?? intradayWatch.error)}
+          {errorText(syncData.error ?? runSignals.error ?? runAdvisor.error ?? status.error ?? assets.error)}
         </p>
       )}
 
@@ -1670,28 +1750,6 @@ export default function ShortTermPage() {
             </select>
           </div>
 
-          {assetType === "etf" ? (
-            <div className="mt-5 grid gap-3 md:grid-cols-3">
-              {etfUniverseOptions.map((option) => {
-                const active = etfUniverse === option.key;
-                return (
-                  <button
-                    key={option.key}
-                    className={`rounded-[18px] border px-4 py-3 text-left transition ${
-                      active ? "border-ink bg-ink text-white" : "border-ink/10 bg-white text-ink hover:border-accent"
-                    }`}
-                    onClick={() => setEtfUniverse(option.key)}
-                  >
-                    <span className="text-sm font-semibold">{option.label}</span>
-                    <span className={`mt-1 block text-xs leading-5 ${active ? "text-white/65" : "text-ink/55"}`}>
-                      {option.description}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          ) : null}
-
           <div className="mt-5">
             <AssetPaginationBar
               total={totalAssetCount}
@@ -1710,61 +1768,88 @@ export default function ShortTermPage() {
               </div>
             ) : null}
             {visibleAssets.map((item) => {
-              const isSelected = selected?.asset_type === item.asset_type && selected.code === item.code;
-              const exclusionReasons = stringListMetric(item.metrics, "default_exclusion_reasons");
-              const defaultEligible = boolMetric(item.metrics, "default_display_eligible");
+              const itemAssetType = getItemAssetType(item);
+              const itemCode = toEtfItemCode(item);
+              const isSelected = selected?.asset_type === itemAssetType && selected.code === itemCode;
+              const isLiveItem = isLiveRankingItem(item);
+              const quote = liveRankingQuote(item);
+              const quotedTime = quote?.quote_time;
+              const livePrice = quote?.latest_price;
               return (
                 <button
-                  key={`${item.asset_type}-${item.code}`}
+                  key={`${itemAssetType}-${itemCode}`}
                   className={`w-full rounded-[20px] border p-4 text-left transition ${
                     isSelected ? "border-ink bg-ink text-white" : "border-ink/10 bg-white text-ink hover:border-accent"
                   }`}
-                  onClick={() => setSelected({ asset_type: item.asset_type, code: item.code })}
+                  onClick={() => selectAsset(item)}
                 >
                   <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                     <div>
                       <p className={`text-xs font-semibold ${isSelected ? "text-white/60" : "text-accent"}`}>
-                        #{item.rank ?? "-"} · {assetTypeLabel(item.asset_type)} · {item.theme_tags.slice(0, 3).join(" / ")}
+                        {isLiveItem ? "实时排名" : `#${item.rank ?? "-"}`}
+                        {isLiveItem ? "" : ` · ${assetTypeLabel(item.asset_type)}`}
+                        {!isLiveItem ? ` · ${shortResearchThemeTags(item).slice(0, 3).join(" / ")}` : ""}
                       </p>
                       <h3 className="mt-2 text-xl font-semibold">
-                        {item.name}
+                        {isLiveItem ? toEtfItemName(item) : item.name}
                         <span className={`ml-2 text-sm font-normal ${isSelected ? "text-white/45" : "text-ink/45"}`}>
-                          {item.code}
+                          {isLiveItem ? itemCode : item.code}
                         </span>
                       </h3>
                       <p className={`mt-2 line-clamp-2 text-sm leading-6 ${isSelected ? "text-white/65" : "text-ink/60"}`}>
-                        {rationaleText(item, "key_reason", "按近期趋势、风险和数据质量生成。")}
+                        {isLiveItem ? item.live_entry_timing_reason : rationaleText(item, "key_reason", "按近期趋势、风险和数据质量生成。")}
                       </p>
                     </div>
                     <div className="flex flex-wrap gap-2">
                       <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white text-ink" : "bg-ink text-white"}`}>
-                        {item.total_score.toFixed(1)} 分
+                        {isLiveItem
+                          ? `实时综合分 ${formatLiveScore(item.live_total_score)} 分`
+                          : `${item.total_score.toFixed(1)} 分`}
                       </span>
-                      <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : conclusionTone(item.conclusion)}`}>
-                        {item.conclusion}
+                      <span className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                        isSelected ? "bg-white/15 text-white" : conclusionTone(itemConclusion(item))
+                      }`}>
+                        买入观察状态：{itemConclusion(item)}
                       </span>
-                      {item.advisor_report ? (
-                        <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : advisorTone(item.advisor_report.action_label)}`}>
-                          {item.advisor_report.action_label}
-                        </span>
-                      ) : null}
+                      <span
+                        className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                          isSelected ? "bg-white/15 text-white" : entryTimingTone(isLiveItem ? item.live_entry_timing_label : item.entry_timing_label)
+                        }`}
+                      >
+                        {isLiveItem ? "盘中买点状态" : "今日买点"}：{isLiveItem ? item.live_entry_timing_label : item.entry_timing_label}
+                      </span>
+                    {isLiveItem ? (
+                      <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : ""}`}>
+                        实时排名变化：{etfLiveRankChangeText(item.rank_change)}
+                      </span>
+                    ) : item.advisor_report ? (
+                      <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : advisorTone(item.advisor_report.action_label)}`}>
+                        {item.advisor_report.action_label}
+                      </span>
+                    ) : null}
                     </div>
                   </div>
-                  <div className={`mt-4 grid gap-2 text-sm ${assetType === "etf" ? "md:grid-cols-6" : "md:grid-cols-5"} ${isSelected ? "text-white/70" : "text-ink/60"}`}>
-                    <span>近 5 日：{percentMetric(item.metrics, "return_5d")}</span>
-                    <span>近 20 日：{percentMetric(item.metrics, "return_20d")}</span>
-                    <span>近 60 日：{percentMetric(item.metrics, "return_60d")}</span>
-                    <span>60 日回撤：{percentMetric(item.metrics, "max_drawdown_60d")}</span>
-                    {assetType === "etf" ? (
-                      <span>20 日成交额：{formatTurnover(numericMetric(item.metrics, "average_turnover_20d"))}</span>
-                    ) : null}
-                    <span>样本：{item.usable_days} 天</span>
+                  <div className={`mt-4 grid gap-2 text-sm md:grid-cols-6 ${isSelected ? "text-white/70" : "text-ink/60"}`}>
+                    {isLiveItem ? (
+                      <>
+                        <span>实时排名 #{toEtfItemRank(item) ?? "-"}</span>
+                        <span>日线基础分：{formatLiveScore(item.base_score)}</span>
+                        <span>来源：{item.sources.length ? item.sources.join(" / ") : "暂无来源"}</span>
+                        <span>行情时间：{quote ? formatDateTime(quotedTime) : "暂无新鲜盘中行情"}</span>
+                        <span>当前价：{quote ? (livePrice === null || livePrice === undefined ? "暂无" : livePrice.toFixed(4)) : "暂无新鲜盘中行情"}</span>
+                        <span>实时排名变化：{etfLiveRankChangeText(item.rank_change)}</span>
+                      </>
+                    ) : (
+                      <>
+                        <span>今天：{percentMetric(item.metrics, "today_return_pct")}</span>
+                        <span>近 5 日：{percentMetric(item.metrics, "return_5d")}</span>
+                        <span>近 20 日：{percentMetric(item.metrics, "return_20d")}</span>
+                        <span>近 60 日：{percentMetric(item.metrics, "return_60d")}</span>
+                        <span>60 日回撤：{percentMetric(item.metrics, "max_drawdown_60d")}</span>
+                        <span>样本：{item.usable_days} 天</span>
+                      </>
+                    )}
                   </div>
-                  {assetType === "etf" && !defaultEligible ? (
-                    <p className={`mt-3 line-clamp-1 text-xs leading-5 ${isSelected ? "text-white/55" : "text-ink/45"}`}>
-                      未进默认精选：{exclusionReasons.length ? exclusionReasons.join("；") : "数据质量或流动性未达标"}。
-                    </p>
-                  ) : null}
                 </button>
               );
             })}
@@ -1813,7 +1898,10 @@ export default function ShortTermPage() {
                       {selectedAsset.total_score.toFixed(1)} 分
                     </span>
                     <span className={`rounded-full px-4 py-2 text-sm font-semibold ${conclusionTone(selectedAsset.conclusion)}`}>
-                      {selectedAsset.conclusion}
+                      买入观察：{selectedAsset.conclusion}
+                    </span>
+                    <span className={`rounded-full px-4 py-2 text-sm font-semibold ${entryTimingTone(selectedAsset.entry_timing_label)}`}>
+                      今日买点：{selectedAsset.entry_timing_label}
                     </span>
                   </div>
                 </div>
@@ -1829,9 +1917,9 @@ export default function ShortTermPage() {
                     </p>
                   </div>
                   <div className="rounded-[20px] bg-ink p-4 text-white">
-                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-white/50">持仓口径</p>
+                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-white/50">买点口径</p>
                     <p className="mt-2 text-sm leading-7 text-white/75">
-                      评分高代表适合放入买入观察清单；如果你已经买入，是否卖出或减仓要看买入价、当前盈亏、趋势转弱、移动止盈和硬止损。
+                      短线观察 = 值得看；今日买点状态 = 今天更适合追、等、还是回避。{selectedAsset.entry_timing_reason}
                     </p>
                   </div>
                 </div>
@@ -1992,10 +2080,11 @@ export default function ShortTermPage() {
                   </div>
                 ) : null}
 
-                <div className={`mt-5 grid gap-3 ${assetType === "etf" ? "md:grid-cols-5" : "md:grid-cols-4"}`}>
+                <div className={`mt-5 grid gap-3 ${assetType === "etf" ? "md:grid-cols-6" : "md:grid-cols-5"}`}>
                   <StatPill label={mode.latestLabel} value={formatDate(selectedAsset.latest_date)} tone="bg-white text-ink" />
                   <StatPill label={mode.priceLabel} value={selectedAsset.latest_value === null ? "暂无" : selectedAsset.latest_value.toFixed(4)} />
                   <StatPill label="可用样本" value={`${selectedAsset.usable_days} 天`} tone="bg-accentSoft text-ink" />
+                  <StatPill label="今日买点" value={selectedAsset.entry_timing_label} tone="bg-white text-ink" />
                   {assetType === "etf" ? (
                     <StatPill
                       label="20 日成交额"
@@ -2019,7 +2108,7 @@ export default function ShortTermPage() {
                           : "点击页面顶部“生成 AI 研究报告”后，会在这里显示多角度说明。没有报告时，排序和图表仍然正常可用。"}
                       </p>
                       <p className="mt-2 text-sm leading-6 text-ink/60">
-                        排序、买入观察标签和持仓动态线由规则计算；AI只解释依据和风险，不直接决定买卖。
+                        排序、买入观察标签、今日买点和持仓动态线由规则计算；AI只解释依据和风险，不直接决定买卖。
                       </p>
                     </div>
                     <span className={`w-fit rounded-full px-4 py-2 text-sm font-semibold ${advisorTone(advisorReport?.action_label ?? "暂不考虑")}`}>

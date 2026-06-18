@@ -26,6 +26,7 @@ from app.services.intraday_etf.service import (
     is_quote_stale,
     normalize_spot_record,
 )
+from app.services.short_research.service import CONCLUSION_HIGH_WATCH, CONCLUSION_WATCH
 from app.services.tracked_positions.service import (
     create_alert_if_needed,
     create_position,
@@ -46,7 +47,15 @@ def _etf(code: str, name: str | None = None) -> TradableEtf:
     )
 
 
-async def _seed_signal_run(app, *, count: int = 25) -> int:
+async def _seed_signal_run(
+    app,
+    *,
+    count: int = 25,
+    conclusions: list[str] | None = None,
+    total_scores: list[float] | None = None,
+) -> int:
+    conclusions = conclusions or [CONCLUSION_WATCH] * count
+    total_scores = total_scores or [100.0 - i for i in range(count)]
     async with app.state.db.session() as session:
         session.add_all([_etf(f"51{i:04d}") for i in range(count)])
         run = ShortResearchSignalRun(
@@ -67,8 +76,8 @@ async def _seed_signal_run(app, *, count: int = 25) -> int:
                     asset_type="etf",
                     asset_code=f"51{i:04d}",
                     rank=i + 1,
-                    total_score=100 - i,
-                    conclusion="短线观察",
+                    total_score=total_scores[i] if i < len(total_scores) else 100.0 - i,
+                    conclusion=conclusions[i] if i < len(conclusions) else CONCLUSION_WATCH,
                     score_breakdown_json={},
                     risk_flags_json=[],
                     rationale_json={"key_reason": "test"},
@@ -164,7 +173,10 @@ async def test_scheduled_intraday_watch_skips_closed_market_without_fetching(app
 
 @pytest.mark.asyncio
 async def test_watchlist_uses_top20_and_merges_active_tracked_etfs(app) -> None:
-    await _seed_signal_run(app, count=25)
+    conclusions = [CONCLUSION_WATCH] * 22
+    conclusions[20] = CONCLUSION_HIGH_WATCH
+    conclusions[21] = CONCLUSION_WATCH
+    await _seed_signal_run(app, count=22, conclusions=conclusions)
     async with app.state.db.session() as session:
         session.add(_etf("159999", "Tracked ETF"))
         session.add(
@@ -185,12 +197,103 @@ async def test_watchlist_uses_top20_and_merges_active_tracked_etfs(app) -> None:
 
         watchlist = await build_watchlist(session)
 
-    assert len(watchlist.items) == 21
+    assert watchlist.message == "使用最新 ETF 短线评分前 20、短线观察/高位观察和已追踪 ETF 盯盘。"
+    assert len(watchlist.items) == 23
     assert [item.etf_code for item in watchlist.items[:3]] == ["510000", "510001", "510002"]
+    assert watchlist.items[0].rank == 1
+    assert watchlist.items[19].rank == 20
+    assert watchlist.items[20].etf_code == "510020"
+    assert watchlist.items[20].rank == 21
+    assert watchlist.items[20].sources == {"high_watch"}
+    assert watchlist.items[21].etf_code == "510021"
+    assert watchlist.items[21].sources == {"short_watch"}
     tracked = next(item for item in watchlist.items if item.etf_code == "159999")
     assert tracked.rank is None
     assert tracked.sources == {"tracked_position"}
     assert watchlist.signal_status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_live_rankings_order_and_rank_change(client, app) -> None:
+    await _seed_signal_run(
+        app,
+        count=3,
+        conclusions=[CONCLUSION_WATCH, CONCLUSION_WATCH, CONCLUSION_HIGH_WATCH],
+        total_scores=[60.0, 70.0, 80.0],
+    )
+    now = datetime.now().replace(microsecond=0)
+    async with app.state.db.session() as session:
+        session.add(
+            EtfIntradayQuote(
+                etf_code="510000",
+                quote_time=now,
+                trade_date=now.date(),
+                latest_price=1.0,
+                change_percent=1.0,
+                source="test",
+                freshness_status="fresh",
+                raw_json={},
+            )
+        )
+        session.add(
+            EtfIntradayQuote(
+                etf_code="510001",
+                quote_time=now,
+                trade_date=now.date(),
+                latest_price=1.2,
+                change_percent=3.0,
+                source="test",
+                freshness_status="fresh",
+                raw_json={},
+            )
+        )
+        session.add(
+            EtfIntradayQuote(
+                etf_code="510002",
+                quote_time=now,
+                trade_date=now.date(),
+                latest_price=1.4,
+                change_percent=-1.0,
+                source="test",
+                freshness_status="fresh",
+                raw_json={},
+            )
+        )
+        await session.commit()
+
+    response = await client.get("/api/etf-quotes/live-rankings?limit=2&offset=0")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 3
+    assert body["watched_count"] == 3
+    items = body["items"]
+    assert [item["etf_code"] for item in items] == ["510002", "510001"]
+    assert items[0]["live_rank"] == 1
+    assert items[0]["base_rank"] == 3
+    assert items[0]["rank_change"] == 2
+    assert items[0]["live_entry_timing_label"] == "健康回踩"
+    assert items[1]["live_rank"] == 2
+    assert items[1]["base_rank"] == 2
+    assert items[1]["rank_change"] == 0
+    assert items[1]["live_entry_timing_label"] == "冲高别追"
+
+
+@pytest.mark.asyncio
+async def test_live_rankings_marks_data_insufficient_without_faking_quote(client, app) -> None:
+    await _seed_signal_run(app, count=1)
+    response = await client.get("/api/etf-quotes/live-rankings")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    items = body["items"]
+    assert len(items) == 1
+    assert items[0]["etf_code"] == "510000"
+    assert items[0]["base_score"] == 100
+    assert items[0]["live_total_score"] == 92
+    assert items[0]["quote"] is None
+    assert items[0]["live_entry_timing_label"] == "数据不足"
+    assert items[0]["live_entry_timing_reason"] == "暂无新鲜盘中行情，暂不做盘中加分。"
 
 
 @pytest.mark.asyncio

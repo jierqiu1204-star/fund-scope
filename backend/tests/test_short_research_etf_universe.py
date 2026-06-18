@@ -340,6 +340,7 @@ async def test_dynamic_etf_sync_batches_and_prioritizes_tracked_etfs(app, monkey
                     is_watchlist=False,
                 ),
                 TrackedPosition(
+                    user_id=1,
                     asset_type="etf",
                     asset_code="560203",
                     asset_name="已追踪ETF",

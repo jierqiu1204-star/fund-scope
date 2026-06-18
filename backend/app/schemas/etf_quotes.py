@@ -64,6 +64,35 @@ class IntradayEtfWatchStatusOut(BaseModel):
     items: list[IntradayEtfWatchItemOut] = Field(default_factory=list)
 
 
+class EtfLiveRankingItemOut(BaseModel):
+    etf_code: str
+    etf_name: str | None = None
+    base_rank: int | None = None
+    live_rank: int | None = None
+    rank_change: int | None = None
+    sources: list[str] = Field(default_factory=list)
+    conclusion: str | None = None
+    base_score: float | None = None
+    live_total_score: float | None = None
+    live_entry_timing_label: str
+    live_entry_timing_reason: str
+    quote: EtfIntradayQuoteOut | None = None
+
+
+class EtfLiveRankingListOut(BaseModel):
+    market_status: str
+    market_session: str | None = None
+    message: str
+    quote_refresh_seconds: int = 60
+    page_poll_seconds: int = 30
+    watched_count: int
+    total: int
+    signal_as_of_date: date | None = None
+    signal_status: str
+    latest_run: IntradayEtfWatchRunOut | None = None
+    items: list[EtfLiveRankingItemOut] = Field(default_factory=list)
+
+
 class TrackedEtfIntradaySnapshotOut(BaseModel):
     current_price: float | None = None
     quote_time: datetime | None = None

@@ -92,6 +92,8 @@ class ShortResearchAssetOut(BaseModel):
     rank: int | None = None
     total_score: float
     conclusion: str
+    entry_timing_label: str
+    entry_timing_reason: str
     theme_tags: list[str]
     investment_direction: str
     trading_rule_label: str

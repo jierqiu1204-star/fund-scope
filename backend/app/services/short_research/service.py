@@ -44,6 +44,12 @@ CONCLUSION_HIGH_WATCH = "高位观察"
 CONCLUSION_CAUTION = "谨慎观察"
 CONCLUSION_REJECT = "不适合短线"
 CONCLUSION_INSUFFICIENT = "数据不足"
+ENTRY_TIMING_TREND_CONTINUATION = "趋势延续"
+ENTRY_TIMING_HEALTHY_PULLBACK = "健康回踩"
+ENTRY_TIMING_CHASE_RISK = "冲高别追"
+ENTRY_TIMING_BREAK_WAIT = "跌破等待"
+ENTRY_TIMING_VOLUME_WEAKENING = "放量转弱"
+ENTRY_TIMING_INSUFFICIENT = "数据不足"
 
 STALE_DATA_DAYS = 7
 MIN_AVERAGE_TURNOVER = 50_000_000
@@ -84,6 +90,8 @@ class ComputedAsset:
     risk_flags: list[str]
     rationale: dict[str, Any]
     source_note: str
+    entry_timing_label: str
+    entry_timing_reason: str
 
 
 def allowed_conclusions() -> set[str]:
@@ -393,6 +401,21 @@ def _cached_asset_from_signal_item(
     as_of_date: date | None,
 ) -> ComputedAsset:
     metrics = dict(item.metrics_json or {})
+    rationale = dict(item.rationale_json or {})
+    entry_timing_label = str(
+        metrics.get("entry_timing_label")
+        or rationale.get("entry_timing_label")
+        or ENTRY_TIMING_INSUFFICIENT
+    )
+    entry_timing_reason = str(
+        metrics.get("entry_timing_reason")
+        or rationale.get("entry_timing_reason")
+        or "这条排序缓存缺少今日买点维度，请重新生成短线排序。"
+    )
+    metrics.setdefault("entry_timing_label", entry_timing_label)
+    metrics.setdefault("entry_timing_reason", entry_timing_reason)
+    rationale.setdefault("entry_timing_label", entry_timing_label)
+    rationale.setdefault("entry_timing_reason", entry_timing_reason)
     latest_date = _date_metric(metrics.pop("latest_date", None)) or as_of_date
     latest_value = _float_metric(metrics.pop("latest_value", None))
     usable_days = _int_metric(metrics.pop("usable_days", None)) or 0
@@ -415,8 +438,10 @@ def _cached_asset_from_signal_item(
         metrics=metrics,
         score_breakdown=dict(item.score_breakdown_json or {}),
         risk_flags=list(item.risk_flags_json or []),
-        rationale=dict(item.rationale_json or {}),
+        rationale=rationale,
         source_note=source_note,
+        entry_timing_label=entry_timing_label,
+        entry_timing_reason=entry_timing_reason,
     )
 
 
@@ -568,6 +593,135 @@ def _format_percent(value: float | None) -> str:
     return f"{value * 100:.2f}%"
 
 
+def _mean_value(points: list[PricePoint]) -> float | None:
+    values = [item.value for item in points if item.value > 0]
+    return mean(values) if values else None
+
+
+def _distance_to_average(current: float | None, average: float | None) -> float | None:
+    if current is None or average is None or average <= 0:
+        return None
+    return current / average - 1
+
+
+def _latest_day_return(series: list[PricePoint]) -> float | None:
+    if not series:
+        return None
+    latest = series[-1]
+    if latest.pct_change is not None:
+        return latest.pct_change
+    if len(series) < 2:
+        return None
+    previous = series[-2].value
+    return latest.value / previous - 1 if previous else None
+
+
+def _pullback_from_high(series: list[PricePoint], window: int) -> float | None:
+    recent = series[-window:]
+    if not recent:
+        return None
+    high = max(item.value for item in recent)
+    latest = recent[-1].value
+    return latest / high - 1 if high else None
+
+
+def _entry_timing_metrics(
+    metadata: ShortResearchAsset,
+    series: list[PricePoint],
+    as_of_date: date,
+    *,
+    return_5d: float | None,
+    return_20d: float | None,
+    return_60d: float | None,
+    average_turnover_20d: float | None,
+) -> dict[str, Any]:
+    latest = series[-1] if series else None
+    latest_value = latest.value if latest else None
+    latest_date = latest.point_date if latest else None
+    ma5 = _mean_value(series[-5:])
+    ma10 = _mean_value(series[-10:])
+    ma20 = _mean_value(series[-20:])
+    today_return = _latest_day_return(series)
+    distance_to_ma5 = _distance_to_average(latest_value, ma5)
+    distance_to_ma10 = _distance_to_average(latest_value, ma10)
+    distance_to_ma20 = _distance_to_average(latest_value, ma20)
+    pullback_5d = _pullback_from_high(series, 5)
+    pullback_20d = _pullback_from_high(series, 20)
+    volume_ratio_20d = None
+    if metadata.asset_type == ASSET_TYPE_ETF and latest and latest.turnover is not None and average_turnover_20d:
+        volume_ratio_20d = latest.turnover / average_turnover_20d
+
+    base = {
+        "today_return_pct": today_return,
+        "ma5": ma5,
+        "ma10": ma10,
+        "ma20": ma20,
+        "distance_to_ma5_pct": distance_to_ma5,
+        "distance_to_ma10_pct": distance_to_ma10,
+        "pullback_from_5d_high_pct": pullback_5d,
+        "pullback_from_20d_high_pct": pullback_20d,
+        "volume_ratio_20d": volume_ratio_20d,
+    }
+    if latest is None or len(series) < 20:
+        reason = "公开历史不足 20 个可用交易日，今天不做买点判断。"
+        return {**base, "entry_timing_label": ENTRY_TIMING_INSUFFICIENT, "entry_timing_reason": reason}
+    if latest_date is None or (as_of_date - latest_date).days > STALE_DATA_DAYS:
+        reason = "最新公开数据已经滞后，今天不做买点判断。"
+        return {**base, "entry_timing_label": ENTRY_TIMING_INSUFFICIENT, "entry_timing_reason": reason}
+    if today_return is None or ma5 is None or ma10 is None or ma20 is None:
+        reason = "缺少今天涨跌或均线数据，今天不做买点判断。"
+        return {**base, "entry_timing_label": ENTRY_TIMING_INSUFFICIENT, "entry_timing_reason": reason}
+
+    positive_trend = (return_5d or 0.0) > 0 and (return_20d or 0.0) > 0 and (return_60d or 0.0) > 0
+    heavy_volume = volume_ratio_20d is not None and volume_ratio_20d >= 1.5
+    below_ma5_ma10 = (
+        latest_value is not None
+        and distance_to_ma5 is not None
+        and distance_to_ma10 is not None
+        and distance_to_ma5 < 0
+        and distance_to_ma10 < 0
+    )
+    below_ma20 = distance_to_ma20 is not None and distance_to_ma20 < 0
+    near_or_above_ma10 = distance_to_ma10 is not None and distance_to_ma10 >= -0.005
+
+    if today_return < 0 and (heavy_volume or below_ma20):
+        reason = (
+            f"今天 {_format_percent(today_return)}，价格已低于20日线或成交额明显放大，"
+            "短线结构转弱，先等待新信号。"
+        )
+        return {**base, "entry_timing_label": ENTRY_TIMING_VOLUME_WEAKENING, "entry_timing_reason": reason}
+    if today_return <= -0.025 or below_ma5_ma10 or ((return_5d or 0.0) < 0 and not near_or_above_ma10):
+        reason = (
+            f"今天 {_format_percent(today_return)}，最新价已跌破5日线和10日线附近，"
+            "短线趋势开始变弱，适合先等待。"
+        )
+        return {**base, "entry_timing_label": ENTRY_TIMING_BREAK_WAIT, "entry_timing_reason": reason}
+    if today_return >= 0.025 and ((return_20d or 0.0) >= 0.10 or (return_60d or 0.0) >= 0.25 or (distance_to_ma5 or 0.0) >= 0.035):
+        reason = (
+            f"今天 {_format_percent(today_return)}，且近20日 {_format_percent(return_20d)}、"
+            f"近60日 {_format_percent(return_60d)} 已经不低，追高风险上升。"
+        )
+        return {**base, "entry_timing_label": ENTRY_TIMING_CHASE_RISK, "entry_timing_reason": reason}
+    if positive_trend and -0.015 <= today_return <= -0.002 and near_or_above_ma10 and not heavy_volume:
+        reason = (
+            f"近5/20/60日仍为正，今天 {_format_percent(today_return)}，"
+            f"仍在10日线附近或上方，属于健康回踩，适合继续观察。"
+        )
+        return {**base, "entry_timing_label": ENTRY_TIMING_HEALTHY_PULLBACK, "entry_timing_reason": reason}
+    if positive_trend and today_return > -0.015 and near_or_above_ma10:
+        reason = (
+            f"近5/20/60日仍为正，今天 {_format_percent(today_return)}，"
+            "价格仍在10日线附近或上方，趋势暂未破坏。"
+        )
+        return {**base, "entry_timing_label": ENTRY_TIMING_TREND_CONTINUATION, "entry_timing_reason": reason}
+
+    reason = (
+        f"今天 {_format_percent(today_return)}，趋势条件不够清晰，"
+        "短线买点需要等待更多确认。"
+    )
+    return {**base, "entry_timing_label": ENTRY_TIMING_BREAK_WAIT, "entry_timing_reason": reason}
+
+
 def _risk_text(flags: list[str]) -> str:
     if not flags:
         return "暂未触发主要风险标签。"
@@ -662,6 +816,15 @@ def _score_metrics(metadata: ShortResearchAsset, series: list[PricePoint], as_of
         total_score = min(total_score, 35.0)
     elif "数据滞后" in risk_flags:
         total_score = min(total_score, 55.0)
+    entry_timing = _entry_timing_metrics(
+        metadata,
+        series,
+        as_of_date,
+        return_5d=return_5d,
+        return_20d=return_20d,
+        return_60d=return_60d,
+        average_turnover_20d=average_turnover_20d,
+    )
 
     return {
         "usable_days": usable_days,
@@ -679,6 +842,7 @@ def _score_metrics(metadata: ShortResearchAsset, series: list[PricePoint], as_of
         "liquidity_score": liquidity_score,
         "total_score": total_score,
         "risk_flags": risk_flags,
+        **entry_timing,
     }
 
 
@@ -738,6 +902,8 @@ def _rationale(metadata: ShortResearchAsset, metrics: dict[str, Any], conclusion
         "opposing_view": opposing_view,
         "sample_note": sample_level,
         "label_meaning": label_meanings[conclusion],
+        "entry_timing_label": metrics["entry_timing_label"],
+        "entry_timing_reason": metrics["entry_timing_reason"],
         "research_only": True,
         "no_trade_instruction": True,
     }
@@ -836,6 +1002,17 @@ async def compute_asset(
                 "volatility_20d",
                 "max_drawdown_60d",
                 "average_turnover_20d",
+                "today_return_pct",
+                "ma5",
+                "ma10",
+                "ma20",
+                "distance_to_ma5_pct",
+                "distance_to_ma10_pct",
+                "pullback_from_5d_high_pct",
+                "pullback_from_20d_high_pct",
+                "volume_ratio_20d",
+                "entry_timing_label",
+                "entry_timing_reason",
             )
         },
     }
@@ -858,12 +1035,25 @@ async def compute_asset(
                 "volatility_20d",
                 "max_drawdown_60d",
                 "average_turnover_20d",
+                "today_return_pct",
+                "ma5",
+                "ma10",
+                "ma20",
+                "distance_to_ma5_pct",
+                "distance_to_ma10_pct",
+                "pullback_from_5d_high_pct",
+                "pullback_from_20d_high_pct",
+                "volume_ratio_20d",
+                "entry_timing_label",
+                "entry_timing_reason",
             )
         },
         score_breakdown=score_breakdown,
         risk_flags=list(metrics["risk_flags"]),
         rationale=_rationale(metadata, metrics, conclusion),
         source_note=source_note,
+        entry_timing_label=str(metrics["entry_timing_label"]),
+        entry_timing_reason=str(metrics["entry_timing_reason"]),
     )
     return await _with_quality_metrics(session, computed, effective_date)
 
@@ -992,6 +1182,7 @@ async def get_asset_detail(
     sections = {
         "投资方向": metadata.investment_direction,
         "为什么上榜": str(computed.rationale["key_reason"]),
+        "今日买点": computed.entry_timing_reason,
         "主要风险": str(computed.rationale["risk_explanation"]),
         "反方提醒": str(computed.rationale["opposing_view"]),
         "数据说明": f"{computed.source_note}，最新日期 {computed.latest_date.isoformat() if computed.latest_date else '暂无'}。",
@@ -1096,6 +1287,16 @@ async def signal_run_items_as_assets(session: AsyncSession, run: ShortResearchSi
                 risk_flags=item.risk_flags_json,
                 rationale=item.rationale_json,
                 source_note="公开 ETF 日线数据" if item.asset_type == ASSET_TYPE_ETF else "公开基金净值数据",
+                entry_timing_label=str(
+                    (item.metrics_json or {}).get("entry_timing_label")
+                    or (item.rationale_json or {}).get("entry_timing_label")
+                    or fresh.entry_timing_label
+                ),
+                entry_timing_reason=str(
+                    (item.metrics_json or {}).get("entry_timing_reason")
+                    or (item.rationale_json or {}).get("entry_timing_reason")
+                    or fresh.entry_timing_reason
+                ),
             )
         )
     return assets

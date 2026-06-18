@@ -489,6 +489,8 @@ export type ShortResearchAsset = {
   rank: number | null;
   total_score: number;
   conclusion: string;
+  entry_timing_label: string;
+  entry_timing_reason: string;
   theme_tags: string[];
   investment_direction: string;
   trading_rule_label: string;
@@ -727,6 +729,35 @@ export type IntradayEtfWatchStatus = {
   signal_status: string;
   latest_run: IntradayEtfWatchRun | null;
   items: IntradayEtfWatchItem[];
+};
+
+export type IntradayEtfLiveRankingItem = {
+  etf_code: string;
+  etf_name: string | null;
+  base_rank: number | null;
+  live_rank: number | null;
+  rank_change: number | null;
+  sources: string[];
+  conclusion: string | null;
+  base_score: number | null;
+  live_total_score: number | null;
+  live_entry_timing_label: string;
+  live_entry_timing_reason: string;
+  quote: EtfIntradayQuote | null;
+};
+
+export type IntradayEtfLiveRankingList = {
+  market_status: string;
+  market_session: string | null;
+  message: string;
+  quote_refresh_seconds: number;
+  page_poll_seconds: number;
+  watched_count: number;
+  total: number;
+  signal_as_of_date: string | null;
+  signal_status: string;
+  latest_run: IntradayEtfWatchRun | null;
+  items: IntradayEtfLiveRankingItem[];
 };
 
 export type TrackedEtfIntradaySnapshot = {
