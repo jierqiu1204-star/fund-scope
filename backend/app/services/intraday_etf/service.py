@@ -82,9 +82,9 @@ def current_market_state(now: datetime | None = None) -> MarketState:
     if local_now.weekday() >= 5:
         return MarketState("closed", None, local_now)
     current = local_now.time()
-    if time(9, 30) <= current <= time(11, 30):
+    if time(9, 30) <= current < time(11, 30):
         return MarketState("open", "morning", local_now)
-    if time(13, 0) <= current <= time(15, 0):
+    if time(13, 0) <= current < time(15, 0):
         return MarketState("open", "afternoon", local_now)
     return MarketState("closed", None, local_now)
 
@@ -407,12 +407,13 @@ async def watch_status(session: AsyncSession) -> IntradayEtfWatchStatusOut:
     quotes = await latest_quotes_by_code(session, codes)
     latest_run = await latest_watch_run(session)
     now = datetime.now(ASIA_SHANGHAI).replace(tzinfo=None)
+    is_open = state.status == "open"
     return IntradayEtfWatchStatusOut(
         market_status=state.status,
         market_session=state.session,
-        message=watchlist.message,
-        quote_refresh_seconds=WATCH_REFRESH_SECONDS,
-        page_poll_seconds=PAGE_POLL_SECONDS,
+        message=watchlist.message if is_open else f"{watchlist.message} 当前休市，页面不会自动刷新盘中行情。",
+        quote_refresh_seconds=WATCH_REFRESH_SECONDS if is_open else 0,
+        page_poll_seconds=PAGE_POLL_SECONDS if is_open else 0,
         watched_count=len(watchlist.items),
         top20_signal_run_id=watchlist.signal_run_id,
         signal_as_of_date=watchlist.signal_as_of_date,

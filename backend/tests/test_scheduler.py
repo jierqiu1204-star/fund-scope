@@ -37,6 +37,7 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     scheduler_module.register_default_jobs(scheduler, app.state.db, app.state.settings)
 
     job_ids = {job.id for job in scheduler.get_jobs()}
+    intraday_11 = scheduler.get_job("intraday_etf_watch_11")
     assert "daily_short_research_data" in job_ids
     assert "daily_short_research_signals" in job_ids
     assert "daily_short_research_advisor" in job_ids
@@ -44,7 +45,10 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     assert "intraday_etf_watch_10" in job_ids
     assert "intraday_etf_watch_11" in job_ids
     assert "intraday_etf_watch_13_14" in job_ids
-    assert "intraday_etf_watch_1500" in job_ids
+    assert "intraday_etf_watch_1500" not in job_ids
+    assert intraday_11 is not None
+    minute_field = next(field for field in intraday_11.trigger.fields if field.name == "minute")
+    assert str(minute_field) == "0-29"
     assert "daily_short_etf_data" not in job_ids
     assert "daily_short_etf_signals" not in job_ids
     assert "daily_short_etf_paper" not in job_ids

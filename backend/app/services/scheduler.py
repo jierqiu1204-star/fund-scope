@@ -176,9 +176,8 @@ def register_default_jobs(
     intraday_windows = [
         ("intraday_etf_watch_0930", 9, "30-59"),
         ("intraday_etf_watch_10", 10, "*"),
-        ("intraday_etf_watch_11", 11, "0-30"),
+        ("intraday_etf_watch_11", 11, "0-29"),
         ("intraday_etf_watch_13_14", "13-14", "*"),
-        ("intraday_etf_watch_1500", 15, "0"),
     ]
     for job_id, hour, minute in intraday_windows:
         scheduler.add_job(

@@ -515,6 +515,23 @@ function formatUtcDateTime(value: string | null | undefined) {
   }).format(date);
 }
 
+function isAshareTradingPollWindow(timestamp: number) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Shanghai",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(new Date(timestamp));
+  const value = (type: string) => parts.find((part) => part.type === type)?.value;
+  const weekday = value("weekday");
+  if (weekday === "Sat" || weekday === "Sun") {
+    return false;
+  }
+  const minutes = Number(value("hour")) * 60 + Number(value("minute"));
+  return (minutes >= 9 * 60 + 30 && minutes < 11 * 60 + 30) || (minutes >= 13 * 60 && minutes < 15 * 60);
+}
+
 function AssetPaginationBar({
   total,
   offset,
@@ -635,8 +652,10 @@ export default function ShortTermPage() {
   const [trackingConfirmedNav, setTrackingConfirmedNav] = useState("");
   const [trackingConfirmedShares, setTrackingConfirmedShares] = useState("");
   const [trackingNote, setTrackingNote] = useState("");
+  const [pollClock, setPollClock] = useState(() => Date.now());
   const mode = assetModes[assetType];
   const sortOptions = assetType === "etf" ? etfSortOptions : baseSortOptions;
+  const isEtfTradingPollWindow = assetType === "etf" && isAshareTradingPollWindow(pollClock);
 
   const status = useQuery({
     queryKey: ["short-research", "status"],
@@ -686,18 +705,39 @@ export default function ShortTermPage() {
       ).data
   });
 
-  const trackedPositions = useQuery({
-    queryKey: ["tracked-positions"],
-    queryFn: async () => (await api.get<TrackedPositionList>("/api/tracked-positions")).data,
-    refetchInterval: assetType === "etf" ? 30_000 : false
-  });
-
   const intradayWatch = useQuery({
     queryKey: ["etf-quotes", "tracked"],
     enabled: assetType === "etf",
     queryFn: async () => (await api.get<IntradayEtfWatchStatus>("/api/etf-quotes/tracked")).data,
-    refetchInterval: assetType === "etf" ? 30_000 : false
+    refetchInterval: (query) => {
+      const data = query.state.data as IntradayEtfWatchStatus | undefined;
+      return isEtfTradingPollWindow && data?.market_status === "open" ? 30_000 : false;
+    }
   });
+
+  const shouldRefreshIntradayQueries = isEtfTradingPollWindow && intradayWatch.data?.market_status === "open";
+
+  const trackedPositions = useQuery({
+    queryKey: ["tracked-positions"],
+    queryFn: async () => (await api.get<TrackedPositionList>("/api/tracked-positions")).data,
+    refetchInterval: shouldRefreshIntradayQueries ? 30_000 : false
+  });
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setPollClock(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const previousTradingPollWindow = useRef(isEtfTradingPollWindow);
+  useEffect(() => {
+    if (!previousTradingPollWindow.current && isEtfTradingPollWindow) {
+      void Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["etf-quotes", "tracked"] }),
+        queryClient.invalidateQueries({ queryKey: ["tracked-positions"] })
+      ]);
+    }
+    previousTradingPollWindow.current = isEtfTradingPollWindow;
+  }, [isEtfTradingPollWindow, queryClient]);
 
   useEffect(() => {
     setAssetOffset(0);

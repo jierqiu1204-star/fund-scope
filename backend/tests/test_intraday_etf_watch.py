@@ -19,7 +19,10 @@ from app.models.entities import (
 )
 from app.services.intraday_etf.jobs import intraday_etf_watch_job
 from app.services.intraday_etf.service import (
+    ASIA_SHANGHAI,
+    MarketState,
     build_watchlist,
+    current_market_state,
     is_quote_stale,
     normalize_spot_record,
 )
@@ -129,6 +132,34 @@ async def _seed_price_history_from_closes(
                 )
             )
         await session.commit()
+
+
+def test_current_market_state_uses_half_open_trading_sessions() -> None:
+    assert current_market_state(datetime(2026, 6, 17, 11, 29, 59, tzinfo=ASIA_SHANGHAI)).status == "open"
+    assert current_market_state(datetime(2026, 6, 17, 11, 30, 0, tzinfo=ASIA_SHANGHAI)).status == "closed"
+    assert current_market_state(datetime(2026, 6, 17, 14, 59, 59, tzinfo=ASIA_SHANGHAI)).status == "open"
+    assert current_market_state(datetime(2026, 6, 17, 15, 0, 0, tzinfo=ASIA_SHANGHAI)).status == "closed"
+
+
+@pytest.mark.asyncio
+async def test_scheduled_intraday_watch_skips_closed_market_without_fetching(app, monkeypatch) -> None:
+    called = False
+
+    def fake_fetcher() -> pd.DataFrame:
+        nonlocal called
+        called = True
+        return pd.DataFrame()
+
+    monkeypatch.setattr(
+        "app.services.intraday_etf.jobs.current_market_state",
+        lambda: MarketState("closed", None, datetime(2026, 6, 17, 11, 30, tzinfo=ASIA_SHANGHAI)),
+    )
+
+    async with app.state.db.session() as session:
+        result = await intraday_etf_watch_job(session, run_type="scheduled", fetcher=fake_fetcher)
+
+    assert result["status"] == "skipped"
+    assert called is False
 
 
 @pytest.mark.asyncio
