@@ -116,6 +116,8 @@ async def _seed_cached_etf_signals(app: Any, count: int = 3) -> int:
                         "sample_level": "样本充足",
                         "source_note": "cached signal",
                         "default_display_eligible": True,
+                        "entry_timing_label": "健康回踩",
+                        "entry_timing_reason": "测试缓存资产处于健康回踩，允许进入观察组合。",
                     },
                 )
             )

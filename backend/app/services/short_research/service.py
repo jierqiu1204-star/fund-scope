@@ -63,6 +63,34 @@ CHASE_RETURN_60D = 0.45
 SURGE_RETURN_5D = 0.08
 HIGH_DAILY_VOLATILITY_20D = 0.035
 LARGE_DRAWDOWN_60D = -0.18
+_PORTFOLIO_SINGLE_WEIGHT_CAP = 0.20
+_PORTFOLIO_TOTAL_EXPOSURE_CAP = 0.60
+_PORTFOLIO_THEME_EXPOSURE_CAP = 0.35
+_PORTFOLIO_HIGH_CORRELATION = 0.85
+_PORTFOLIO_CORRELATION_MIN_POINTS = 40
+_PORTFOLIO_ENTRY_TIMING_OK = (
+    ENTRY_TIMING_HEALTHY_PULLBACK,
+    ENTRY_TIMING_TREND_CONTINUATION,
+)
+_PORTFOLIO_ENTRY_TIMING_FORBIDDEN = (
+    ENTRY_TIMING_CHASE_RISK,
+    ENTRY_TIMING_BREAK_WAIT,
+    ENTRY_TIMING_VOLUME_WEAKENING,
+    ENTRY_TIMING_INSUFFICIENT,
+)
+_PORTFOLIO_RISK_FLAGS_FORBIDDEN = (
+    "数据不足",
+    "数据滞后",
+    "流动性不足",
+)
+_PORTFOLIO_RISK_FLAGS_WATCH_ONLY = (
+    "追高风险",
+    "连续大涨",
+)
+_PORTFOLIO_RISK_FLAGS_REDUCE_WEIGHT = (
+    "高波动",
+    "回撤较大",
+)
 
 
 @dataclass(frozen=True)
@@ -1543,14 +1571,121 @@ async def refresh_dynamic_etf_universe(session: AsyncSession) -> dict[str, Any]:
 
 
 def _portfolio_exposure_for_asset(asset: ComputedAsset) -> float:
-    exposure = 0.25
-    if "杩介珮椋庨櫓" in asset.risk_flags or "追高风险" in asset.risk_flags:
+    exposure = _PORTFOLIO_SINGLE_WEIGHT_CAP
+    if any(flag in asset.risk_flags for flag in _PORTFOLIO_RISK_FLAGS_REDUCE_WEIGHT):
         exposure -= 0.05
-    if "楂樻尝鍔?" in asset.risk_flags or "高波动" in asset.risk_flags:
-        exposure -= 0.05
+    if (asset.metrics.get("volatility_20d") or 0.0) > 0.025:
+        exposure -= 0.03
+    if (asset.metrics.get("max_drawdown_60d") or 0.0) < -0.12:
+        exposure -= 0.03
     if not asset.metrics.get("default_display_eligible", False):
-        exposure -= 0.10
-    return max(0.05, min(0.30, exposure))
+        exposure -= 0.05
+    return max(0.05, min(_PORTFOLIO_SINGLE_WEIGHT_CAP, exposure))
+
+
+def _portfolio_exclusion_reason(asset: ComputedAsset) -> str | None:
+    forbidden = [flag for flag in _PORTFOLIO_RISK_FLAGS_FORBIDDEN if flag in asset.risk_flags]
+    if forbidden:
+        return f"数据或流动性不足：{'、'.join(forbidden)}"
+    if asset.conclusion in {CONCLUSION_REJECT, CONCLUSION_INSUFFICIENT}:
+        return f"观察标签不适合短线组合（当前：{asset.conclusion}）"
+    if asset.entry_timing_label in {
+        ENTRY_TIMING_BREAK_WAIT,
+        ENTRY_TIMING_VOLUME_WEAKENING,
+        ENTRY_TIMING_INSUFFICIENT,
+    }:
+        return f"今日买点需要等待（当前：{asset.entry_timing_label}）"
+    return None
+
+
+def _portfolio_watch_only_reason(asset: ComputedAsset) -> str | None:
+    if asset.conclusion == CONCLUSION_HIGH_WATCH:
+        return "趋势强但处于高位观察，先放入强势但别追，不给组合权重。"
+    if asset.entry_timing_label == ENTRY_TIMING_CHASE_RISK:
+        return f"今日买点为{ENTRY_TIMING_CHASE_RISK}，适合继续盯，不分配主组合权重。"
+    watch_flags = [flag for flag in _PORTFOLIO_RISK_FLAGS_WATCH_ONLY if flag in asset.risk_flags]
+    if watch_flags:
+        return f"存在{'、'.join(watch_flags)}，强势但不适合追入。"
+    if asset.conclusion != CONCLUSION_WATCH:
+        return f"观察标签非短线观察（当前：{asset.conclusion}）。"
+    if asset.entry_timing_label not in _PORTFOLIO_ENTRY_TIMING_OK:
+        return f"今日买点不满足主组合筛选（当前：{asset.entry_timing_label}）。"
+    return None
+
+
+def _portfolio_candidate_group(asset: ComputedAsset) -> tuple[str, str | None]:
+    exclusion_reason = _portfolio_exclusion_reason(asset)
+    if exclusion_reason is not None:
+        return "excluded", exclusion_reason
+    watch_reason = _portfolio_watch_only_reason(asset)
+    if watch_reason is not None:
+        return "watch_only", watch_reason
+    return "primary", None
+
+
+def _portfolio_item(asset: ComputedAsset, *, target_weight: float, reason: str | None = None) -> dict[str, Any]:
+    risk_reasons = asset.risk_flags or ["暂未触发主要风险标签"]
+    if reason:
+        risk_reasons = [reason, *risk_reasons]
+    return {
+        "asset_type": asset.metadata.asset_type,
+        "code": asset.metadata.code,
+        "name": asset.metadata.name,
+        "target_weight": round(target_weight, 4),
+        "score": round(asset.total_score, 2),
+        "conclusion": asset.conclusion,
+        "data_date": asset.latest_date,
+        "evidence": [
+            f"综合分 {asset.total_score:.1f}",
+            f"近20日收益 {_format_percent(asset.metrics.get('return_20d'))}",
+            f"近20日平均成交额 {float(asset.metrics.get('average_turnover_20d') or 0) / 100_000_000:.2f} 亿元",
+            f"今日买点 {asset.entry_timing_label}：{asset.entry_timing_reason}",
+        ],
+        "risk_reasons": risk_reasons
+        + [
+            f"今日买点：{asset.entry_timing_label}",
+            f"买点原因：{asset.entry_timing_reason}",
+        ],
+    }
+
+
+def _series_return_by_date(series: list[PricePoint], window: int = 60) -> dict[date, float]:
+    recent = series[-(window + 1) :]
+    returns: dict[date, float] = {}
+    for previous, current in zip(recent, recent[1:], strict=False):
+        if previous.value > 0:
+            returns[current.point_date] = current.value / previous.value - 1.0
+    return returns
+
+
+def _correlation(left: dict[date, float], right: dict[date, float]) -> float | None:
+    common_dates = sorted(set(left).intersection(right))
+    if len(common_dates) < _PORTFOLIO_CORRELATION_MIN_POINTS:
+        return None
+    left_values = [left[item] for item in common_dates]
+    right_values = [right[item] for item in common_dates]
+    left_mean = mean(left_values)
+    right_mean = mean(right_values)
+    numerator = sum((left_item - left_mean) * (right_item - right_mean) for left_item, right_item in zip(left_values, right_values, strict=True))
+    left_denominator = sum((item - left_mean) ** 2 for item in left_values) ** 0.5
+    right_denominator = sum((item - right_mean) ** 2 for item in right_values) ** 0.5
+    if left_denominator == 0 or right_denominator == 0:
+        return None
+    return numerator / (left_denominator * right_denominator)
+
+
+async def _portfolio_return_maps(
+    session: AsyncSession,
+    assets: list[ComputedAsset],
+    as_of_date: date | None,
+) -> dict[str, dict[date, float]]:
+    result: dict[str, dict[date, float]] = {}
+    for asset in assets:
+        series = await _etf_series(session, asset.metadata.code, as_of_date)
+        returns = _series_return_by_date(series)
+        if len(returns) >= _PORTFOLIO_CORRELATION_MIN_POINTS:
+            result[asset.metadata.code] = returns
+    return result
 
 
 async def etf_observation_portfolio(
@@ -1566,10 +1701,13 @@ async def etf_observation_portfolio(
             "as_of_date": as_of_date or await latest_data_date(session) or date.today(),
             "asset_type": ASSET_TYPE_ETF,
             "items": [],
+            "watch_only_items": [],
+            "excluded_items": [],
             "cash_weight": 1.0,
             "research_only": True,
             "no_trade_instruction": True,
             "note": "暂无 ETF 排序快照，先生成短线排序后再查看观察组合。",
+            "methodology": "按最新 ETF 短线排序生成研究参考；当前没有可用排序快照。",
         }
     assets, _total = await cached_signal_assets(
         session,
@@ -1577,45 +1715,78 @@ async def etf_observation_portfolio(
         asset_type=ASSET_TYPE_ETF,
         sort="score",
         universe=universe,
-        limit=max(1, min(limit, 10)),
+        limit=max(50, min(limit * 10, 200)),
     )
-    selected = assets[: max(1, min(limit, 10))]
+    primary_candidates: list[ComputedAsset] = []
+    watch_only_items: list[dict[str, Any]] = []
+    excluded_items: list[dict[str, Any]] = []
+    for asset in assets:
+        group, reason = _portfolio_candidate_group(asset)
+        if group == "primary":
+            primary_candidates.append(asset)
+        elif group == "watch_only":
+            watch_only_items.append(_portfolio_item(asset, target_weight=0.0, reason=reason))
+        else:
+            excluded_items.append(_portfolio_item(asset, target_weight=0.0, reason=reason))
+
+    return_maps = await _portfolio_return_maps(session, primary_candidates, run.as_of_date)
     items: list[dict[str, Any]] = []
     total_weight = 0.0
-    max_total_exposure = 0.75
-    high_risk_count = sum(1 for item in selected if item.conclusion == CONCLUSION_HIGH_WATCH or item.risk_flags)
-    if high_risk_count >= 2:
-        max_total_exposure = 0.55
-    for asset in selected:
-        if total_weight >= max_total_exposure:
+    theme_weights: dict[str, float] = {}
+    selected_return_maps: dict[str, dict[date, float]] = {}
+    max_total_exposure = _PORTFOLIO_TOTAL_EXPOSURE_CAP
+    selected_limit = max(1, min(limit, 10))
+    for asset in primary_candidates:
+        if len(items) >= selected_limit or total_weight >= max_total_exposure:
             break
+        reason: str | None = None
+        asset_themes = list(asset.metadata.theme_tags[:2]) or ["ETF"]
+        if any(theme_weights.get(theme, 0.0) >= _PORTFOLIO_THEME_EXPOSURE_CAP for theme in asset_themes):
+            reason = "同主题 ETF 已有足够观察权重，避免集中在单一方向。"
+        asset_returns = return_maps.get(asset.metadata.code)
+        if reason is None and asset_returns:
+            for selected_code, selected_returns in selected_return_maps.items():
+                correlation = _correlation(asset_returns, selected_returns)
+                if correlation is not None and correlation >= _PORTFOLIO_HIGH_CORRELATION:
+                    reason = f"与已选 ETF {selected_code} 近60日相关性约 {correlation:.2f}，为避免重复押注转入观察。"
+                    break
+        if reason is not None:
+            watch_only_items.append(_portfolio_item(asset, target_weight=0.0, reason=reason))
+            continue
+
         target = min(_portfolio_exposure_for_asset(asset), max_total_exposure - total_weight)
+        for theme in asset_themes:
+            remaining_theme_room = _PORTFOLIO_THEME_EXPOSURE_CAP - theme_weights.get(theme, 0.0)
+            target = min(target, max(0.0, remaining_theme_room))
         if target <= 0:
+            watch_only_items.append(
+                _portfolio_item(asset, target_weight=0.0, reason="主题集中度约束已满，暂不分配主组合权重。")
+            )
             continue
         total_weight += target
-        items.append(
-            {
-                "asset_type": asset.metadata.asset_type,
-                "code": asset.metadata.code,
-                "name": asset.metadata.name,
-                "target_weight": round(target, 4),
-                "score": round(asset.total_score, 2),
-                "conclusion": asset.conclusion,
-                "data_date": asset.latest_date,
-                "evidence": [
-                    f"综合分 {asset.total_score:.1f}",
-                    f"近20日收益 {_format_percent(asset.metrics.get('return_20d'))}",
-                    f"近20日平均成交额 {float(asset.metrics.get('average_turnover_20d') or 0) / 100_000_000:.2f} 亿元",
-                ],
-                "risk_reasons": asset.risk_flags or ["暂未触发主要风险标签"],
-            }
-        )
+        for theme in asset_themes:
+            theme_weights[theme] = theme_weights.get(theme, 0.0) + target
+        if asset_returns:
+            selected_return_maps[asset.metadata.code] = asset_returns
+        items.append(_portfolio_item(asset, target_weight=target))
+
+    note = "观察组合只用于手动研究参考，不连接券商、不自动下单。"
+    if not items:
+        note = "当前没有同时满足短线观察和健康买点的 ETF，强势但高位的只适合继续观察，不给组合权重。"
+    elif watch_only_items or excluded_items:
+        note = "高位/追高/数据不足资产会分到观察或等待分组，不进入主组合权重。" + note
     return {
         "as_of_date": as_of_date or run.as_of_date,
         "asset_type": ASSET_TYPE_ETF,
         "items": items,
+        "watch_only_items": watch_only_items[:10],
+        "excluded_items": excluded_items[:10],
         "cash_weight": round(max(0.0, 1.0 - sum(item["target_weight"] for item in items)), 4),
         "research_only": True,
         "no_trade_instruction": True,
-        "note": "观察组合只用于手动研究参考，不连接券商、不自动下单。",
+        "note": note,
+        "methodology": (
+            "先过滤短线观察且买点为健康回踩/趋势延续的 ETF，再按单只上限、总仓位上限、"
+            "高波动/回撤降权、同主题集中度和近60日相关性做简化组合约束；这不是收益最优模型。"
+        ),
     }

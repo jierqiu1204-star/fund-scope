@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { CSSProperties, ReactNode } from "react";
+import type { ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Area,
@@ -711,8 +711,11 @@ function SectionKicker({ eyebrow, title, description }: { eyebrow: string; title
 
 export default function ShortTermPage() {
   const queryClient = useQueryClient();
-  const detailColumnRef = useRef<HTMLDivElement | null>(null);
-  const [detailColumnHeight, setDetailColumnHeight] = useState<number | null>(null);
+  const summarySectionRef = useRef<HTMLDivElement | null>(null);
+  const chartsSectionRef = useRef<HTMLDivElement | null>(null);
+  const advisorSectionRef = useRef<HTMLDivElement | null>(null);
+  const explanationSectionRef = useRef<HTMLDivElement | null>(null);
+  const trackingSectionRef = useRef<HTMLDivElement | null>(null);
   const [assetType, setAssetType] = useState<AssetType>("etf");
   const [theme, setTheme] = useState("all");
   const [sort, setSort] = useState<SortKey>("score");
@@ -730,6 +733,7 @@ export default function ShortTermPage() {
   const [trackingConfirmedShares, setTrackingConfirmedShares] = useState("");
   const [trackingNote, setTrackingNote] = useState("");
   const [pollClock, setPollClock] = useState(() => Date.now());
+  const [pendingDesktopScrollKey, setPendingDesktopScrollKey] = useState<string | null>(null);
   const mode = assetModes[assetType];
   const sortOptions = assetType === "etf" ? etfSortOptions : baseSortOptions;
   const isEtfTradingPollWindow = assetType === "etf" && isAshareTradingPollWindow(pollClock);
@@ -956,6 +960,7 @@ export default function ShortTermPage() {
   });
 
   const selectedAsset = selectedDetail.data?.asset;
+  const selectedAssetKey = selectedAsset ? `${selectedAsset.asset_type}-${selectedAsset.code}` : null;
   const advisorReport = selectedAsset?.advisor_report ?? null;
   const detailPoints = chartPoints(selectedDetail.data);
   const windowPoints = returnWindowChart(selectedAsset);
@@ -1010,9 +1015,6 @@ export default function ShortTermPage() {
   const trackingEntry = trackingPoints.find((point) => point.isEntry);
   const trackingHigh = trackingPoints.find((point) => point.isHigh);
   const trackingCurrent = trackingPoints.find((point) => point.isCurrent);
-  const workbenchStyle = {
-    "--short-term-detail-height": detailColumnHeight ? `${detailColumnHeight}px` : undefined
-  } as CSSProperties & { "--short-term-detail-height"?: string };
 
   const mobileTabs: Array<{ id: MobileTab; label: string }> = [
     { id: "ranking", label: "榜单" },
@@ -1020,6 +1022,24 @@ export default function ShortTermPage() {
     { id: "tracking", label: "追踪" },
     { id: "explanation", label: "说明" }
   ];
+  const detailNavItems: Array<{ label: string; section: "summary" | "charts" | "advisor" | "explanation" | "tracking" }> = [
+    { label: "摘要", section: "summary" },
+    { label: "图表", section: "charts" },
+    { label: "AI", section: "advisor" },
+    { label: "说明", section: "explanation" },
+    { label: "追踪", section: "tracking" }
+  ];
+
+  const scrollToDetailSection = (section: "summary" | "charts" | "advisor" | "explanation" | "tracking") => {
+    const target = {
+      summary: summarySectionRef,
+      charts: chartsSectionRef,
+      advisor: advisorSectionRef,
+      explanation: explanationSectionRef,
+      tracking: trackingSectionRef
+    }[section].current;
+    target?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
 
   const renderAssetStatusSummary = () => {
     if (!selectedAsset) {
@@ -1077,11 +1097,28 @@ export default function ShortTermPage() {
   const isMobileLayout = () => typeof window !== "undefined" && window.matchMedia("(max-width: 1023px)").matches;
 
   const selectAsset = (item: RankedAssetItem) => {
-    setSelected({ asset_type: getItemAssetType(item), code: toEtfItemCode(item) });
+    const nextSelected = { asset_type: getItemAssetType(item), code: toEtfItemCode(item) };
+    setSelected(nextSelected);
     if (isMobileLayout()) {
       setMobileTab("detail");
+    } else {
+      setPendingDesktopScrollKey(`${nextSelected.asset_type}-${nextSelected.code}`);
     }
   };
+
+  useEffect(() => {
+    if (!pendingDesktopScrollKey || !selectedAssetKey) {
+      return;
+    }
+    if (selectedAssetKey !== pendingDesktopScrollKey) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      summarySectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      setPendingDesktopScrollKey(null);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [pendingDesktopScrollKey, selectedAssetKey]);
 
   useEffect(() => {
     if (!visibleAssets.length) {
@@ -1170,13 +1207,13 @@ export default function ShortTermPage() {
                 onClick={() => selectAsset(item)}
               >
                 <div className={`flex flex-col ${cardGap} md:flex-row md:items-start md:justify-between`}>
-                  <div>
+                  <div className="min-w-0">
                     <p className={`text-xs font-semibold ${isSelected ? "text-white/60" : "text-accent"}`}>
                       {isLiveItem ? "实时排名" : `#${item.rank ?? "-"}`}
                       {isLiveItem ? "" : ` · ${assetTypeLabel(item.asset_type)}`}
                       {!isLiveItem ? ` · ${shortResearchThemeTags(item).slice(0, 3).join(" / ")}` : ""}
                     </p>
-                    <h3 className="mt-2 text-xl font-semibold">
+                    <h3 className="mt-2 text-xl font-semibold leading-tight">
                       {isLiveItem ? toEtfItemName(item) : item.name}
                       <span className={`ml-2 text-sm font-normal ${isSelected ? "text-white/45" : "text-ink/45"}`}>
                         {isLiveItem ? itemCode : item.code}
@@ -1224,28 +1261,36 @@ export default function ShortTermPage() {
                     ) : null}
                   </div>
                 </div>
-                <div
-                  className={`mt-4 grid gap-2 text-sm md:grid-cols-6 ${
-                    isSelected ? "text-white/70" : "text-ink/60"
-                  }`}
-                >
+                <div className={`mt-4 grid gap-2 text-sm sm:grid-cols-2 ${isSelected ? "text-white/75" : "text-ink/65"}`}>
                   {isLiveItem ? (
                     <>
-                      <span>实时排名 #{toEtfItemRank(item) ?? "-"}</span>
-                      <span>日线基础分：{formatLiveScore(item.base_score)}</span>
-                      <span>来源：{item.sources.length ? item.sources.join(" / ") : "暂无来源"}</span>
-                      <span>行情时间：{quote ? formatDateTime(quotedTime) : "暂无新鲜盘中行情"}</span>
-                      <span>当前价：{quote ? (livePrice === null || livePrice === undefined ? "暂无" : livePrice.toFixed(4)) : "暂无新鲜盘中行情"}</span>
+                      <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                        实时排名 #{toEtfItemRank(item) ?? "-"}
+                      </span>
+                      <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                        当前价：{quote ? (livePrice === null || livePrice === undefined ? "暂无" : livePrice.toFixed(4)) : "暂无"}
+                      </span>
+                      <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                        行情：{quote ? formatDateTime(quotedTime) : "等待盘中行情"}
+                      </span>
+                      <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                        排名变化：{etfLiveRankChangeText(item.rank_change)}
+                      </span>
                     </>
                   ) : (
                     <>
-                      <span>今天:{percentMetric(item.metrics, "today_return_pct")}</span>
-                      <span>5日:{percentMetric(item.metrics, "return_5d")}</span>
-                      <span>20日:{percentMetric(item.metrics, "return_20d")}</span>
-                      <span>60日:{percentMetric(item.metrics, "return_60d")}</span>
-                      <span>60日回撤:{percentMetric(item.metrics, "max_drawdown_60d")}</span>
-                      <span>20日换手:{formatTurnover(numericMetric(item.metrics, "average_turnover_20d"))}</span>
-                      <span>样本天数:{item.usable_days}</span>
+                      <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                        今天：{percentMetric(item.metrics, "today_return_pct")}
+                      </span>
+                      <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                        近 20 日：{percentMetric(item.metrics, "return_20d")}
+                      </span>
+                      <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                        60 日回撤：{percentMetric(item.metrics, "max_drawdown_60d")}
+                      </span>
+                      <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                        样本：{item.usable_days} 天
+                      </span>
                     </>
                   )}
                 </div>
@@ -1563,28 +1608,6 @@ export default function ShortTermPage() {
     </Panel>
   );
 
-  useEffect(() => {
-    const node = detailColumnRef.current;
-    if (!node || typeof ResizeObserver === "undefined") {
-      setDetailColumnHeight(null);
-      return;
-    }
-
-    const updateHeight = () => {
-      const nextHeight = Math.ceil(node.getBoundingClientRect().height);
-      setDetailColumnHeight((currentHeight) => (currentHeight === nextHeight ? currentHeight : nextHeight));
-    };
-
-    updateHeight();
-    const observer = new ResizeObserver(updateHeight);
-    observer.observe(node);
-    window.addEventListener("resize", updateHeight);
-    return () => {
-      observer.disconnect();
-      window.removeEventListener("resize", updateHeight);
-    };
-  }, []);
-
   return (
     <div className="space-y-6">
       <Panel className="rounded-[24px] bg-white/90">
@@ -1704,64 +1727,66 @@ export default function ShortTermPage() {
         </div>
       </div>
 
-      <div className="hidden lg:grid gap-6 xl:grid-cols-[minmax(360px,0.78fr)_minmax(0,1.22fr)]" style={workbenchStyle}>
-        <Panel className="rounded-[24px] xl:h-[var(--short-term-detail-height)] xl:overflow-auto">
-          <div className="mb-5 flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
-            <SectionKicker
-              eyebrow="买入观察榜单"
-              title={`${mode.shortLabel}排序`}
-              description="先扫分数、标签和关键指标；详细解释会在右侧展示。"
-            />
-            <span className="w-fit rounded-full bg-paper px-3 py-1 text-xs font-semibold text-ink/60">
-              每页 12 只
-            </span>
-          </div>
-          <div className="grid gap-3 md:grid-cols-2">
-            <div className="rounded-full border border-ink/10 bg-white px-4 py-2 text-sm font-semibold text-ink">
-              {mode.classification}
+      <div className="hidden gap-6 lg:grid lg:grid-cols-[minmax(360px,0.76fr)_minmax(0,1.24fr)] lg:items-start xl:grid-cols-[minmax(380px,0.72fr)_minmax(0,1.28fr)]">
+        <Panel className="rounded-[24px] lg:sticky lg:top-6 lg:flex lg:max-h-[calc(100vh-3rem)] lg:flex-col lg:overflow-hidden">
+          <div className="-mx-6 -mt-6 shrink-0 border-b border-ink/10 bg-white/95 px-6 pb-4 pt-6">
+            <div className="mb-5 flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+              <SectionKicker
+                eyebrow="买入观察榜单"
+                title={`${mode.shortLabel}排序`}
+                description="先扫分数、标签和关键指标；详细解释会在右侧展示。"
+              />
+              <span className="w-fit rounded-full bg-paper px-3 py-1 text-xs font-semibold text-ink/60">
+                每页 12 只
+              </span>
             </div>
-            <input
-              className="rounded-full border border-ink/10 bg-white px-4 py-2 text-sm outline-none transition focus:border-accent"
-              placeholder="搜基金名或代码"
-              value={keyword}
-              onChange={(event) => setKeyword(event.target.value)}
-            />
-            <select
-              className="rounded-full border border-ink/10 bg-white px-4 py-2 text-sm outline-none transition focus:border-accent"
-              value={theme}
-              onChange={(event) => setTheme(event.target.value)}
-            >
-              {themes.map((item) => (
-                <option key={item} value={item}>
-                  {item === "all" ? "全部方向" : item}
-                </option>
-              ))}
-            </select>
-            <select
-              className="rounded-full border border-ink/10 bg-white px-4 py-2 text-sm outline-none transition focus:border-accent"
-              value={sort}
-              onChange={(event) => setSort(event.target.value as SortKey)}
-            >
-              {sortOptions.map((option) => (
-                <option key={option.key} value={option.key}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="rounded-full border border-ink/10 bg-white px-4 py-2 text-sm font-semibold text-ink">
+                {mode.classification}
+              </div>
+              <input
+                className="rounded-full border border-ink/10 bg-white px-4 py-2 text-sm outline-none transition focus:border-accent"
+                placeholder="搜基金名或代码"
+                value={keyword}
+                onChange={(event) => setKeyword(event.target.value)}
+              />
+              <select
+                className="rounded-full border border-ink/10 bg-white px-4 py-2 text-sm outline-none transition focus:border-accent"
+                value={theme}
+                onChange={(event) => setTheme(event.target.value)}
+              >
+                {themes.map((item) => (
+                  <option key={item} value={item}>
+                    {item === "all" ? "全部方向" : item}
+                  </option>
+                ))}
+              </select>
+              <select
+                className="rounded-full border border-ink/10 bg-white px-4 py-2 text-sm outline-none transition focus:border-accent"
+                value={sort}
+                onChange={(event) => setSort(event.target.value as SortKey)}
+              >
+                {sortOptions.map((option) => (
+                  <option key={option.key} value={option.key}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="mt-5">
+              <AssetPaginationBar
+                total={totalAssetCount}
+                offset={assetOffset}
+                visibleCount={visibleAssets.length}
+                isFetching={assets.isFetching}
+                onPrevious={goToPreviousAssetPage}
+                onNext={goToNextAssetPage}
+              />
+            </div>
           </div>
 
-          <div className="mt-5">
-            <AssetPaginationBar
-              total={totalAssetCount}
-              offset={assetOffset}
-              visibleCount={visibleAssets.length}
-              isFetching={assets.isFetching}
-              onPrevious={goToPreviousAssetPage}
-              onNext={goToNextAssetPage}
-            />
-          </div>
-
-          <div className="mt-5 space-y-3">
+          <div className="mt-5 min-h-0 flex-1 space-y-3 overflow-y-auto pr-1 lg:pb-1">
             {assets.isLoading ? (
               <div className="rounded-[20px] border border-dashed border-ink/20 p-6 text-sm text-ink/55">
                 正在读取短线研究池...
@@ -1783,14 +1808,14 @@ export default function ShortTermPage() {
                   }`}
                   onClick={() => selectAsset(item)}
                 >
-                  <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-                    <div>
+                  <div className="flex flex-col gap-3">
+                    <div className="min-w-0">
                       <p className={`text-xs font-semibold ${isSelected ? "text-white/60" : "text-accent"}`}>
                         {isLiveItem ? "实时排名" : `#${item.rank ?? "-"}`}
                         {isLiveItem ? "" : ` · ${assetTypeLabel(item.asset_type)}`}
                         {!isLiveItem ? ` · ${shortResearchThemeTags(item).slice(0, 3).join(" / ")}` : ""}
                       </p>
-                      <h3 className="mt-2 text-xl font-semibold">
+                      <h3 className="mt-2 text-xl font-semibold leading-tight">
                         {isLiveItem ? toEtfItemName(item) : item.name}
                         <span className={`ml-2 text-sm font-normal ${isSelected ? "text-white/45" : "text-ink/45"}`}>
                           {isLiveItem ? itemCode : item.code}
@@ -1829,24 +1854,36 @@ export default function ShortTermPage() {
                     ) : null}
                     </div>
                   </div>
-                  <div className={`mt-4 grid gap-2 text-sm md:grid-cols-6 ${isSelected ? "text-white/70" : "text-ink/60"}`}>
+                  <div className={`mt-4 grid gap-2 text-sm sm:grid-cols-2 ${isSelected ? "text-white/75" : "text-ink/65"}`}>
                     {isLiveItem ? (
                       <>
-                        <span>实时排名 #{toEtfItemRank(item) ?? "-"}</span>
-                        <span>日线基础分：{formatLiveScore(item.base_score)}</span>
-                        <span>来源：{item.sources.length ? item.sources.join(" / ") : "暂无来源"}</span>
-                        <span>行情时间：{quote ? formatDateTime(quotedTime) : "暂无新鲜盘中行情"}</span>
-                        <span>当前价：{quote ? (livePrice === null || livePrice === undefined ? "暂无" : livePrice.toFixed(4)) : "暂无新鲜盘中行情"}</span>
-                        <span>实时排名变化：{etfLiveRankChangeText(item.rank_change)}</span>
+                        <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                          实时排名 #{toEtfItemRank(item) ?? "-"}
+                        </span>
+                        <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                          当前价：{quote ? (livePrice === null || livePrice === undefined ? "暂无" : livePrice.toFixed(4)) : "暂无"}
+                        </span>
+                        <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                          行情：{quote ? formatDateTime(quotedTime) : "等待盘中行情"}
+                        </span>
+                        <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                          排名变化：{etfLiveRankChangeText(item.rank_change)}
+                        </span>
                       </>
                     ) : (
                       <>
-                        <span>今天：{percentMetric(item.metrics, "today_return_pct")}</span>
-                        <span>近 5 日：{percentMetric(item.metrics, "return_5d")}</span>
-                        <span>近 20 日：{percentMetric(item.metrics, "return_20d")}</span>
-                        <span>近 60 日：{percentMetric(item.metrics, "return_60d")}</span>
-                        <span>60 日回撤：{percentMetric(item.metrics, "max_drawdown_60d")}</span>
-                        <span>样本：{item.usable_days} 天</span>
+                        <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                          今天：{percentMetric(item.metrics, "today_return_pct")}
+                        </span>
+                        <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                          近 20 日：{percentMetric(item.metrics, "return_20d")}
+                        </span>
+                        <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                          60 日回撤：{percentMetric(item.metrics, "max_drawdown_60d")}
+                        </span>
+                        <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                          样本：{item.usable_days} 天
+                        </span>
                       </>
                     )}
                   </div>
@@ -1869,7 +1906,7 @@ export default function ShortTermPage() {
           </div>
         </Panel>
 
-        <div ref={detailColumnRef} className="space-y-6 xl:sticky xl:top-6 xl:self-start">
+        <div className="min-w-0 space-y-6">
           <Panel className="rounded-[24px]">
             {selectedAsset ? (
               <>
@@ -1906,27 +1943,41 @@ export default function ShortTermPage() {
                   </div>
                 </div>
 
-                <div className="mt-5 grid gap-3 md:grid-cols-[1fr_0.82fr]">
-                  <div className="rounded-[20px] bg-paper p-4">
-                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">当前结论</p>
-                    <p className="mt-2 text-lg font-semibold text-ink">
-                      {selectedAsset.conclusion} · 综合分 {selectedAsset.total_score.toFixed(1)}
-                    </p>
-                    <p className="mt-2 text-sm leading-7 text-ink/65">
-                      {rationaleText(selectedAsset, "key_reason", "按近期趋势、回撤、波动、成交额和数据质量综合生成。")}
-                    </p>
-                  </div>
-                  <div className="rounded-[20px] bg-ink p-4 text-white">
-                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-white/50">买点口径</p>
-                    <p className="mt-2 text-sm leading-7 text-white/75">
-                      短线观察 = 值得看；今日买点状态 = 今天更适合追、等、还是回避。{selectedAsset.entry_timing_reason}
-                    </p>
-                  </div>
+                <div className="mt-4 flex flex-wrap gap-2 rounded-[18px] bg-paper p-2">
+                  {detailNavItems.map((item) => (
+                    <button
+                      key={item.section}
+                      className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-ink transition hover:bg-ink hover:text-white"
+                      onClick={() => scrollToDetailSection(item.section)}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
                 </div>
 
-                {renderAssetStatusSummary()}
+                <div ref={summarySectionRef} className="scroll-mt-6">
+                  <div className="mt-5 grid gap-3 md:grid-cols-[1fr_0.82fr]">
+                    <div className="rounded-[20px] bg-paper p-4">
+                      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">当前结论</p>
+                      <p className="mt-2 text-lg font-semibold text-ink">
+                        {selectedAsset.conclusion} · 综合分 {selectedAsset.total_score.toFixed(1)}
+                      </p>
+                      <p className="mt-2 text-sm leading-7 text-ink/65">
+                        {rationaleText(selectedAsset, "key_reason", "按近期趋势、回撤、波动、成交额和数据质量综合生成。")}
+                      </p>
+                    </div>
+                    <div className="rounded-[20px] bg-ink p-4 text-white">
+                      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-white/50">买点口径</p>
+                      <p className="mt-2 text-sm leading-7 text-white/75">
+                        短线观察 = 值得看；今日买点状态 = 今天更适合追、等、还是回避。{selectedAsset.entry_timing_reason}
+                      </p>
+                    </div>
+                  </div>
 
-                <div className="mt-5 rounded-[20px] border border-ink/10 bg-white p-4">
+                  {renderAssetStatusSummary()}
+                </div>
+
+                <div ref={trackingSectionRef} className="mt-5 scroll-mt-6 rounded-[20px] border border-ink/10 bg-white p-4">
                   <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                     <div>
                       <p className="text-sm font-semibold text-ink">我已买入，开始追踪</p>
@@ -2095,7 +2146,7 @@ export default function ShortTermPage() {
                   <StatPill label="60 日回撤" value={percentMetric(selectedAsset.metrics, "max_drawdown_60d")} tone="bg-white text-ink" />
                 </div>
 
-                <div className="mt-6 rounded-[20px] border border-ink/10 bg-white p-5">
+                <div ref={advisorSectionRef} className="mt-6 scroll-mt-6 rounded-[20px] border border-ink/10 bg-white p-5">
                   <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                     <div>
                       <p className="text-xs font-semibold uppercase tracking-[0.22em] text-accent">今日研究建议</p>
@@ -2151,7 +2202,7 @@ export default function ShortTermPage() {
                   ) : null}
                 </div>
 
-                <div className="mt-6 grid gap-5 xl:grid-cols-2">
+                <div ref={chartsSectionRef} className="mt-6 grid scroll-mt-6 gap-5 xl:grid-cols-2">
                   <div className="rounded-[20px] bg-paper p-4">
                     <p className="font-semibold text-ink">走势</p>
                     <div className="mt-4 h-72">
@@ -2260,29 +2311,31 @@ export default function ShortTermPage() {
           </Panel>
 
           {selectedAsset ? (
-            <Panel className="rounded-[24px]">
-              <p className="text-lg font-semibold text-ink">分析说明</p>
-              <div className="mt-4 grid gap-4 md:grid-cols-2">
-                {Object.entries(selectedDetail.data?.explanation_sections ?? {}).map(([title, text]) => (
-                  <div key={title} className="rounded-[18px] border border-ink/10 bg-white p-4">
-                    <p className="font-semibold text-ink">{title}</p>
-                    <p className="mt-2 text-sm leading-7 text-ink/65">{text}</p>
+            <div ref={explanationSectionRef} className="scroll-mt-6">
+              <Panel className="rounded-[24px]">
+                <p className="text-lg font-semibold text-ink">分析说明</p>
+                <div className="mt-4 grid gap-4 md:grid-cols-2">
+                  {Object.entries(selectedDetail.data?.explanation_sections ?? {}).map(([title, text]) => (
+                    <div key={title} className="rounded-[18px] border border-ink/10 bg-white p-4">
+                      <p className="font-semibold text-ink">{title}</p>
+                      <p className="mt-2 text-sm leading-7 text-ink/65">{text}</p>
+                    </div>
+                  ))}
+                  <div className="rounded-[18px] border border-ink/10 bg-white p-4">
+                    <p className="font-semibold text-ink">标签原因</p>
+                    <p className="mt-2 text-sm leading-7 text-ink/65">
+                      {rationaleText(selectedAsset, "label_meaning", labelMeaning(selectedAsset.conclusion))}
+                    </p>
                   </div>
-                ))}
-                <div className="rounded-[18px] border border-ink/10 bg-white p-4">
-                  <p className="font-semibold text-ink">标签原因</p>
-                  <p className="mt-2 text-sm leading-7 text-ink/65">
-                    {rationaleText(selectedAsset, "label_meaning", labelMeaning(selectedAsset.conclusion))}
-                  </p>
+                  <div className="rounded-[18px] border border-ink/10 bg-white p-4">
+                    <p className="font-semibold text-ink">风险标签</p>
+                    <p className="mt-2 text-sm leading-7 text-ink/65">
+                      {selectedAsset.risk_flags.length ? selectedAsset.risk_flags.join("、") : "暂未触发主要风险标签。"}
+                    </p>
+                  </div>
                 </div>
-                <div className="rounded-[18px] border border-ink/10 bg-white p-4">
-                  <p className="font-semibold text-ink">风险标签</p>
-                  <p className="mt-2 text-sm leading-7 text-ink/65">
-                    {selectedAsset.risk_flags.length ? selectedAsset.risk_flags.join("、") : "暂未触发主要风险标签。"}
-                  </p>
-                </div>
-              </div>
-            </Panel>
+              </Panel>
+            </div>
           ) : null}
         </div>
       </div>
@@ -2443,9 +2496,19 @@ export default function ShortTermPage() {
               </span>
             </summary>
             <p className="mt-2 text-sm leading-6 text-ink/60">
-              这里只是研究用目标权重：风险高时提高现金比例，不连接证券账户，不自动下单。
+              主组合只保留短线观察且买点为健康回踩/趋势延续的 ETF；高位或冲高的 ETF 单独放入“强势但别追”。
+              这里是研究观察用权重，不连接证券账户，不自动下单。
             </p>
-            <div className="mt-5 grid gap-3 lg:grid-cols-3">
+            <p className="mt-3 rounded-[16px] bg-paper px-4 py-3 text-xs leading-5 text-ink/55">
+              {observationPortfolio.data?.methodology ?? "先按买点和风险筛选，再保留现金，不做收益承诺。"}
+            </p>
+            <div className="mt-5 flex items-center justify-between gap-3">
+              <p className="text-sm font-semibold text-ink">主观察组合</p>
+              <span className="rounded-full bg-ink px-3 py-1 text-xs font-semibold text-white">
+                {observationPortfolio.data?.items.length ?? 0} 只
+              </span>
+            </div>
+            <div className="mt-3 grid gap-3 lg:grid-cols-3">
               {(observationPortfolio.data?.items ?? []).map((item) => (
                 <div key={item.code} className="rounded-[18px] border border-ink/10 bg-white p-4">
                   <div className="flex items-start justify-between gap-3">
@@ -2466,8 +2529,59 @@ export default function ShortTermPage() {
             </div>
             {!observationPortfolio.isLoading && !(observationPortfolio.data?.items ?? []).length ? (
               <p className="mt-4 rounded-[18px] bg-paper px-4 py-3 text-sm text-ink/55">
-                暂无可用观察组合。先更新 ETF 数据，或切到“全部可分析”查看低流动性样本。
+                暂无可用观察组合。当前高分 ETF 可能偏高位、买点不合适或数据不足，先继续观察，不给组合权重。
               </p>
+            ) : null}
+            {(observationPortfolio.data?.watch_only_items ?? []).length ? (
+              <>
+                <div className="mt-6 flex items-center justify-between gap-3">
+                  <p className="text-sm font-semibold text-ink">强势但别追</p>
+                  <span className="rounded-full bg-rose-50 px-3 py-1 text-xs font-semibold text-rose-700">
+                    {observationPortfolio.data?.watch_only_items.length ?? 0} 只
+                  </span>
+                </div>
+                <div className="mt-3 grid gap-3 lg:grid-cols-3">
+                  {(observationPortfolio.data?.watch_only_items ?? []).map((item) => (
+                    <div key={`watch-${item.code}`} className="rounded-[18px] border border-rose-100 bg-rose-50/40 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-semibold text-ink">{item.name}</p>
+                          <p className="mt-1 text-xs text-ink/45">{item.code} · {formatDate(item.data_date)}</p>
+                        </div>
+                        <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-rose-700">
+                          不给权重
+                        </span>
+                      </div>
+                      <p className="mt-3 text-sm text-ink/65">综合分 {item.score.toFixed(1)} · {item.conclusion}</p>
+                      <p className="mt-3 rounded-[14px] bg-white/70 px-3 py-2 text-xs leading-5 text-ink/55">
+                        原因：{item.risk_reasons.slice(0, 3).join("；")}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : null}
+            {(observationPortfolio.data?.excluded_items ?? []).length ? (
+              <>
+                <div className="mt-6 flex items-center justify-between gap-3">
+                  <p className="text-sm font-semibold text-ink">等待 / 回避</p>
+                  <span className="rounded-full bg-paper px-3 py-1 text-xs font-semibold text-ink/55">
+                    {observationPortfolio.data?.excluded_items.length ?? 0} 只
+                  </span>
+                </div>
+                <div className="mt-3 grid gap-3 lg:grid-cols-3">
+                  {(observationPortfolio.data?.excluded_items ?? []).map((item) => (
+                    <div key={`excluded-${item.code}`} className="rounded-[18px] border border-ink/10 bg-white/60 p-4">
+                      <p className="text-sm font-semibold text-ink">
+                        {item.name} <span className="text-ink/40">{item.code}</span>
+                      </p>
+                      <p className="mt-2 text-xs leading-5 text-ink/55">
+                        {item.risk_reasons.slice(0, 3).join("；")}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </>
             ) : null}
             <p className="mt-4 text-xs leading-5 text-ink/50">
               {observationPortfolio.data?.note ?? "观察组合只用于手动研究参考。"}

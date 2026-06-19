@@ -6,7 +6,13 @@ from typing import Any
 
 import pytest
 
-from app.models.entities import EtfPriceHistory, FundNavHistory, TradableEtf
+from app.models.entities import (
+    EtfPriceHistory,
+    FundNavHistory,
+    ShortResearchSignalItem,
+    ShortResearchSignalRun,
+    TradableEtf,
+)
 from app.services.short_research.service import allowed_conclusions, ensure_short_research_universe
 
 
@@ -85,6 +91,103 @@ async def _seed_entry_timing_etf(
 
 def _steady_uptrend(days: int = 80, *, start: float = 1.0, step: float = 0.01) -> list[float]:
     return [round(start + offset * step, 6) for offset in range(days)]
+
+
+async def _seed_observation_portfolio_signal_run(
+    app,
+    *,
+    run_as_of_date: date = date(2026, 6, 15),
+    items: list[dict[str, Any]],
+) -> None:
+    async with app.state.db.session() as session:
+        run = ShortResearchSignalRun(
+            status="success",
+            as_of_date=run_as_of_date,
+            config_json={"asset_type": "etf", "language": "research_only"},
+            summary_json={"item_count": len(items)},
+        )
+        session.add(run)
+        await session.commit()
+        await session.refresh(run)
+
+        seen_codes: set[str] = set()
+        for item in items:
+            code = item["code"]
+            if code in seen_codes:
+                continue
+            seen_codes.add(code)
+            session.add(
+                TradableEtf(
+                    code=code,
+                    name=f"观察组合测试{code}",
+                    exchange="SH",
+                    theme_tags_json=item.get("theme_tags", ["观察组合测试"]),
+                    trading_rule_label="证券账户 T+1 ETF",
+                    asset_class="sector",
+                    is_short_term_eligible=True,
+                    is_watchlist=True,
+                )
+            )
+
+        await session.commit()
+
+        session.add_all(
+            [
+                ShortResearchSignalItem(
+                    run_id=run.id,
+                    asset_type="etf",
+                    asset_code=item["code"],
+                    rank=index + 1,
+                    total_score=float(item["total_score"]),
+                    conclusion=item["conclusion"],
+                    score_breakdown_json={},
+                    risk_flags_json=item.get("risk_flags", []),
+                    rationale_json={"entry_timing_reason": item["entry_timing_reason"]},
+                    metrics_json={
+                        "entry_timing_label": item["entry_timing_label"],
+                        "entry_timing_reason": item["entry_timing_reason"],
+                        "return_20d": 0.09,
+                        "average_turnover_20d": 150_000_000,
+                        "max_drawdown_60d": item.get("max_drawdown_60d", -0.04),
+                        "volatility_20d": item.get("volatility_20d", 0.015),
+                        "default_display_eligible": item.get("default_display_eligible", True),
+                    },
+                )
+                for index, item in enumerate(items)
+            ]
+        )
+        await session.commit()
+
+
+async def _seed_observation_price_series(
+    app,
+    *,
+    code: str,
+    start_price: float = 1.0,
+    daily_return: float = 0.002,
+    days: int = 70,
+    latest_date: date = date(2026, 6, 15),
+) -> None:
+    start = latest_date - timedelta(days=days - 1)
+    async with app.state.db.session() as session:
+        close = start_price
+        for offset in range(days):
+            period_return = 0.0 if offset == 0 else daily_return + (0.001 if offset % 2 else -0.001)
+            close = close if offset == 0 else close * (1 + period_return)
+            session.add(
+                EtfPriceHistory(
+                    etf_code=code,
+                    trade_date=start + timedelta(days=offset),
+                    open=close * 0.995,
+                    high=close * 1.01,
+                    low=close * 0.99,
+                    close=close,
+                    volume=2_000_000,
+                    turnover=160_000_000,
+                    pct_change=period_return * 100,
+                )
+            )
+        await session.commit()
 
 
 @pytest.mark.asyncio
@@ -255,3 +358,166 @@ async def test_short_research_filters_sort_and_data_sync_endpoint(client, app, m
     assert body["asset_count"] == 1
     assert body["etfs"]["inserted"] == 3
     assert body["failed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_short_research_observation_portfolio_filters_out_high_watch_and_bad_timing(client, app) -> None:
+    await _seed_observation_portfolio_signal_run(
+        app,
+        items=[
+            {
+                "code": "560901",
+                "total_score": 94.0,
+                "conclusion": "短线观察",
+                "entry_timing_label": "健康回踩",
+                "entry_timing_reason": "今日回踩 5 日线附近，短线结构可再观察。",
+            },
+            {
+                "code": "560902",
+                "total_score": 99.0,
+                "conclusion": "高位观察",
+                "entry_timing_label": "健康回踩",
+                "entry_timing_reason": "今日买点标签示例。",
+            },
+            {
+                "code": "560903",
+                "total_score": 98.0,
+                "conclusion": "短线观察",
+                "entry_timing_label": "冲高别追",
+                "entry_timing_reason": "今日短线已转弱，等待修复。",
+            },
+            {
+                "code": "560904",
+                "total_score": 97.0,
+                "conclusion": "短线观察",
+                "entry_timing_label": "趋势延续",
+                "entry_timing_reason": "趋势延续，仍可观察。",
+            },
+            {
+                "code": "560905",
+                "total_score": 96.0,
+                "conclusion": "短线观察",
+                "entry_timing_label": "健康回踩",
+                "entry_timing_reason": "短线指标偏强。",
+                "risk_flags": ["追高风险", "流动性不足"],
+            },
+            {
+                "code": "560906",
+                "total_score": 95.0,
+                "conclusion": "短线观察",
+                "entry_timing_label": "数据不足",
+                "entry_timing_reason": "今日数据缺口。",
+            },
+        ],
+    )
+
+    response = await client.get("/api/short-research/observation-portfolio?limit=3")
+    assert response.status_code == 200
+
+    body = response.json()
+    assert body["asset_type"] == "etf"
+    assert body["cash_weight"] < 1.0
+    assert body["methodology"]
+    assert len(body["items"]) == 2
+    assert [item["code"] for item in body["items"]] == ["560904", "560901"]
+    assert all(item["code"] not in {"560902", "560903", "560905", "560906"} for item in body["items"])
+    assert {item["code"] for item in body["watch_only_items"]} >= {"560902", "560903"}
+    assert {item["code"] for item in body["excluded_items"]} >= {"560905", "560906"}
+    assert "今日买点：趋势延续" in body["items"][0]["risk_reasons"]
+    assert any("买点原因：" in item for item in body["items"][0]["risk_reasons"])
+    assert (
+        "高位/追高/数据不足资产会分到观察或等待分组，不进入主组合权重。"
+        in (body["note"] or "")
+    )
+
+
+@pytest.mark.asyncio
+async def test_short_research_observation_portfolio_no_match_returns_full_cash(client, app) -> None:
+    await _seed_observation_portfolio_signal_run(
+        app,
+        items=[
+            {
+                "code": "560907",
+                "total_score": 99.0,
+                "conclusion": "高位观察",
+                "entry_timing_label": "健康回踩",
+                "entry_timing_reason": "高位观察示例。",
+            },
+            {
+                "code": "560908",
+                "total_score": 98.0,
+                "conclusion": "短线观察",
+                "entry_timing_label": "冲高别追",
+                "entry_timing_reason": "短线偏热，不适合再买。",
+            },
+            {
+                "code": "560909",
+                "total_score": 97.0,
+                "conclusion": "短线观察",
+                "entry_timing_label": "健康回踩",
+                "entry_timing_reason": "偏强。",
+                "risk_flags": ["追高风险"],
+            },
+        ],
+    )
+
+    response = await client.get("/api/short-research/observation-portfolio?limit=3")
+    assert response.status_code == 200
+
+    body = response.json()
+    assert body["items"] == []
+    assert body["watch_only_items"]
+    assert body["excluded_items"] == []
+    assert body["cash_weight"] == 1.0
+    assert (
+        body["note"]
+        == "当前没有同时满足短线观察和健康买点的 ETF，强势但高位的只适合继续观察，不给组合权重。"
+    )
+
+
+@pytest.mark.asyncio
+async def test_short_research_observation_portfolio_reduces_theme_and_correlation_overlap(client, app) -> None:
+    await _seed_observation_portfolio_signal_run(
+        app,
+        items=[
+            {
+                "code": "561001",
+                "total_score": 99.0,
+                "conclusion": "短线观察",
+                "entry_timing_label": "健康回踩",
+                "entry_timing_reason": "科技方向健康回踩。",
+                "theme_tags": ["科技"],
+            },
+            {
+                "code": "561002",
+                "total_score": 98.0,
+                "conclusion": "短线观察",
+                "entry_timing_label": "健康回踩",
+                "entry_timing_reason": "同方向健康回踩。",
+                "theme_tags": ["科技"],
+            },
+            {
+                "code": "561003",
+                "total_score": 97.0,
+                "conclusion": "短线观察",
+                "entry_timing_label": "趋势延续",
+                "entry_timing_reason": "红利方向趋势延续。",
+                "theme_tags": ["红利"],
+            },
+        ],
+    )
+    await _seed_observation_price_series(app, code="561001", daily_return=0.002)
+    await _seed_observation_price_series(app, code="561002", daily_return=0.002)
+    await _seed_observation_price_series(app, code="561003", daily_return=0.001)
+
+    response = await client.get("/api/short-research/observation-portfolio?limit=3")
+    assert response.status_code == 200
+
+    body = response.json()
+    item_codes = {item["code"] for item in body["items"]}
+    watch_codes = {item["code"] for item in body["watch_only_items"]}
+    assert "561001" in item_codes
+    assert "561002" not in item_codes
+    assert "561002" in watch_codes
+    assert any("相关性" in "；".join(item["risk_reasons"]) for item in body["watch_only_items"])
+    assert body["cash_weight"] >= 0.6

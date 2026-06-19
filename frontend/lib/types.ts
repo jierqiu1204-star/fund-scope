@@ -565,10 +565,13 @@ export type ShortResearchObservationPortfolio = {
   as_of_date: string;
   asset_type: "etf";
   items: ShortResearchObservationPortfolioItem[];
+  watch_only_items: ShortResearchObservationPortfolioItem[];
+  excluded_items: ShortResearchObservationPortfolioItem[];
   cash_weight: number;
   research_only: boolean;
   no_trade_instruction: boolean;
   note: string;
+  methodology: string;
 };
 
 export type TrackedPositionSnapshot = {

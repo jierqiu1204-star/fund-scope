@@ -151,7 +151,10 @@ class ShortResearchObservationPortfolioOut(BaseModel):
     as_of_date: date
     asset_type: str
     items: list[ShortResearchObservationPortfolioItemOut]
+    watch_only_items: list[ShortResearchObservationPortfolioItemOut] = Field(default_factory=list)
+    excluded_items: list[ShortResearchObservationPortfolioItemOut] = Field(default_factory=list)
     cash_weight: float
     research_only: bool
     no_trade_instruction: bool
     note: str
+    methodology: str = ""
