@@ -16,6 +16,7 @@ from app.services.intraday_etf.service import (
     fetch_spot_quotes,
     latest_quotes_by_code,
     persist_quotes,
+    summarize_and_cleanup_intraday_quotes,
 )
 from app.services.tracked_positions.service import (
     ACTIVE_STATUS,
@@ -153,6 +154,15 @@ async def _check_tracked_etf_alerts(session: AsyncSession, settings: Settings) -
             result["web_only"] += 1
     return result
 
+async def intraday_etf_cleanup_job(
+    session: AsyncSession,
+    *,
+    retention_trading_days: int = 60,
+) -> dict[str, Any]:
+    return await summarize_and_cleanup_intraday_quotes(
+        session,
+        retention_trading_days=retention_trading_days,
+    )
 
 def _result(run: IntradayEtfWatchRun) -> dict[str, Any]:
     return {

@@ -1403,40 +1403,6 @@ async def run_signal_generation(
 async def signal_run_items_as_assets(session: AsyncSession, run: ShortResearchSignalRun) -> list[ComputedAsset]:
     cached_assets, _total = await cached_signal_assets(session, run, sort="score", universe=UNIVERSE_ALL)
     return cached_assets
-    items = await list_signal_items(session, run.id)
-    assets: list[ComputedAsset] = []
-    for item in items:
-        metadata = await _metadata_for_code(session, item.asset_type, item.asset_code)
-        fresh = await compute_asset(session, metadata, as_of_date=run.as_of_date, rank=item.rank)
-        assets.append(
-            ComputedAsset(
-                metadata=metadata,
-                rank=item.rank,
-                total_score=item.total_score,
-                conclusion=item.conclusion,
-                latest_date=fresh.latest_date,
-                latest_value=fresh.latest_value,
-                usable_days=fresh.usable_days,
-                sample_level=fresh.sample_level,
-                metrics=item.metrics_json,
-                score_breakdown=item.score_breakdown_json,
-                risk_flags=item.risk_flags_json,
-                rationale=item.rationale_json,
-                source_note="公开 ETF 日线数据" if item.asset_type == ASSET_TYPE_ETF else "公开基金净值数据",
-                entry_timing_label=str(
-                    (item.metrics_json or {}).get("entry_timing_label")
-                    or (item.rationale_json or {}).get("entry_timing_label")
-                    or fresh.entry_timing_label
-                ),
-                entry_timing_reason=str(
-                    (item.metrics_json or {}).get("entry_timing_reason")
-                    or (item.rationale_json or {}).get("entry_timing_reason")
-                    or fresh.entry_timing_reason
-                ),
-            )
-        )
-    return assets
-
 
 async def status_summary(session: AsyncSession, *, include_health: bool = False) -> dict[str, Any]:
     await ensure_short_research_universe(session)

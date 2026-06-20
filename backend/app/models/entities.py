@@ -315,6 +315,28 @@ class EtfIntradayQuote(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class EtfIntradayDailySummary(Base):
+    __tablename__ = "etf_intraday_daily_summaries"
+    __table_args__ = (UniqueConstraint("etf_code", "trade_date", name="uq_etf_intraday_daily_summary"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    etf_code: Mapped[str] = mapped_column(ForeignKey("tradable_etfs.code", ondelete="CASCADE"))
+    trade_date: Mapped[date] = mapped_column(Date)
+    quote_count: Mapped[int] = mapped_column(Integer, default=0)
+    first_quote_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_quote_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    open_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    close_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_turnover: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    summary_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class IntradayEtfWatchRun(Base):
     __tablename__ = "intraday_etf_watch_runs"
 
@@ -571,6 +593,7 @@ class TrackedPosition(Base):
     entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     entry_price_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     estimated_shares: Mapped[float | None] = mapped_column(Float, nullable=True)
+    exit_state_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String(32), default="active")
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import func, select
 
 from app.models.entities import (
+    EtfIntradayDailySummary,
     EtfIntradayQuote,
     EtfPriceHistory,
     ShortResearchSignalItem,
@@ -24,7 +25,9 @@ from app.services.intraday_etf.service import (
     build_watchlist,
     current_market_state,
     is_quote_stale,
+    latest_quotes_by_code,
     normalize_spot_record,
+    summarize_and_cleanup_intraday_quotes,
 )
 from app.services.short_research.service import CONCLUSION_HIGH_WATCH, CONCLUSION_WATCH
 from app.services.tracked_positions.service import (
@@ -976,3 +979,79 @@ async def test_intraday_provider_failure_falls_back_to_cached_quote(app, monkeyp
     assert result["updated_quote_count"] == 0
     assert result["details"]["provider_error"]
     assert quote_count == 1
+
+
+@pytest.mark.asyncio
+async def test_latest_quotes_by_code_returns_one_latest_quote_per_etf(app) -> None:
+    async with app.state.db.session() as session:
+        session.add_all([_etf("510001"), _etf("510002")])
+        await session.flush()
+        session.add_all(
+            [
+                EtfIntradayQuote(
+                    etf_code="510001",
+                    quote_time=datetime(2026, 6, 18, 9, 31),
+                    trade_date=date(2026, 6, 18),
+                    latest_price=1.0,
+                ),
+                EtfIntradayQuote(
+                    etf_code="510001",
+                    quote_time=datetime(2026, 6, 18, 9, 35),
+                    trade_date=date(2026, 6, 18),
+                    latest_price=1.1,
+                ),
+                EtfIntradayQuote(
+                    etf_code="510002",
+                    quote_time=datetime(2026, 6, 18, 9, 33),
+                    trade_date=date(2026, 6, 18),
+                    latest_price=2.0,
+                ),
+            ]
+        )
+        await session.commit()
+
+        quotes = await latest_quotes_by_code(session, ["510001", "510002", "510001", "599999"])
+
+    assert set(quotes) == {"510001", "510002"}
+    assert quotes["510001"].latest_price == 1.1
+    assert quotes["510002"].latest_price == 2.0
+
+
+@pytest.mark.asyncio
+async def test_intraday_cleanup_summarizes_and_deletes_old_raw_quotes(app) -> None:
+    async with app.state.db.session() as session:
+        session.add(_etf("510003"))
+        await session.flush()
+        for offset in range(4):
+            trade_date = date(2026, 6, 10 + offset)
+            session.add_all(
+                [
+                    EtfIntradayQuote(
+                        etf_code="510003",
+                        quote_time=datetime(2026, 6, 10 + offset, 9, 31),
+                        trade_date=trade_date,
+                        latest_price=1.0 + offset,
+                        volume=1000 + offset,
+                        turnover=10_000 + offset,
+                    ),
+                    EtfIntradayQuote(
+                        etf_code="510003",
+                        quote_time=datetime(2026, 6, 10 + offset, 14, 59),
+                        trade_date=trade_date,
+                        latest_price=1.1 + offset,
+                        volume=2000 + offset,
+                        turnover=20_000 + offset,
+                    ),
+                ]
+            )
+        await session.commit()
+
+        result = await summarize_and_cleanup_intraday_quotes(session, retention_trading_days=2)
+        raw_count = await session.scalar(select(func.count()).select_from(EtfIntradayQuote))
+        summary_count = await session.scalar(select(func.count()).select_from(EtfIntradayDailySummary))
+
+    assert result["cutoff_date"] == "2026-06-12"
+    assert result["summarized_groups"] == 2
+    assert result["deleted_rows"] == 4
+    assert raw_count == 4
+    assert summary_count == 2

@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta
 from statistics import pstdev
 from typing import Any, cast
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
@@ -103,6 +103,13 @@ class AlertDecision:
     alert_level: str = "warning"
     alert_source: str = "daily_close"
     quote_time: datetime | None = None
+
+
+@dataclass(frozen=True)
+class SignalContext:
+    run: ShortResearchSignalRun | None
+    item: ShortResearchSignalItem | None
+    report: ShortResearchAdvisorReport | None
 
 
 @dataclass(frozen=True)
@@ -862,31 +869,25 @@ def _estimate_snapshot(
     )
 
 
-async def current_snapshot(session: AsyncSession, position: TrackedPosition) -> TrackedPositionSnapshot:
+async def current_snapshot(
+    session: AsyncSession,
+    position: TrackedPosition,
+    *,
+    item: ShortResearchSignalItem | None = None,
+    report: ShortResearchAdvisorReport | None = None,
+    signal_context_loaded: bool = False,
+) -> TrackedPositionSnapshot:
     current_price, intraday = await latest_tracking_price(session, position.asset_type, position.asset_code)
     snapshot = _estimate_snapshot(position, current_price, intraday)
-    run = await latest_signal_run(session, asset_type=position.asset_type)
-    if run is None:
-        return snapshot
-    items = await list_signal_items(session, run.id)
-    item = next(
-        (
-            row
-            for row in items
-            if row.asset_type == position.asset_type and row.asset_code == position.asset_code
-        ),
-        None,
-    )
+    if not signal_context_loaded:
+        _run, item, report = await latest_signal_context(session, position)
     if item is None:
         return snapshot
-    reports = await latest_reports_by_asset(session, run.id)
-    report = reports.get((position.asset_type, position.asset_code))
     snapshot.current_label = item.conclusion
     snapshot.advisor_label = report.action_label if report is not None else conservative_action_for_item(item, is_held=True)
     snapshot.risk_flags = list(item.risk_flags_json or [])
     snapshot.explanation = report.plain_summary if report is not None else str((item.rationale_json or {}).get("key_reason", ""))
     return snapshot
-
 
 async def position_chart(session: AsyncSession, position: TrackedPosition) -> list[TrackedPositionChartPoint]:
     start_date = tracking_start_date(position)
@@ -983,6 +984,26 @@ async def position_analysis(
         dynamic_thresholds=dynamic_thresholds,
     )
 
+
+def merge_exit_state(position: TrackedPosition, analysis: PositionAnalysis) -> None:
+    state = dict(position.exit_state_json or {})
+    if analysis.max_profit_pct is not None:
+        previous_max = state.get("max_profit_pct")
+        if previous_max is None or analysis.max_profit_pct > float(previous_max):
+            state["max_profit_pct"] = analysis.max_profit_pct
+            state["max_profit_recorded_at"] = utcnow().isoformat()
+    if analysis.profit_giveback_pct is not None:
+        state["profit_giveback_pct"] = analysis.profit_giveback_pct
+    if analysis.holding_days is not None:
+        state["holding_days"] = analysis.holding_days
+    if analysis.dynamic_thresholds is not None:
+        state["dynamic_thresholds"] = analysis.dynamic_thresholds.model_dump(mode="json")
+    if analysis.intraday_snapshot is not None:
+        state["latest_price_source"] = analysis.intraday_snapshot.price_source
+        if analysis.intraday_snapshot.quote_time is not None:
+            state["latest_quote_time"] = analysis.intraday_snapshot.quote_time.isoformat()
+    state["updated_at"] = utcnow().isoformat()
+    position.exit_state_json = state
 
 async def create_position(
     session: AsyncSession,
@@ -1114,6 +1135,122 @@ async def recent_intraday_alerts_for_position(
     return list(result.all())
 
 
+async def latest_alerts_for_positions(
+    session: AsyncSession,
+    position_ids: list[int],
+) -> dict[int, TrackedPositionAlert]:
+    ids = list(dict.fromkeys(position_ids))
+    if not ids:
+        return {}
+    ranked = (
+        select(
+            TrackedPositionAlert.id.label("alert_id"),
+            TrackedPositionAlert.tracked_position_id.label("position_id"),
+            func.row_number()
+            .over(
+                partition_by=TrackedPositionAlert.tracked_position_id,
+                order_by=(TrackedPositionAlert.alert_date.desc(), TrackedPositionAlert.id.desc()),
+            )
+            .label("rank"),
+        )
+        .where(TrackedPositionAlert.tracked_position_id.in_(ids))
+        .subquery()
+    )
+    rows = (
+        await session.scalars(
+            select(TrackedPositionAlert)
+            .join(ranked, ranked.c.alert_id == TrackedPositionAlert.id)
+            .where(ranked.c.rank == 1)
+        )
+    ).all()
+    return {row.tracked_position_id: row for row in rows}
+
+
+async def recent_intraday_alerts_for_positions(
+    session: AsyncSession,
+    position_ids: list[int],
+    *,
+    limit: int = 5,
+) -> dict[int, list[TrackedPositionAlert]]:
+    ids = list(dict.fromkeys(position_ids))
+    if not ids:
+        return {}
+    ranked = (
+        select(
+            TrackedPositionAlert.id.label("alert_id"),
+            TrackedPositionAlert.tracked_position_id.label("position_id"),
+            func.row_number()
+            .over(
+                partition_by=TrackedPositionAlert.tracked_position_id,
+                order_by=(TrackedPositionAlert.created_at.desc(), TrackedPositionAlert.id.desc()),
+            )
+            .label("rank"),
+        )
+        .where(
+            TrackedPositionAlert.tracked_position_id.in_(ids),
+            TrackedPositionAlert.alert_source == "intraday_quote",
+        )
+        .subquery()
+    )
+    rows = (
+        await session.scalars(
+            select(TrackedPositionAlert)
+            .join(ranked, ranked.c.alert_id == TrackedPositionAlert.id)
+            .where(ranked.c.rank <= limit)
+            .order_by(
+                TrackedPositionAlert.tracked_position_id.asc(),
+                TrackedPositionAlert.created_at.desc(),
+                TrackedPositionAlert.id.desc(),
+            )
+        )
+    ).all()
+    grouped: dict[int, list[TrackedPositionAlert]] = {position_id: [] for position_id in ids}
+    for row in rows:
+        grouped.setdefault(row.tracked_position_id, []).append(row)
+    return grouped
+
+
+async def latest_signal_contexts(
+    session: AsyncSession,
+    positions: list[TrackedPosition],
+) -> dict[int, SignalContext]:
+    contexts = {position.id: SignalContext(None, None, None) for position in positions}
+    by_type: dict[str, list[TrackedPosition]] = {}
+    for position in positions:
+        by_type.setdefault(position.asset_type, []).append(position)
+    for asset_type, rows in by_type.items():
+        run = await latest_signal_run(session, asset_type=asset_type)
+        if run is None:
+            continue
+        codes = list(dict.fromkeys(row.asset_code for row in rows))
+        signal_items = (
+            await session.scalars(
+                select(ShortResearchSignalItem).where(
+                    ShortResearchSignalItem.run_id == run.id,
+                    ShortResearchSignalItem.asset_type == asset_type,
+                    ShortResearchSignalItem.asset_code.in_(codes),
+                )
+            )
+        ).all()
+        item_by_code = {item.asset_code: item for item in signal_items}
+        advisor_rows = (
+            await session.scalars(
+                select(ShortResearchAdvisorReport).where(
+                    ShortResearchAdvisorReport.signal_run_id == run.id,
+                    ShortResearchAdvisorReport.asset_type == asset_type,
+                    ShortResearchAdvisorReport.asset_code.in_(codes),
+                )
+            )
+        ).all()
+        report_by_code = {report.asset_code: report for report in advisor_rows}
+        for position in rows:
+            contexts[position.id] = SignalContext(
+                run,
+                item_by_code.get(position.asset_code),
+                report_by_code.get(position.asset_code),
+            )
+    return contexts
+
 def alert_out(row: TrackedPositionAlert) -> TrackedPositionAlertOut:
     return TrackedPositionAlertOut(
         id=row.id,
@@ -1192,6 +1329,7 @@ async def evaluate_alert_decision_v2(
 ) -> tuple[AlertDecision | None, date | None]:
     run, item, report = await latest_signal_context(session, position)
     analysis = await position_analysis(session, position, item=item)
+    merge_exit_state(position, analysis)
     technical_signal = analysis.exit_signal if analysis.exit_signal.alert_type is not None else None
     if run is None and technical_signal is None:
         return None, None
@@ -1278,6 +1416,8 @@ async def create_alert_if_needed(
 ) -> tuple[TrackedPositionAlert | None, str]:
     decision, signal_date = await evaluate_alert_decision_v2(session, position)
     if decision is None or signal_date is None:
+        if session.is_modified(position, include_collections=False):
+            await session.commit()
         return None, "no_signal"
 
     current, intraday_snapshot = await latest_tracking_price(session, position.asset_type, position.asset_code)
@@ -1290,6 +1430,8 @@ async def create_alert_if_needed(
         intraday_snapshot,
         evaluation_mode=evaluation_mode,
     ):
+        if session.is_modified(position, include_collections=False):
+            await session.commit()
         return None, "data_ineligible"
 
     if is_intraday_alert:

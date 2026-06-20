@@ -18,28 +18,51 @@ from app.schemas.tracked_positions import (
     TrackedPositionUpdate,
 )
 from app.services.tracked_positions.service import (
+    SignalContext,
     alert_out,
     cost_basis_for_position,
     create_position,
     current_snapshot,
     email_configured,
     latest_alert_for_position,
+    latest_alerts_for_positions,
     latest_signal_context,
+    latest_signal_contexts,
     position_analysis,
     recalculate_entry,
     recent_intraday_alerts_for_position,
+    recent_intraday_alerts_for_positions,
     refresh_entry_if_waiting,
 )
 
 router = APIRouter(prefix="/api/tracked-positions", tags=["tracked-positions"])
 
 
-async def _position_out(session: AsyncSession, row: TrackedPosition) -> TrackedPositionOut:
+async def _position_out(
+    session: AsyncSession,
+    row: TrackedPosition,
+    *,
+    signal_context: SignalContext | None = None,
+    latest_alert: TrackedPositionAlert | None = None,
+    latest_alert_loaded: bool = False,
+    recent_intraday_alerts: list[TrackedPositionAlert] | None = None,
+    recent_intraday_alerts_loaded: bool = False,
+) -> TrackedPositionOut:
     await refresh_entry_if_waiting(session, row)
-    latest_alert = await latest_alert_for_position(session, row.id)
-    _, item, _ = await latest_signal_context(session, row)
+    if signal_context is None:
+        _run, item, report = await latest_signal_context(session, row)
+        signal_context_loaded = True
+    else:
+        item = signal_context.item
+        report = signal_context.report
+        signal_context_loaded = True
+    if latest_alert is None and not latest_alert_loaded:
+        latest_alert = await latest_alert_for_position(session, row.id)
+    if recent_intraday_alerts is None and not recent_intraday_alerts_loaded:
+        recent_intraday_alerts = await recent_intraday_alerts_for_position(session, row.id)
+    if recent_intraday_alerts is None:
+        recent_intraday_alerts = []
     analysis = await position_analysis(session, row, item=item)
-    recent_intraday_alerts = await recent_intraday_alerts_for_position(session, row.id)
     cost_basis, cost_basis_source = cost_basis_for_position(row)
     return TrackedPositionOut(
         id=row.id,
@@ -61,7 +84,13 @@ async def _position_out(session: AsyncSession, row: TrackedPosition) -> TrackedP
         note=row.note,
         created_at=row.created_at,
         updated_at=row.updated_at,
-        current_snapshot=await current_snapshot(session, row),
+        current_snapshot=await current_snapshot(
+            session,
+            row,
+            item=item,
+            report=report,
+            signal_context_loaded=signal_context_loaded,
+        ),
         exit_signal=analysis.exit_signal,
         max_profit_pct=analysis.max_profit_pct,
         profit_giveback_pct=analysis.profit_giveback_pct,
@@ -96,23 +125,39 @@ async def list_tracked_positions(
     user: User = Depends(require_approved_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> TrackedPositionListOut:
-    rows = (
-        await session.scalars(
+    rows = list(
+        (await session.scalars(
             select(TrackedPosition).where(TrackedPosition.user_id == user.id).order_by(
                 TrackedPosition.status.asc(),
                 TrackedPosition.created_at.desc(),
                 TrackedPosition.id.desc(),
             )
-        )
-    ).all()
+        ))
+        .all()
+    )
     total = (
         await session.scalar(
             select(func.count()).select_from(TrackedPosition).where(TrackedPosition.user_id == user.id)
         )
         or 0
     )
+    position_ids = [row.id for row in rows]
+    signal_context_by_id = await latest_signal_contexts(session, rows)
+    latest_alert_by_id = await latest_alerts_for_positions(session, position_ids)
+    recent_intraday_alerts_by_id = await recent_intraday_alerts_for_positions(session, position_ids)
     return TrackedPositionListOut(
-        items=[await _position_out(session, row) for row in rows],
+        items=[
+            await _position_out(
+                session,
+                row,
+                signal_context=signal_context_by_id.get(row.id),
+                latest_alert=latest_alert_by_id.get(row.id),
+                latest_alert_loaded=True,
+                recent_intraday_alerts=recent_intraday_alerts_by_id.get(row.id, []),
+                recent_intraday_alerts_loaded=True,
+            )
+            for row in rows
+        ],
         total=total,
         email_configured=email_configured(user, request.app.state.settings),
         recipient_email=user.recipient_email,

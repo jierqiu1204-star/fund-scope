@@ -8,11 +8,12 @@ from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import akshare as ak
-from sqlalchemy import select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.defaults.short_research import ASSET_TYPE_ETF
 from app.models.entities import (
+    EtfIntradayDailySummary,
     EtfIntradayQuote,
     IntradayEtfWatchRun,
     ShortResearchSignalItem,
@@ -306,20 +307,52 @@ async def latest_intraday_quote(session: AsyncSession, etf_code: str) -> EtfIntr
 
 
 async def latest_quotes_by_code(session: AsyncSession, codes: list[str]) -> dict[str, EtfIntradayQuote]:
-    if not codes:
+    unique_codes = list(dict.fromkeys(code for code in codes if code))
+    if not unique_codes:
         return {}
-    quotes: dict[str, EtfIntradayQuote] = {}
+
+    bind = session.get_bind()
+    if bind.dialect.name == "postgresql":
+        values_sql = ", ".join(f"(:code_{index})" for index in range(len(unique_codes)))
+        params = {f"code_{index}": code for index, code in enumerate(unique_codes)}
+        stmt = text(
+            f"""
+            WITH watch_codes(etf_code) AS (VALUES {values_sql})
+            SELECT q.*
+            FROM watch_codes w
+            JOIN LATERAL (
+                SELECT *
+                FROM etf_intraday_quotes q
+                WHERE q.etf_code = w.etf_code
+                ORDER BY q.quote_time DESC, q.id DESC
+                LIMIT 1
+            ) q ON TRUE
+            """
+        )
+        rows = (await session.scalars(select(EtfIntradayQuote).from_statement(stmt).params(**params))).all()
+        return {row.etf_code: row for row in rows}
+
+    ranked = (
+        select(
+            EtfIntradayQuote.id.label("quote_id"),
+            func.row_number()
+            .over(
+                partition_by=EtfIntradayQuote.etf_code,
+                order_by=(EtfIntradayQuote.quote_time.desc(), EtfIntradayQuote.id.desc()),
+            )
+            .label("rank"),
+        )
+        .where(EtfIntradayQuote.etf_code.in_(unique_codes))
+        .subquery()
+    )
     rows = (
         await session.scalars(
             select(EtfIntradayQuote)
-            .where(EtfIntradayQuote.etf_code.in_(codes))
-            .order_by(EtfIntradayQuote.etf_code.asc(), EtfIntradayQuote.quote_time.desc(), EtfIntradayQuote.id.desc())
+            .join(ranked, ranked.c.quote_id == EtfIntradayQuote.id)
+            .where(ranked.c.rank == 1)
         )
     ).all()
-    for row in rows:
-        quotes.setdefault(row.etf_code, row)
-    return quotes
-
+    return {row.etf_code: row for row in rows}
 
 async def latest_watch_run(session: AsyncSession) -> IntradayEtfWatchRun | None:
     return cast(
@@ -653,6 +686,102 @@ async def persist_quotes(
     await session.commit()
     return updated
 
+
+async def summarize_and_cleanup_intraday_quotes(
+    session: AsyncSession,
+    *,
+    retention_trading_days: int = 60,
+) -> dict[str, Any]:
+    safe_days = max(1, retention_trading_days)
+    trade_dates = (
+        await session.scalars(
+            select(EtfIntradayQuote.trade_date)
+            .distinct()
+            .order_by(EtfIntradayQuote.trade_date.desc())
+        )
+    ).all()
+    if len(trade_dates) <= safe_days:
+        return {
+            "retention_trading_days": safe_days,
+            "cutoff_date": None,
+            "summarized_groups": 0,
+            "deleted_rows": 0,
+            "message": "盘中明细未超过保留窗口，无需清理。",
+        }
+
+    cutoff_date = trade_dates[safe_days - 1]
+    group_rows = (
+        await session.execute(
+            select(
+                EtfIntradayQuote.etf_code.label("etf_code"),
+                EtfIntradayQuote.trade_date.label("trade_date"),
+                func.count(EtfIntradayQuote.id).label("quote_count"),
+                func.min(EtfIntradayQuote.quote_time).label("first_quote_time"),
+                func.max(EtfIntradayQuote.quote_time).label("last_quote_time"),
+                func.min(EtfIntradayQuote.latest_price).label("low_price"),
+                func.max(EtfIntradayQuote.latest_price).label("high_price"),
+                func.sum(EtfIntradayQuote.volume).label("total_volume"),
+                func.sum(EtfIntradayQuote.turnover).label("total_turnover"),
+            )
+            .where(EtfIntradayQuote.trade_date < cutoff_date)
+            .group_by(EtfIntradayQuote.etf_code, EtfIntradayQuote.trade_date)
+        )
+    ).all()
+
+    summarized = 0
+    for row in group_rows:
+        first_quote = await session.scalar(
+            select(EtfIntradayQuote)
+            .where(
+                EtfIntradayQuote.etf_code == row.etf_code,
+                EtfIntradayQuote.trade_date == row.trade_date,
+            )
+            .order_by(EtfIntradayQuote.quote_time.asc(), EtfIntradayQuote.id.asc())
+        )
+        last_quote = await session.scalar(
+            select(EtfIntradayQuote)
+            .where(
+                EtfIntradayQuote.etf_code == row.etf_code,
+                EtfIntradayQuote.trade_date == row.trade_date,
+            )
+            .order_by(EtfIntradayQuote.quote_time.desc(), EtfIntradayQuote.id.desc())
+        )
+        existing = await session.scalar(
+            select(EtfIntradayDailySummary).where(
+                EtfIntradayDailySummary.etf_code == row.etf_code,
+                EtfIntradayDailySummary.trade_date == row.trade_date,
+            )
+        )
+        summary = existing or EtfIntradayDailySummary(etf_code=row.etf_code, trade_date=row.trade_date)
+        summary.quote_count = int(row.quote_count or 0)
+        summary.first_quote_time = row.first_quote_time
+        summary.last_quote_time = row.last_quote_time
+        summary.open_price = first_quote.latest_price if first_quote is not None else None
+        summary.close_price = last_quote.latest_price if last_quote is not None else None
+        summary.low_price = float(row.low_price) if row.low_price is not None else None
+        summary.high_price = float(row.high_price) if row.high_price is not None else None
+        summary.total_volume = float(row.total_volume) if row.total_volume is not None else None
+        summary.total_turnover = float(row.total_turnover) if row.total_turnover is not None else None
+        summary.source = last_quote.source if last_quote is not None else None
+        summary.summary_json = {
+            "retention_trading_days": safe_days,
+            "source": "raw_intraday_cleanup",
+            "display_only": True,
+        }
+        if existing is None:
+            session.add(summary)
+        summarized += 1
+
+    delete_result = await session.execute(delete(EtfIntradayQuote).where(EtfIntradayQuote.trade_date < cutoff_date))
+    deleted_rows = int(getattr(delete_result, "rowcount", 0) or 0)
+    await session.commit()
+    return {
+        "retention_trading_days": safe_days,
+        "cutoff_date": cutoff_date.isoformat(),
+        "summarized_groups": summarized,
+        "deleted_rows": deleted_rows,
+        "message": "已汇总并清理超过保留窗口的 ETF 盘中明细。",
+    }
 
 async def watch_status(session: AsyncSession) -> IntradayEtfWatchStatusOut:
     state = current_market_state()
