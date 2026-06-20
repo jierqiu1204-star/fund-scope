@@ -1629,6 +1629,158 @@ export default function ShortTermPage() {
     </Panel>
   );
 
+  const renderDesktopTrackingPanel = () => (
+    <Panel className="rounded-[24px]">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <SectionKicker eyebrow="我的持仓观察" title={mode.trackingTitle} description={mode.trackingDescription} />
+        <div className="rounded-[18px] bg-paper px-4 py-3 text-sm leading-6 text-ink/65">
+          收件邮箱：{trackedPositions.data?.recipient_email ?? "19535838578@163.com"}
+          <br />
+          邮件通道：{trackedPositions.data?.email_configured ? "已配置" : "未配置授权码"}
+        </div>
+      </div>
+
+      <div className="mt-5 grid gap-4 xl:grid-cols-3">
+        {activeTracked.map((item) => (
+          <div key={item.id} className="rounded-[22px] border border-ink/10 bg-white p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold text-accent">{trackingStatusLabel(item.status)}</p>
+                <h3 className="mt-1 text-xl font-semibold text-ink">
+                  {item.asset_name}
+                  <span className="ml-2 text-sm font-normal text-ink/45">{item.asset_code}</span>
+                </h3>
+                <p className="mt-1 text-xs text-ink/45">{assetTypeLabel(item.asset_type)}</p>
+              </div>
+              <span className={`shrink-0 rounded-full px-3 py-1 text-xs font-semibold ${conclusionTone(item.current_snapshot.current_label ?? "数据不足")}`}>
+                买入观察：{item.current_snapshot.current_label ?? "等待排序"}
+              </span>
+            </div>
+
+            <div className="mt-4 grid gap-2 text-sm text-ink/65">
+              <span>下单：{formatCurrency(item.buy_amount)} / {formatDate(item.buy_date)}（{orderTimeBucketLabel(item.order_time_bucket)}）</span>
+              <span>{item.asset_type === "etf" ? "买入价格日" : "确认净值日"}：{formatDate(item.confirmed_nav_date ?? item.entry_price_date)}</span>
+              <span>{item.asset_type === "etf" ? "买入价" : "确认净值"}：{item.confirmed_nav?.toFixed(4) ?? item.entry_price?.toFixed(4) ?? "等待价格"}</span>
+              <span>当前价：{item.current_snapshot.current_price?.toFixed(4) ?? "暂无"}</span>
+              <span>
+                决策口径：{priceSourceLabel(item.current_snapshot.price_source)} / {reliabilityLabel(item.current_snapshot.data_reliability)}
+                {item.current_snapshot.decision_eligible ? "，可用于提醒判断" : "，仅展示/估算参考"}
+              </span>
+              {item.current_snapshot.display_only_reason ? <span>说明：{item.current_snapshot.display_only_reason}</span> : null}
+              {item.asset_type === "etf" ? (
+                <span>
+                  数据口径：{reliabilityLabel(item.intraday_snapshot?.reliability_level)}
+                  {item.intraday_snapshot?.email_eligible ? "，可用于盘中提醒" : "，仅网页/估算参考"}
+                </span>
+              ) : null}
+              <span>
+                成本口径：{item.cost_basis === null ? "等待成本数据" : `${formatCurrency(item.cost_basis)} / ${costBasisSourceLabel(item.cost_basis_source)}`}
+              </span>
+              <span>持有：{item.holding_days === null ? "等待数据" : `${item.holding_days} 天`}</span>
+              <span>{item.confirmed_shares === null ? "估算份额" : "确认份额"}：{item.estimated_shares === null ? "等待价格" : item.estimated_shares.toFixed(2)}</span>
+              <span className={pnlTone(item.current_snapshot.estimated_pnl)}>估算盈亏：{pnlText(item)}</span>
+            </div>
+
+            <div className={`mt-4 rounded-[16px] p-3 text-sm leading-6 ${exitSignalTone(item.exit_signal.level)}`}>
+              <p className="text-xs font-semibold opacity-75">持仓处理状态</p>
+              <p className="font-semibold">{item.exit_signal.label}</p>
+              <p className="mt-1">{item.exit_signal.reason ?? "暂无持仓处理原因，继续观察公开数据。"}</p>
+              <p className="mt-1 text-xs opacity-75">
+                {item.exit_signal.email_eligible ? "满足邮件提醒条件" : "不会发邮件"}
+                {item.exit_signal.email_eligibility_reason ? `：${item.exit_signal.email_eligibility_reason}` : ""}
+              </p>
+            </div>
+
+            {item.latest_alert ? (
+              <div className={`mt-4 rounded-[16px] p-3 text-sm leading-6 ${latestAlertTone(item.latest_alert)}`}>
+                <p className="font-semibold">
+                  {alertTypeLabel(item.latest_alert.alert_type)} · {alertDeliveryLabel(item.latest_alert)}
+                </p>
+                <p>{item.latest_alert.reasons[0] ?? item.latest_alert.trigger_label}</p>
+                <p className="mt-1 text-xs">
+                  {item.latest_alert.alert_source ? `来源：${priceSourceLabel(item.latest_alert.alert_source)}；` : ""}
+                  行情时间：{formatDateTime(item.latest_alert.quote_time)}
+                  {item.latest_alert.email_error_message ? `；${item.latest_alert.email_error_message}` : ""}
+                </p>
+              </div>
+            ) : (
+              <p className="mt-4 rounded-[16px] bg-paper p-3 text-sm leading-6 text-ink/55">
+                暂无可展示告警。数据质量/IOPV/流动性问题只在网页提示，不触发卖出邮件。
+              </p>
+            )}
+
+            <details className="mt-3 rounded-[16px] bg-paper p-3 text-xs leading-5 text-ink/60">
+              <summary className="cursor-pointer font-semibold text-ink">更多风控数据</summary>
+              <div className="mt-2 grid gap-1">
+                <span>最高盈利：{percentOrWaiting(item.max_profit_pct)}</span>
+                <span>高点回吐：{percentOrWaiting(item.profit_giveback_pct)}</span>
+                {item.asset_type === "etf" ? (
+                  <>
+                    <span>价格来源：{priceSourceLabel(item.intraday_snapshot?.price_source)}</span>
+                    <span>可靠性：{reliabilityLabel(item.intraday_snapshot?.reliability_level)}</span>
+                    <span>行情时间：{formatDateTime(item.intraday_snapshot?.quote_time)}</span>
+                    <span>{item.intraday_snapshot?.message ?? "暂无数据口径说明。"}</span>
+                    <span>
+                      动态止损线：
+                      {item.dynamic_thresholds?.hard_stop_pct === null || item.dynamic_thresholds?.hard_stop_pct === undefined
+                        ? "等待数据"
+                        : formatPercent(item.dynamic_thresholds.hard_stop_pct)}
+                    </span>
+                    <span>
+                      止盈启动线：
+                      {item.dynamic_thresholds?.profit_start_pct === null || item.dynamic_thresholds?.profit_start_pct === undefined
+                        ? "等待数据"
+                        : formatPercent(item.dynamic_thresholds.profit_start_pct)}
+                    </span>
+                    <span>
+                      移动止盈回吐线：
+                      {item.dynamic_thresholds?.trailing_giveback_pct === null ||
+                      item.dynamic_thresholds?.trailing_giveback_pct === undefined
+                        ? "等待数据"
+                        : formatPercent(item.dynamic_thresholds.trailing_giveback_pct)}
+                    </span>
+                    <span>动态线由规则计算，AI只做解释，不改写这些线。</span>
+                    <span>
+                      买卖价差：
+                      {item.intraday_snapshot?.spread_pct === null || item.intraday_snapshot?.spread_pct === undefined
+                        ? "暂无"
+                        : formatPercent(item.intraday_snapshot.spread_pct)}
+                    </span>
+                    <span>
+                      折溢价：
+                      {item.intraday_snapshot?.premium_discount_pct === null ||
+                      item.intraday_snapshot?.premium_discount_pct === undefined
+                        ? "暂无"
+                        : formatPercent(item.intraday_snapshot.premium_discount_pct)}
+                    </span>
+                  </>
+                ) : null}
+                {item.recent_intraday_alerts.slice(0, 3).map((alert) => (
+                  <span key={alert.id}>
+                    {formatDateTime(alert.quote_time)} · {alertTypeLabel(alert.alert_type)} · {alertDeliveryLabel(alert)}
+                  </span>
+                ))}
+              </div>
+            </details>
+
+            <button
+              className="mt-4 rounded-full border border-ink/10 px-4 py-2 text-sm font-semibold text-ink transition hover:border-accent hover:text-accent disabled:opacity-60"
+              disabled={closeTracking.isPending}
+              onClick={() => closeTracking.mutate(item.id)}
+            >
+              标记已卖出 / 停止提醒
+            </button>
+          </div>
+        ))}
+        {!trackedPositions.isLoading && activeTracked.length === 0 ? (
+          <div className="rounded-[20px] border border-dashed border-ink/20 bg-white p-5 text-sm leading-7 text-ink/55 xl:col-span-3">
+            {mode.trackingEmpty}
+          </div>
+        ) : null}
+      </div>
+    </Panel>
+  );
+
   const renderMobileExplanationPanel = () => (
     <Panel className="rounded-[24px]">
       {selectedAsset ? (
@@ -1702,6 +1854,10 @@ export default function ShortTermPage() {
 
   return (
     <div className="space-y-6">
+      <div className="hidden lg:block">
+        {renderDesktopTrackingPanel()}
+      </div>
+
       <Panel className="rounded-[24px] bg-white/90">
         <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-start">
           <SectionKicker eyebrow="短线研究工作台" title={mode.title} description={mode.description} />
@@ -2440,155 +2596,7 @@ export default function ShortTermPage() {
       </div>
 
       <div className="hidden lg:block">
-      <Panel className="rounded-[24px]">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <SectionKicker eyebrow="我的持仓观察" title={mode.trackingTitle} description={mode.trackingDescription} />
-          <div className="rounded-[18px] bg-paper px-4 py-3 text-sm leading-6 text-ink/65">
-            收件邮箱：{trackedPositions.data?.recipient_email ?? "19535838578@163.com"}
-            <br />
-            邮件通道：{trackedPositions.data?.email_configured ? "已配置" : "未配置授权码"}
-          </div>
-        </div>
 
-        <div className="mt-5 grid gap-4 xl:grid-cols-3">
-          {activeTracked.map((item) => (
-            <div key={item.id} className="rounded-[22px] border border-ink/10 bg-white p-4">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <p className="text-xs font-semibold text-accent">{trackingStatusLabel(item.status)}</p>
-                  <h3 className="mt-1 text-xl font-semibold text-ink">
-                    {item.asset_name}
-                    <span className="ml-2 text-sm font-normal text-ink/45">{item.asset_code}</span>
-                  </h3>
-                  <p className="mt-1 text-xs text-ink/45">{assetTypeLabel(item.asset_type)}</p>
-                </div>
-                <span className={`shrink-0 rounded-full px-3 py-1 text-xs font-semibold ${conclusionTone(item.current_snapshot.current_label ?? "数据不足")}`}>
-                  买入观察：{item.current_snapshot.current_label ?? "等待排序"}
-                </span>
-              </div>
-
-              <div className="mt-4 grid gap-2 text-sm text-ink/65">
-                <span>下单：{formatCurrency(item.buy_amount)} / {formatDate(item.buy_date)}（{orderTimeBucketLabel(item.order_time_bucket)}）</span>
-                <span>{item.asset_type === "etf" ? "买入价格日" : "确认净值日"}：{formatDate(item.confirmed_nav_date ?? item.entry_price_date)}</span>
-                <span>{item.asset_type === "etf" ? "买入价" : "确认净值"}：{item.confirmed_nav?.toFixed(4) ?? item.entry_price?.toFixed(4) ?? "等待价格"}</span>
-                <span>当前价：{item.current_snapshot.current_price?.toFixed(4) ?? "暂无"}</span>
-                <span>
-                  决策口径：{priceSourceLabel(item.current_snapshot.price_source)} / {reliabilityLabel(item.current_snapshot.data_reliability)}
-                  {item.current_snapshot.decision_eligible ? "，可用于提醒判断" : "，仅展示/估算参考"}
-                </span>
-                {item.current_snapshot.display_only_reason ? <span>说明：{item.current_snapshot.display_only_reason}</span> : null}
-                {item.asset_type === "etf" ? (
-                  <span>
-                    数据口径：{reliabilityLabel(item.intraday_snapshot?.reliability_level)}
-                    {item.intraday_snapshot?.email_eligible ? "，可用于盘中提醒" : "，仅网页/估算参考"}
-                  </span>
-                ) : null}
-                <span>
-                  成本口径：{item.cost_basis === null ? "等待成本数据" : `${formatCurrency(item.cost_basis)} / ${costBasisSourceLabel(item.cost_basis_source)}`}
-                </span>
-                <span>持有：{item.holding_days === null ? "等待数据" : `${item.holding_days} 天`}</span>
-                <span>{item.confirmed_shares === null ? "估算份额" : "确认份额"}：{item.estimated_shares === null ? "等待价格" : item.estimated_shares.toFixed(2)}</span>
-                <span className={pnlTone(item.current_snapshot.estimated_pnl)}>估算盈亏：{pnlText(item)}</span>
-              </div>
-
-              <div className={`mt-4 rounded-[16px] p-3 text-sm leading-6 ${exitSignalTone(item.exit_signal.level)}`}>
-                <p className="text-xs font-semibold opacity-75">持仓处理状态</p>
-                <p className="font-semibold">{item.exit_signal.label}</p>
-                <p className="mt-1">{item.exit_signal.reason ?? "暂无持仓处理原因，继续观察公开数据。"}</p>
-                <p className="mt-1 text-xs opacity-75">
-                  {item.exit_signal.email_eligible ? "满足邮件提醒条件" : "不会发邮件"}
-                  {item.exit_signal.email_eligibility_reason ? `：${item.exit_signal.email_eligibility_reason}` : ""}
-                </p>
-              </div>
-
-              {item.latest_alert ? (
-                <div className={`mt-4 rounded-[16px] p-3 text-sm leading-6 ${latestAlertTone(item.latest_alert)}`}>
-                  <p className="font-semibold">
-                    {alertTypeLabel(item.latest_alert.alert_type)} · {alertDeliveryLabel(item.latest_alert)}
-                  </p>
-                  <p>{item.latest_alert.reasons[0] ?? item.latest_alert.trigger_label}</p>
-                  <p className="mt-1 text-xs">
-                    {item.latest_alert.alert_source ? `来源：${priceSourceLabel(item.latest_alert.alert_source)}；` : ""}
-                    行情时间：{formatDateTime(item.latest_alert.quote_time)}
-                    {item.latest_alert.email_error_message ? `；${item.latest_alert.email_error_message}` : ""}
-                  </p>
-                </div>
-              ) : (
-                <p className="mt-4 rounded-[16px] bg-paper p-3 text-sm leading-6 text-ink/55">
-                  暂无可展示告警。数据质量/IOPV/流动性问题只在网页提示，不触发卖出邮件。
-                </p>
-              )}
-
-              <details className="mt-3 rounded-[16px] bg-paper p-3 text-xs leading-5 text-ink/60">
-                <summary className="cursor-pointer font-semibold text-ink">更多风控数据</summary>
-                <div className="mt-2 grid gap-1">
-                  <span>最高盈利：{percentOrWaiting(item.max_profit_pct)}</span>
-                  <span>高点回吐：{percentOrWaiting(item.profit_giveback_pct)}</span>
-                  {item.asset_type === "etf" ? (
-                    <>
-                      <span>价格来源：{priceSourceLabel(item.intraday_snapshot?.price_source)}</span>
-                      <span>可靠性：{reliabilityLabel(item.intraday_snapshot?.reliability_level)}</span>
-                      <span>行情时间：{formatDateTime(item.intraday_snapshot?.quote_time)}</span>
-                      <span>{item.intraday_snapshot?.message ?? "暂无数据口径说明。"}</span>
-                      <span>
-                        动态止损线：
-                        {item.dynamic_thresholds?.hard_stop_pct === null || item.dynamic_thresholds?.hard_stop_pct === undefined
-                          ? "等待数据"
-                          : formatPercent(item.dynamic_thresholds.hard_stop_pct)}
-                      </span>
-                      <span>
-                        止盈启动线：
-                        {item.dynamic_thresholds?.profit_start_pct === null || item.dynamic_thresholds?.profit_start_pct === undefined
-                          ? "等待数据"
-                          : formatPercent(item.dynamic_thresholds.profit_start_pct)}
-                      </span>
-                      <span>
-                        移动止盈回吐线：
-                        {item.dynamic_thresholds?.trailing_giveback_pct === null ||
-                        item.dynamic_thresholds?.trailing_giveback_pct === undefined
-                          ? "等待数据"
-                          : formatPercent(item.dynamic_thresholds.trailing_giveback_pct)}
-                      </span>
-                      <span>动态线由规则计算，AI只做解释，不改写这些线。</span>
-                      <span>
-                        买卖价差：
-                        {item.intraday_snapshot?.spread_pct === null || item.intraday_snapshot?.spread_pct === undefined
-                          ? "暂无"
-                          : formatPercent(item.intraday_snapshot.spread_pct)}
-                      </span>
-                      <span>
-                        折溢价：
-                        {item.intraday_snapshot?.premium_discount_pct === null ||
-                        item.intraday_snapshot?.premium_discount_pct === undefined
-                          ? "暂无"
-                          : formatPercent(item.intraday_snapshot.premium_discount_pct)}
-                      </span>
-                    </>
-                  ) : null}
-                  {item.recent_intraday_alerts.slice(0, 3).map((alert) => (
-                    <span key={alert.id}>
-                      {formatDateTime(alert.quote_time)} · {alertTypeLabel(alert.alert_type)} · {alertDeliveryLabel(alert)}
-                    </span>
-                  ))}
-                </div>
-              </details>
-
-              <button
-                className="mt-4 rounded-full border border-ink/10 px-4 py-2 text-sm font-semibold text-ink transition hover:border-accent hover:text-accent disabled:opacity-60"
-                disabled={closeTracking.isPending}
-                onClick={() => closeTracking.mutate(item.id)}
-              >
-                标记已卖出 / 停止提醒
-              </button>
-            </div>
-          ))}
-          {!trackedPositions.isLoading && activeTracked.length === 0 ? (
-            <div className="rounded-[20px] border border-dashed border-ink/20 bg-white p-5 text-sm leading-7 text-ink/55 xl:col-span-3">
-              {mode.trackingEmpty}
-            </div>
-          ) : null}
-        </div>
-      </Panel>
 
       {assetType === "etf" ? (
         <Panel className="rounded-[24px] bg-white/70">
