@@ -183,6 +183,9 @@ def test_advisor_prompt_contains_safe_language_contract() -> None:
     assert "不代表买入建议" in prompt
     assert "建议买入" in prompt
     assert "目标价" in prompt
+    assert "今日买点状态" in prompt
+    assert "不能自行改分数" in prompt
+    assert "不能自行改分数、改标签、改权重、触发邮件或给出交易指令" in prompt
 
 
 def test_validate_advisor_payload_accepts_single_text_list_fields() -> None:

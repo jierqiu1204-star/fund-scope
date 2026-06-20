@@ -439,19 +439,26 @@ async def live_rankings(
         daily_entry_timing_label, daily_entry_timing_reason = _daily_entry_timing(signal_item)
 
         score_source = "daily" if base_score is not None else "unavailable"
+        live_total_score = base_score
+        intraday_adjustment_score: float | None = None
+        score_contribution_reasons: list[str] = []
+        if base_score is not None:
+            score_contribution_reasons.append(f"日线基础分 {base_score:.1f}")
         if not is_open or not is_fresh_decision_quote(quote, now):
-            live_total_score = base_score
             live_label = LIVE_LABEL_DATA_INSUFFICIENT
             live_reason = _INTRADAY_RANKING_DATA_INSUFFICIENT_REASON
+            score_contribution_reasons.append("休市或行情不新鲜，仅使用日线基础分。")
         else:
             assert quote is not None
             if quote.change_percent is None:
-                live_total_score = base_score
                 live_label = LIVE_LABEL_DATA_INSUFFICIENT
                 live_reason = _INTRADAY_RANKING_DATA_INSUFFICIENT_REASON
+                score_contribution_reasons.append("缺少盘中涨跌幅，实时调整不可用。")
             else:
                 score_source = "intraday"
                 live_label, live_reason, adjustment = _entry_timing(quote.change_percent, conclusion)
+                intraday_adjustment_score = float(adjustment)
+                score_contribution_reasons.append(f"盘中涨跌 {quote.change_percent:+.2f}%：{adjustment:+.1f} 分。")
                 live_total_score = _clamp_score(base_score + adjustment) if base_score is not None else None
                 avg_turnover_20d = (
                     _float_or_none((signal_item.metrics_json or {}).get("average_turnover_20d")) if signal_item else None
@@ -464,8 +471,12 @@ async def live_rankings(
                 ):
                     if quote.turnover >= avg_turnover_20d * 0.7:
                         live_total_score = _clamp_score(live_total_score + 1)
+                        intraday_adjustment_score = (intraday_adjustment_score or 0.0) + 1.0
+                        score_contribution_reasons.append("盘中成交额接近近期均值，流动性加 1 分。")
                     elif quote.turnover < avg_turnover_20d * 0.1:
                         live_total_score = _clamp_score(live_total_score - 2)
+                        intraday_adjustment_score = (intraday_adjustment_score or 0.0) - 2.0
+                        score_contribution_reasons.append("盘中成交额明显偏低，流动性扣 2 分。")
 
         scored_rows.append(
             {
@@ -475,7 +486,9 @@ async def live_rankings(
                 "conclusion": conclusion,
                 "base_score": base_score,
                 "live_total_score": live_total_score,
+                "intraday_adjustment_score": intraday_adjustment_score,
                 "score_source": score_source,
+                "score_contribution_reasons": score_contribution_reasons,
                 "live_entry_timing_label": live_label,
                 "live_entry_timing_reason": live_reason,
                 "daily_entry_timing_label": daily_entry_timing_label,
@@ -522,7 +535,9 @@ async def live_rankings(
                 conclusion=row["conclusion"],
                 base_score=row["base_score"],
                 live_total_score=row["live_total_score"],
+                intraday_adjustment_score=row["intraday_adjustment_score"],
                 score_source=row["score_source"],
+                score_contribution_reasons=row["score_contribution_reasons"],
                 live_entry_timing_label=row["live_entry_timing_label"],
                 live_entry_timing_reason=row["live_entry_timing_reason"],
                 daily_entry_timing_label=row["daily_entry_timing_label"],

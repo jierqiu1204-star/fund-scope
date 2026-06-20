@@ -406,6 +406,11 @@ async def test_fund_dynamic_thresholds_use_daily_nav_behavior(app) -> None:
     assert analysis.dynamic_thresholds.hard_stop_pct is not None
     assert analysis.dynamic_thresholds.hard_stop_pct < -4.0
     assert analysis.dynamic_thresholds.profit_start_pct is not None
+    assert analysis.dynamic_thresholds.rule_version == "dynamic_exit_v2"
+    assert analysis.dynamic_thresholds.distance_to_hard_stop_pct is not None
+    assert analysis.dynamic_thresholds.explanation
+    assert analysis.technical_metrics["threshold_rule_version"] == "dynamic_exit_v2"
+    assert analysis.technical_metrics["distance_to_hard_stop_pct"] is not None
     assert analysis.technical_metrics["price_source"] == "daily_close"
 
 

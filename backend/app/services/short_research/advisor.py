@@ -222,6 +222,8 @@ def _asset_name(item: ShortResearchSignalItem) -> str:
 
 def _deterministic_snapshot(item: ShortResearchSignalItem, *, is_held: bool) -> dict[str, Any]:
     metadata = SHORT_RESEARCH_ASSET_BY_KEY.get((item.asset_type, item.asset_code))
+    metrics = item.metrics_json or {}
+    rationale = item.rationale_json or {}
     return {
         "asset_type": item.asset_type,
         "asset_code": item.asset_code,
@@ -229,7 +231,10 @@ def _deterministic_snapshot(item: ShortResearchSignalItem, *, is_held: bool) -> 
         "rank": item.rank,
         "total_score": item.total_score,
         "deterministic_label": item.conclusion,
+        "entry_timing_label": metrics.get("entry_timing_label") or rationale.get("entry_timing_label"),
+        "entry_timing_reason": metrics.get("entry_timing_reason") or rationale.get("entry_timing_reason"),
         "rule_action": conservative_action_for_item(item, is_held=is_held),
+        "ai_boundaries": "AI 只能解释确定性结果，不能改分数、标签、组合权重、动态阈值或邮件触发。",
         "risk_flags": list(item.risk_flags_json or []),
         "metrics": item.metrics_json,
         "rationale": item.rationale_json,
@@ -252,6 +257,7 @@ def fallback_report(item: ShortResearchSignalItem, *, is_held: bool, reason: str
         "plain_summary": f"{name} 当前为{item.conclusion}，{fallback_reason}",
         "opportunity": [
             f"近 5 日 {_format_percent(metrics.get('return_5d'))}，近 20 日 {_format_percent(metrics.get('return_20d'))}。",
+            f"今日买点：{metrics.get('entry_timing_label') or (item.rationale_json or {}).get('entry_timing_label') or '数据不足'}；{metrics.get('entry_timing_reason') or (item.rationale_json or {}).get('entry_timing_reason') or '缺少买点解释'}",
             f"综合分 {item.total_score:.1f}，排名 #{item.rank}。",
         ],
         "risks": risks,

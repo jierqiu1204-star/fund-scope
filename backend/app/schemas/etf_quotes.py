@@ -75,7 +75,9 @@ class EtfLiveRankingItemOut(BaseModel):
     conclusion: str | None = None
     base_score: float | None = None
     live_total_score: float | None = None
+    intraday_adjustment_score: float | None = None
     score_source: str = "unavailable"
+    score_contribution_reasons: list[str] = Field(default_factory=list)
     live_entry_timing_label: str
     live_entry_timing_reason: str
     daily_entry_timing_label: str
@@ -118,10 +120,17 @@ class TrackedEtfIntradaySnapshotOut(BaseModel):
 
 
 class DynamicExitThresholdsOut(BaseModel):
+    threshold_source: str = "rule_dynamic"
+    rule_version: str = "dynamic_exit_v2"
     volatility_unit_pct: float | None = None
     hard_stop_pct: float | None = None
     profit_start_pct: float | None = None
     trailing_giveback_pct: float | None = None
     trend_weakening: bool = False
+    distance_to_hard_stop_pct: float | None = None
+    distance_to_profit_start_pct: float | None = None
+    distance_to_trailing_giveback_pct: float | None = None
+    trend_weakening_distance_pct: float | None = None
+    explanation: list[str] = Field(default_factory=list)
     liquidity_warnings: list[str] = Field(default_factory=list)
     structure_warnings: list[str] = Field(default_factory=list)

@@ -531,7 +531,7 @@ def _annotate_exit_signal_email_eligibility(
     signal: TrackedPositionExitSignal,
     intraday_snapshot: TrackedEtfIntradaySnapshotOut | None,
 ) -> TrackedPositionExitSignal:
-    reliability = _data_reliability_for_position(position, intraday_snapshot)
+    reliability = signal.data_reliability or _data_reliability_for_position(position, intraday_snapshot)
     signal.data_reliability = reliability
     if signal.alert_type is None:
         signal.email_eligible = False
@@ -584,7 +584,10 @@ def _performance_analysis(
 ) -> PositionAnalysis:
     start_date = tracking_start_date(position)
     if not chart:
-        exit_signal = _exit_signal(reasons=["等待公开净值或 ETF 日线数据，暂不能计算卖出/减仓提醒。"])
+        exit_signal = _exit_signal(
+            reasons=["等待公开净值或 ETF 日线数据，暂不能计算卖出/减仓提醒。"],
+            data_reliability=RELIABILITY_MISSING if position.asset_type == ASSET_TYPE_ETF else "unavailable",
+        )
         return PositionAnalysis(
             chart=[],
             exit_signal=_annotate_exit_signal_email_eligibility(position, exit_signal, intraday_snapshot),
@@ -600,7 +603,10 @@ def _performance_analysis(
     current_pnl_pct = current_point.estimated_pnl_pct
     pnl_points = [point for point in chart if point.estimated_pnl_pct is not None]
     if current_pnl_pct is None or not pnl_points:
-        exit_signal = _exit_signal(reasons=["缺少买入净值或估算份额，暂不能计算卖出/减仓提醒。"])
+        exit_signal = _exit_signal(
+            reasons=["缺少买入净值或估算份额，暂不能计算卖出/减仓提醒。"],
+            data_reliability=RELIABILITY_MISSING if position.asset_type == ASSET_TYPE_ETF else "unavailable",
+        )
         return PositionAnalysis(
             chart=chart,
             exit_signal=_annotate_exit_signal_email_eligibility(position, exit_signal, intraday_snapshot),
@@ -660,6 +666,40 @@ def _performance_analysis(
         and return_5d_pct < 0
     )
     trend_weakening = dynamic_thresholds.trend_weakening if dynamic_thresholds else rule_trend_weakening
+    trend_distances = []
+    if ma5:
+        trend_distances.append((current_point.price / ma5 - 1.0) * 100)
+    if ma10:
+        trend_distances.append((current_point.price / ma10 - 1.0) * 100)
+    trend_weakening_distance_pct = min(trend_distances) if trend_distances else None
+    distance_to_hard_stop_pct = current_pnl_pct - hard_stop_pct
+    distance_to_profit_start_pct = current_pnl_pct - take_profit_watch_threshold
+    distance_to_trailing_giveback_pct = (
+        trailing_threshold - profit_giveback_pct if trailing_threshold is not None else None
+    )
+    threshold_explanation = [
+        f"规则版本：{dynamic_thresholds.rule_version if dynamic_thresholds else 'fixed_exit_v1'}。",
+        f"硬止损线 {hard_stop_pct:.2f}%，当前距离硬止损线 {distance_to_hard_stop_pct:.2f} 个百分点。",
+        f"止盈观察线 {take_profit_watch_threshold:.2f}%，当前距离止盈观察线 {distance_to_profit_start_pct:.2f} 个百分点。",
+    ]
+    if dynamic_thresholds and dynamic_thresholds.volatility_unit_pct is not None:
+        threshold_explanation.append(
+            f"动态线参考近阶段波动/回撤，波动单位约 {dynamic_thresholds.volatility_unit_pct:.2f}%。"
+        )
+    if trailing_threshold is not None and distance_to_trailing_giveback_pct is not None:
+        threshold_explanation.append(
+            f"移动止盈回吐线 {trailing_threshold:.2f} 个百分点，距离触发还有 {distance_to_trailing_giveback_pct:.2f} 个百分点。"
+        )
+    if dynamic_thresholds is not None:
+        dynamic_thresholds = dynamic_thresholds.model_copy(
+            update={
+                "distance_to_hard_stop_pct": _round_or_none(distance_to_hard_stop_pct),
+                "distance_to_profit_start_pct": _round_or_none(distance_to_profit_start_pct),
+                "distance_to_trailing_giveback_pct": _round_or_none(distance_to_trailing_giveback_pct),
+                "trend_weakening_distance_pct": _round_or_none(trend_weakening_distance_pct),
+                "explanation": threshold_explanation,
+            }
+        )
     source_message = _quote_source_message(intraday_snapshot)
 
     technical_metrics: dict[str, Any] = {
@@ -675,6 +715,13 @@ def _performance_analysis(
         "trailing_threshold_pct": _round_or_none(trailing_threshold),
         "trailing_stop_pnl_pct": _round_or_none(trailing_stop_pnl_pct),
         "trend_weakening": trend_weakening,
+        "threshold_source": dynamic_thresholds.threshold_source if dynamic_thresholds else "fixed_rule",
+        "threshold_rule_version": dynamic_thresholds.rule_version if dynamic_thresholds else "fixed_exit_v1",
+        "distance_to_hard_stop_pct": _round_or_none(distance_to_hard_stop_pct),
+        "distance_to_profit_start_pct": _round_or_none(distance_to_profit_start_pct),
+        "distance_to_trailing_giveback_pct": _round_or_none(distance_to_trailing_giveback_pct),
+        "trend_weakening_distance_pct": _round_or_none(trend_weakening_distance_pct),
+        "threshold_explanation": threshold_explanation,
         "price_source": intraday_snapshot.price_source if intraday_snapshot else "daily_close",
     }
 
@@ -735,7 +782,7 @@ def _performance_analysis(
         exit_signal.label = "移动止盈提醒"
         exit_signal.reasons = [
             f"最高盈利 {max_profit_pct:.2f}%，当前盈利 {current_pnl_pct:.2f}%，已从高点回吐 {profit_giveback_pct:.2f} 个百分点。",
-            f"动态移动止盈回吐线为 {trailing_threshold:.2f} 个百分点，当前价 {current_point.price:.4f}；{source_message}",
+            f"动态移动止盈回吐线为 {trailing_threshold:.2f} 个百分点，距离触发还有 {distance_to_trailing_giveback_pct:.2f} 个百分点；当前价 {current_point.price:.4f}；{source_message}",
         ]
         exit_signal.reason = exit_signal.reasons[0]
     elif exit_signal.alert_type == ALERT_TREND_WEAKENING:
@@ -793,7 +840,7 @@ def _estimate_snapshot(
     if position.asset_type == ASSET_TYPE_ETF:
         price_source = intraday_snapshot.price_source if intraday_snapshot is not None else "unavailable"
         decision_eligible = bool(intraday_snapshot is not None and intraday_snapshot.email_eligible)
-        data_reliability = "verified" if decision_eligible else ("stale" if price is not None else "unavailable")
+        data_reliability = "verified" if decision_eligible else (RELIABILITY_STALE_QUOTE if price is not None else "unavailable")
         display_only_reason = None if decision_eligible else (
             intraday_snapshot.email_eligibility_reason if intraday_snapshot is not None else "暂无可用价格，不能触发邮件或计算持仓处理。"
         )

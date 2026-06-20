@@ -284,6 +284,8 @@ async def test_live_rankings_order_and_rank_change(client, app, monkeypatch) -> 
     assert items[0]["base_rank"] == 3
     assert items[0]["rank_change"] == 2
     assert items[0]["score_source"] == "intraday"
+    assert items[0]["intraday_adjustment_score"] is not None
+    assert any("盘中涨跌" in reason for reason in items[0]["score_contribution_reasons"])
     assert items[0]["live_entry_timing_label"] == "健康回踩"
     assert items[1]["live_rank"] == 2
     assert items[1]["base_rank"] == 2
@@ -305,6 +307,8 @@ async def test_live_rankings_marks_data_insufficient_without_faking_quote(client
     assert items[0]["base_score"] == 100
     assert items[0]["live_total_score"] == 100
     assert items[0]["score_source"] == "daily"
+    assert items[0]["intraday_adjustment_score"] is None
+    assert any("日线基础分" in reason for reason in items[0]["score_contribution_reasons"])
     assert items[0]["quote"] is None
     assert items[0]["live_entry_timing_label"] == "数据不足"
     assert items[0]["live_entry_timing_reason"] == "暂无新鲜盘中行情，暂不做盘中加分。"

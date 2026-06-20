@@ -158,6 +158,44 @@ function percentMetric(metrics: Record<string, unknown>, key: string) {
   return value === null ? "暂无" : formatPercent(value * 100);
 }
 
+type LabelValidationWindow = {
+  sample_count?: number;
+  avg_return?: number | null;
+  max_drawdown?: number | null;
+  win_rate?: number | null;
+  insufficient_sample?: boolean;
+};
+
+type LabelValidationGroup = {
+  label?: string;
+  entry_timing_label?: string;
+  key?: string;
+  windows?: Record<string, LabelValidationWindow>;
+};
+
+function labelValidationGroups(statusData: ShortResearchStatus | undefined): LabelValidationGroup[] {
+  const validation = statusData?.label_validation as { groups?: unknown } | undefined;
+  return Array.isArray(validation?.groups) ? (validation.groups as LabelValidationGroup[]) : [];
+}
+
+function labelValidationLine(group: LabelValidationGroup | undefined, window: "5" | "10") {
+  const item = group?.windows?.[window];
+  if (!item || !item.sample_count) {
+    return `${window}日：样本不足`;
+  }
+  const avg = item.avg_return === null || item.avg_return === undefined ? "暂无" : formatPercent(item.avg_return * 100);
+  const drawdown = item.max_drawdown === null || item.max_drawdown === undefined ? "暂无" : formatPercent(item.max_drawdown * 100);
+  const winRate = item.win_rate === null || item.win_rate === undefined ? "暂无" : formatPercent(item.win_rate * 100);
+  return `${window}日：样本 ${item.sample_count}，均值 ${avg}，胜率 ${winRate}，最大回撤 ${drawdown}`;
+}
+
+function signedScore(value: number | null | undefined) {
+  if (value === null || value === undefined) {
+    return "暂无";
+  }
+  return `${value >= 0 ? "+" : ""}${value.toFixed(1)} 分`;
+}
+
 function conclusionTone(conclusion: string) {
   if (conclusion === "短线观察") {
     return "bg-emerald-100 text-emerald-800";
@@ -240,7 +278,7 @@ function formatLiveScore(value: number | null | undefined) {
 
 function liveScoreText(item: IntradayEtfLiveRankingItem) {
   if (item.score_source === "intraday") {
-    return "实时综合分 " + formatLiveScore(item.live_total_score) + " 分";
+    return "实时综合分 " + formatLiveScore(item.live_total_score) + " 分（盘中调整 " + signedScore(item.intraday_adjustment_score) + "）";
   }
   if (item.score_source === "daily") {
     return "日线基础分 " + formatLiveScore(item.base_score ?? item.live_total_score) + " 分";
@@ -1031,6 +1069,12 @@ export default function ShortTermPage() {
   );
   const primaryTracked = selectedTracked[0] ?? null;
   const selectedAssetMetrics = selectedAsset?.metrics ?? {};
+  const validationGroups = labelValidationGroups(statusData);
+  const selectedValidationGroup = selectedAsset
+    ? validationGroups.find(
+        (item) => item.label === selectedAsset.conclusion && item.entry_timing_label === selectedAsset.entry_timing_label
+      )
+    : undefined;
   const selectedAssetTrendScore = numericMetric(selectedAssetMetrics, "trend_score");
   const selectedAssetSource = selectedAsset?.source_note ?? "暂无";
   const selectedHoldingStatus = primaryTracked?.current_snapshot.current_label ?? "未持仓";
@@ -1090,6 +1134,9 @@ export default function ShortTermPage() {
           hardStop: percentValueOrWaiting(primaryTracked.dynamic_thresholds.hard_stop_pct),
           profitStart: percentValueOrWaiting(primaryTracked.dynamic_thresholds.profit_start_pct),
           giveback: percentValueOrWaiting(primaryTracked.dynamic_thresholds.trailing_giveback_pct),
+          hardStopDistance: percentValueOrWaiting(primaryTracked.dynamic_thresholds.distance_to_hard_stop_pct),
+          profitDistance: percentValueOrWaiting(primaryTracked.dynamic_thresholds.distance_to_profit_start_pct),
+          givebackDistance: percentValueOrWaiting(primaryTracked.dynamic_thresholds.distance_to_trailing_giveback_pct),
           trendWeakening
         }
       : null;
@@ -1113,11 +1160,18 @@ export default function ShortTermPage() {
           <span>持仓处理状态：{selectedHoldingDecision}</span>
           <span>最新原因：{selectedLatestReason}</span>
         </div>
+        {assetType === "etf" ? (
+          <div className="mt-3 rounded-[14px] bg-paper px-3 py-2 text-xs leading-5 text-ink/60">
+            <p className="font-semibold text-ink">标签验证</p>
+            <p>{selectedValidationGroup ? labelValidationLine(selectedValidationGroup, "5") : "当前标签组合暂无足够历史验证样本。"}</p>
+            <p>{selectedValidationGroup ? labelValidationLine(selectedValidationGroup, "10") : "样本不足时只能继续观察，不能把标签当成买入结论。"}</p>
+          </div>
+        ) : null}
         <details className="mt-3 rounded-[14px] bg-paper px-3 py-2">
           <summary className="cursor-pointer text-sm font-semibold">动态阈值</summary>
           <p className="mt-2 text-xs text-ink/65">
             {thresholds
-              ? `硬止损${thresholds.hardStop}；止盈起点${thresholds.profitStart}；回撤减仓${thresholds.giveback}；趋势减弱预警${thresholds.trendWeakening}`
+              ? `硬止损${thresholds.hardStop}（距离${thresholds.hardStopDistance}）；止盈起点${thresholds.profitStart}（距离${thresholds.profitDistance}）；回撤减仓${thresholds.giveback}（距离${thresholds.givebackDistance}）；趋势减弱预警${thresholds.trendWeakening}`
               : "暂无追踪动态阈值"}
           </p>
           <p className="mt-2 text-xs leading-5 text-ink/55">
@@ -1310,6 +1364,9 @@ export default function ShortTermPage() {
                       </span>
                       <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
                         排名变化：{etfLiveRankChangeText(item.rank_change)}
+                      </span>
+                      <span className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                        分数来源：{item.score_contribution_reasons.slice(0, 2).join("；") || "等待盘中数据"}
                       </span>
                     </>
                   ) : (
@@ -1691,6 +1748,12 @@ export default function ShortTermPage() {
           <WorkbenchMetric label={mode.latestLabel} value={formatDate(currentLatestDate)} />
           <WorkbenchMetric label="短线观察" value={`${observableCount} 只`} tone="bg-emerald-50 text-emerald-800" />
           <WorkbenchMetric label="高位观察" value={`${highRiskCount} 只`} tone="bg-rose-50 text-rose-800" />
+          {assetType === "etf" ? (
+            <WorkbenchMetric label="标签验证" value={`${validationGroups.length} 组`} tone="bg-white text-ink" />
+          ) : null}
+          {assetType === "etf" ? (
+            <WorkbenchMetric label="验证时间" value={formatUtcDateTime(statusData?.label_validation_generated_at)} tone="bg-white text-ink" />
+          ) : null}
           {assetType === "etf" ? (
             <WorkbenchMetric label="滞后/失败" value={`${statusData?.etf_data_stale_count ?? 0} / ${statusData?.etf_failed_count ?? 0} 只`} tone="bg-amber-50 text-amber-900" />
           ) : null}
@@ -2542,6 +2605,9 @@ export default function ShortTermPage() {
             </p>
             <p className="mt-3 rounded-[16px] bg-paper px-4 py-3 text-xs leading-5 text-ink/55">
               {observationPortfolio.data?.methodology ?? "先按买点和风险筛选，再保留现金，不做收益承诺。"}
+              {observationPortfolio.data
+                ? ` 单只 ETF 上限 ${formatPercent((observationPortfolio.data.single_weight_cap ?? 0) * 100)}，总观察仓位上限 ${formatPercent((observationPortfolio.data.total_exposure_cap ?? 0) * 100)}。`
+                : ""}
             </p>
             <div className="mt-5 flex items-center justify-between gap-3">
               <p className="text-sm font-semibold text-ink">主观察组合</p>

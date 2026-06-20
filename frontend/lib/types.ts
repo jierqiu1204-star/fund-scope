@@ -472,6 +472,8 @@ export type ShortResearchStatus = {
   high_risk_count: number;
   data_issue_count: number;
   data_health: ShortResearchDataHealth[];
+  label_validation: Record<string, unknown>;
+  label_validation_generated_at: string | null;
 };
 
 export type ShortResearchChartPoint = {
@@ -569,6 +571,9 @@ export type ShortResearchObservationPortfolio = {
   watch_only_items: ShortResearchObservationPortfolioItem[];
   excluded_items: ShortResearchObservationPortfolioItem[];
   cash_weight: number;
+  single_weight_cap: number | null;
+  total_exposure_cap: number | null;
+  constraint_summary: Record<string, unknown>;
   research_only: boolean;
   no_trade_instruction: boolean;
   note: string;
@@ -750,7 +755,9 @@ export type IntradayEtfLiveRankingItem = {
   conclusion: string | null;
   base_score: number | null;
   live_total_score: number | null;
+  intraday_adjustment_score: number | null;
   score_source: "intraday" | "daily" | "unavailable";
+  score_contribution_reasons: string[];
   live_entry_timing_label: string;
   live_entry_timing_reason: string;
   daily_entry_timing_label: string;
@@ -793,11 +800,18 @@ export type TrackedEtfIntradaySnapshot = {
 };
 
 export type DynamicExitThresholds = {
+  threshold_source: string;
+  rule_version: string;
   volatility_unit_pct: number | null;
   hard_stop_pct: number | null;
   profit_start_pct: number | null;
   trailing_giveback_pct: number | null;
   trend_weakening: boolean;
+  distance_to_hard_stop_pct: number | null;
+  distance_to_profit_start_pct: number | null;
+  distance_to_trailing_giveback_pct: number | null;
+  trend_weakening_distance_pct: number | null;
+  explanation: string[];
   liquidity_warnings: string[];
   structure_warnings: string[];
 };

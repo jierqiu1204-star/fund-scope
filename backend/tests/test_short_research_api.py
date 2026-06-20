@@ -219,6 +219,9 @@ async def test_short_research_signal_generation_is_deterministic_and_research_on
     assert body["status"] == "success"
     assert body["summary"]["item_count"] == 200
     assert body["summary"]["research_only"] is True
+    assert body["summary"]["experiment"]["portfolio_single_weight_cap"] == 0.3
+    assert body["summary"]["label_validation"]["rule_version"] == "label_validation_v1"
+    assert body["summary"]["label_validation"]["groups"]
     assert body["items"]
     assert {item["conclusion"] for item in body["items"]}.issubset(allowed_conclusions())
     assert any(item["code"] == "110020" and item["asset_type"] == "fund" for item in body["items"])
@@ -417,6 +420,9 @@ async def test_short_research_observation_portfolio_filters_out_high_watch_and_b
     body = response.json()
     assert body["asset_type"] == "etf"
     assert body["cash_weight"] < 1.0
+    assert body["single_weight_cap"] == 0.3
+    assert body["total_exposure_cap"] == 0.6
+    assert body["constraint_summary"]["single_weight_cap"] == 0.3
     assert body["methodology"]
     assert len(body["items"]) == 2
     assert [item["code"] for item in body["items"]] == ["560904", "560901"]
@@ -520,4 +526,5 @@ async def test_short_research_observation_portfolio_reduces_theme_and_correlatio
     assert "561002" not in item_codes
     assert "561002" in watch_codes
     assert any("相关性" in "；".join(item["risk_reasons"]) for item in body["watch_only_items"])
-    assert body["cash_weight"] >= 0.6
+    assert all(item["target_weight"] <= 0.3 for item in body["items"])
+    assert body["cash_weight"] >= 0.4

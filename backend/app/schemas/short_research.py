@@ -35,6 +35,8 @@ class ShortResearchStatusOut(BaseModel):
     high_risk_count: int
     data_issue_count: int
     data_health: list[ShortResearchDataHealthOut] = Field(default_factory=list)
+    label_validation: dict[str, Any] = Field(default_factory=dict)
+    label_validation_generated_at: datetime | None = None
 
 
 class ShortResearchDataSyncRequest(BaseModel):
@@ -154,6 +156,9 @@ class ShortResearchObservationPortfolioOut(BaseModel):
     watch_only_items: list[ShortResearchObservationPortfolioItemOut] = Field(default_factory=list)
     excluded_items: list[ShortResearchObservationPortfolioItemOut] = Field(default_factory=list)
     cash_weight: float
+    single_weight_cap: float | None = None
+    total_exposure_cap: float | None = None
+    constraint_summary: dict[str, Any] = Field(default_factory=dict)
     research_only: bool
     no_trade_instruction: bool
     note: str
