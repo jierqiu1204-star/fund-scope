@@ -119,6 +119,19 @@ def _entry_timing(
     return LIVE_LABEL_CHASE_WARNING, "涨幅过快，短线追高风险较高，降分。", -3
 
 
+def _daily_entry_timing(signal_item: ShortResearchSignalItem | None) -> tuple[str, str]:
+    if signal_item is None:
+        return LIVE_LABEL_DATA_INSUFFICIENT, "缺少最新短线排序缓存，请先生成短线排序。"
+    metrics = signal_item.metrics_json or {}
+    rationale = signal_item.rationale_json or {}
+    label = metrics.get("entry_timing_label") or rationale.get("entry_timing_label")
+    reason = metrics.get("entry_timing_reason") or rationale.get("entry_timing_reason")
+    return (
+        str(label or LIVE_LABEL_DATA_INSUFFICIENT),
+        str(reason or "短线排序缓存缺少日线买点，请重新生成短线排序。"),
+    )
+
+
 @dataclass(frozen=True)
 class NormalizedQuote:
     etf_code: str
@@ -411,6 +424,7 @@ async def live_rankings(
         base_rank = watch_item.rank
         conclusion = signal_item.conclusion if signal_item is not None else None
         quote = latest_quotes.get(watch_item.etf_code)
+        daily_entry_timing_label, daily_entry_timing_reason = _daily_entry_timing(signal_item)
 
         if quote is None or is_quote_stale(quote.quote_time, now):
             live_total_score = _clamp_score(base_score - 8) if base_score is not None else None
@@ -448,6 +462,8 @@ async def live_rankings(
                 "live_total_score": live_total_score,
                 "live_entry_timing_label": live_label,
                 "live_entry_timing_reason": live_reason,
+                "daily_entry_timing_label": daily_entry_timing_label,
+                "daily_entry_timing_reason": daily_entry_timing_reason,
                 "sources": sorted(watch_item.sources),
                 "quote": quote_out(quote, etf_name=name, now=now) if quote is not None else None,
             }
@@ -492,6 +508,8 @@ async def live_rankings(
                 live_total_score=row["live_total_score"],
                 live_entry_timing_label=row["live_entry_timing_label"],
                 live_entry_timing_reason=row["live_entry_timing_reason"],
+                daily_entry_timing_label=row["daily_entry_timing_label"],
+                daily_entry_timing_reason=row["daily_entry_timing_reason"],
                 quote=row["quote"],
             )
             for row in selected

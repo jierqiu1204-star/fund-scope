@@ -76,6 +76,8 @@ class EtfLiveRankingItemOut(BaseModel):
     live_total_score: float | None = None
     live_entry_timing_label: str
     live_entry_timing_reason: str
+    daily_entry_timing_label: str
+    daily_entry_timing_reason: str
     quote: EtfIntradayQuoteOut | None = None
 
 

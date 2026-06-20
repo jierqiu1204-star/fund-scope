@@ -80,8 +80,16 @@ async def _seed_signal_run(
                     conclusion=conclusions[i] if i < len(conclusions) else CONCLUSION_WATCH,
                     score_breakdown_json={},
                     risk_flags_json=[],
-                    rationale_json={"key_reason": "test"},
-                    metrics_json={"default_display_eligible": True},
+                    rationale_json={
+                        "key_reason": "test",
+                        "entry_timing_label": "趋势延续",
+                        "entry_timing_reason": "日线趋势仍在。",
+                    },
+                    metrics_json={
+                        "default_display_eligible": True,
+                        "entry_timing_label": "趋势延续",
+                        "entry_timing_reason": "日线趋势仍在。",
+                    },
                 )
                 for i in range(count)
             ]
@@ -294,6 +302,8 @@ async def test_live_rankings_marks_data_insufficient_without_faking_quote(client
     assert items[0]["quote"] is None
     assert items[0]["live_entry_timing_label"] == "数据不足"
     assert items[0]["live_entry_timing_reason"] == "暂无新鲜盘中行情，暂不做盘中加分。"
+    assert items[0]["daily_entry_timing_label"] == "趋势延续"
+    assert items[0]["daily_entry_timing_reason"] == "日线趋势仍在。"
 
 
 @pytest.mark.asyncio

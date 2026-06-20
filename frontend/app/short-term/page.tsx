@@ -246,6 +246,30 @@ function liveRankingQuote(item: RankedAssetItem) {
   return isLiveRankingItem(item) ? item.quote : null;
 }
 
+function itemEntryTimingDisplay(item: RankedAssetItem, marketStatus?: string | null) {
+  if (!isLiveRankingItem(item)) {
+    return {
+      title: "今日买点",
+      label: item.entry_timing_label,
+      reason: rationaleText(item, "key_reason", "按近期趋势、风险和数据质量生成。"),
+    };
+  }
+  const hasFreshLiveTiming =
+    marketStatus === "open" && item.quote !== null && !item.quote.is_stale && item.live_entry_timing_label !== "数据不足";
+  if (hasFreshLiveTiming) {
+    return {
+      title: "盘中买点状态",
+      label: item.live_entry_timing_label,
+      reason: item.live_entry_timing_reason,
+    };
+  }
+  return {
+    title: "日线买点参考",
+    label: item.daily_entry_timing_label,
+    reason: item.daily_entry_timing_reason,
+  };
+}
+
 function shortResearchThemeTags(item: RankedAssetItem): string[] {
   return isLiveRankingItem(item) ? [] : item.theme_tags;
 }
@@ -1198,6 +1222,7 @@ export default function ShortTermPage() {
             const quote = liveRankingQuote(item);
             const quotedTime = quote?.quote_time;
             const livePrice = quote?.latest_price;
+            const timingDisplay = itemEntryTimingDisplay(item, etfLiveData?.market_status);
             return (
               <button
                 key={`${itemAssetType}-${itemCode}`}
@@ -1220,7 +1245,7 @@ export default function ShortTermPage() {
                       </span>
                     </h3>
                     <p className={`mt-2 line-clamp-2 text-sm leading-6 ${isSelected ? "text-white/65" : "text-ink/60"}`}>
-                      {isLiveItem ? item.live_entry_timing_reason : rationaleText(item, "key_reason", "暂无")}
+                      {timingDisplay.reason}
                     </p>
                   </div>
                   <div className="flex flex-wrap gap-2">
@@ -1237,9 +1262,9 @@ export default function ShortTermPage() {
                       买入观察状态：{itemConclusion(item)}
                     </span>
                     <span
-                      className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : entryTimingTone(isLiveItem ? item.live_entry_timing_label : item.entry_timing_label)}`}
+                      className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : entryTimingTone(timingDisplay.label)}`}
                     >
-                      {isLiveItem ? "盘中买点状态" : "今日买点"}：{isLiveItem ? item.live_entry_timing_label : item.entry_timing_label}
+                      {timingDisplay.title}：{timingDisplay.label}
                     </span>
                     {isLiveItem ? (
                       <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : ""}`}>
@@ -1800,6 +1825,7 @@ export default function ShortTermPage() {
               const quote = liveRankingQuote(item);
               const quotedTime = quote?.quote_time;
               const livePrice = quote?.latest_price;
+              const timingDisplay = itemEntryTimingDisplay(item, etfLiveData?.market_status);
               return (
                 <button
                   key={`${itemAssetType}-${itemCode}`}
@@ -1822,7 +1848,7 @@ export default function ShortTermPage() {
                         </span>
                       </h3>
                       <p className={`mt-2 line-clamp-2 text-sm leading-6 ${isSelected ? "text-white/65" : "text-ink/60"}`}>
-                        {isLiveItem ? item.live_entry_timing_reason : rationaleText(item, "key_reason", "按近期趋势、风险和数据质量生成。")}
+                        {timingDisplay.reason}
                       </p>
                     </div>
                     <div className="flex flex-wrap gap-2">
@@ -1838,10 +1864,10 @@ export default function ShortTermPage() {
                       </span>
                       <span
                         className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                          isSelected ? "bg-white/15 text-white" : entryTimingTone(isLiveItem ? item.live_entry_timing_label : item.entry_timing_label)
+                          isSelected ? "bg-white/15 text-white" : entryTimingTone(timingDisplay.label)
                         }`}
                       >
-                        {isLiveItem ? "盘中买点状态" : "今日买点"}：{isLiveItem ? item.live_entry_timing_label : item.entry_timing_label}
+                        {timingDisplay.title}：{timingDisplay.label}
                       </span>
                     {isLiveItem ? (
                       <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : ""}`}>

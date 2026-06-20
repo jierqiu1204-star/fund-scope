@@ -746,6 +746,8 @@ export type IntradayEtfLiveRankingItem = {
   live_total_score: number | null;
   live_entry_timing_label: string;
   live_entry_timing_reason: string;
+  daily_entry_timing_label: string;
+  daily_entry_timing_reason: string;
   quote: EtfIntradayQuote | null;
 };
 
