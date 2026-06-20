@@ -22,6 +22,7 @@ class EtfIntradayQuoteOut(BaseModel):
     source: str
     freshness_status: str
     is_stale: bool = False
+    quote_time_is_fallback: bool = False
 
 
 class IntradayEtfWatchRunOut(BaseModel):
@@ -74,6 +75,7 @@ class EtfLiveRankingItemOut(BaseModel):
     conclusion: str | None = None
     base_score: float | None = None
     live_total_score: float | None = None
+    score_source: str = "unavailable"
     live_entry_timing_label: str
     live_entry_timing_reason: str
     daily_entry_timing_label: str

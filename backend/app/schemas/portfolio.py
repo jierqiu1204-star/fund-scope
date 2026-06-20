@@ -10,11 +10,12 @@ class HoldingItem(BaseModel):
     fund_name: str
     shares: float
     cost_basis: float
-    market_value: float
-    pnl: float
-    pnl_pct: float
+    market_value: float | None
+    pnl: float | None
+    pnl_pct: float | None
     is_stale: bool
     as_of_date: date | None
+    valuation_status: str = "ready"
 
 
 class HoldingsResponse(BaseModel):

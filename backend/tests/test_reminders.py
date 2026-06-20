@@ -25,7 +25,7 @@ from app.services.notifier import Notifier
         (40, 833.0, "合理 常规定投"),
         (65, 416.5, "偏高 减量"),
         (85, 0.0, "高估 暂停本月定投"),
-        (None, 833.0, "估值数据缺失 使用默认金额"),
+        (None, 833.0, "估值缺失 按固定计划或人工确认"),
     ],
 )
 def test_dca_calculator_matches_percentile_bands(percentile, amount, label) -> None:

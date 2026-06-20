@@ -222,7 +222,7 @@ async def test_watchlist_uses_top20_and_merges_active_tracked_etfs(app) -> None:
 
 
 @pytest.mark.asyncio
-async def test_live_rankings_order_and_rank_change(client, app) -> None:
+async def test_live_rankings_order_and_rank_change(client, app, monkeypatch) -> None:
     await _seed_signal_run(
         app,
         count=3,
@@ -230,6 +230,10 @@ async def test_live_rankings_order_and_rank_change(client, app) -> None:
         total_scores=[60.0, 70.0, 80.0],
     )
     now = datetime.now().replace(microsecond=0)
+    monkeypatch.setattr(
+        "app.services.intraday_etf.service.current_market_state",
+        lambda: MarketState("open", "morning", now.replace(tzinfo=ASIA_SHANGHAI)),
+    )
     async with app.state.db.session() as session:
         session.add(
             EtfIntradayQuote(
@@ -279,6 +283,7 @@ async def test_live_rankings_order_and_rank_change(client, app) -> None:
     assert items[0]["live_rank"] == 1
     assert items[0]["base_rank"] == 3
     assert items[0]["rank_change"] == 2
+    assert items[0]["score_source"] == "intraday"
     assert items[0]["live_entry_timing_label"] == "健康回踩"
     assert items[1]["live_rank"] == 2
     assert items[1]["base_rank"] == 2
@@ -298,7 +303,8 @@ async def test_live_rankings_marks_data_insufficient_without_faking_quote(client
     assert len(items) == 1
     assert items[0]["etf_code"] == "510000"
     assert items[0]["base_score"] == 100
-    assert items[0]["live_total_score"] == 92
+    assert items[0]["live_total_score"] == 100
+    assert items[0]["score_source"] == "daily"
     assert items[0]["quote"] is None
     assert items[0]["live_entry_timing_label"] == "数据不足"
     assert items[0]["live_entry_timing_reason"] == "暂无新鲜盘中行情，暂不做盘中加分。"
@@ -328,6 +334,7 @@ async def test_quote_normalization_stale_handling_and_persist_only_watched(app) 
     assert quote is not None
     assert quote.etf_code == "510000"
     assert quote.latest_price == 1.234
+    assert quote.raw["quote_time_is_fallback"] is False
     assert is_quote_stale(datetime.now() - timedelta(minutes=5)) is True
 
     def fake_fetcher() -> pd.DataFrame:
@@ -357,10 +364,30 @@ async def test_quote_normalization_stale_handling_and_persist_only_watched(app) 
     assert rows[0].raw_json["provider_timestamp"] == quote_time.isoformat()
 
 
+def test_quote_normalization_marks_missing_time_as_display_only() -> None:
+    fallback_time = datetime(2026, 6, 17, 10, 1, 0, tzinfo=ASIA_SHANGHAI)
+    quote = normalize_spot_record(
+        {
+            "code": "510000",
+            "latest_price": "1.234",
+            "change_percent": "0.8",
+        },
+        fallback_time=fallback_time,
+    )
+
+    assert quote is not None
+    assert quote.quote_time == fallback_time.replace(tzinfo=None)
+    assert quote.raw["quote_time_is_fallback"] is True
+
+
 @pytest.mark.asyncio
-async def test_etf_entry_uses_manual_price_then_fresh_intraday_fallback(app) -> None:
+async def test_etf_entry_uses_manual_price_then_fresh_intraday_fallback(app, monkeypatch) -> None:
     await _seed_price_history(app, "512800")
     now = datetime.now().replace(microsecond=0)
+    monkeypatch.setattr(
+        "app.services.intraday_etf.service.current_market_state",
+        lambda: MarketState("open", "morning", now.replace(tzinfo=ASIA_SHANGHAI)),
+    )
     async with app.state.db.session() as session:
         session.add(
             EtfIntradayQuote(
@@ -401,6 +428,29 @@ async def test_etf_entry_uses_manual_price_then_fresh_intraday_fallback(app) -> 
     assert manual.entry_price == 0.8
     assert fallback.entry_price == 0.814
     assert fallback.entry_price_date == now.date()
+
+
+@pytest.mark.asyncio
+async def test_etf_entry_requires_manual_price_without_fresh_intraday_quote(app) -> None:
+    await _seed_price_history(app, "512800", start_price=0.8)
+    buy_date = date(2026, 6, 17)
+
+    async with app.state.db.session() as session:
+        position = await create_position(
+            session,
+            asset_type="etf",
+            asset_code="512800",
+            user_id=1,
+            buy_amount=3000,
+            buy_date=buy_date,
+            order_time_bucket="before_15",
+            confirmed_nav_date=None,
+            confirmed_nav=None,
+        )
+
+    assert position.entry_price is None
+    assert position.entry_price_date is None
+    assert position.estimated_shares is None
 
 
 @pytest.mark.asyncio
@@ -834,10 +884,14 @@ async def test_missing_iopv_warning_is_web_only(app, settings, monkeypatch) -> N
 
 
 @pytest.mark.asyncio
-async def test_intraday_watch_status_api_and_tracked_position_fields(client, app) -> None:
+async def test_intraday_watch_status_api_and_tracked_position_fields(client, app, monkeypatch) -> None:
     await _seed_signal_run(app, count=1)
     await _seed_price_history(app, "510000")
     now = datetime.now().replace(microsecond=0)
+    monkeypatch.setattr(
+        "app.services.intraday_etf.service.current_market_state",
+        lambda: MarketState("open", "morning", now.replace(tzinfo=ASIA_SHANGHAI)),
+    )
     async with app.state.db.session() as session:
         session.add(
             TrackedPosition(
@@ -887,9 +941,13 @@ async def test_intraday_watch_status_api_and_tracked_position_fields(client, app
 
 
 @pytest.mark.asyncio
-async def test_intraday_provider_failure_falls_back_to_cached_quote(app) -> None:
+async def test_intraday_provider_failure_falls_back_to_cached_quote(app, monkeypatch) -> None:
     await _seed_signal_run(app, count=1)
     now = datetime.now().replace(microsecond=0)
+    monkeypatch.setattr(
+        "app.services.intraday_etf.service.current_market_state",
+        lambda: MarketState("open", "morning", now.replace(tzinfo=ASIA_SHANGHAI)),
+    )
     async with app.state.db.session() as session:
         session.add(
             EtfIntradayQuote(

@@ -10,6 +10,16 @@ import type { HoldingsResponse, ValueHistoryPoint } from "@/lib/types";
 
 const COLORS = ["#b5532d", "#1f5c4b", "#d8a657", "#7f95d1", "#cf6a87"];
 
+function valuationStatusText(status: string) {
+  if (status === "missing_snapshot") {
+    return "等待持仓快照或净值数据";
+  }
+  if (status === "missing_nav") {
+    return "等待最新净值数据";
+  }
+  return "估值已就绪";
+}
+
 export default function PortfolioPage() {
   const holdings = useQuery({
     queryKey: ["holdings"],
@@ -21,9 +31,11 @@ export default function PortfolioPage() {
   });
 
   const items = holdings.data?.items ?? [];
-  const totalValue = items.reduce((sum, item) => sum + item.market_value, 0);
+  const valuedItems = items.filter((item) => item.market_value !== null && item.pnl !== null && item.pnl_pct !== null);
+  const totalValue = valuedItems.reduce((sum, item) => sum + (item.market_value ?? 0), 0);
   const totalCost = items.reduce((sum, item) => sum + item.cost_basis, 0);
-  const totalPnl = totalValue - totalCost;
+  const allItemsValued = items.length > 0 && valuedItems.length === items.length;
+  const totalPnl = allItemsValued ? totalValue - totalCost : null;
 
   return (
     <div className="space-y-8">
@@ -34,12 +46,12 @@ export default function PortfolioPage() {
       />
 
       <div className="grid gap-4 md:grid-cols-3">
-        <StatPill label="当前市值" value={formatCurrency(totalValue)} />
+        <StatPill label="当前市值" value={valuedItems.length ? formatCurrency(totalValue) : "等待数据"} />
         <StatPill label="投入成本" value={formatCurrency(totalCost)} tone="bg-white text-ink" />
         <StatPill
           label="累计盈亏"
-          value={`${formatCurrency(totalPnl)} / ${totalCost ? formatPercent((totalPnl / totalCost) * 100) : "0.00%"}`}
-          tone={totalPnl >= 0 ? "bg-emerald-100 text-emerald-900" : "bg-rose-100 text-rose-900"}
+          value={totalPnl === null ? "等待持仓快照" : `${formatCurrency(totalPnl)} / ${totalCost ? formatPercent((totalPnl / totalCost) * 100) : "0.00%"}`}
+          tone={totalPnl === null ? "bg-amber-50 text-amber-900" : totalPnl >= 0 ? "bg-emerald-100 text-emerald-900" : "bg-rose-100 text-rose-900"}
         />
       </div>
 
@@ -85,8 +97,8 @@ export default function PortfolioPage() {
             <div className="h-80">
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
-                  <Pie data={items} dataKey="market_value" nameKey="fund_name" innerRadius={70} outerRadius={108}>
-                    {items.map((entry, index) => (
+                  <Pie data={valuedItems} dataKey="market_value" nameKey="fund_name" innerRadius={70} outerRadius={108}>
+                    {valuedItems.map((entry, index) => (
                       <Cell key={entry.fund_code} fill={COLORS[index % COLORS.length]} />
                     ))}
                   </Pie>
@@ -115,17 +127,21 @@ export default function PortfolioPage() {
               </div>
               <div className="flex justify-between">
                 <span className="text-ink/60">市值</span>
-                <span>{formatCurrency(item.market_value)}</span>
+                <span>{item.market_value === null ? "等待数据" : formatCurrency(item.market_value)}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-ink/60">盈亏</span>
-                <span className={item.pnl >= 0 ? "text-emerald-700" : "text-rose-700"}>
-                  {formatCurrency(item.pnl)} / {formatPercent(item.pnl_pct)}
+                <span className={item.pnl === null ? "text-ink/50" : item.pnl >= 0 ? "text-emerald-700" : "text-rose-700"}>
+                  {item.pnl === null || item.pnl_pct === null ? "等待数据" : `${formatCurrency(item.pnl)} / ${formatPercent(item.pnl_pct)}`}
                 </span>
               </div>
             </div>
             <div className="mt-6 rounded-2xl bg-paper px-4 py-3 text-xs uppercase tracking-[0.2em] text-ink/60">
-              {item.is_stale ? `数据可能过期，最近日期 ${formatDate(item.as_of_date)}` : `数据截至 ${formatDate(item.as_of_date)}`}
+              {item.valuation_status === "ready"
+                ? item.is_stale
+                  ? `数据可能过期，最近日期 ${formatDate(item.as_of_date)}`
+                  : `数据截至 ${formatDate(item.as_of_date)}`
+                : valuationStatusText(item.valuation_status)}
             </div>
           </Panel>
         ))}

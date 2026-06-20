@@ -11,7 +11,7 @@ class DCAResult:
 
 def compute_dca_amount(base_amount: float, percentile: float | None) -> DCAResult:
     if percentile is None:
-        return DCAResult(amount=round(base_amount, 2), reason="估值数据缺失 使用默认金额")
+        return DCAResult(amount=round(base_amount, 2), reason="估值缺失 按固定计划或人工确认")
     if percentile < 20:
         return DCAResult(amount=round(base_amount * 1.5, 2), reason="低估 加码")
     if percentile < 50:

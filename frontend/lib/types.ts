@@ -3,11 +3,12 @@ export type HoldingItem = {
   fund_name: string;
   shares: number;
   cost_basis: number;
-  market_value: number;
-  pnl: number;
-  pnl_pct: number;
+  market_value: number | null;
+  pnl: number | null;
+  pnl_pct: number | null;
   is_stale: boolean;
   as_of_date: string | null;
+  valuation_status: "ready" | "missing_snapshot" | "missing_nav";
 };
 
 export type HoldingsResponse = {
@@ -584,6 +585,10 @@ export type TrackedPositionSnapshot = {
   advisor_label: string | null;
   risk_flags: string[];
   explanation: string | null;
+  data_reliability: string;
+  price_source: string;
+  decision_eligible: boolean;
+  display_only_reason: string | null;
 };
 
 export type TrackedPositionExitSignal = {
@@ -692,6 +697,7 @@ export type EtfIntradayQuote = {
   source: string;
   freshness_status: string;
   is_stale: boolean;
+  quote_time_is_fallback: boolean;
 };
 
 export type IntradayEtfWatchItem = {
@@ -744,6 +750,7 @@ export type IntradayEtfLiveRankingItem = {
   conclusion: string | null;
   base_score: number | null;
   live_total_score: number | null;
+  score_source: "intraday" | "daily" | "unavailable";
   live_entry_timing_label: string;
   live_entry_timing_reason: string;
   daily_entry_timing_label: string;

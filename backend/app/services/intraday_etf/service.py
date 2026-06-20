@@ -188,7 +188,7 @@ def _text(record: dict[str, Any], *keys: str) -> str | None:
     return None
 
 
-def _parse_quote_time(record: dict[str, Any], fallback: datetime | None = None) -> datetime:
+def _parse_quote_time(record: dict[str, Any], fallback: datetime | None = None) -> tuple[datetime, bool]:
     raw = _text(record, "行情时间", "更新时间", "time", "quote_time")
     if raw:
         for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%H:%M:%S", "%H:%M"):
@@ -196,11 +196,21 @@ def _parse_quote_time(record: dict[str, Any], fallback: datetime | None = None) 
                 parsed = datetime.strptime(raw, fmt)
                 if parsed.year == 1900:
                     base = (fallback or datetime.now(ASIA_SHANGHAI)).astimezone(ASIA_SHANGHAI)
-                    return datetime.combine(base.date(), parsed.time()).replace(tzinfo=ASIA_SHANGHAI).replace(tzinfo=None)
-                return parsed
+                    quote_time = datetime.combine(base.date(), parsed.time()).replace(tzinfo=ASIA_SHANGHAI).replace(tzinfo=None)
+                    return quote_time, False
+                return parsed, False
             except ValueError:
                 continue
-    return (fallback or datetime.now(ASIA_SHANGHAI)).astimezone(ASIA_SHANGHAI).replace(tzinfo=None)
+    quote_time = (fallback or datetime.now(ASIA_SHANGHAI)).astimezone(ASIA_SHANGHAI).replace(tzinfo=None)
+    return quote_time, True
+
+
+def is_quote_time_fallback(quote: EtfIntradayQuote | None) -> bool:
+    return bool(quote is not None and (quote.raw_json or {}).get("quote_time_is_fallback"))
+
+
+def is_fresh_decision_quote(quote: EtfIntradayQuote | None, now: datetime | None = None) -> bool:
+    return bool(quote is not None and not is_quote_time_fallback(quote) and not is_quote_stale(quote.quote_time, now))
 
 
 def _json_safe(value: Any) -> Any:
@@ -234,7 +244,9 @@ def normalize_spot_record(record: dict[str, Any], *, fallback_time: datetime | N
     price = _number(record, "最新价", "现价", "最新", "price", "latest_price")
     if not code or price is None or price <= 0:
         return None
-    quote_time = _parse_quote_time(record, fallback=fallback_time)
+    quote_time, quote_time_is_fallback = _parse_quote_time(record, fallback=fallback_time)
+    raw = _json_safe_record(record)
+    raw["quote_time_is_fallback"] = quote_time_is_fallback
     return NormalizedQuote(
         etf_code=code[-6:],
         quote_time=quote_time,
@@ -248,7 +260,7 @@ def normalize_spot_record(record: dict[str, Any], *, fallback_time: datetime | N
         iopv=_number(record, "IOPV", "iopv"),
         premium_discount_pct=_number(record, "折价率", "溢价率", "折溢价率", "premium_discount_pct"),
         source=QUOTE_SOURCE_AKSHARE,
-        raw=_json_safe_record(record),
+        raw=raw,
     )
 
 
@@ -426,16 +438,19 @@ async def live_rankings(
         quote = latest_quotes.get(watch_item.etf_code)
         daily_entry_timing_label, daily_entry_timing_reason = _daily_entry_timing(signal_item)
 
-        if quote is None or is_quote_stale(quote.quote_time, now):
-            live_total_score = _clamp_score(base_score - 8) if base_score is not None else None
+        score_source = "daily" if base_score is not None else "unavailable"
+        if not is_open or not is_fresh_decision_quote(quote, now):
+            live_total_score = base_score
             live_label = LIVE_LABEL_DATA_INSUFFICIENT
             live_reason = _INTRADAY_RANKING_DATA_INSUFFICIENT_REASON
         else:
+            assert quote is not None
             if quote.change_percent is None:
-                live_total_score = _clamp_score(base_score - 8) if base_score is not None else None
+                live_total_score = base_score
                 live_label = LIVE_LABEL_DATA_INSUFFICIENT
                 live_reason = _INTRADAY_RANKING_DATA_INSUFFICIENT_REASON
             else:
+                score_source = "intraday"
                 live_label, live_reason, adjustment = _entry_timing(quote.change_percent, conclusion)
                 live_total_score = _clamp_score(base_score + adjustment) if base_score is not None else None
                 avg_turnover_20d = (
@@ -460,6 +475,7 @@ async def live_rankings(
                 "conclusion": conclusion,
                 "base_score": base_score,
                 "live_total_score": live_total_score,
+                "score_source": score_source,
                 "live_entry_timing_label": live_label,
                 "live_entry_timing_reason": live_reason,
                 "daily_entry_timing_label": daily_entry_timing_label,
@@ -506,6 +522,7 @@ async def live_rankings(
                 conclusion=row["conclusion"],
                 base_score=row["base_score"],
                 live_total_score=row["live_total_score"],
+                score_source=row["score_source"],
                 live_entry_timing_label=row["live_entry_timing_label"],
                 live_entry_timing_reason=row["live_entry_timing_reason"],
                 daily_entry_timing_label=row["daily_entry_timing_label"],
@@ -530,7 +547,7 @@ def quote_out(
     etf_name: str | None = None,
     now: datetime | None = None,
 ) -> EtfIntradayQuoteOut:
-    stale = is_quote_stale(quote.quote_time, now)
+    stale = is_quote_stale(quote.quote_time, now) or is_quote_time_fallback(quote)
     return EtfIntradayQuoteOut(
         etf_code=quote.etf_code,
         etf_name=etf_name,
@@ -547,6 +564,7 @@ def quote_out(
         source=quote.source,
         freshness_status="stale" if stale else quote.freshness_status,
         is_stale=stale,
+        quote_time_is_fallback=is_quote_time_fallback(quote),
     )
 
 

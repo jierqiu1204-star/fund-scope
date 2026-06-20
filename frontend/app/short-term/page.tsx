@@ -238,6 +238,16 @@ function formatLiveScore(value: number | null | undefined) {
   return value === null || value === undefined ? "暂无" : value.toFixed(1);
 }
 
+function liveScoreText(item: IntradayEtfLiveRankingItem) {
+  if (item.score_source === "intraday") {
+    return "实时综合分 " + formatLiveScore(item.live_total_score) + " 分";
+  }
+  if (item.score_source === "daily") {
+    return "日线基础分 " + formatLiveScore(item.base_score ?? item.live_total_score) + " 分";
+  }
+  return "暂无分数";
+}
+
 function isLiveRankingResponse(value: RankedAssetResponse | undefined): value is IntradayEtfLiveRankingList {
   return Boolean(value && "signal_as_of_date" in value && "latest_run" in value);
 }
@@ -255,7 +265,7 @@ function itemEntryTimingDisplay(item: RankedAssetItem, marketStatus?: string | n
     };
   }
   const hasFreshLiveTiming =
-    marketStatus === "open" && item.quote !== null && !item.quote.is_stale && item.live_entry_timing_label !== "数据不足";
+    item.score_source === "intraday" && marketStatus === "open" && item.quote !== null && !item.quote.is_stale && item.live_entry_timing_label !== "数据不足";
   if (hasFreshLiveTiming) {
     return {
       title: "盘中买点状态",
@@ -570,10 +580,10 @@ function advisorSourceLabel(source: string | null | undefined) {
     return "AI生成";
   }
   if (source === "partial_fallback") {
-    return "AI生成，部分规则补齐";
+    return "规则补齐（AI 输出不完整）";
   }
   if (source === "fallback") {
-    return "规则兜底";
+    return "规则说明";
   }
   return "规则解释";
 }
@@ -1251,7 +1261,7 @@ export default function ShortTermPage() {
                   <div className="flex flex-wrap gap-2">
                     <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white text-ink" : "bg-ink text-white"}`}>
                       {isLiveItem
-                        ? `实时综合分 ${formatLiveScore(item.live_total_score)} 分`
+                        ? liveScoreText(item)
                         : `${item.total_score.toFixed(1)} 分`}
                     </span>
                     <span
@@ -1592,7 +1602,7 @@ export default function ShortTermPage() {
             </div>
           </div>
           <div className="rounded-[18px] bg-paper p-4">
-            <p className="font-semibold text-ink">AI/规则解释</p>
+            <p className="font-semibold text-ink">AI/规则说明</p>
             <p className="mt-2 text-sm leading-6 text-ink/65">
               {advisorReport ? `${advisorReport.plain_summary}` : "暂无完整解释结果。"}
             </p>
@@ -1854,7 +1864,7 @@ export default function ShortTermPage() {
                     <div className="flex flex-wrap gap-2">
                       <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white text-ink" : "bg-ink text-white"}`}>
                         {isLiveItem
-                          ? `实时综合分 ${formatLiveScore(item.live_total_score)} 分`
+                          ? liveScoreText(item)
                           : `${item.total_score.toFixed(1)} 分`}
                       </span>
                       <span className={`rounded-full px-3 py-1 text-xs font-semibold ${
@@ -2399,6 +2409,11 @@ export default function ShortTermPage() {
                 <span>{item.asset_type === "etf" ? "买入价格日" : "确认净值日"}：{formatDate(item.confirmed_nav_date ?? item.entry_price_date)}</span>
                 <span>{item.asset_type === "etf" ? "买入价" : "确认净值"}：{item.confirmed_nav?.toFixed(4) ?? item.entry_price?.toFixed(4) ?? "等待价格"}</span>
                 <span>当前价：{item.current_snapshot.current_price?.toFixed(4) ?? "暂无"}</span>
+                <span>
+                  决策口径：{priceSourceLabel(item.current_snapshot.price_source)} / {reliabilityLabel(item.current_snapshot.data_reliability)}
+                  {item.current_snapshot.decision_eligible ? "，可用于提醒判断" : "，仅展示/估算参考"}
+                </span>
+                {item.current_snapshot.display_only_reason ? <span>说明：{item.current_snapshot.display_only_reason}</span> : null}
                 {item.asset_type === "etf" ? (
                   <span>
                     数据口径：{reliabilityLabel(item.intraday_snapshot?.reliability_level)}

@@ -196,6 +196,34 @@ async def test_holdings_include_latest_nav_values_for_allocation_source_data(cli
     assert item["pnl"] == 100
     assert item["pnl_pct"] == 20
     assert item["is_stale"] is False
+    assert item["valuation_status"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_holdings_without_snapshot_do_not_fake_full_loss(client) -> None:
+    await client.post(
+        "/api/transactions",
+        json={
+            "fund_code": "007339",
+            "action": "buy",
+            "amount": 500,
+            "nav_at_trade": 1.25,
+            "fee": 0,
+            "traded_at": "2026-05-01",
+        },
+    )
+
+    response = await client.get("/api/portfolio/holdings")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["fund_code"] == "007339"
+    assert item["shares"] == pytest.approx(400)
+    assert item["cost_basis"] == 500
+    assert item["market_value"] is None
+    assert item["pnl"] is None
+    assert item["pnl_pct"] is None
+    assert item["valuation_status"] == "missing_snapshot"
 
 
 @pytest.mark.asyncio

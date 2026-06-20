@@ -49,9 +49,10 @@ async def get_holdings(session: AsyncSession = Depends(get_db_session)) -> Holdi
         ).all()
 
         for snapshot, fund, nav in snapshot_rows:
-            market_value = 0.0 if snapshot.market_value is None else snapshot.market_value
-            pnl = market_value - snapshot.cost_basis
-            pnl_pct = (pnl / snapshot.cost_basis * 100) if snapshot.cost_basis else 0.0
+            market_value = snapshot.market_value
+            pnl = market_value - snapshot.cost_basis if market_value is not None else None
+            pnl_pct = (pnl / snapshot.cost_basis * 100) if pnl is not None and snapshot.cost_basis else None
+            valuation_status = "ready" if market_value is not None and nav is not None else "missing_nav"
             items.append(
                 HoldingItem(
                     fund_code=snapshot.fund_code,
@@ -60,9 +61,10 @@ async def get_holdings(session: AsyncSession = Depends(get_db_session)) -> Holdi
                     cost_basis=snapshot.cost_basis,
                     market_value=market_value,
                     pnl=pnl,
-                    pnl_pct=round(pnl_pct, 2),
+                    pnl_pct=round(pnl_pct, 2) if pnl_pct is not None else None,
                     is_stale=is_business_days_stale(nav.nav_date) if nav is not None else True,
                     as_of_date=nav.nav_date if nav is not None else None,
+                    valuation_status=valuation_status,
                 )
             )
         return HoldingsResponse(items=items)
@@ -78,11 +80,12 @@ async def get_holdings(session: AsyncSession = Depends(get_db_session)) -> Holdi
                 fund_name=funds[fund_code].name,
                 shares=shares,
                 cost_basis=round(cost_basis, 2),
-                market_value=0.0,
-                pnl=round(-cost_basis, 2),
-                pnl_pct=-100.0 if cost_basis else 0.0,
+                market_value=None,
+                pnl=None,
+                pnl_pct=None,
                 is_stale=True,
                 as_of_date=None,
+                valuation_status="missing_snapshot",
             )
         )
     return HoldingsResponse(items=items)

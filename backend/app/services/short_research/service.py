@@ -1580,7 +1580,7 @@ def _portfolio_exposure_for_asset(asset: ComputedAsset) -> float:
         exposure -= 0.03
     if not asset.metrics.get("default_display_eligible", False):
         exposure -= 0.05
-    return max(0.05, min(_PORTFOLIO_SINGLE_WEIGHT_CAP, exposure))
+    return float(max(0.05, min(_PORTFOLIO_SINGLE_WEIGHT_CAP, exposure)))
 
 
 def _portfolio_exclusion_reason(asset: ComputedAsset) -> str | None:
@@ -1671,7 +1671,7 @@ def _correlation(left: dict[date, float], right: dict[date, float]) -> float | N
     right_denominator = sum((item - right_mean) ** 2 for item in right_values) ** 0.5
     if left_denominator == 0 or right_denominator == 0:
         return None
-    return numerator / (left_denominator * right_denominator)
+    return float(numerator / (left_denominator * right_denominator))
 
 
 async def _portfolio_return_maps(
@@ -1739,19 +1739,19 @@ async def etf_observation_portfolio(
     for asset in primary_candidates:
         if len(items) >= selected_limit or total_weight >= max_total_exposure:
             break
-        reason: str | None = None
+        selection_reason: str | None = None
         asset_themes = list(asset.metadata.theme_tags[:2]) or ["ETF"]
         if any(theme_weights.get(theme, 0.0) >= _PORTFOLIO_THEME_EXPOSURE_CAP for theme in asset_themes):
-            reason = "同主题 ETF 已有足够观察权重，避免集中在单一方向。"
+            selection_reason = "同主题 ETF 已有足够观察权重，避免集中在单一方向。"
         asset_returns = return_maps.get(asset.metadata.code)
-        if reason is None and asset_returns:
+        if selection_reason is None and asset_returns:
             for selected_code, selected_returns in selected_return_maps.items():
                 correlation = _correlation(asset_returns, selected_returns)
                 if correlation is not None and correlation >= _PORTFOLIO_HIGH_CORRELATION:
-                    reason = f"与已选 ETF {selected_code} 近60日相关性约 {correlation:.2f}，为避免重复押注转入观察。"
+                    selection_reason = f"与已选 ETF {selected_code} 近60日相关性约 {correlation:.2f}，为避免重复押注转入观察。"
                     break
-        if reason is not None:
-            watch_only_items.append(_portfolio_item(asset, target_weight=0.0, reason=reason))
+        if selection_reason is not None:
+            watch_only_items.append(_portfolio_item(asset, target_weight=0.0, reason=selection_reason))
             continue
 
         target = min(_portfolio_exposure_for_asset(asset), max_total_exposure - total_weight)

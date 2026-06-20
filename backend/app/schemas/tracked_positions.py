@@ -48,6 +48,10 @@ class TrackedPositionSnapshot(BaseModel):
     advisor_label: str | None = None
     risk_flags: list[str] = Field(default_factory=list)
     explanation: str | None = None
+    data_reliability: str = "unavailable"
+    price_source: str = "unavailable"
+    decision_eligible: bool = False
+    display_only_reason: str | None = None
 
 
 class TrackedPositionExitSignal(BaseModel):

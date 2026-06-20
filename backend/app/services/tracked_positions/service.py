@@ -34,7 +34,11 @@ from app.schemas.tracked_positions import (
     TrackedPositionExitSignal,
     TrackedPositionSnapshot,
 )
-from app.services.intraday_etf.service import ASIA_SHANGHAI, is_quote_stale, latest_intraday_quote
+from app.services.intraday_etf.service import (
+    ASIA_SHANGHAI,
+    is_fresh_decision_quote,
+    latest_intraday_quote,
+)
 from app.services.notifier import Notifier
 from app.services.short_research.advisor import (
     ACTION_EXIT,
@@ -186,7 +190,8 @@ async def latest_tracking_price(
     if asset_type != ASSET_TYPE_ETF:
         return await latest_price(session, asset_type, asset_code), None
     quote = await latest_intraday_quote(session, asset_code)
-    if quote is not None and not is_quote_stale(quote.quote_time):
+    if is_fresh_decision_quote(quote):
+        assert quote is not None
         spread_pct = None
         if quote.bid_price and quote.ask_price and quote.bid_price > 0:
             midpoint = (quote.bid_price + quote.ask_price) / 2
@@ -271,10 +276,10 @@ async def resolve_entry_price(
     if asset_type == ASSET_TYPE_ETF:
         local_today = datetime.now(ASIA_SHANGHAI).date()
         quote = await latest_intraday_quote(session, asset_code)
-        if buy_date == local_today and quote is not None and not is_quote_stale(quote.quote_time):
+        if buy_date == local_today and is_fresh_decision_quote(quote):
+            assert quote is not None
             return PriceSnapshot(quote.latest_price, quote.trade_date), quote.trade_date
-        entry = await latest_price(session, asset_type, asset_code, on_or_before=buy_date)
-        return entry, entry.price_date if entry is not None else None
+        return None, None
     if order_time_bucket == ORDER_AFTER_15:
         entry = await latest_price(session, asset_type, asset_code, on_or_after=buy_date + timedelta(days=1))
         return entry, entry.price_date if entry is not None else None
@@ -772,7 +777,11 @@ def _performance_analysis(
     )
 
 
-def _estimate_snapshot(position: TrackedPosition, price: PriceSnapshot | None) -> TrackedPositionSnapshot:
+def _estimate_snapshot(
+    position: TrackedPosition,
+    price: PriceSnapshot | None,
+    intraday_snapshot: TrackedEtfIntradaySnapshotOut | None = None,
+) -> TrackedPositionSnapshot:
     estimated_value: float | None = None
     estimated_pnl: float | None = None
     estimated_pnl_pct: float | None = None
@@ -781,18 +790,34 @@ def _estimate_snapshot(position: TrackedPosition, price: PriceSnapshot | None) -
         estimated_value = position.estimated_shares * price.price
         estimated_pnl = estimated_value - cost_basis if cost_basis is not None else None
         estimated_pnl_pct = estimated_pnl / cost_basis * 100 if estimated_pnl is not None and cost_basis else None
+    if position.asset_type == ASSET_TYPE_ETF:
+        price_source = intraday_snapshot.price_source if intraday_snapshot is not None else "unavailable"
+        decision_eligible = bool(intraday_snapshot is not None and intraday_snapshot.email_eligible)
+        data_reliability = "verified" if decision_eligible else ("stale" if price is not None else "unavailable")
+        display_only_reason = None if decision_eligible else (
+            intraday_snapshot.email_eligibility_reason if intraday_snapshot is not None else "暂无可用价格，不能触发邮件或计算持仓处理。"
+        )
+    else:
+        price_source = "daily_nav" if price is not None else "unavailable"
+        data_reliability = "verified" if price is not None else "unavailable"
+        decision_eligible = price is not None
+        display_only_reason = None if decision_eligible else "暂无公开净值，不能触发邮件或计算持仓处理。"
     return TrackedPositionSnapshot(
         current_price=_round_or_none(price.price, 6) if price else None,
         current_price_date=price.price_date if price else None,
         estimated_value=_round_or_none(estimated_value),
         estimated_pnl=_round_or_none(estimated_pnl),
         estimated_pnl_pct=_round_or_none(estimated_pnl_pct),
+        data_reliability=data_reliability,
+        price_source=price_source,
+        decision_eligible=decision_eligible,
+        display_only_reason=display_only_reason,
     )
 
 
 async def current_snapshot(session: AsyncSession, position: TrackedPosition) -> TrackedPositionSnapshot:
-    current_price, _intraday = await latest_tracking_price(session, position.asset_type, position.asset_code)
-    snapshot = _estimate_snapshot(position, current_price)
+    current_price, intraday = await latest_tracking_price(session, position.asset_type, position.asset_code)
+    snapshot = _estimate_snapshot(position, current_price, intraday)
     run = await latest_signal_run(session, asset_type=position.asset_type)
     if run is None:
         return snapshot
@@ -844,7 +869,7 @@ async def position_chart(session: AsyncSession, position: TrackedPosition) -> li
         ).all()
         points = [(row.trade_date, row.close) for row in etf_rows]
         quote = await latest_intraday_quote(session, position.asset_code)
-        if quote is not None and not is_quote_stale(quote.quote_time) and quote.trade_date >= start_date:
+        if is_fresh_decision_quote(quote) and quote is not None and quote.trade_date >= start_date:
             if points and points[-1][0] == quote.trade_date:
                 points[-1] = (quote.trade_date, quote.latest_price)
             else:
