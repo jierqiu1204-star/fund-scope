@@ -87,6 +87,7 @@ class TrackedPositionAlertOut(BaseModel):
     email_error_message: str | None
     sent_at: datetime | None
     created_at: datetime
+    threshold_context: dict[str, Any] = Field(default_factory=dict)
 
 
 class TrackedPositionChartPoint(BaseModel):

@@ -13,7 +13,11 @@ from app.models.entities import (
     ShortResearchSignalRun,
     TradableEtf,
 )
-from app.services.short_research.service import allowed_conclusions, ensure_short_research_universe
+from app.services.short_research.service import (
+    allowed_conclusions,
+    ensure_short_research_universe,
+    run_etf_observation_portfolio_optimization,
+)
 
 
 async def _seed_short_research_history(app) -> None:
@@ -308,6 +312,66 @@ async def test_short_research_entry_timing_labels_are_explained(client, app) -> 
 
 
 @pytest.mark.asyncio
+async def test_etf_signal_validation_run_records_forward_outcomes(client, app) -> None:
+    await _seed_observation_portfolio_signal_run(
+        app,
+        items=[
+            {
+                "code": "562001",
+                "total_score": 92.0,
+                "conclusion": "短线观察",
+                "entry_timing_label": "健康回踩",
+                "entry_timing_reason": "验证样本测试。",
+            }
+        ],
+    )
+    await _seed_observation_price_series(app, code="562001", days=90)
+
+    response = await client.post("/api/short-research/validation/run")
+    assert response.status_code == 200
+
+    body = response.json()
+    assert body["status"] == "success"
+    assert body["summary"]["evaluated_asset_count"] == 1
+    items = body["items"]
+    assert {item["horizon_days"] for item in items} >= {1, 3, 5, 10}
+    assert any(item["sample_count"] > 0 and item["median_return"] is not None for item in items)
+    assert any(
+        item["excluded_count"] > 0
+        and (item["metrics"].get("exclusion_reasons") or {}).get("missing_future_price")
+        for item in items
+    )
+
+    latest = await client.get("/api/short-research/validation/latest")
+    assert latest.status_code == 200
+    assert latest.json()["id"] == body["id"]
+
+
+@pytest.mark.asyncio
+async def test_etf_signal_validation_marks_insufficient_samples(client, app) -> None:
+    await _seed_observation_portfolio_signal_run(
+        app,
+        items=[
+            {
+                "code": "562002",
+                "total_score": 90.0,
+                "conclusion": "短线观察",
+                "entry_timing_label": "趋势延续",
+                "entry_timing_reason": "短样本验证测试。",
+            }
+        ],
+    )
+    await _seed_observation_price_series(app, code="562002", days=72)
+
+    response = await client.post("/api/short-research/validation/run")
+    assert response.status_code == 200
+
+    items = response.json()["items"]
+    assert items
+    assert any(item["confidence"] == "insufficient" for item in items)
+
+
+@pytest.mark.asyncio
 async def test_short_research_asset_detail_returns_charts_and_beginner_explanations(client, app) -> None:
     await _seed_short_research_history(app)
 
@@ -438,6 +502,45 @@ async def test_short_research_observation_portfolio_filters_out_high_watch_and_b
 
 
 @pytest.mark.asyncio
+async def test_short_research_observation_portfolio_persists_snapshot(client, app) -> None:
+    await _seed_observation_portfolio_signal_run(
+        app,
+        items=[
+            {
+                "code": "560921",
+                "total_score": 94.0,
+                "conclusion": "短线观察",
+                "entry_timing_label": "健康回踩",
+                "entry_timing_reason": "健康回踩，适合作为观察权重测试。",
+                "theme_tags": ["红利"],
+            },
+            {
+                "code": "560922",
+                "total_score": 93.0,
+                "conclusion": "短线观察",
+                "entry_timing_label": "趋势延续",
+                "entry_timing_reason": "趋势延续，适合作为观察权重测试。",
+                "theme_tags": ["消费"],
+            },
+        ],
+    )
+
+    async with app.state.db.session() as session:
+        snapshot = await run_etf_observation_portfolio_optimization(session, limit=2)
+        snapshot_id = snapshot.id
+
+    response = await client.get("/api/short-research/observation-portfolio?limit=2")
+    assert response.status_code == 200
+
+    body = response.json()
+    assert body["snapshot_id"] == snapshot_id
+    assert body["generated_at"] is not None
+    assert len(body["items"]) == 2
+    assert all(item["target_weight"] <= 0.3 for item in body["items"])
+    assert body["constraint_summary"]["total_exposure_cap"] == 0.6
+
+
+@pytest.mark.asyncio
 async def test_short_research_observation_portfolio_no_match_returns_full_cash(client, app) -> None:
     await _seed_observation_portfolio_signal_run(
         app,
@@ -528,3 +631,6 @@ async def test_short_research_observation_portfolio_reduces_theme_and_correlatio
     assert any("相关性" in "；".join(item["risk_reasons"]) for item in body["watch_only_items"])
     assert all(item["target_weight"] <= 0.3 for item in body["items"])
     assert body["cash_weight"] >= 0.4
+
+
+

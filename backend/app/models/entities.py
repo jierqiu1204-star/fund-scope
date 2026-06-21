@@ -528,6 +528,94 @@ class ShortResearchSignalItem(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class EtfSignalValidationRun(Base):
+    __tablename__ = "etf_signal_validation_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    status: Mapped[str] = mapped_column(String(32), default="success")
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    as_of_date: Mapped[date] = mapped_column(Date)
+    source_signal_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("short_research_signal_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    asset_type: Mapped[str] = mapped_column(String(16), default="etf")
+    rule_version: Mapped[str] = mapped_column(String(64), default="label_validation_v1")
+    config_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    summary_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class EtfSignalValidationItem(Base):
+    __tablename__ = "etf_signal_validation_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id",
+            "label",
+            "entry_timing_label",
+            "horizon_days",
+            name="uq_etf_signal_validation_item",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("etf_signal_validation_runs.id", ondelete="CASCADE"))
+    label: Mapped[str] = mapped_column(String(64))
+    entry_timing_label: Mapped[str] = mapped_column(String(64))
+    horizon_days: Mapped[int] = mapped_column(Integer)
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    excluded_count: Mapped[int] = mapped_column(Integer, default=0)
+    avg_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    median_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    win_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    worst_forward_drawdown: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confidence: Mapped[str] = mapped_column(String(32), default="insufficient")
+    metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class EtfObservationPortfolioSnapshot(Base):
+    __tablename__ = "etf_observation_portfolio_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    status: Mapped[str] = mapped_column(String(32), default="success")
+    source_signal_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("short_research_signal_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    validation_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("etf_signal_validation_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    as_of_date: Mapped[date] = mapped_column(Date)
+    asset_type: Mapped[str] = mapped_column(String(16), default="etf")
+    config_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    summary_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class EtfObservationPortfolioItem(Base):
+    __tablename__ = "etf_observation_portfolio_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    snapshot_id: Mapped[int] = mapped_column(
+        ForeignKey("etf_observation_portfolio_snapshots.id", ondelete="CASCADE")
+    )
+    item_type: Mapped[str] = mapped_column(String(32), default="primary")
+    rank_order: Mapped[int] = mapped_column(Integer, default=0)
+    asset_code: Mapped[str] = mapped_column(String(32))
+    asset_name: Mapped[str] = mapped_column(String(255))
+    target_weight: Mapped[float] = mapped_column(Float, default=0.0)
+    score: Mapped[float] = mapped_column(Float, default=0.0)
+    conclusion: Mapped[str] = mapped_column(String(64))
+    entry_timing_label: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    data_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    evidence_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    risk_reasons_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    exclusion_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class ShortResearchAdvisorReport(Base):
     __tablename__ = "short_research_advisor_reports"
     __table_args__ = (
@@ -617,6 +705,7 @@ class TrackedPositionAlert(Base):
     estimated_pnl_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
     reasons_json: Mapped[list[str]] = mapped_column(JSON, default=list)
     risk_flags_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    threshold_context_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     advisor_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     alert_level: Mapped[str | None] = mapped_column(String(32), nullable=True)
     quote_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

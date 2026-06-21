@@ -28,6 +28,8 @@ from app.services.short_etf.jobs import (
     daily_short_etf_signals_job,
 )
 from app.services.short_research.jobs import (
+    daily_etf_observation_portfolio_job,
+    daily_etf_signal_validation_job,
     daily_etf_universe_job,
     daily_short_research_advisor_job,
     daily_short_research_data_job,
@@ -168,6 +170,10 @@ async def run_job_by_name(
         return await run_job(request.app.state.db.session, job_name, daily_etf_universe_job)
     if job_name == "daily_short_research_signals":
         return await run_job(request.app.state.db.session, job_name, daily_short_research_signals_job)
+    if job_name == "daily_etf_signal_validation":
+        return await run_job(request.app.state.db.session, job_name, daily_etf_signal_validation_job)
+    if job_name == "daily_etf_observation_portfolio":
+        return await run_job(request.app.state.db.session, job_name, daily_etf_observation_portfolio_job)
     if job_name == "daily_short_research_advisor":
         return await run_job(
             request.app.state.db.session,

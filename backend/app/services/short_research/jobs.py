@@ -9,7 +9,12 @@ from app.core.config import Settings, get_settings
 from app.defaults.short_research import ASSET_TYPE_ETF, ASSET_TYPE_FUND
 from app.services.llm import LLMClient
 from app.services.short_research.advisor import run_advisor_generation
-from app.services.short_research.service import run_signal_generation, sync_short_research_data
+from app.services.short_research.service import (
+    run_etf_observation_portfolio_optimization,
+    run_etf_signal_validation,
+    run_signal_generation,
+    sync_short_research_data,
+)
 from app.services.short_research.universe import refresh_etf_universe
 
 SHORT_RESEARCH_DAILY_ASSET_TYPES = [ASSET_TYPE_FUND, ASSET_TYPE_ETF]
@@ -94,4 +99,30 @@ async def daily_short_research_advisor_job(
         "selected": sum(_count(item, "selected") for item in results.values()),
         "succeeded": sum(_count(item, "succeeded") for item in results.values()),
         "failed": sum(_count(item, "failed") for item in results.values()),
+    }
+
+
+async def daily_etf_signal_validation_job(session: AsyncSession) -> dict[str, Any]:
+    run = await run_etf_signal_validation(session)
+    return {
+        "run_id": run.id,
+        "status": run.status,
+        "as_of_date": run.as_of_date.isoformat(),
+        "rule_version": run.rule_version,
+        "items": len((run.summary_json or {}).get("groups", [])),
+    }
+
+
+async def daily_etf_observation_portfolio_job(session: AsyncSession) -> dict[str, Any]:
+    snapshot = await run_etf_observation_portfolio_optimization(session)
+    summary = dict(snapshot.summary_json or {})
+    constraint_summary = dict(summary.get("constraint_summary") or {})
+    return {
+        "snapshot_id": snapshot.id,
+        "status": snapshot.status,
+        "as_of_date": snapshot.as_of_date.isoformat(),
+        "cash_weight": summary.get("cash_weight"),
+        "primary_count": constraint_summary.get("primary_count", 0),
+        "watch_only_count": constraint_summary.get("watch_only_count", 0),
+        "excluded_count": constraint_summary.get("excluded_count", 0),
     }

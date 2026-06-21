@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
-from statistics import mean, pstdev
+from statistics import mean, median, pstdev
 from typing import Any, cast
 
 from sqlalchemy import func, select
@@ -21,7 +21,11 @@ from app.defaults.short_research import (
 )
 from app.models.entities import (
     EtfDataHealth,
+    EtfObservationPortfolioItem,
+    EtfObservationPortfolioSnapshot,
     EtfPriceHistory,
+    EtfSignalValidationItem,
+    EtfSignalValidationRun,
     EtfThemeExposure,
     Fund,
     FundNavHistory,
@@ -902,25 +906,44 @@ def _forward_drawdown(series: list[PricePoint]) -> float | None:
     return _max_drawdown(series)
 
 
+def _validation_confidence(sample_count: int) -> str:
+    if sample_count >= 30:
+        return "sufficient"
+    if sample_count >= _LABEL_VALIDATION_MIN_SAMPLES:
+        return "limited"
+    return "insufficient"
+
+
 def _summarize_validation_samples(samples: list[dict[str, float]], total_samples: int) -> dict[str, Any]:
+    sample_count = len(samples)
+    excluded_count = max(0, total_samples - sample_count)
     if not samples:
         return {
             "sample_count": 0,
+            "excluded_count": excluded_count,
             "coverage": 0.0,
             "avg_return": None,
+            "median_return": None,
             "max_drawdown": None,
+            "worst_forward_drawdown": None,
             "win_rate": None,
+            "confidence": "insufficient",
             "insufficient_sample": True,
         }
     returns = [item["return"] for item in samples]
     drawdowns = [item["drawdown"] for item in samples]
+    confidence = _validation_confidence(sample_count)
     return {
-        "sample_count": len(samples),
-        "coverage": round(len(samples) / total_samples, 4) if total_samples else 0.0,
+        "sample_count": sample_count,
+        "excluded_count": excluded_count,
+        "coverage": round(sample_count / total_samples, 4) if total_samples else 0.0,
         "avg_return": round(mean(returns), 6),
+        "median_return": round(median(returns), 6),
         "max_drawdown": round(min(drawdowns), 6),
-        "win_rate": round(sum(1 for item in returns if item > 0) / len(returns), 4),
-        "insufficient_sample": len(samples) < _LABEL_VALIDATION_MIN_SAMPLES,
+        "worst_forward_drawdown": round(min(drawdowns), 6),
+        "win_rate": round(sum(1 for item in returns if item > 0) / sample_count, 4),
+        "confidence": confidence,
+        "insufficient_sample": confidence == "insufficient",
     }
 
 
@@ -933,7 +956,8 @@ async def _label_validation_summary(
     if not etf_assets:
         return {}
     grouped: dict[tuple[str, str], dict[int, list[dict[str, float]]]] = {}
-    totals_by_window = {window: 0 for window in _LABEL_VALIDATION_WINDOWS}
+    total_by_group: dict[tuple[str, str], dict[int, int]] = {}
+    exclusion_reasons: dict[tuple[str, str], dict[int, dict[str, int]]] = {}
     evaluated_assets = 0
     max_window = max(_LABEL_VALIDATION_WINDOWS)
     for asset in etf_assets:
@@ -941,7 +965,7 @@ async def _label_validation_summary(
         if len(series) <= 60 + max_window:
             continue
         evaluated_assets += 1
-        for index in range(60, len(series) - max_window):
+        for index in range(60, len(series)):
             history = series[: index + 1]
             point_date = history[-1].point_date
             metrics = _score_metrics(asset.metadata, history, point_date)
@@ -949,14 +973,24 @@ async def _label_validation_summary(
             entry_label = str(metrics.get("entry_timing_label") or ENTRY_TIMING_INSUFFICIENT)
             key = (conclusion, entry_label)
             grouped.setdefault(key, {window: [] for window in _LABEL_VALIDATION_WINDOWS})
+            total_by_group.setdefault(key, {window: 0 for window in _LABEL_VALIDATION_WINDOWS})
+            exclusion_reasons.setdefault(key, {window: {} for window in _LABEL_VALIDATION_WINDOWS})
             for window in _LABEL_VALIDATION_WINDOWS:
+                total_by_group[key][window] += 1
                 future_index = index + window
-                if future_index >= len(series) or series[index].value <= 0:
+                if future_index >= len(series):
+                    reasons = exclusion_reasons[key][window]
+                    reasons["missing_future_price"] = reasons.get("missing_future_price", 0) + 1
                     continue
-                totals_by_window[window] += 1
+                if series[index].value <= 0 or series[future_index].value <= 0:
+                    reasons = exclusion_reasons[key][window]
+                    reasons["invalid_price"] = reasons.get("invalid_price", 0) + 1
+                    continue
                 window_series = series[index : future_index + 1]
                 drawdown = _forward_drawdown(window_series)
                 if drawdown is None:
+                    reasons = exclusion_reasons[key][window]
+                    reasons["insufficient_window"] = reasons.get("insufficient_window", 0) + 1
                     continue
                 grouped[key][window].append(
                     {
@@ -966,15 +1000,20 @@ async def _label_validation_summary(
                 )
     groups: list[dict[str, Any]] = []
     for (conclusion, entry_label), windows in sorted(grouped.items()):
+        key = (conclusion, entry_label)
+        window_summary = {
+            str(window): {
+                **_summarize_validation_samples(windows[window], total_by_group[key][window]),
+                "exclusion_reasons": exclusion_reasons[key][window],
+            }
+            for window in _LABEL_VALIDATION_WINDOWS
+        }
         groups.append(
             {
                 "label": conclusion,
                 "entry_timing_label": entry_label,
                 "key": f"{conclusion} / {entry_label}",
-                "windows": {
-                    str(window): _summarize_validation_samples(windows[window], totals_by_window[window])
-                    for window in _LABEL_VALIDATION_WINDOWS
-                },
+                "windows": window_summary,
             }
         )
     return {
@@ -986,9 +1025,170 @@ async def _label_validation_summary(
         "evaluated_asset_count": evaluated_assets,
         "windows": list(_LABEL_VALIDATION_WINDOWS),
         "min_sample_count": _LABEL_VALIDATION_MIN_SAMPLES,
+        "sufficient_sample_count": 30,
         "sample_policy": "最多取当前 ETF 排序前 120 只，按历史日线重新计算标签后验证未来 1/3/5/10 个交易日表现。",
         "groups": groups,
     }
+
+
+def _validation_items_from_summary(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for group in summary.get("groups", []):
+        if not isinstance(group, dict):
+            continue
+        windows = group.get("windows", {})
+        if not isinstance(windows, dict):
+            continue
+        for raw_window, metrics in windows.items():
+            if not isinstance(metrics, dict):
+                continue
+            items.append(
+                {
+                    "label": str(group.get("label") or ""),
+                    "entry_timing_label": str(group.get("entry_timing_label") or ""),
+                    "horizon_days": int(raw_window),
+                    "sample_count": int(metrics.get("sample_count") or 0),
+                    "excluded_count": int(metrics.get("excluded_count") or 0),
+                    "avg_return": metrics.get("avg_return"),
+                    "median_return": metrics.get("median_return"),
+                    "win_rate": metrics.get("win_rate"),
+                    "worst_forward_drawdown": metrics.get("worst_forward_drawdown") or metrics.get("max_drawdown"),
+                    "confidence": str(metrics.get("confidence") or "insufficient"),
+                    "metrics": metrics,
+                }
+            )
+    return items
+
+
+async def latest_signal_validation_run(session: AsyncSession) -> EtfSignalValidationRun | None:
+    return cast(
+        EtfSignalValidationRun | None,
+        await session.scalar(
+            select(EtfSignalValidationRun)
+            .where(EtfSignalValidationRun.asset_type == ASSET_TYPE_ETF)
+            .order_by(EtfSignalValidationRun.as_of_date.desc(), EtfSignalValidationRun.id.desc())
+        ),
+    )
+
+
+async def latest_validation_evidence_by_label(session: AsyncSession) -> dict[tuple[str, str], dict[str, Any]]:
+    run = await latest_signal_validation_run(session)
+    if run is None:
+        return {}
+    rows = (
+        await session.scalars(
+            select(EtfSignalValidationItem).where(EtfSignalValidationItem.run_id == run.id)
+        )
+    ).all()
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        key = (row.label, row.entry_timing_label)
+        evidence = grouped.setdefault(
+            key,
+            {
+                "run_id": run.id,
+                "as_of_date": run.as_of_date.isoformat(),
+                "rule_version": run.rule_version,
+                "confidence": "insufficient",
+                "horizons": {},
+            },
+        )
+        horizon = {
+            "sample_count": row.sample_count,
+            "excluded_count": row.excluded_count,
+            "avg_return": row.avg_return,
+            "median_return": row.median_return,
+            "win_rate": row.win_rate,
+            "worst_forward_drawdown": row.worst_forward_drawdown,
+            "confidence": row.confidence,
+        }
+        evidence["horizons"][str(row.horizon_days)] = horizon
+        if row.horizon_days == 5:
+            evidence.update(
+                {
+                    "sample_count": row.sample_count,
+                    "win_rate": row.win_rate,
+                    "median_return": row.median_return,
+                    "confidence": row.confidence,
+                }
+            )
+        elif "sample_count" not in evidence:
+            evidence.update(
+                {
+                    "sample_count": row.sample_count,
+                    "win_rate": row.win_rate,
+                    "median_return": row.median_return,
+                    "confidence": row.confidence,
+                }
+            )
+    return grouped
+
+
+async def run_etf_signal_validation(session: AsyncSession) -> EtfSignalValidationRun:
+    started_at = utcnow()
+    source_run = await latest_signal_run(session, asset_type=ASSET_TYPE_ETF)
+    if source_run is None:
+        run = EtfSignalValidationRun(
+            status=RUN_STATUS_FAILED,
+            started_at=started_at,
+            finished_at=utcnow(),
+            as_of_date=date.today(),
+            asset_type=ASSET_TYPE_ETF,
+            rule_version=_LABEL_VALIDATION_RULE_VERSION,
+            config_json={"windows": list(_LABEL_VALIDATION_WINDOWS)},
+            summary_json={},
+            error_message="暂无 ETF 短线排序快照，无法做标签有效性验证。",
+        )
+        session.add(run)
+        await session.commit()
+        await session.refresh(run)
+        return run
+    assets, _total = await cached_signal_assets(
+        session,
+        source_run,
+        asset_type=ASSET_TYPE_ETF,
+        sort="score",
+        universe=UNIVERSE_ALL,
+        limit=_LABEL_VALIDATION_MAX_ASSETS,
+    )
+    summary = await _label_validation_summary(session, assets, source_run.as_of_date)
+    run = EtfSignalValidationRun(
+        status=RUN_STATUS_SUCCESS,
+        started_at=started_at,
+        finished_at=utcnow(),
+        as_of_date=source_run.as_of_date,
+        source_signal_run_id=source_run.id,
+        asset_type=ASSET_TYPE_ETF,
+        rule_version=_LABEL_VALIDATION_RULE_VERSION,
+        config_json={
+            "windows": list(_LABEL_VALIDATION_WINDOWS),
+            "max_assets": _LABEL_VALIDATION_MAX_ASSETS,
+            "min_sample_count": _LABEL_VALIDATION_MIN_SAMPLES,
+        },
+        summary_json=summary,
+    )
+    session.add(run)
+    await session.flush()
+    for item in _validation_items_from_summary(summary):
+        session.add(
+            EtfSignalValidationItem(
+                run_id=run.id,
+                label=item["label"],
+                entry_timing_label=item["entry_timing_label"],
+                horizon_days=item["horizon_days"],
+                sample_count=item["sample_count"],
+                excluded_count=item["excluded_count"],
+                avg_return=item["avg_return"],
+                median_return=item["median_return"],
+                win_rate=item["win_rate"],
+                worst_forward_drawdown=item["worst_forward_drawdown"],
+                confidence=item["confidence"],
+                metrics_json=item["metrics"],
+            )
+        )
+    await session.commit()
+    await session.refresh(run)
+    return run
 
 
 def _rationale(metadata: ShortResearchAsset, metrics: dict[str, Any], conclusion: str) -> dict[str, Any]:
@@ -1404,6 +1604,7 @@ async def signal_run_items_as_assets(session: AsyncSession, run: ShortResearchSi
     cached_assets, _total = await cached_signal_assets(session, run, sort="score", universe=UNIVERSE_ALL)
     return cached_assets
 
+
 async def status_summary(session: AsyncSession, *, include_health: bool = False) -> dict[str, Any]:
     await ensure_short_research_universe(session)
     latest_run = await latest_signal_run(session)
@@ -1653,6 +1854,21 @@ async def refresh_dynamic_etf_universe(session: AsyncSession) -> dict[str, Any]:
     return await refresh_etf_universe(session)
 
 
+def _asset_with_validation_evidence(
+    asset: ComputedAsset,
+    evidence_by_label: dict[tuple[str, str], dict[str, Any]],
+) -> ComputedAsset:
+    evidence = evidence_by_label.get((asset.conclusion, asset.entry_timing_label))
+    if not evidence:
+        return asset
+    metrics = dict(asset.metrics)
+    metrics["validation_confidence"] = evidence.get("confidence", "insufficient")
+    metrics["validation_sample_count"] = evidence.get("sample_count", 0)
+    metrics["validation_median_return"] = evidence.get("median_return")
+    metrics["validation_win_rate"] = evidence.get("win_rate")
+    return replace(asset, metrics=metrics)
+
+
 def _portfolio_exposure_for_asset(asset: ComputedAsset) -> float:
     exposure = _PORTFOLIO_SINGLE_WEIGHT_CAP
     if any(flag in asset.risk_flags for flag in _PORTFOLIO_RISK_FLAGS_REDUCE_WEIGHT):
@@ -1662,6 +1878,11 @@ def _portfolio_exposure_for_asset(asset: ComputedAsset) -> float:
     if (asset.metrics.get("max_drawdown_60d") or 0.0) < -0.12:
         exposure -= 0.03
     if not asset.metrics.get("default_display_eligible", False):
+        exposure -= 0.05
+    validation_confidence = asset.metrics.get("validation_confidence")
+    if validation_confidence == "limited":
+        exposure -= 0.03
+    elif validation_confidence == "insufficient":
         exposure -= 0.05
     return float(max(0.05, min(_PORTFOLIO_SINGLE_WEIGHT_CAP, exposure)))
 
@@ -1713,6 +1934,16 @@ def _portfolio_item(asset: ComputedAsset, *, target_weight: float, reason: str |
     risk_reasons = asset.risk_flags or ["暂未触发主要风险标签"]
     if reason:
         risk_reasons = [reason, *risk_reasons]
+    risk_reasons = [
+        *risk_reasons,
+        f"今日买点：{asset.entry_timing_label}",
+        f"买点原因：{asset.entry_timing_reason}",
+    ]
+    validation_confidence = asset.metrics.get("validation_confidence")
+    if validation_confidence:
+        risk_reasons.append(
+            f"标签验证：{validation_confidence}，样本 {int(asset.metrics.get('validation_sample_count') or 0)}"
+        )
     return {
         "asset_type": asset.metadata.asset_type,
         "code": asset.metadata.code,
@@ -1720,18 +1951,17 @@ def _portfolio_item(asset: ComputedAsset, *, target_weight: float, reason: str |
         "target_weight": round(target_weight, 4),
         "score": round(asset.total_score, 2),
         "conclusion": asset.conclusion,
+        "entry_timing_label": asset.entry_timing_label,
         "data_date": asset.latest_date,
         "evidence": [
             f"综合分 {asset.total_score:.1f}",
             f"近20日收益 {_format_percent(asset.metrics.get('return_20d'))}",
             f"近20日平均成交额 {float(asset.metrics.get('average_turnover_20d') or 0) / 100_000_000:.2f} 亿元",
             f"今日买点 {asset.entry_timing_label}：{asset.entry_timing_reason}",
-        ],
-        "risk_reasons": risk_reasons
-        + [
-            f"今日买点：{asset.entry_timing_label}",
             f"买点原因：{asset.entry_timing_reason}",
         ],
+        "risk_reasons": risk_reasons,
+        "metrics": asset.metrics,
     }
 
 
@@ -1774,13 +2004,163 @@ async def _portfolio_return_maps(
     return result
 
 
+async def latest_observation_portfolio_snapshot(
+    session: AsyncSession,
+) -> EtfObservationPortfolioSnapshot | None:
+    return cast(
+        EtfObservationPortfolioSnapshot | None,
+        await session.scalar(
+            select(EtfObservationPortfolioSnapshot)
+            .where(EtfObservationPortfolioSnapshot.asset_type == ASSET_TYPE_ETF)
+            .order_by(
+                EtfObservationPortfolioSnapshot.as_of_date.desc(),
+                EtfObservationPortfolioSnapshot.id.desc(),
+            )
+        ),
+    )
+
+
+def _snapshot_item_out(row: EtfObservationPortfolioItem) -> dict[str, Any]:
+    return {
+        "asset_type": ASSET_TYPE_ETF,
+        "code": row.asset_code,
+        "name": row.asset_name,
+        "target_weight": row.target_weight,
+        "score": row.score,
+        "conclusion": row.conclusion,
+        "entry_timing_label": row.entry_timing_label,
+        "data_date": row.data_date,
+        "evidence": list(row.evidence_json or []),
+        "risk_reasons": list(row.risk_reasons_json or []),
+        "item_type": row.item_type,
+        "exclusion_reason": row.exclusion_reason,
+        "metrics": dict(row.metrics_json or {}),
+    }
+
+
+async def observation_portfolio_from_snapshot(
+    session: AsyncSession,
+    snapshot: EtfObservationPortfolioSnapshot,
+) -> dict[str, Any]:
+    rows = (
+        await session.scalars(
+            select(EtfObservationPortfolioItem)
+            .where(EtfObservationPortfolioItem.snapshot_id == snapshot.id)
+            .order_by(EtfObservationPortfolioItem.item_type.asc(), EtfObservationPortfolioItem.rank_order.asc())
+        )
+    ).all()
+    primary = [_snapshot_item_out(row) for row in rows if row.item_type == "primary"]
+    watch_only = [_snapshot_item_out(row) for row in rows if row.item_type == "watch_only"]
+    excluded = [_snapshot_item_out(row) for row in rows if row.item_type == "excluded"]
+    summary = dict(snapshot.summary_json or {})
+    return {
+        "snapshot_id": snapshot.id,
+        "generated_at": snapshot.created_at,
+        "as_of_date": snapshot.as_of_date,
+        "asset_type": snapshot.asset_type,
+        "items": primary,
+        "watch_only_items": watch_only,
+        "excluded_items": excluded,
+        "cash_weight": float(summary.get("cash_weight", max(0.0, 1.0 - sum(item["target_weight"] for item in primary)))),
+        "single_weight_cap": summary.get("single_weight_cap", _PORTFOLIO_SINGLE_WEIGHT_CAP),
+        "total_exposure_cap": summary.get("total_exposure_cap", _PORTFOLIO_TOTAL_EXPOSURE_CAP),
+        "constraint_summary": summary.get("constraint_summary", {}),
+        "research_only": True,
+        "no_trade_instruction": True,
+        "note": str(summary.get("note") or "观察组合只用于手动研究参考，不连接券商、不自动下单。"),
+        "methodology": str(summary.get("methodology") or "按评分、波动、回撤、流动性、主题和相关性约束生成。"),
+    }
+
+
+async def persist_observation_portfolio_snapshot(
+    session: AsyncSession,
+    portfolio: dict[str, Any],
+    *,
+    source_signal_run_id: int | None,
+    validation_run_id: int | None,
+) -> EtfObservationPortfolioSnapshot:
+    summary = {
+        "cash_weight": portfolio.get("cash_weight", 1.0),
+        "single_weight_cap": portfolio.get("single_weight_cap"),
+        "total_exposure_cap": portfolio.get("total_exposure_cap"),
+        "constraint_summary": portfolio.get("constraint_summary", {}),
+        "note": portfolio.get("note", ""),
+        "methodology": portfolio.get("methodology", ""),
+    }
+    snapshot = EtfObservationPortfolioSnapshot(
+        status=RUN_STATUS_SUCCESS,
+        source_signal_run_id=source_signal_run_id,
+        validation_run_id=validation_run_id,
+        as_of_date=portfolio.get("as_of_date") or date.today(),
+        asset_type=ASSET_TYPE_ETF,
+        config_json={
+            "single_weight_cap": _PORTFOLIO_SINGLE_WEIGHT_CAP,
+            "total_exposure_cap": _PORTFOLIO_TOTAL_EXPOSURE_CAP,
+            "theme_exposure_cap": _PORTFOLIO_THEME_EXPOSURE_CAP,
+            "high_correlation_threshold": _PORTFOLIO_HIGH_CORRELATION,
+        },
+        summary_json=summary,
+    )
+    session.add(snapshot)
+    await session.flush()
+    for item_type, key in (
+        ("primary", "items"),
+        ("watch_only", "watch_only_items"),
+        ("excluded", "excluded_items"),
+    ):
+        for index, item in enumerate(portfolio.get(key, []), start=1):
+            risk_reasons = list(item.get("risk_reasons") or [])
+            session.add(
+                EtfObservationPortfolioItem(
+                    snapshot_id=snapshot.id,
+                    item_type=item_type,
+                    rank_order=index,
+                    asset_code=str(item.get("code") or ""),
+                    asset_name=str(item.get("name") or ""),
+                    target_weight=float(item.get("target_weight") or 0.0),
+                    score=float(item.get("score") or 0.0),
+                    conclusion=str(item.get("conclusion") or ""),
+                    entry_timing_label=item.get("entry_timing_label"),
+                    data_date=item.get("data_date"),
+                    evidence_json=list(item.get("evidence") or []),
+                    risk_reasons_json=risk_reasons,
+                    exclusion_reason=(risk_reasons[0] if item_type != "primary" and risk_reasons else None),
+                    metrics_json=dict(item.get("metrics") or {}),
+                )
+            )
+    await session.commit()
+    await session.refresh(snapshot)
+    return snapshot
+
+
+async def run_etf_observation_portfolio_optimization(
+    session: AsyncSession,
+    *,
+    limit: int = 5,
+) -> EtfObservationPortfolioSnapshot:
+    signal_run = await latest_signal_run(session, asset_type=ASSET_TYPE_ETF)
+    validation_run = await latest_signal_validation_run(session)
+    portfolio = await etf_observation_portfolio(session, limit=limit, universe=UNIVERSE_DEFAULT, use_snapshot=False)
+    return await persist_observation_portfolio_snapshot(
+        session,
+        portfolio,
+        source_signal_run_id=signal_run.id if signal_run else None,
+        validation_run_id=validation_run.id if validation_run else None,
+    )
+
+
 async def etf_observation_portfolio(
     session: AsyncSession,
     *,
     as_of_date: date | None = None,
     limit: int = 5,
     universe: str = UNIVERSE_DEFAULT,
+    use_snapshot: bool = True,
 ) -> dict[str, Any]:
+    if use_snapshot and universe == UNIVERSE_DEFAULT:
+        snapshot = await latest_observation_portfolio_snapshot(session)
+        if snapshot is not None:
+            return await observation_portfolio_from_snapshot(session, snapshot)
     run = await latest_signal_run(session, asset_type=ASSET_TYPE_ETF)
     if run is None:
         return {
@@ -1811,6 +2191,9 @@ async def etf_observation_portfolio(
         universe=universe,
         limit=max(50, min(limit * 10, 200)),
     )
+    validation_by_label = await latest_validation_evidence_by_label(session)
+    if validation_by_label:
+        assets = [_asset_with_validation_evidence(asset, validation_by_label) for asset in assets]
     primary_candidates: list[ComputedAsset] = []
     watch_only_items: list[dict[str, Any]] = []
     excluded_items: list[dict[str, Any]] = []

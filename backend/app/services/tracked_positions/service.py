@@ -1251,6 +1251,41 @@ async def latest_signal_contexts(
             )
     return contexts
 
+
+def _alert_threshold_context(
+    position: TrackedPosition,
+    alert: TrackedPositionAlert | None,
+    decision: AlertDecision,
+) -> dict[str, Any]:
+    state = dict(position.exit_state_json or {})
+    dynamic_thresholds = dict(state.get("dynamic_thresholds") or {})
+    context = {
+        "threshold_mode": dynamic_thresholds.get("threshold_source", "fixed_rule"),
+        "rule_version": dynamic_thresholds.get("rule_version", "fixed_exit_v1"),
+        "hard_stop_pct": dynamic_thresholds.get("hard_stop_pct"),
+        "profit_start_pct": dynamic_thresholds.get("profit_start_pct"),
+        "trailing_giveback_pct": dynamic_thresholds.get("trailing_giveback_pct"),
+        "volatility_unit_pct": dynamic_thresholds.get("volatility_unit_pct"),
+        "distance_to_hard_stop_pct": dynamic_thresholds.get("distance_to_hard_stop_pct"),
+        "distance_to_profit_start_pct": dynamic_thresholds.get("distance_to_profit_start_pct"),
+        "distance_to_trailing_giveback_pct": dynamic_thresholds.get("distance_to_trailing_giveback_pct"),
+        "max_profit_pct": state.get("max_profit_pct"),
+        "profit_giveback_pct": state.get("profit_giveback_pct"),
+        "holding_days": state.get("holding_days"),
+        "explanation": dynamic_thresholds.get("explanation") or [],
+        "alert_type": decision.alert_type,
+        "alert_source": decision.alert_source,
+    }
+    if alert is not None:
+        context.update(
+            {
+                "current_price": alert.current_price,
+                "current_price_date": alert.current_price_date.isoformat() if alert.current_price_date else None,
+                "estimated_pnl_pct": alert.estimated_pnl_pct,
+            }
+        )
+    return context
+
 def alert_out(row: TrackedPositionAlert) -> TrackedPositionAlertOut:
     return TrackedPositionAlertOut(
         id=row.id,
@@ -1274,6 +1309,7 @@ def alert_out(row: TrackedPositionAlert) -> TrackedPositionAlertOut:
         email_error_message=row.email_error_message,
         sent_at=row.sent_at,
         created_at=row.created_at,
+        threshold_context=dict(row.threshold_context_json or {}),
     )
 
 
@@ -1499,6 +1535,7 @@ async def create_alert_if_needed(
         suppression_status="sent_or_pending",
         email_status="pending",
     )
+    alert.threshold_context_json = _alert_threshold_context(position, alert, decision)
     session.add(alert)
     await session.commit()
     await session.refresh(alert)
@@ -1585,4 +1622,5 @@ def _email_payload(
             if decision.advisor_report is not None
             else "结果基于公开净值或 ETF 日线数据，不连接支付宝或券商。"
         ),
+        "threshold_context": _alert_threshold_context(position, alert, decision),
     }

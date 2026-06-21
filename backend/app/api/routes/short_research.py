@@ -4,11 +4,18 @@ from datetime import date, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db_session
-from app.models.entities import ShortResearchSignalRun
+from app.models.entities import (
+    EtfSignalValidationItem,
+    EtfSignalValidationRun,
+    ShortResearchSignalRun,
+)
 from app.schemas.short_research import (
+    EtfSignalValidationItemOut,
+    EtfSignalValidationRunOut,
     ShortResearchAdvisorReportOut,
     ShortResearchAdvisorRunRequest,
     ShortResearchAssetDetailOut,
@@ -28,6 +35,8 @@ from app.services.short_research.service import (
     etf_observation_portfolio,
     get_asset_detail,
     latest_signal_run,
+    latest_validation_evidence_by_label,
+    run_etf_signal_validation,
     run_signal_generation,
     status_summary,
     sync_short_research_data,
@@ -57,7 +66,13 @@ def _advisor_report_out(report: Any | None) -> ShortResearchAdvisorReportOut | N
     )
 
 
-def _asset_out(asset: ComputedAsset, advisor_report: Any | None = None) -> ShortResearchAssetOut:
+def _asset_out(
+    asset: ComputedAsset,
+    advisor_report: Any | None = None,
+    *,
+    validation_evidence: dict[str, Any] | None = None,
+    observation_portfolio: dict[str, Any] | None = None,
+) -> ShortResearchAssetOut:
     return ShortResearchAssetOut(
         asset_type=asset.metadata.asset_type,
         code=asset.metadata.code,
@@ -80,6 +95,74 @@ def _asset_out(asset: ComputedAsset, advisor_report: Any | None = None) -> Short
         rationale=asset.rationale,
         source_note=asset.source_note,
         advisor_report=_advisor_report_out(advisor_report),
+        validation_evidence=validation_evidence or {},
+        observation_portfolio=observation_portfolio or {},
+    )
+
+
+def _validation_for_asset(asset: ComputedAsset, evidence_by_label: dict[tuple[str, str], dict[str, Any]]) -> dict[str, Any]:
+    return evidence_by_label.get((asset.conclusion, asset.entry_timing_label), {})
+
+
+def _portfolio_contexts(portfolio: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for section, status in (
+        ("items", "included"),
+        ("watch_only_items", "watch_only"),
+        ("excluded_items", "excluded"),
+    ):
+        for item in portfolio.get(section, []):
+            code = str(item.get("code") or "")
+            if not code:
+                continue
+            result[code] = {
+                "status": status,
+                "target_weight": item.get("target_weight", 0.0),
+                "evidence": list(item.get("evidence") or []),
+                "risk_reasons": list(item.get("risk_reasons") or []),
+                "exclusion_reason": item.get("exclusion_reason"),
+                "snapshot_id": portfolio.get("snapshot_id"),
+                "generated_at": portfolio.get("generated_at"),
+            }
+    return result
+
+
+async def _validation_run_out(session: AsyncSession, run: EtfSignalValidationRun) -> EtfSignalValidationRunOut:
+    rows = (
+        await session.scalars(
+            select(EtfSignalValidationItem)
+            .where(EtfSignalValidationItem.run_id == run.id)
+            .order_by(
+                EtfSignalValidationItem.label.asc(),
+                EtfSignalValidationItem.entry_timing_label.asc(),
+                EtfSignalValidationItem.horizon_days.asc(),
+            )
+        )
+    ).all()
+    return EtfSignalValidationRunOut(
+        id=run.id,
+        status=run.status,
+        as_of_date=run.as_of_date,
+        source_signal_run_id=run.source_signal_run_id,
+        rule_version=run.rule_version,
+        summary=dict(run.summary_json or {}),
+        created_at=run.created_at,
+        items=[
+            EtfSignalValidationItemOut(
+                label=row.label,
+                entry_timing_label=row.entry_timing_label,
+                horizon_days=row.horizon_days,
+                sample_count=row.sample_count,
+                excluded_count=row.excluded_count,
+                avg_return=row.avg_return,
+                median_return=row.median_return,
+                win_rate=row.win_rate,
+                worst_forward_drawdown=row.worst_forward_drawdown,
+                confidence=row.confidence,
+                metrics=dict(row.metrics_json or {}),
+            )
+            for row in rows
+        ],
     )
 
 
@@ -168,11 +251,15 @@ async def list_short_research_assets(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     advisor_reports = await latest_reports_by_asset(session, run.id) if run is not None else {}
+    validation_by_label = await latest_validation_evidence_by_label(session) if asset_type in {None, "etf"} else {}
+    portfolio_context_by_code = _portfolio_contexts(await etf_observation_portfolio(session)) if asset_type in {None, "etf"} else {}
     return ShortResearchAssetListOut(
         items=[
             _asset_out(
                 item,
                 advisor_reports.get((item.metadata.asset_type, item.metadata.code)),
+                validation_evidence=_validation_for_asset(item, validation_by_label),
+                observation_portfolio=portfolio_context_by_code.get(item.metadata.code, {}),
             )
             for item in assets
         ],
@@ -194,6 +281,44 @@ async def get_short_research_observation_portfolio(
     return await etf_observation_portfolio(session, limit=limit, universe=universe)
 
 
+@router.post("/validation/run", response_model=EtfSignalValidationRunOut)
+async def run_short_research_validation(
+    session: AsyncSession = Depends(get_db_session),
+) -> EtfSignalValidationRunOut:
+    run = await run_etf_signal_validation(session)
+    return await _validation_run_out(session, run)
+
+
+@router.get("/validation/latest", response_model=EtfSignalValidationRunOut | None)
+async def get_latest_short_research_validation(
+    session: AsyncSession = Depends(get_db_session),
+) -> EtfSignalValidationRunOut | None:
+    run = await session.scalar(
+        select(EtfSignalValidationRun).order_by(
+            EtfSignalValidationRun.as_of_date.desc(),
+            EtfSignalValidationRun.id.desc(),
+        )
+    )
+    if run is None:
+        return None
+    return await _validation_run_out(session, run)
+
+
+@router.get("/validation", response_model=list[EtfSignalValidationRunOut])
+async def list_short_research_validations(
+    limit: int = Query(default=10, ge=1, le=50),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[EtfSignalValidationRunOut]:
+    runs = (
+        await session.scalars(
+            select(EtfSignalValidationRun)
+            .order_by(EtfSignalValidationRun.as_of_date.desc(), EtfSignalValidationRun.id.desc())
+            .limit(limit)
+        )
+    ).all()
+    return [await _validation_run_out(session, run) for run in runs]
+
+
 @router.get("/assets/{asset_type}/{code}", response_model=ShortResearchAssetDetailOut)
 async def get_short_research_asset_detail(
     asset_type: str,
@@ -206,8 +331,15 @@ async def get_short_research_asset_detail(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     run = await latest_signal_run(session, asset_type=asset_type)
     advisor_reports = await latest_reports_by_asset(session, run.id) if run is not None else {}
+    validation_by_label = await latest_validation_evidence_by_label(session) if asset.metadata.asset_type == "etf" else {}
+    portfolio_context_by_code = _portfolio_contexts(await etf_observation_portfolio(session)) if asset.metadata.asset_type == "etf" else {}
     return ShortResearchAssetDetailOut(
-        asset=_asset_out(asset, advisor_reports.get((asset.metadata.asset_type, asset.metadata.code))),
+        asset=_asset_out(
+            asset,
+            advisor_reports.get((asset.metadata.asset_type, asset.metadata.code)),
+            validation_evidence=_validation_for_asset(asset, validation_by_label),
+            observation_portfolio=portfolio_context_by_code.get(asset.metadata.code, {}),
+        ),
         chart=[
             ShortResearchChartPointOut(
                 date=item["date"],

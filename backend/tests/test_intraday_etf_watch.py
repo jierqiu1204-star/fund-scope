@@ -516,6 +516,11 @@ async def test_dynamic_hard_stop_and_intraday_cooldown(app, settings, monkeypatc
     assert first_alert.alert_type == "hard_stop"
     assert first_alert.alert_level == "urgent"
     assert first_alert.alert_source == "intraday_quote"
+    assert first_alert.threshold_context_json["alert_type"] == "hard_stop"
+    assert first_alert.threshold_context_json["hard_stop_pct"] is not None
+    assert first_alert.threshold_context_json["threshold_mode"] in {"rule_dynamic", "fixed_fallback"}
+    assert sent[0]["threshold_context"]["alert_type"] == "hard_stop"
+    assert sent[0]["threshold_context"]["hard_stop_pct"] == first_alert.threshold_context_json["hard_stop_pct"]
     assert second_status == "suppressed"
     assert second_alert is not None
     assert second_alert.id == first_alert.id
@@ -1055,3 +1060,4 @@ async def test_intraday_cleanup_summarizes_and_deletes_old_raw_quotes(app) -> No
     assert result["deleted_rows"] == 4
     assert raw_count == 4
     assert summary_count == 2
+

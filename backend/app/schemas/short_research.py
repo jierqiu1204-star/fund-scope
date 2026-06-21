@@ -39,6 +39,31 @@ class ShortResearchStatusOut(BaseModel):
     label_validation_generated_at: datetime | None = None
 
 
+class EtfSignalValidationItemOut(BaseModel):
+    label: str
+    entry_timing_label: str
+    horizon_days: int
+    sample_count: int
+    excluded_count: int = 0
+    avg_return: float | None = None
+    median_return: float | None = None
+    win_rate: float | None = None
+    worst_forward_drawdown: float | None = None
+    confidence: str
+    metrics: dict[str, Any] = Field(default_factory=dict)
+
+
+class EtfSignalValidationRunOut(BaseModel):
+    id: int
+    status: str
+    as_of_date: date
+    source_signal_run_id: int | None = None
+    rule_version: str
+    summary: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    items: list[EtfSignalValidationItemOut] = Field(default_factory=list)
+
+
 class ShortResearchDataSyncRequest(BaseModel):
     from_date: date | None = None
     to_date: date | None = None
@@ -109,6 +134,8 @@ class ShortResearchAssetOut(BaseModel):
     rationale: dict[str, Any]
     source_note: str
     advisor_report: ShortResearchAdvisorReportOut | None = None
+    validation_evidence: dict[str, Any] = Field(default_factory=dict)
+    observation_portfolio: dict[str, Any] = Field(default_factory=dict)
 
 
 class ShortResearchAssetListOut(BaseModel):
@@ -147,6 +174,10 @@ class ShortResearchObservationPortfolioItemOut(BaseModel):
     data_date: date | None = None
     evidence: list[str]
     risk_reasons: list[str]
+    entry_timing_label: str | None = None
+    item_type: str | None = None
+    exclusion_reason: str | None = None
+    metrics: dict[str, Any] = Field(default_factory=dict)
 
 
 class ShortResearchObservationPortfolioOut(BaseModel):
@@ -163,3 +194,5 @@ class ShortResearchObservationPortfolioOut(BaseModel):
     no_trade_instruction: bool
     note: str
     methodology: str = ""
+    snapshot_id: int | None = None
+    generated_at: datetime | None = None

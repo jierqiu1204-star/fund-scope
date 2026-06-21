@@ -22,6 +22,8 @@ from app.services.jobs import (
 )
 from app.services.llm import LLMClient
 from app.services.short_research.jobs import (
+    daily_etf_observation_portfolio_job,
+    daily_etf_signal_validation_job,
     daily_short_research_advisor_job,
     daily_short_research_data_job,
     daily_short_research_signals_job,
@@ -153,6 +155,24 @@ def register_default_jobs(
         hour=21,
         minute=40,
         id="daily_short_research_signals",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_tracked_job,
+        "cron",
+        args=[db, "daily_etf_signal_validation", daily_etf_signal_validation_job],
+        hour=21,
+        minute=45,
+        id="daily_etf_signal_validation",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_tracked_job,
+        "cron",
+        args=[db, "daily_etf_observation_portfolio", daily_etf_observation_portfolio_job],
+        hour=21,
+        minute=47,
+        id="daily_etf_observation_portfolio",
         replace_existing=True,
     )
     scheduler.add_job(

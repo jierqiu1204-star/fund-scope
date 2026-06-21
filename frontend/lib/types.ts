@@ -485,6 +485,35 @@ export type ShortResearchChartPoint = {
   turnover: number | null;
 };
 
+export type ValidationEvidence = {
+  run_id?: number;
+  as_of_date?: string;
+  rule_version?: string;
+  sample_count?: number;
+  win_rate?: number | null;
+  median_return?: number | null;
+  confidence?: "sufficient" | "limited" | "insufficient" | string;
+  horizons?: Record<string, {
+    sample_count?: number;
+    excluded_count?: number;
+    avg_return?: number | null;
+    median_return?: number | null;
+    win_rate?: number | null;
+    worst_forward_drawdown?: number | null;
+    confidence?: string;
+  }>;
+};
+
+export type ObservationPortfolioContext = {
+  status?: "included" | "watch_only" | "excluded" | string;
+  target_weight?: number;
+  evidence?: string[];
+  risk_reasons?: string[];
+  exclusion_reason?: string | null;
+  snapshot_id?: number | null;
+  generated_at?: string | null;
+};
+
 export type ShortResearchAsset = {
   asset_type: "fund" | "etf";
   code: string;
@@ -507,6 +536,8 @@ export type ShortResearchAsset = {
   rationale: Record<string, unknown>;
   source_note: string;
   advisor_report: ShortResearchAdvisorReport | null;
+  validation_evidence: ValidationEvidence;
+  observation_portfolio: ObservationPortfolioContext;
 };
 
 export type ShortResearchAdvisorReport = {
@@ -562,9 +593,15 @@ export type ShortResearchObservationPortfolioItem = {
   data_date: string | null;
   evidence: string[];
   risk_reasons: string[];
+  entry_timing_label?: string | null;
+  item_type?: string | null;
+  exclusion_reason?: string | null;
+  metrics?: Record<string, unknown>;
 };
 
 export type ShortResearchObservationPortfolio = {
+  snapshot_id?: number | null;
+  generated_at?: string | null;
   as_of_date: string;
   asset_type: "etf";
   items: ShortResearchObservationPortfolioItem[];
@@ -629,6 +666,7 @@ export type TrackedPositionAlert = {
   email_error_message: string | null;
   sent_at: string | null;
   created_at: string;
+  threshold_context: Record<string, unknown>;
 };
 
 export type TrackedPositionChartPoint = {

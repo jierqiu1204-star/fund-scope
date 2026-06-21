@@ -189,6 +189,54 @@ function labelValidationLine(group: LabelValidationGroup | undefined, window: "5
   return `${window}日：样本 ${item.sample_count}，均值 ${avg}，胜率 ${winRate}，最大回撤 ${drawdown}`;
 }
 
+function validationConfidenceLabel(confidence: string | undefined) {
+  if (confidence === "sufficient") {
+    return "证据较足";
+  }
+  if (confidence === "limited") {
+    return "样本有限";
+  }
+  return "样本不足";
+}
+
+function validationEvidenceText(asset: ShortResearchAsset | null | undefined) {
+  const evidence = asset?.validation_evidence;
+  if (!evidence || !evidence.sample_count) {
+    return "标签验证：样本不足";
+  }
+  const winRate = evidence.win_rate === null || evidence.win_rate === undefined ? "暂无" : formatPercent(evidence.win_rate * 100);
+  const medianReturn =
+    evidence.median_return === null || evidence.median_return === undefined
+      ? "暂无"
+      : formatPercent(evidence.median_return * 100);
+  return `标签验证：${validationConfidenceLabel(evidence.confidence)}，样本 ${evidence.sample_count}，5日中位收益 ${medianReturn}，胜率 ${winRate}`;
+}
+
+function observationPortfolioText(asset: ShortResearchAsset | null | undefined) {
+  const context = asset?.observation_portfolio;
+  if (!context || !context.status) {
+    return "观察组合：暂无权重快照";
+  }
+  if (context.status === "included") {
+    return `观察组合：参考权重 ${formatPercent((context.target_weight ?? 0) * 100)}，仅作研究参考`;
+  }
+  const reason = context.exclusion_reason || context.risk_reasons?.[0] || "未进入主观察组合";
+  return `观察组合：${context.status === "watch_only" ? "只观察不配权" : "未配权"}，${reason}`;
+}
+
+function thresholdExplanationLine(position: TrackedPosition | null | undefined) {
+  const explanation = position?.dynamic_thresholds?.explanation?.[0];
+  if (explanation) {
+    return explanation;
+  }
+  const alertExplanation = position?.latest_alert?.threshold_context?.explanation;
+  if (Array.isArray(alertExplanation) && typeof alertExplanation[0] === "string") {
+    return alertExplanation[0];
+  }
+  return "动态线等待足够价格数据后计算。";
+}
+
+
 function signedScore(value: number | null | undefined) {
   if (value === null || value === undefined) {
     return "暂无";
@@ -1163,8 +1211,9 @@ export default function ShortTermPage() {
         {assetType === "etf" ? (
           <div className="mt-3 rounded-[14px] bg-paper px-3 py-2 text-xs leading-5 text-ink/60">
             <p className="font-semibold text-ink">标签验证</p>
-            <p>{selectedValidationGroup ? labelValidationLine(selectedValidationGroup, "5") : "当前标签组合暂无足够历史验证样本。"}</p>
+            <p>{validationEvidenceText(selectedAsset)}</p>
             <p>{selectedValidationGroup ? labelValidationLine(selectedValidationGroup, "10") : "样本不足时只能继续观察，不能把标签当成买入结论。"}</p>
+            <p>{observationPortfolioText(selectedAsset)}</p>
           </div>
         ) : null}
         <details className="mt-3 rounded-[14px] bg-paper px-3 py-2">
@@ -1371,6 +1420,9 @@ export default function ShortTermPage() {
                     </>
                   ) : (
                     <>
+                      <span className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                        {validationEvidenceText(item as ShortResearchAsset)}
+                      </span>
                       <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
                         今天：{percentMetric(item.metrics, "today_return_pct")}
                       </span>
@@ -1740,6 +1792,7 @@ export default function ShortTermPage() {
                         : formatPercent(item.dynamic_thresholds.trailing_giveback_pct)}
                     </span>
                     <span>动态线由规则计算，AI只做解释，不改写这些线。</span>
+                    <span>阈值说明：{thresholdExplanationLine(item)}</span>
                     <span>
                       买卖价差：
                       {item.intraday_snapshot?.spread_pct === null || item.intraday_snapshot?.spread_pct === undefined
