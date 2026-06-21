@@ -66,9 +66,9 @@
 
 ## 9. Server Verification
 
-- [ ] 9.1 Deploy to `110.42.222.9` after tests pass.
-- [ ] 9.2 Run database migration on the server.
-- [ ] 9.3 Trigger one validation job and one observation portfolio optimization job manually.
-- [ ] 9.4 Verify `/short-term` shows validation evidence and optimized weights.
-- [ ] 9.5 Verify tracked holdings show adaptive threshold reasons and no email is sent from stale/display-only data.
+- [x] 9.1 Deploy to `110.42.222.9` after tests pass.
+- [x] 9.2 Run database migration on the server.
+- [x] 9.3 Trigger one validation job and one observation portfolio optimization job manually.
+- [x] 9.4 Verify `/short-term` shows validation evidence and optimized weights.
+- [x] 9.5 Verify tracked holdings show adaptive threshold reasons and no email is sent from stale/display-only data.
 
