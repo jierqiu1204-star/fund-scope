@@ -411,6 +411,65 @@ function shortResearchThemeTags(item: RankedAssetItem): string[] {
   return isLiveRankingItem(item) ? [] : item.theme_tags;
 }
 
+function previewAssetFromRankedItem(item: RankedAssetItem, marketStatus?: string | null): ShortResearchAsset {
+  if (!isLiveRankingItem(item)) {
+    return item;
+  }
+
+  const entryTiming = itemEntryTimingDisplay(item, marketStatus);
+  const conclusion = itemConclusion(item);
+  const keyReason =
+    item.score_contribution_reasons[0] ??
+    entryTiming.reason ??
+    "正在加载完整详情，先使用榜单数据展示核心摘要。";
+  const quote = item.quote;
+  const metrics: Record<string, unknown> = {};
+  if (quote?.change_percent !== null && quote?.change_percent !== undefined) {
+    metrics.today_return_pct = quote.change_percent / 100;
+  }
+  if (quote?.turnover !== null && quote?.turnover !== undefined) {
+    metrics.average_turnover_20d = quote.turnover;
+  }
+
+  return {
+    asset_type: "etf",
+    code: item.etf_code,
+    name: item.etf_name ?? item.etf_code,
+    rank: item.live_rank ?? item.base_rank,
+    total_score: item.live_total_score ?? item.base_score ?? 0,
+    conclusion,
+    entry_timing_label: entryTiming.label,
+    entry_timing_reason: entryTiming.reason,
+    theme_tags: [],
+    investment_direction: item.sources.length ? item.sources.join(" / ") : "场内 ETF",
+    trading_rule_label: "场内 ETF",
+    latest_date: quote?.trade_date ?? null,
+    latest_value: quote?.latest_price ?? null,
+    usable_days: 0,
+    sample_level: "正在加载完整日线详情。",
+    metrics,
+    score_breakdown: {},
+    risk_flags: quote?.is_stale ? ["行情滞后"] : [],
+    rationale: {
+      key_reason: keyReason,
+      label_meaning: labelMeaning(conclusion)
+    },
+    source_note: item.score_source === "intraday" ? "盘中榜单预览，完整详情加载中" : "日线榜单预览，完整详情加载中",
+    advisor_report: null,
+    validation_evidence: {
+      sample_count: 0,
+      confidence: "insufficient",
+      sample_quality: null,
+      freshness: quote?.trade_date ? { as_of_date: quote.trade_date } : null
+    },
+    observation_portfolio: {
+      status: "watch_only",
+      exclusion_reason: "完整详情加载中",
+      exclusion_explanation: "正在读取完整详情，暂不显示组合权重。"
+    }
+  };
+}
+
 function assetTypeLabel(assetType: string) {
   return assetType === "etf" ? "场内 ETF" : "支付宝场外基金";
 }
@@ -860,6 +919,14 @@ function WorkbenchMetric({
   );
 }
 
+function DetailLoadingPlaceholder({ text }: { text: string }) {
+  return (
+    <div className="flex h-full items-center justify-center rounded-[18px] bg-white text-sm text-ink/50 transition-opacity duration-150">
+      {text}
+    </div>
+  );
+}
+
 function SectionKicker({ eyebrow, title, description }: { eyebrow: string; title: string; description?: string }) {
   return (
     <div>
@@ -1120,11 +1187,6 @@ export default function ShortTermPage() {
     }
   });
 
-  const selectedAsset = selectedDetail.data?.asset;
-  const selectedAssetKey = selectedAsset ? `${selectedAsset.asset_type}-${selectedAsset.code}` : null;
-  const advisorReport = selectedAsset?.advisor_report ?? null;
-  const detailPoints = chartPoints(selectedDetail.data);
-  const windowPoints = returnWindowChart(selectedAsset);
   const statusData = status.data;
   const currentLatestDate =
     statusData?.latest_data_date ??
@@ -1136,6 +1198,21 @@ export default function ShortTermPage() {
       ? (statusData?.etf_data_stale_count ?? 0) + (statusData?.etf_failed_count ?? 0)
       : statusData?.data_issue_count ?? 0;
   const visibleAssets = useMemo(() => (assets.data?.items ?? []) as RankedAssetItem[], [assets.data?.items]);
+  const selectedKey = selected ? `${selected.asset_type}-${selected.code}` : null;
+  const selectedListItem = selected
+    ? visibleAssets.find((item) => getItemAssetType(item) === selected.asset_type && toEtfItemCode(item) === selected.code)
+    : undefined;
+  const selectedPreviewAsset = selectedListItem ? previewAssetFromRankedItem(selectedListItem, etfLiveData?.market_status) : null;
+  const selectedDetailDataKey = selectedDetail.data
+    ? `${selectedDetail.data.asset.asset_type}-${selectedDetail.data.asset.code}`
+    : null;
+  const selectedDetailForCurrent = selectedKey && selectedDetailDataKey === selectedKey ? selectedDetail.data : undefined;
+  const selectedAsset = selectedDetailForCurrent?.asset ?? selectedPreviewAsset;
+  const selectedAssetKey = selectedAsset ? `${selectedAsset.asset_type}-${selectedAsset.code}` : null;
+  const isSelectedDetailPending = Boolean(selectedKey && selectedAsset && !selectedDetailForCurrent && selectedDetail.isFetching);
+  const advisorReport = selectedDetailForCurrent?.asset.advisor_report ?? null;
+  const detailPoints = chartPoints(selectedDetailForCurrent);
+  const windowPoints = returnWindowChart(selectedAsset ?? undefined);
   const totalAssetCount = assets.data?.total ?? 0;
   const latestIntradayQuoteTime = useMemo(() => {
     const quoteTimes = visibleAssets
@@ -2344,6 +2421,11 @@ export default function ShortTermPage() {
                     {selectedTracked.length ? (
                       <p className="mt-2 text-sm text-emerald-700">你正在追踪这只资产的 {selectedTracked.length} 笔买入。</p>
                     ) : null}
+                    {isSelectedDetailPending ? (
+                      <p className="mt-2 inline-flex rounded-full bg-paper px-3 py-1 text-xs font-semibold text-ink/60 transition-opacity duration-150">
+                        正在更新 {selectedAsset.code} 详情...
+                      </p>
+                    ) : null}
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <span className="rounded-full bg-ink px-4 py-2 text-sm font-semibold text-white">
@@ -2572,12 +2654,18 @@ export default function ShortTermPage() {
                     <div>
                       <p className="text-xs font-semibold uppercase tracking-[0.22em] text-accent">今日研究建议</p>
                       <h3 className="mt-2 text-xl font-semibold text-ink">
-                        {advisorReport ? advisorReport.plain_summary : "还没有 AI 研究报告，先看规则解释。"}
+                        {advisorReport
+                          ? advisorReport.plain_summary
+                          : isSelectedDetailPending
+                            ? `正在更新 ${selectedAsset.code} 研究说明...`
+                            : "还没有 AI 研究报告，先看规则解释。"}
                       </h3>
                       <p className="mt-2 text-sm leading-6 text-ink/60">
                         {advisorReport
                           ? `${advisorSourceLabel(advisorReport.source)} · ${advisorReport.model_name} · ${formatDate(advisorReport.generated_at)}`
-                          : "点击页面顶部“生成 AI 研究报告”后，会在这里显示多角度说明。没有报告时，排序和图表仍然正常可用。"}
+                          : isSelectedDetailPending
+                            ? "首屏摘要先用榜单数据展示，完整图表和说明加载完成后会自动补齐。"
+                            : "点击页面顶部“生成 AI 研究报告”后，会在这里显示多角度说明。没有报告时，排序和图表仍然正常可用。"}
                       </p>
                       <p className="mt-2 text-sm leading-6 text-ink/60">
                         排序、买入观察标签、今日买点和持仓动态线由规则计算；AI只解释依据和风险，不直接决定买卖。
@@ -2637,6 +2725,8 @@ export default function ShortTermPage() {
                             <Area type="monotone" dataKey="value" name={assetType === "etf" ? "收盘价" : "净值"} stroke="#1f5c4b" fill="#dce9df" />
                           </AreaChart>
                         </ResponsiveContainer>
+                      ) : isSelectedDetailPending ? (
+                        <DetailLoadingPlaceholder text={`正在更新 ${selectedAsset.code} 走势图...`} />
                       ) : (
                         <div className="flex h-full items-center justify-center rounded-[18px] bg-white text-sm text-ink/50">
                           暂无走势图。先准备数据后再查看。
@@ -2658,6 +2748,8 @@ export default function ShortTermPage() {
                             <Area type="monotone" dataKey="drawdown" name="回落幅度" stroke="#b5532d" fill="#f1d8ca" />
                           </AreaChart>
                         </ResponsiveContainer>
+                      ) : isSelectedDetailPending ? (
+                        <DetailLoadingPlaceholder text={`正在更新 ${selectedAsset.code} 回撤图...`} />
                       ) : (
                         <div className="flex h-full items-center justify-center rounded-[18px] bg-white text-sm text-ink/50">
                           暂无回撤图。
@@ -2695,6 +2787,8 @@ export default function ShortTermPage() {
                               <Bar dataKey="turnover" name="成交额" fill="#e3b873" radius={[8, 8, 0, 0]} />
                             </BarChart>
                           </ResponsiveContainer>
+                        ) : isSelectedDetailPending ? (
+                          <DetailLoadingPlaceholder text={`正在更新 ${selectedAsset.code} 成交额...`} />
                         ) : (
                           <div className="flex h-full items-center justify-center rounded-[18px] bg-white text-sm text-ink/50">
                             暂无成交额数据。
@@ -2736,7 +2830,12 @@ export default function ShortTermPage() {
               <Panel className="rounded-[24px]">
                 <p className="text-lg font-semibold text-ink">分析说明</p>
                 <div className="mt-4 grid gap-4 md:grid-cols-2">
-                  {Object.entries(selectedDetail.data?.explanation_sections ?? {}).map(([title, text]) => (
+                  {isSelectedDetailPending ? (
+                    <div className="rounded-[18px] border border-ink/10 bg-white p-4 text-sm leading-7 text-ink/60">
+                      正在更新 {selectedAsset.code} 的完整分析说明...
+                    </div>
+                  ) : null}
+                  {Object.entries(selectedDetailForCurrent?.explanation_sections ?? {}).map(([title, text]) => (
                     <div key={title} className="rounded-[18px] border border-ink/10 bg-white p-4">
                       <p className="font-semibold text-ink">{title}</p>
                       <p className="mt-2 text-sm leading-7 text-ink/65">{text}</p>
