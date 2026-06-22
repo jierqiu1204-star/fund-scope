@@ -80,20 +80,20 @@ const assetModes: Record<
     shortLabel: "场内 ETF",
     title: "场内 ETF 短线研究",
     description:
-      "默认看证券账户可以买卖的场内 ETF，更适合一两周到两三个月的短线观察。这里用公开日线收盘价、成交额和风险标签做排序；价格比场外基金更及时，但页面数据仍可能延迟，不代表券商盘口实时价。",
+      "默认看证券账户可以买卖的场内 ETF，更适合一两周到两三个月的短线观察。日线基准用收盘价、成交额和风险标签生成；盘中行情会单独显示当前价和行情时间，但仍不是券商盘口实时价。",
     poolLabel: "ETF 池",
     classification: "场内 ETF（证券账户交易）",
-    latestLabel: "最新交易日",
-    priceLabel: "最新收盘价",
+    latestLabel: "日线基准日",
+    priceLabel: "日线收盘价",
     dataButton: "拉取近 120 天 ETF 日线",
     trackingTitle: "标注你已经在证券账户买入的场内 ETF",
     trackingDescription:
       "ETF 追踪按公开行情估算，不连接券商账户。数据滞后、暂无 IOPV 这类问题只在网页提示；只有硬止损、移动止盈、趋势转弱、退出观察才发邮件提醒你人工判断。",
     trackingEmpty: "还没有追踪记录。左侧选择一只场内 ETF 后，点“我已买入，开始追踪”。",
-    detailEmpty: "左侧选择一只 ETF 后，这里会显示走势、回撤、成交额、近期涨跌和解释。",
-    noResults: "当前筛选条件下没有 ETF 结果。可以换一个方向，或先点击“拉取近 120 天 ETF 日线”。",
+    detailEmpty: "左侧选择一只 ETF 后，这里会显示日线走势、盘中价、回撤、成交额、近期涨跌和解释。",
+    noResults: "当前筛选条件下没有 ETF 结果。可以换一个方向，或先更新日线数据并生成短线排序。",
     sourceSummary:
-      "说明：ETF 使用公开日线收盘价和成交额，适合证券账户短线研究；它不是券商盘口实时价，也不会自动下单。"
+      "说明：ETF 排序以公开日线为基准，盘中价只在盯盘池里实时更新；页面不是券商盘口，也不会自动下单。"
   },
   fund: {
     label: "支付宝场外基金（非实时净值）",
@@ -1094,8 +1094,14 @@ export default function ShortTermPage() {
     assetType === "etf"
       ? (statusData?.etf_data_stale_count ?? 0) + (statusData?.etf_failed_count ?? 0)
       : statusData?.data_issue_count ?? 0;
-  const visibleAssets = (assets.data?.items ?? []) as RankedAssetItem[];
+  const visibleAssets = useMemo(() => (assets.data?.items ?? []) as RankedAssetItem[], [assets.data?.items]);
   const totalAssetCount = assets.data?.total ?? 0;
+  const latestIntradayQuoteTime = useMemo(() => {
+    const quoteTimes = visibleAssets
+      .map((item) => (isLiveRankingItem(item) ? item.quote?.quote_time : null))
+      .filter((value): value is string => Boolean(value));
+    return quoteTimes.sort().at(-1) ?? null;
+  }, [visibleAssets]);
   const goToPreviousAssetPage = () => setAssetOffset((value) => Math.max(0, value - ASSET_PAGE_SIZE));
   const goToNextAssetPage = () => setAssetOffset((value) => value + ASSET_PAGE_SIZE);
   const observableCount = visibleAssets.filter((item) => itemConclusion(item) === "短线观察").length;
@@ -1116,6 +1122,10 @@ export default function ShortTermPage() {
     (item) => selectedAsset && item.asset_type === selectedAsset.asset_type && item.asset_code === selectedAsset.code
   );
   const primaryTracked = selectedTracked[0] ?? null;
+  const selectedLiveItem = selectedAsset
+    ? visibleAssets.find((item) => isLiveRankingItem(item) && item.etf_code === selectedAsset.code)
+    : null;
+  const selectedLiveQuote = selectedLiveItem && isLiveRankingItem(selectedLiveItem) ? selectedLiveItem.quote : null;
   const selectedAssetMetrics = selectedAsset?.metrics ?? {};
   const validationGroups = labelValidationGroups(statusData);
   const selectedValidationGroup = selectedAsset
@@ -1965,6 +1975,9 @@ export default function ShortTermPage() {
           ) : null}
           <WorkbenchMetric label="当前列表" value={`${visibleAssets.length}/${totalAssetCount} 只`} tone="bg-accentSoft/45 text-ink" />
           <WorkbenchMetric label={mode.latestLabel} value={formatDate(currentLatestDate)} />
+          {assetType === "etf" ? (
+            <WorkbenchMetric label="盘中行情时间" value={formatDateTime(latestIntradayQuoteTime)} tone="bg-white text-ink" />
+          ) : null}
           <WorkbenchMetric label="短线观察" value={`${observableCount} 只`} tone="bg-emerald-50 text-emerald-800" />
           <WorkbenchMetric label="高位观察" value={`${highRiskCount} 只`} tone="bg-rose-50 text-rose-800" />
           {assetType === "etf" ? (
@@ -1982,7 +1995,7 @@ export default function ShortTermPage() {
         </div>
 
         {assetType === "etf" ? (
-          <div className="mt-4 grid gap-3 rounded-[20px] border border-ink/10 bg-ink px-4 py-3 text-white md:grid-cols-4">
+          <div className="mt-4 grid gap-3 rounded-[20px] border border-ink/10 bg-ink px-4 py-3 text-white md:grid-cols-5">
             <div>
               <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-white/50">盘中盯盘</p>
               <p className="mt-1 text-sm text-white/75">评分前 20 + 短线/高位观察 + 已追踪 ETF</p>
@@ -1994,6 +2007,10 @@ export default function ShortTermPage() {
             <div>
               <p className="text-xs text-white/50">盯盘数量</p>
               <p className="font-semibold">{etfLiveStatus?.watched_count ?? 0} 只</p>
+            </div>
+            <div>
+              <p className="text-xs text-white/50">盘中行情</p>
+              <p className="font-semibold">{formatDateTime(latestIntradayQuoteTime)}</p>
             </div>
             <div>
               <p className="text-xs text-white/50">最近运行</p>
@@ -2449,9 +2466,15 @@ export default function ShortTermPage() {
                   </div>
                 ) : null}
 
-                <div className={`mt-5 grid gap-3 ${assetType === "etf" ? "md:grid-cols-6" : "md:grid-cols-5"}`}>
+                <div className={`mt-5 grid gap-3 ${assetType === "etf" ? "md:grid-cols-7" : "md:grid-cols-5"}`}>
                   <StatPill label={mode.latestLabel} value={formatDate(selectedAsset.latest_date)} tone="bg-white text-ink" />
                   <StatPill label={mode.priceLabel} value={selectedAsset.latest_value === null ? "暂无" : selectedAsset.latest_value.toFixed(4)} />
+                  {assetType === "etf" ? (
+                    <StatPill label="盘中价" value={selectedLiveQuote?.latest_price === undefined ? "暂无" : selectedLiveQuote.latest_price.toFixed(4)} tone="bg-white text-ink" />
+                  ) : null}
+                  {assetType === "etf" ? (
+                    <StatPill label="行情时间" value={formatDateTime(selectedLiveQuote?.quote_time)} tone="bg-white text-ink" />
+                  ) : null}
                   <StatPill label="可用样本" value={`${selectedAsset.usable_days} 天`} tone="bg-accentSoft text-ink" />
                   <StatPill label="今日买点" value={selectedAsset.entry_timing_label} tone="bg-white text-ink" />
                   {assetType === "etf" ? (
@@ -2613,7 +2636,7 @@ export default function ShortTermPage() {
                         <p className="mt-2">
                           交易口径：
                           {assetType === "etf"
-                            ? "证券账户场内 ETF，按公开日线收盘价估算；页面不是券商盘口实时价。"
+                            ? "证券账户场内 ETF，日线图按公开收盘价，盘中价在上方单独展示；页面不是券商盘口实时价。"
                             : "支付宝场外基金，按确认净值日估算，不是盘中实时价格。"}
                         </p>
                       </div>

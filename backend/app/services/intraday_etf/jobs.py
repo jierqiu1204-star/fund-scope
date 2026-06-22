@@ -69,6 +69,7 @@ async def intraday_etf_watch_job(
             await session.commit()
             return _result(run)
 
+        watch_codes = {item.etf_code for item in watchlist.items}
         provider_error = None
         try:
             quotes = await fetch_spot_quotes(fetcher)
@@ -77,6 +78,8 @@ async def intraday_etf_watch_job(
             provider_error = str(exc)
             quotes = {}
             updated = 0
+        updated_codes = sorted(set(quotes).intersection(watch_codes))
+        missing_watch_codes = sorted(watch_codes - set(quotes))
         latest_quotes = await latest_quotes_by_code(session, [item.etf_code for item in watchlist.items])
         local_now = datetime.now(ASIA_SHANGHAI).replace(tzinfo=None)
         stale = sum(1 for quote in latest_quotes.values() if local_now - quote.quote_time > timedelta(minutes=3))
@@ -92,7 +95,9 @@ async def intraday_etf_watch_job(
         run.details_json = {
             **dict(run.details_json or {}),
             "provider_returned": len(quotes),
-            "updated_codes": sorted(set(quotes).intersection({item.etf_code for item in watchlist.items})),
+            "updated_codes": updated_codes,
+            "missing_watch_count": len(missing_watch_codes),
+            "missing_watch_codes": missing_watch_codes,
             "provider_error": provider_error,
             "alert_result": alert_result,
         }

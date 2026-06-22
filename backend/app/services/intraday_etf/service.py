@@ -192,6 +192,14 @@ def _text(record: dict[str, Any], *keys: str) -> str | None:
 def _parse_quote_time(record: dict[str, Any], fallback: datetime | None = None) -> tuple[datetime, bool]:
     raw = _text(record, "行情时间", "更新时间", "time", "quote_time")
     if raw:
+        normalized = raw.strip().replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(normalized)
+            if parsed.tzinfo is not None:
+                parsed = parsed.astimezone(ASIA_SHANGHAI).replace(tzinfo=None)
+            return parsed, False
+        except ValueError:
+            pass
         for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%H:%M:%S", "%H:%M"):
             try:
                 parsed = datetime.strptime(raw, fmt)

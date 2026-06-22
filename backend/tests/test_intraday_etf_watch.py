@@ -387,6 +387,47 @@ def test_quote_normalization_marks_missing_time_as_display_only() -> None:
     assert quote.raw["quote_time_is_fallback"] is True
 
 
+def test_quote_normalization_parses_timezone_update_time() -> None:
+    quote = normalize_spot_record(
+        {
+            "代码": "513520",
+            "最新价": "2.585",
+            "涨跌幅": "0.12",
+            "更新时间": "2026-06-22 12:47:26+08:00",
+        }
+    )
+
+    assert quote is not None
+    assert quote.etf_code == "513520"
+    assert quote.quote_time == datetime(2026, 6, 22, 12, 47, 26)
+    assert quote.trade_date == date(2026, 6, 22)
+    assert quote.raw["quote_time_is_fallback"] is False
+
+
+@pytest.mark.asyncio
+async def test_intraday_watch_reports_watch_codes_missing_from_provider(app) -> None:
+    await _seed_signal_run(app, count=2)
+    quote_time = datetime.now().replace(microsecond=0)
+
+    def fake_fetcher() -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "code": "510000",
+                    "latest_price": 1.25,
+                    "quote_time": quote_time.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+            ]
+        )
+
+    async with app.state.db.session() as session:
+        result = await intraday_etf_watch_job(session, run_type="manual", force=True, fetcher=fake_fetcher)
+
+    assert result["updated_quote_count"] == 1
+    assert result["details"]["missing_watch_count"] == 1
+    assert result["details"]["missing_watch_codes"] == ["510001"]
+
+
 @pytest.mark.asyncio
 async def test_etf_entry_uses_manual_price_then_fresh_intraday_fallback(app, monkeypatch) -> None:
     await _seed_price_history(app, "512800")
