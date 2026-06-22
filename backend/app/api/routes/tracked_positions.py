@@ -8,8 +8,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_approved_user
 from app.core.db import get_db_session
-from app.models.entities import TrackedPosition, TrackedPositionAlert, User, utcnow
+from app.models.entities import (
+    TrackedPosition,
+    TrackedPositionAlert,
+    TrackedPositionAlertAudit,
+    User,
+    utcnow,
+)
 from app.schemas.tracked_positions import (
+    TrackedPositionAlertAuditListOut,
     TrackedPositionCloseRequest,
     TrackedPositionCreate,
     TrackedPositionDetailOut,
@@ -19,6 +26,7 @@ from app.schemas.tracked_positions import (
 )
 from app.services.tracked_positions.service import (
     SignalContext,
+    alert_audit_out,
     alert_out,
     cost_basis_for_position,
     create_position,
@@ -28,6 +36,7 @@ from app.services.tracked_positions.service import (
     latest_alerts_for_positions,
     latest_signal_context,
     latest_signal_contexts,
+    legacy_alert_audit_out,
     position_analysis,
     recalculate_entry,
     recent_intraday_alerts_for_position,
@@ -187,6 +196,41 @@ async def create_tracked_position(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return await _position_out(session, row)
+
+
+@router.get("/{position_id}/audit", response_model=TrackedPositionAlertAuditListOut)
+async def get_tracked_position_alert_audit(
+    position_id: int,
+    user: User = Depends(require_approved_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> TrackedPositionAlertAuditListOut:
+    row = await session.get(TrackedPosition, position_id)
+    if row is None or row.user_id != user.id:
+        raise HTTPException(status_code=404, detail="未找到这笔追踪")
+    audits = list(
+        (
+            await session.scalars(
+                select(TrackedPositionAlertAudit)
+                .where(TrackedPositionAlertAudit.tracked_position_id == row.id)
+                .order_by(TrackedPositionAlertAudit.created_at.desc(), TrackedPositionAlertAudit.id.desc())
+            )
+        ).all()
+    )
+    if audits:
+        return TrackedPositionAlertAuditListOut(items=[alert_audit_out(item) for item in audits], total=len(audits))
+    legacy_alerts = list(
+        (
+            await session.scalars(
+                select(TrackedPositionAlert)
+                .where(TrackedPositionAlert.tracked_position_id == row.id)
+                .order_by(TrackedPositionAlert.created_at.desc(), TrackedPositionAlert.id.desc())
+            )
+        ).all()
+    )
+    return TrackedPositionAlertAuditListOut(
+        items=[legacy_alert_audit_out(item) for item in legacy_alerts],
+        total=len(legacy_alerts),
+    )
 
 
 @router.get("/{position_id}", response_model=TrackedPositionDetailOut)

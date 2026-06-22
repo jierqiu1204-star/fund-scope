@@ -1093,14 +1093,17 @@ async def latest_validation_evidence_by_label(session: AsyncSession) -> dict[tup
                 "horizons": {},
             },
         )
+        metrics = dict(row.metrics_json or {})
         horizon = {
             "sample_count": row.sample_count,
             "excluded_count": row.excluded_count,
+            "coverage": metrics.get("coverage"),
             "avg_return": row.avg_return,
             "median_return": row.median_return,
             "win_rate": row.win_rate,
             "worst_forward_drawdown": row.worst_forward_drawdown,
             "confidence": row.confidence,
+            "exclusion_reasons": metrics.get("exclusion_reasons", {}),
         }
         evidence["horizons"][str(row.horizon_days)] = horizon
         if row.horizon_days == 5:
@@ -1121,6 +1124,41 @@ async def latest_validation_evidence_by_label(session: AsyncSession) -> dict[tup
                     "confidence": row.confidence,
                 }
             )
+    for evidence in grouped.values():
+        horizons = evidence.get("horizons", {})
+        five_day = horizons.get("5") if isinstance(horizons, dict) else None
+        one_day = horizons.get("1") if isinstance(horizons, dict) else None
+        excluded_total = 0
+        sample_total = 0
+        exclusion_summary: dict[str, int] = {}
+        if isinstance(horizons, dict):
+            for horizon in horizons.values():
+                if not isinstance(horizon, dict):
+                    continue
+                sample_total += int(horizon.get("sample_count") or 0)
+                excluded_total += int(horizon.get("excluded_count") or 0)
+                reasons = horizon.get("exclusion_reasons")
+                if isinstance(reasons, dict):
+                    for key, count in reasons.items():
+                        exclusion_summary[str(key)] = exclusion_summary.get(str(key), 0) + int(count or 0)
+        degradation_warning = None
+        if isinstance(five_day, dict) and five_day.get("median_return") is not None:
+            if float(five_day["median_return"] or 0.0) < 0 or float(five_day.get("win_rate") or 0.0) < 0.45:
+                degradation_warning = "近5日验证样本中位收益或胜率偏弱，标签有效性需要降级观察。"
+        if degradation_warning is None and isinstance(one_day, dict) and one_day.get("median_return") is not None:
+            if float(one_day["median_return"] or 0.0) < 0 and evidence.get("confidence") == "sufficient":
+                degradation_warning = "近1日验证出现转弱迹象，短线标签需要结合当日走势复核。"
+        evidence["freshness"] = {
+            "as_of_date": run.as_of_date.isoformat(),
+            "generated_at": run.created_at.isoformat(),
+            "rule_version": run.rule_version,
+        }
+        evidence["sample_quality"] = {
+            "sample_count_total": sample_total,
+            "excluded_count_total": excluded_total,
+            "exclusion_reasons": exclusion_summary,
+        }
+        evidence["degradation_warning"] = degradation_warning
     return grouped
 
 
@@ -1930,6 +1968,41 @@ def _portfolio_candidate_group(asset: ComputedAsset) -> tuple[str, str | None]:
     return "primary", None
 
 
+def _portfolio_decision_factors(asset: ComputedAsset, *, target_weight: float, reason: str | None) -> dict[str, Any]:
+    return {
+        "score": round(asset.total_score, 2),
+        "validation_confidence": asset.metrics.get("validation_confidence"),
+        "validation_sample_count": int(asset.metrics.get("validation_sample_count") or 0),
+        "volatility_20d": asset.metrics.get("volatility_20d"),
+        "max_drawdown_60d": asset.metrics.get("max_drawdown_60d"),
+        "average_turnover_20d": asset.metrics.get("average_turnover_20d"),
+        "entry_timing_label": asset.entry_timing_label,
+        "risk_flags": list(asset.risk_flags),
+        "single_weight_cap": _PORTFOLIO_SINGLE_WEIGHT_CAP,
+        "target_weight": round(target_weight, 4),
+        "exclusion_reason": reason,
+    }
+
+
+def _portfolio_weight_explanation(asset: ComputedAsset, *, target_weight: float) -> str | None:
+    if target_weight <= 0:
+        return None
+    confidence = asset.metrics.get("validation_confidence") or "未验证"
+    sample_count = int(asset.metrics.get("validation_sample_count") or 0)
+    turnover = float(asset.metrics.get("average_turnover_20d") or 0.0) / 100_000_000
+    return (
+        f"给 {target_weight * 100:.0f}% 观察权重：综合分 {asset.total_score:.1f}，"
+        f"标签验证 {confidence}（样本 {sample_count}），20日成交额约 {turnover:.2f} 亿元；"
+        "同时受单只30%、总仓位、主题集中度、波动和回撤约束。"
+    )
+
+
+def _portfolio_exclusion_explanation(reason: str | None) -> str | None:
+    if reason is None:
+        return None
+    return f"未分配主组合权重：{reason}"
+
+
 def _portfolio_item(asset: ComputedAsset, *, target_weight: float, reason: str | None = None) -> dict[str, Any]:
     risk_reasons = asset.risk_flags or ["暂未触发主要风险标签"]
     if reason:
@@ -1944,6 +2017,15 @@ def _portfolio_item(asset: ComputedAsset, *, target_weight: float, reason: str |
         risk_reasons.append(
             f"标签验证：{validation_confidence}，样本 {int(asset.metrics.get('validation_sample_count') or 0)}"
         )
+    weight_explanation = _portfolio_weight_explanation(asset, target_weight=target_weight)
+    exclusion_explanation = _portfolio_exclusion_explanation(reason)
+    decision_factors = _portfolio_decision_factors(asset, target_weight=target_weight, reason=reason)
+    metrics = {
+        **asset.metrics,
+        "portfolio_weight_explanation": weight_explanation,
+        "portfolio_exclusion_explanation": exclusion_explanation,
+        "portfolio_decision_factors": decision_factors,
+    }
     return {
         "asset_type": asset.metadata.asset_type,
         "code": asset.metadata.code,
@@ -1961,7 +2043,10 @@ def _portfolio_item(asset: ComputedAsset, *, target_weight: float, reason: str |
             f"买点原因：{asset.entry_timing_reason}",
         ],
         "risk_reasons": risk_reasons,
-        "metrics": asset.metrics,
+        "weight_explanation": weight_explanation,
+        "exclusion_explanation": exclusion_explanation,
+        "decision_factors": decision_factors,
+        "metrics": metrics,
     }
 
 
@@ -2021,6 +2106,10 @@ async def latest_observation_portfolio_snapshot(
 
 
 def _snapshot_item_out(row: EtfObservationPortfolioItem) -> dict[str, Any]:
+    metrics = dict(row.metrics_json or {})
+    decision_factors = metrics.get("portfolio_decision_factors")
+    if not isinstance(decision_factors, dict):
+        decision_factors = {}
     return {
         "asset_type": ASSET_TYPE_ETF,
         "code": row.asset_code,
@@ -2034,7 +2123,10 @@ def _snapshot_item_out(row: EtfObservationPortfolioItem) -> dict[str, Any]:
         "risk_reasons": list(row.risk_reasons_json or []),
         "item_type": row.item_type,
         "exclusion_reason": row.exclusion_reason,
-        "metrics": dict(row.metrics_json or {}),
+        "weight_explanation": metrics.get("portfolio_weight_explanation"),
+        "exclusion_explanation": metrics.get("portfolio_exclusion_explanation"),
+        "decision_factors": decision_factors,
+        "metrics": metrics,
     }
 
 

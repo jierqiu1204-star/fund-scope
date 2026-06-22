@@ -23,12 +23,14 @@ from app.models.entities import (
     ShortResearchSignalRun,
     TrackedPosition,
     TrackedPositionAlert,
+    TrackedPositionAlertAudit,
     TradableEtf,
     User,
     utcnow,
 )
 from app.schemas.etf_quotes import DynamicExitThresholdsOut, TrackedEtfIntradaySnapshotOut
 from app.schemas.tracked_positions import (
+    TrackedPositionAlertAuditOut,
     TrackedPositionAlertOut,
     TrackedPositionChartPoint,
     TrackedPositionExitSignal,
@@ -1327,6 +1329,233 @@ def alert_out(row: TrackedPositionAlert) -> TrackedPositionAlertOut:
     )
 
 
+def _legacy_alert_audit_outcome(row: TrackedPositionAlert) -> str:
+    if row.email_status == "sent":
+        return "sent"
+    if row.email_status == "failed":
+        return "failed"
+    if row.suppression_status in {"web_only", "suppressed"}:
+        return str(row.suppression_status)
+    if row.email_status == "skipped":
+        return "skipped"
+    return row.email_status or "recorded"
+
+
+def _audit_summary(
+    *,
+    outcome: str,
+    alert_type: str,
+    smtp_error_message: str | None = None,
+    duplicate_reason: str | None = None,
+    cooldown_reason: str | None = None,
+) -> str:
+    if outcome == "sent":
+        return "已发送邮件提醒。"
+    if outcome == "failed":
+        return f"邮件发送失败：{smtp_error_message or '未知错误'}。"
+    if outcome == "web_only":
+        return _web_only_message(alert_type)
+    if outcome == "suppressed":
+        return duplicate_reason or "同类盘中提醒处于冷却期，本次不重复发邮件。"
+    if outcome == "data_ineligible":
+        return "当前数据不可用于邮件决策，仅在网页展示，不发送卖出/减仓邮件。"
+    if outcome == "skipped":
+        return cooldown_reason or smtp_error_message or "本次跳过邮件发送。"
+    return "已记录提醒评估结果。"
+
+
+def _quote_freshness_for_audit(
+    position: TrackedPosition,
+    intraday_snapshot: TrackedEtfIntradaySnapshotOut | None,
+    *,
+    evaluation_mode: str,
+) -> str:
+    if position.asset_type == ASSET_TYPE_FUND:
+        return "daily_nav"
+    if intraday_snapshot is None:
+        return "missing_intraday" if evaluation_mode == "intraday" else "daily_close"
+    if _is_fresh_intraday_snapshot(intraday_snapshot):
+        return RELIABILITY_FRESH_INTRADAY
+    if intraday_snapshot.reliability_level:
+        return intraday_snapshot.reliability_level
+    return RELIABILITY_STALE_QUOTE if intraday_snapshot.is_stale else "intraday_display_only"
+
+
+def _audit_decision_context(
+    position: TrackedPosition,
+    decision: AlertDecision,
+    intraday_snapshot: TrackedEtfIntradaySnapshotOut | None,
+    *,
+    evaluation_mode: str,
+    outcome: str,
+) -> dict[str, Any]:
+    email_data_eligible = _decision_email_data_eligible(
+        position,
+        decision,
+        intraday_snapshot,
+        evaluation_mode=evaluation_mode,
+    )
+    email_eligible = _should_send_email(decision.alert_type) and email_data_eligible
+    email_eligibility_reason = None
+    if not _should_send_email(decision.alert_type):
+        email_eligibility_reason = _web_only_message(decision.alert_type)
+    elif not email_data_eligible:
+        email_eligibility_reason = "盘中提醒必须使用新鲜盘中行情；旧行情、日线价和估算价不会触发邮件。"
+    return {
+        "evaluation_mode": evaluation_mode,
+        "outcome": outcome,
+        "email_eligible": email_eligible,
+        "email_eligibility_reason": email_eligibility_reason,
+        "alert_level": decision.alert_level,
+        "reasons": list(decision.reasons),
+        "risk_flags": list(decision.risk_flags),
+        "data_reliability": _data_reliability_for_position(position, intraday_snapshot),
+        "quote_time": decision.quote_time.isoformat() if decision.quote_time else None,
+    }
+
+
+def alert_audit_out(row: TrackedPositionAlertAudit) -> TrackedPositionAlertAuditOut:
+    return TrackedPositionAlertAuditOut(
+        id=row.id,
+        tracked_position_id=row.tracked_position_id,
+        tracked_position_alert_id=row.tracked_position_alert_id,
+        outcome=row.outcome,
+        signal_type=row.signal_type,
+        alert_date=row.alert_date,
+        alert_type=row.alert_type,
+        trigger_label=row.trigger_label,
+        data_source=row.data_source,
+        quote_freshness=row.quote_freshness,
+        threshold_context=dict(row.threshold_context_json or {}),
+        decision_context=dict(row.decision_context_json or {}),
+        recipient=row.recipient,
+        duplicate_reason=row.duplicate_reason,
+        cooldown_reason=row.cooldown_reason,
+        smtp_result=row.smtp_result,
+        smtp_error_message=row.smtp_error_message,
+        quote_time=row.quote_time,
+        created_at=row.created_at,
+        audit_summary=_audit_summary(
+            outcome=row.outcome,
+            alert_type=row.alert_type,
+            smtp_error_message=row.smtp_error_message,
+            duplicate_reason=row.duplicate_reason,
+            cooldown_reason=row.cooldown_reason,
+        ),
+    )
+
+
+def legacy_alert_audit_out(row: TrackedPositionAlert) -> TrackedPositionAlertAuditOut:
+    outcome = _legacy_alert_audit_outcome(row)
+    threshold_context = dict(row.threshold_context_json or {})
+    cooldown_reason = None
+    duplicate_reason = None
+    if row.suppression_status == "suppressed":
+        duplicate_reason = "同一 ETF 同一盘中信号 30 分钟内不重复发。"
+    elif row.email_status == "skipped" and row.alert_type == ALERT_TAKE_PROFIT_WATCH:
+        cooldown_reason = "止盈观察只看真正发过邮件的记录，3 天内不重复发。"
+    return TrackedPositionAlertAuditOut(
+        id=row.id,
+        tracked_position_id=row.tracked_position_id,
+        tracked_position_alert_id=row.id,
+        outcome=outcome,
+        signal_type=row.alert_type,
+        alert_date=row.alert_date,
+        alert_type=row.alert_type,
+        trigger_label=row.trigger_label,
+        data_source=row.alert_source or "unknown",
+        quote_freshness="fresh_intraday" if row.alert_source == "intraday_quote" and row.quote_time else str(threshold_context.get("data_reliability") or "unknown"),
+        threshold_context=threshold_context,
+        decision_context={
+            "legacy_alert_row": True,
+            "email_status": row.email_status,
+            "suppression_status": row.suppression_status,
+            "risk_flags": list(row.risk_flags_json or []),
+            "reasons": list(row.reasons_json or []),
+        },
+        recipient=None,
+        duplicate_reason=duplicate_reason,
+        cooldown_reason=cooldown_reason,
+        smtp_result=row.email_status if row.email_status in {"sent", "failed", "skipped"} else None,
+        smtp_error_message=row.email_error_message,
+        quote_time=row.quote_time,
+        created_at=row.created_at,
+        audit_summary=_audit_summary(
+            outcome=outcome,
+            alert_type=row.alert_type,
+            smtp_error_message=row.email_error_message,
+            duplicate_reason=duplicate_reason,
+            cooldown_reason=cooldown_reason,
+        ),
+    )
+
+
+async def _record_alert_audit(
+    session: AsyncSession,
+    position: TrackedPosition,
+    decision: AlertDecision,
+    signal_date: date,
+    *,
+    outcome: str,
+    evaluation_mode: str,
+    alert: TrackedPositionAlert | None = None,
+    intraday_snapshot: TrackedEtfIntradaySnapshotOut | None = None,
+    duplicate_reason: str | None = None,
+    cooldown_reason: str | None = None,
+    smtp_result: str | None = None,
+    smtp_error_message: str | None = None,
+    recipient: str | None = None,
+    dedupe_minutes: int | None = None,
+) -> TrackedPositionAlertAudit:
+    if dedupe_minutes is not None:
+        existing = await session.scalar(
+            select(TrackedPositionAlertAudit)
+            .where(
+                TrackedPositionAlertAudit.tracked_position_id == position.id,
+                TrackedPositionAlertAudit.alert_type == decision.alert_type,
+                TrackedPositionAlertAudit.outcome == outcome,
+                TrackedPositionAlertAudit.created_at >= utcnow() - timedelta(minutes=dedupe_minutes),
+            )
+            .order_by(TrackedPositionAlertAudit.created_at.desc(), TrackedPositionAlertAudit.id.desc())
+        )
+        if existing is not None:
+            return existing
+    data_source = intraday_snapshot.price_source if intraday_snapshot else decision.alert_source or "unknown"
+    row = TrackedPositionAlertAudit(
+        tracked_position_id=position.id,
+        tracked_position_alert_id=alert.id if alert is not None else None,
+        outcome=outcome,
+        signal_type=decision.alert_type,
+        alert_date=signal_date,
+        alert_type=decision.alert_type,
+        trigger_label=decision.trigger_label,
+        data_source=data_source,
+        quote_freshness=_quote_freshness_for_audit(
+            position,
+            intraday_snapshot,
+            evaluation_mode=evaluation_mode,
+        ),
+        threshold_context_json=_alert_threshold_context(position, alert, decision),
+        decision_context_json=_audit_decision_context(
+            position,
+            decision,
+            intraday_snapshot,
+            evaluation_mode=evaluation_mode,
+            outcome=outcome,
+        ),
+        recipient=recipient,
+        duplicate_reason=duplicate_reason,
+        cooldown_reason=cooldown_reason,
+        smtp_result=smtp_result,
+        smtp_error_message=smtp_error_message,
+        quote_time=decision.quote_time or (intraday_snapshot.quote_time if intraday_snapshot else None),
+    )
+    session.add(row)
+    await session.commit()
+    await session.refresh(row)
+    return row
+
+
 async def evaluate_alert_decision(
     session: AsyncSession,
     position: TrackedPosition,
@@ -1482,6 +1711,17 @@ async def create_alert_if_needed(
     ):
         if session.is_modified(position, include_collections=False):
             await session.commit()
+        await _record_alert_audit(
+            session,
+            position,
+            decision,
+            signal_date,
+            outcome="data_ineligible",
+            evaluation_mode=evaluation_mode,
+            intraday_snapshot=intraday_snapshot,
+            cooldown_reason="当前行情不是新鲜盘中行情，盘中邮件不会用日线兜底或旧行情触发。",
+            dedupe_minutes=30,
+        )
         return None, "data_ineligible"
 
     if is_intraday_alert:
@@ -1504,6 +1744,18 @@ async def create_alert_if_needed(
             and decision.quote_time != recent_intraday.quote_time
         )
         if recent_intraday is not None and not escalated_hard_stop:
+            await _record_alert_audit(
+                session,
+                position,
+                decision,
+                signal_date,
+                outcome="suppressed",
+                evaluation_mode=evaluation_mode,
+                alert=recent_intraday,
+                intraday_snapshot=intraday_snapshot,
+                duplicate_reason="同一 ETF 同一盘中信号 30 分钟内不重复发。",
+                dedupe_minutes=30,
+            )
             return recent_intraday, "suppressed"
     else:
         existing = await session.scalar(
@@ -1514,6 +1766,18 @@ async def create_alert_if_needed(
             )
         )
         if existing is not None:
+            await _record_alert_audit(
+                session,
+                position,
+                decision,
+                signal_date,
+                outcome="suppressed",
+                evaluation_mode=evaluation_mode,
+                alert=existing,
+                intraday_snapshot=intraday_snapshot,
+                duplicate_reason="同一持仓同一天同类提醒已存在，本次不重复记录邮件。",
+                dedupe_minutes=1440,
+            )
             return existing, "deduplicated"
 
     if decision.alert_type == ALERT_TAKE_PROFIT_WATCH:
@@ -1528,6 +1792,18 @@ async def create_alert_if_needed(
             .order_by(TrackedPositionAlert.alert_date.desc(), TrackedPositionAlert.id.desc())
         )
         if recent_take_profit is not None:
+            await _record_alert_audit(
+                session,
+                position,
+                decision,
+                signal_date,
+                outcome="skipped",
+                evaluation_mode=evaluation_mode,
+                alert=recent_take_profit,
+                intraday_snapshot=intraday_snapshot,
+                cooldown_reason="止盈观察只看真正发过邮件的记录，3 天内不重复发。",
+                dedupe_minutes=1440,
+            )
             return recent_take_profit, "deduplicated"
 
     alert = TrackedPositionAlert(
@@ -1560,6 +1836,17 @@ async def create_alert_if_needed(
         alert.email_error_message = _web_only_message(alert.alert_type)
         await session.commit()
         await session.refresh(alert)
+        await _record_alert_audit(
+            session,
+            position,
+            decision,
+            signal_date,
+            outcome="web_only",
+            evaluation_mode=evaluation_mode,
+            alert=alert,
+            intraday_snapshot=intraday_snapshot,
+            smtp_result="skipped",
+        )
         return alert, "web_only"
 
     user = await session.get(User, position.user_id)
@@ -1568,6 +1855,20 @@ async def create_alert_if_needed(
         alert.email_status = "skipped"
         alert.email_error_message = "邮件通道未配置或未通过测试"
         await session.commit()
+        await session.refresh(alert)
+        await _record_alert_audit(
+            session,
+            position,
+            decision,
+            signal_date,
+            outcome="skipped",
+            evaluation_mode=evaluation_mode,
+            alert=alert,
+            intraday_snapshot=intraday_snapshot,
+            smtp_result="skipped",
+            smtp_error_message=alert.email_error_message,
+            recipient=user.recipient_email,
+        )
         return alert, "email_skipped"
 
     notifier = build_notifier_for_user(user, settings)
@@ -1581,11 +1882,38 @@ async def create_alert_if_needed(
         alert.email_status = "sent"
         alert.sent_at = utcnow()
         await session.commit()
+        await session.refresh(alert)
+        await _record_alert_audit(
+            session,
+            position,
+            decision,
+            signal_date,
+            outcome="sent",
+            evaluation_mode=evaluation_mode,
+            alert=alert,
+            intraday_snapshot=intraday_snapshot,
+            smtp_result="sent",
+            recipient=user.recipient_email,
+        )
         return alert, "email_sent"
     except Exception as exc:  # noqa: BLE001
         alert.email_status = "failed"
         alert.email_error_message = str(exc)
         await session.commit()
+        await session.refresh(alert)
+        await _record_alert_audit(
+            session,
+            position,
+            decision,
+            signal_date,
+            outcome="failed",
+            evaluation_mode=evaluation_mode,
+            alert=alert,
+            intraday_snapshot=intraday_snapshot,
+            smtp_result="failed",
+            smtp_error_message=str(exc),
+            recipient=user.recipient_email,
+        )
         return alert, "email_failed"
 
 

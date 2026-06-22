@@ -282,6 +282,8 @@ async def test_observation_portfolio_uses_cached_signals(client, app, monkeypatc
     assert body["research_only"] is True
     assert len(body["items"]) == 2
     assert [item["code"] for item in body["items"]] == ["562000", "562001"]
+    assert body["items"][0]["weight_explanation"]
+    assert body["items"][0]["decision_factors"]
     assert abs(sum(item["target_weight"] for item in body["items"]) + body["cash_weight"] - 1) < 0.01
 
 

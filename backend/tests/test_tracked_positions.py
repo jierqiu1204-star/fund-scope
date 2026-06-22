@@ -13,6 +13,7 @@ from app.models.entities import (
     ShortResearchSignalItem,
     ShortResearchSignalRun,
     TrackedPositionAlert,
+    TrackedPositionAlertAudit,
     TradableEtf,
     User,
     utcnow,
@@ -877,3 +878,45 @@ async def test_exit_watch_sends_email_once_per_signal_day(client, app, settings,
     assert sent[0]["recipient"] == "19535838578@163.com"
     assert sent[0]["template_name"] == "tracked_position_alert.html.j2"
     assert "卖出/减仓提醒" in sent[0]["payload"]["title"]
+
+
+@pytest.mark.asyncio
+async def test_tracked_position_audit_endpoint_returns_owner_events(client, app) -> None:
+    await _seed_nav(app)
+    response = await client.post(
+        "/api/tracked-positions",
+        json={"asset_type": "fund", "asset_code": "270042", "buy_date": "2026-06-01"},
+    )
+    assert response.status_code == 201
+    position_id = response.json()["id"]
+
+    async with app.state.db.session() as session:
+        session.add(
+            TrackedPositionAlertAudit(
+                tracked_position_id=position_id,
+                outcome="data_ineligible",
+                signal_type="hard_stop",
+                alert_date=date(2026, 6, 5),
+                alert_type="hard_stop",
+                trigger_label="硬止损",
+                data_source="intraday_quote",
+                quote_freshness="stale_quote",
+                threshold_context_json={"hard_stop_pct": -4.5},
+                decision_context_json={"evaluation_mode": "intraday", "email_eligible": False},
+                cooldown_reason="当前行情不是新鲜盘中行情。",
+                smtp_result="skipped",
+                created_at=utcnow(),
+            )
+        )
+        await session.commit()
+
+    audit_response = await client.get(f"/api/tracked-positions/{position_id}/audit")
+
+    assert audit_response.status_code == 200
+    body = audit_response.json()
+    assert body["total"] == 1
+    item = body["items"][0]
+    assert item["outcome"] == "data_ineligible"
+    assert item["quote_freshness"] == "stale_quote"
+    assert item["threshold_context"]["hard_stop_pct"] == -4.5
+    assert "不发送" in item["audit_summary"]

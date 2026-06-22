@@ -90,6 +90,34 @@ class TrackedPositionAlertOut(BaseModel):
     threshold_context: dict[str, Any] = Field(default_factory=dict)
 
 
+class TrackedPositionAlertAuditOut(BaseModel):
+    id: int
+    tracked_position_id: int
+    tracked_position_alert_id: int | None = None
+    outcome: str
+    signal_type: str | None = None
+    alert_date: date
+    alert_type: str
+    trigger_label: str | None = None
+    data_source: str
+    quote_freshness: str
+    threshold_context: dict[str, Any] = Field(default_factory=dict)
+    decision_context: dict[str, Any] = Field(default_factory=dict)
+    recipient: str | None = None
+    duplicate_reason: str | None = None
+    cooldown_reason: str | None = None
+    smtp_result: str | None = None
+    smtp_error_message: str | None = None
+    quote_time: datetime | None = None
+    created_at: datetime
+    audit_summary: str
+
+
+class TrackedPositionAlertAuditListOut(BaseModel):
+    items: list[TrackedPositionAlertAuditOut]
+    total: int
+
+
 class TrackedPositionChartPoint(BaseModel):
     date: date
     price: float

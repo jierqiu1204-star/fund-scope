@@ -30,6 +30,7 @@ import type {
   IntradayEtfLiveRankingItem,
   IntradayEtfLiveRankingList,
   TrackedPosition,
+  TrackedPositionAlertAuditList,
   TrackedPositionDetail,
   TrackedPositionList
 } from "@/lib/types";
@@ -199,6 +200,19 @@ function validationConfidenceLabel(confidence: string | undefined) {
   return "样本不足";
 }
 
+function sampleQualityLabel(evidence: ShortResearchAsset["validation_evidence"] | null | undefined) {
+  const sampleQuality = evidence?.sample_quality;
+  if (!sampleQuality) {
+    return "无样本质量说明";
+  }
+  const excluded = sampleQuality.excluded_count_total ?? 0;
+  const reasons = sampleQuality.exclusion_reasons ?? [];
+  if (excluded > 0 && reasons.length) {
+    return `排除 ${excluded} 条不可决策样本：${reasons.slice(0, 2).join("、")}`;
+  }
+  return `可用样本 ${sampleQuality.sample_count_total ?? evidence?.sample_count ?? 0}`;
+}
+
 function validationEvidenceText(asset: ShortResearchAsset | null | undefined) {
   const evidence = asset?.validation_evidence;
   if (!evidence || !evidence.sample_count) {
@@ -209,7 +223,9 @@ function validationEvidenceText(asset: ShortResearchAsset | null | undefined) {
     evidence.median_return === null || evidence.median_return === undefined
       ? "暂无"
       : formatPercent(evidence.median_return * 100);
-  return `标签验证：${validationConfidenceLabel(evidence.confidence)}，样本 ${evidence.sample_count}，5日中位收益 ${medianReturn}，胜率 ${winRate}`;
+  const freshness = evidence.freshness?.as_of_date ? `，样本日期 ${formatDate(evidence.freshness.as_of_date)}` : "";
+  const warning = evidence.degradation_warning ? `；${evidence.degradation_warning}` : "";
+  return `标签验证：${validationConfidenceLabel(evidence.confidence)}，样本 ${evidence.sample_count}，5日中位收益 ${medianReturn}，胜率 ${winRate}，${sampleQualityLabel(evidence)}${freshness}${warning}`;
 }
 
 function observationPortfolioText(asset: ShortResearchAsset | null | undefined) {
@@ -218,10 +234,35 @@ function observationPortfolioText(asset: ShortResearchAsset | null | undefined) 
     return "观察组合：暂无权重快照";
   }
   if (context.status === "included") {
-    return `观察组合：参考权重 ${formatPercent((context.target_weight ?? 0) * 100)}，仅作研究参考`;
+    return context.weight_explanation ?? `观察组合：参考权重 ${formatPercent((context.target_weight ?? 0) * 100)}，仅作研究参考`;
   }
-  const reason = context.exclusion_reason || context.risk_reasons?.[0] || "未进入主观察组合";
+  const reason = context.exclusion_explanation || context.exclusion_reason || context.risk_reasons?.[0] || "未进入主观察组合";
   return `观察组合：${context.status === "watch_only" ? "只观察不配权" : "未配权"}，${reason}`;
+}
+
+function auditOutcomeLabel(outcome: string) {
+  const labels: Record<string, string> = {
+    sent: "已发邮件",
+    failed: "发送失败",
+    skipped: "已跳过",
+    suppressed: "冷却抑制",
+    web_only: "仅网页提示",
+    data_ineligible: "数据不可决策"
+  };
+  return labels[outcome] ?? outcome;
+}
+
+function auditTone(outcome: string) {
+  if (outcome === "sent") {
+    return "bg-emerald-50 text-emerald-800";
+  }
+  if (outcome === "failed" || outcome === "data_ineligible") {
+    return "bg-rose-50 text-rose-700";
+  }
+  if (outcome === "suppressed" || outcome === "skipped") {
+    return "bg-amber-50 text-amber-800";
+  }
+  return "bg-sky-50 text-sky-800";
 }
 
 function thresholdExplanationLine(position: TrackedPosition | null | undefined) {
@@ -1147,6 +1188,12 @@ export default function ShortTermPage() {
     enabled: primaryTracked !== null,
     queryFn: async () => (await api.get<TrackedPositionDetail>(`/api/tracked-positions/${primaryTracked?.id}`)).data
   });
+  const trackedAudit = useQuery({
+    queryKey: ["tracked-position-audit", primaryTracked?.id],
+    enabled: primaryTracked !== null,
+    queryFn: async () => (await api.get<TrackedPositionAlertAuditList>(`/api/tracked-positions/${primaryTracked?.id}/audit`)).data
+  });
+  const auditItems = trackedAudit.data?.items ?? [];
   const trackingPoints = trackingChartPoints(trackedDetail.data);
   const trackingEntry = trackingPoints.find((point) => point.isEntry);
   const trackingHigh = trackingPoints.find((point) => point.isHigh);
@@ -1780,6 +1827,39 @@ export default function ShortTermPage() {
                 暂无可展示告警。数据质量/IOPV/流动性问题只在网页提示，不触发卖出邮件。
               </p>
             )}
+
+            {item.id === primaryTracked?.id ? (
+              <div className="mt-4 rounded-[16px] border border-ink/10 bg-white p-3 text-sm leading-6">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="font-semibold text-ink">提醒审计</p>
+                  <span className="text-xs text-ink/45">{auditItems.length ? `最近 ${Math.min(auditItems.length, 3)} 条` : "暂无"}</span>
+                </div>
+                {auditItems.length ? (
+                  <div className="mt-3 grid gap-2">
+                    {auditItems.slice(0, 3).map((audit) => (
+                      <div key={audit.id} className="rounded-[14px] bg-paper px-3 py-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${auditTone(audit.outcome)}`}>
+                            {auditOutcomeLabel(audit.outcome)}
+                          </span>
+                          <span className="text-xs text-ink/45">
+                            {formatDateTime(audit.quote_time ?? audit.created_at)} · {priceSourceLabel(audit.data_source)} · {reliabilityLabel(audit.quote_freshness)}
+                          </span>
+                        </div>
+                        <p className="mt-1 text-xs text-ink/60">{audit.audit_summary}</p>
+                        {audit.duplicate_reason || audit.cooldown_reason || audit.smtp_error_message ? (
+                          <p className="mt-1 text-xs text-ink/45">
+                            {audit.duplicate_reason ?? audit.cooldown_reason ?? audit.smtp_error_message}
+                          </p>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-2 text-xs text-ink/55">暂无审计记录，后续触发、跳过、抑制提醒后会显示。</p>
+                )}
+              </div>
+            ) : null}
 
             <details className="mt-3 rounded-[16px] bg-paper p-3 text-xs leading-5 text-ink/60">
               <summary className="cursor-pointer font-semibold text-ink">更多风控数据</summary>
@@ -2723,7 +2803,7 @@ export default function ShortTermPage() {
                   </div>
                   <p className="mt-3 text-sm text-ink/65">综合分 {item.score.toFixed(1)} · {item.conclusion}</p>
                   <p className="mt-3 rounded-[14px] bg-paper px-3 py-2 text-xs leading-5 text-ink/55">
-                    风险：{item.risk_reasons.join("；")}
+                    {item.weight_explanation ?? `风险：${item.risk_reasons.join("；")}`}
                   </p>
                 </div>
               ))}
@@ -2755,7 +2835,7 @@ export default function ShortTermPage() {
                       </div>
                       <p className="mt-3 text-sm text-ink/65">综合分 {item.score.toFixed(1)} · {item.conclusion}</p>
                       <p className="mt-3 rounded-[14px] bg-white/70 px-3 py-2 text-xs leading-5 text-ink/55">
-                        原因：{item.risk_reasons.slice(0, 3).join("；")}
+                        {item.exclusion_explanation ?? `原因：${item.risk_reasons.slice(0, 3).join("；")}`}
                       </p>
                     </div>
                   ))}
@@ -2777,7 +2857,7 @@ export default function ShortTermPage() {
                         {item.name} <span className="text-ink/40">{item.code}</span>
                       </p>
                       <p className="mt-2 text-xs leading-5 text-ink/55">
-                        {item.risk_reasons.slice(0, 3).join("；")}
+                        {item.exclusion_explanation ?? item.risk_reasons.slice(0, 3).join("；")}
                       </p>
                     </div>
                   ))}

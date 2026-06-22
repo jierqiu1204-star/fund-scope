@@ -493,9 +493,26 @@ export type ValidationEvidence = {
   win_rate?: number | null;
   median_return?: number | null;
   confidence?: "sufficient" | "limited" | "insufficient" | string;
+  sample_quality?: {
+    sample_count_total?: number;
+    excluded_count_total?: number;
+    exclusion_reasons?: string[];
+  } | null;
+  freshness?: {
+    as_of_date?: string | null;
+    generated_at?: string | null;
+    rule_version?: string | null;
+  } | null;
+  degradation_warning?: string | null;
+  freshness_days?: number | null;
+  fresh?: boolean;
+  sample_quality_warnings?: string[];
+  degraded_recently?: boolean;
+  degradation_reason?: string | null;
   horizons?: Record<string, {
     sample_count?: number;
     excluded_count?: number;
+    exclusion_reasons?: string[];
     avg_return?: number | null;
     median_return?: number | null;
     win_rate?: number | null;
@@ -509,7 +526,14 @@ export type ObservationPortfolioContext = {
   target_weight?: number;
   evidence?: string[];
   risk_reasons?: string[];
+  inclusion_reasons?: string[];
+  weight_reason?: string | null;
+  quality_note?: string | null;
+  explanation?: string | null;
   exclusion_reason?: string | null;
+  weight_explanation?: string | null;
+  exclusion_explanation?: string | null;
+  decision_factors?: Record<string, unknown>;
   snapshot_id?: number | null;
   generated_at?: string | null;
 };
@@ -593,9 +617,18 @@ export type ShortResearchObservationPortfolioItem = {
   data_date: string | null;
   evidence: string[];
   risk_reasons: string[];
+  inclusion_reasons?: string[];
+  exclusion_reasoning?: string[];
+  weight_reason?: string | null;
+  validation_confidence?: "sufficient" | "limited" | "insufficient" | string;
+  score_factors?: Record<string, unknown>;
+  data_quality?: Record<string, unknown>;
   entry_timing_label?: string | null;
   item_type?: string | null;
   exclusion_reason?: string | null;
+  weight_explanation?: string | null;
+  exclusion_explanation?: string | null;
+  decision_factors?: Record<string, unknown>;
   metrics?: Record<string, unknown>;
 };
 
@@ -666,7 +699,41 @@ export type TrackedPositionAlert = {
   email_error_message: string | null;
   sent_at: string | null;
   created_at: string;
+  audit_outcome?: string | null;
+  suppression_reason?: string | null;
+  data_ineligible_reason?: string | null;
+  delivery_status?: string | null;
+  audit_context?: Record<string, unknown>;
+  quote_freshness?: number | null;
   threshold_context: Record<string, unknown>;
+};
+
+export type TrackedPositionAlertAudit = {
+  id: number;
+  tracked_position_id: number;
+  tracked_position_alert_id: number | null;
+  outcome: string;
+  signal_type: string | null;
+  alert_date: string;
+  alert_type: string;
+  trigger_label: string | null;
+  data_source: string;
+  quote_freshness: string;
+  threshold_context: Record<string, unknown>;
+  decision_context: Record<string, unknown>;
+  recipient: string | null;
+  duplicate_reason: string | null;
+  cooldown_reason: string | null;
+  smtp_result: string | null;
+  smtp_error_message: string | null;
+  quote_time: string | null;
+  created_at: string;
+  audit_summary: string;
+};
+
+export type TrackedPositionAlertAuditList = {
+  items: TrackedPositionAlertAudit[];
+  total: number;
 };
 
 export type TrackedPositionChartPoint = {

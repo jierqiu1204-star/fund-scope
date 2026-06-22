@@ -5,7 +5,13 @@ from datetime import date
 import pytest
 
 from app.core.auth import hash_password
-from app.models.entities import EtfPriceHistory, TrackedPosition, TradableEtf, User
+from app.models.entities import (
+    EtfPriceHistory,
+    TrackedPosition,
+    TrackedPositionAlertAudit,
+    TradableEtf,
+    User,
+)
 from app.services.tracked_positions.service import (
     ALERT_HARD_STOP,
     AlertDecision,
@@ -61,6 +67,54 @@ async def test_tracked_positions_are_filtered_by_owner(client, app) -> None:
     payload = response.json()
     assert payload["total"] == 1
     assert payload["items"][0]["asset_code"] == "510300"
+
+
+@pytest.mark.asyncio
+async def test_tracked_position_audit_is_owner_scoped(client, app) -> None:
+    async with app.state.db.session() as session:
+        other = User(
+            email="other-audit@example.com",
+            password_hash=hash_password("password-123"),
+            recipient_email="other-audit@example.com",
+            is_approved=True,
+            is_super_admin=False,
+        )
+        session.add(other)
+        await session.flush()
+        position = TrackedPosition(
+            user_id=other.id,
+            asset_type="etf",
+            asset_code="512800",
+            asset_name="银行ETF",
+            buy_date=date(2026, 6, 1),
+            buy_amount=1000,
+            entry_price=1.0,
+            entry_price_date=date(2026, 6, 1),
+            estimated_shares=1000,
+            status="active",
+        )
+        session.add(position)
+        await session.flush()
+        session.add(
+            TrackedPositionAlertAudit(
+                tracked_position_id=position.id,
+                outcome="sent",
+                signal_type="hard_stop",
+                alert_date=date(2026, 6, 2),
+                alert_type="hard_stop",
+                trigger_label="硬止损",
+                data_source="intraday_quote",
+                quote_freshness="fresh_intraday",
+                threshold_context_json={},
+                decision_context_json={},
+            )
+        )
+        await session.commit()
+        position_id = position.id
+
+    response = await client.get(f"/api/tracked-positions/{position_id}/audit")
+
+    assert response.status_code == 404
 
 
 @pytest.mark.asyncio

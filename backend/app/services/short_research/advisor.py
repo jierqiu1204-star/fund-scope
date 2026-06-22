@@ -234,7 +234,7 @@ def _deterministic_snapshot(item: ShortResearchSignalItem, *, is_held: bool) -> 
         "entry_timing_label": metrics.get("entry_timing_label") or rationale.get("entry_timing_label"),
         "entry_timing_reason": metrics.get("entry_timing_reason") or rationale.get("entry_timing_reason"),
         "rule_action": conservative_action_for_item(item, is_held=is_held),
-        "ai_boundaries": "AI 只能解释确定性结果，不能改分数、标签、组合权重、动态阈值或邮件触发。",
+        "ai_boundaries": "AI 只能解释系统已计算的标签证据、组合权重、提醒审计和其他确定性结果，不能改分数、标签、组合权重、动态阈值或邮件触发。",
         "risk_flags": list(item.risk_flags_json or []),
         "metrics": item.metrics_json,
         "rationale": item.rationale_json,

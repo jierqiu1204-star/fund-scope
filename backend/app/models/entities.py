@@ -717,6 +717,36 @@ class TrackedPositionAlert(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+
+class TrackedPositionAlertAudit(Base):
+    __tablename__ = "tracked_position_alert_audits"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tracked_position_id: Mapped[int] = mapped_column(
+        ForeignKey("tracked_positions.id", ondelete="CASCADE")
+    )
+    tracked_position_alert_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tracked_position_alerts.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    outcome: Mapped[str] = mapped_column(String(32), nullable=False)
+    signal_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    alert_date: Mapped[date] = mapped_column(Date, nullable=False)
+    alert_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    trigger_label: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    data_source: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    quote_freshness: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    threshold_context_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    decision_context_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    recipient: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    duplicate_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cooldown_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    smtp_result: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    smtp_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    quote_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class NewsItem(Base):
     __tablename__ = "news_items"
 

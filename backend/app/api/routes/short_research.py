@@ -115,12 +115,18 @@ def _portfolio_contexts(portfolio: dict[str, Any]) -> dict[str, dict[str, Any]]:
             code = str(item.get("code") or "")
             if not code:
                 continue
+            decision_factors = item.get("decision_factors")
+            if not isinstance(decision_factors, dict):
+                decision_factors = {}
             result[code] = {
                 "status": status,
                 "target_weight": item.get("target_weight", 0.0),
                 "evidence": list(item.get("evidence") or []),
                 "risk_reasons": list(item.get("risk_reasons") or []),
                 "exclusion_reason": item.get("exclusion_reason"),
+                "weight_explanation": item.get("weight_explanation"),
+                "exclusion_explanation": item.get("exclusion_explanation"),
+                "decision_factors": decision_factors,
                 "snapshot_id": portfolio.get("snapshot_id"),
                 "generated_at": portfolio.get("generated_at"),
             }

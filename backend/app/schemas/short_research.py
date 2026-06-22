@@ -177,6 +177,9 @@ class ShortResearchObservationPortfolioItemOut(BaseModel):
     entry_timing_label: str | None = None
     item_type: str | None = None
     exclusion_reason: str | None = None
+    weight_explanation: str | None = None
+    exclusion_explanation: str | None = None
+    decision_factors: dict[str, Any] = Field(default_factory=dict)
     metrics: dict[str, Any] = Field(default_factory=dict)
 
 

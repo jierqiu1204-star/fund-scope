@@ -14,6 +14,7 @@ from app.services.intraday_etf.service import (
     build_watchlist,
     current_market_state,
     fetch_spot_quotes,
+    is_fresh_decision_quote,
     latest_quotes_by_code,
     persist_quotes,
     summarize_and_cleanup_intraday_quotes,
@@ -82,7 +83,8 @@ async def intraday_etf_watch_job(
         missing_watch_codes = sorted(watch_codes - set(quotes))
         latest_quotes = await latest_quotes_by_code(session, [item.etf_code for item in watchlist.items])
         local_now = datetime.now(ASIA_SHANGHAI).replace(tzinfo=None)
-        stale = sum(1 for quote in latest_quotes.values() if local_now - quote.quote_time > timedelta(minutes=3))
+        quote_audit = _quote_audit_for_watchlist(watch_codes, latest_quotes, local_now)
+        stale = sum(1 for item in quote_audit.values() if item["quote_freshness"] == "stale")
         alert_result = await _check_tracked_etf_alerts(session, settings or get_settings())
         run.status = "degraded" if provider_error else "success"
         run.updated_quote_count = updated
@@ -99,6 +101,7 @@ async def intraday_etf_watch_job(
             "missing_watch_count": len(missing_watch_codes),
             "missing_watch_codes": missing_watch_codes,
             "provider_error": provider_error,
+            "quote_audit": quote_audit,
             "alert_result": alert_result,
         }
         await session.commit()
@@ -109,6 +112,34 @@ async def intraday_etf_watch_job(
         run.finished_at = utcnow()
         await session.commit()
         raise
+
+
+def _quote_audit_for_watchlist(watch_codes: set[str], latest_quotes: dict[str, Any], local_now: datetime) -> dict[str, Any]:
+    audit: dict[str, Any] = {}
+    for code in sorted(watch_codes):
+        quote = latest_quotes.get(code)
+        if quote is None:
+            audit[code] = {
+                "decision_eligible": False,
+                "quote_freshness": "unavailable",
+                "source": None,
+                "quote_time": None,
+            }
+            continue
+        decision_eligible = is_fresh_decision_quote(quote, local_now)
+        if decision_eligible:
+            freshness = "fresh"
+        elif local_now - quote.quote_time > timedelta(minutes=3):
+            freshness = "stale"
+        else:
+            freshness = getattr(quote, "freshness_status", None) or "display_only"
+        audit[code] = {
+            "decision_eligible": decision_eligible,
+            "quote_freshness": freshness,
+            "source": quote.source,
+            "quote_time": quote.quote_time.isoformat() if quote.quote_time else None,
+        }
+    return audit
 
 
 async def _check_tracked_etf_alerts(session: AsyncSession, settings: Settings) -> dict[str, int]:

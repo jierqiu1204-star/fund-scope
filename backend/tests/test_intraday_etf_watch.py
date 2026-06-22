@@ -426,6 +426,9 @@ async def test_intraday_watch_reports_watch_codes_missing_from_provider(app) -> 
     assert result["updated_quote_count"] == 1
     assert result["details"]["missing_watch_count"] == 1
     assert result["details"]["missing_watch_codes"] == ["510001"]
+    assert result["details"]["quote_audit"]["510000"]["decision_eligible"] is True
+    assert result["details"]["quote_audit"]["510001"]["decision_eligible"] is False
+    assert result["details"]["quote_audit"]["510001"]["quote_freshness"] == "unavailable"
 
 
 @pytest.mark.asyncio
