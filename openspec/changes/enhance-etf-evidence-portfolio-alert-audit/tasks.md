@@ -63,4 +63,4 @@
 - [x] 9.4 Run `corepack pnpm exec tsc --noEmit`.
 - [x] 9.5 Run `corepack pnpm build:static`.
 - [x] 9.6 Run `openspec validate enhance-etf-evidence-portfolio-alert-audit --strict`.
-- [ ] 9.7 Deploy to `110.42.222.9` only after tests pass and verify existing email, intraday watch, and `/short-term` flows still work.
+- [x] 9.7 Deploy to `110.42.222.9` only after tests pass and verify existing email, intraday watch, and `/short-term` flows still work.
