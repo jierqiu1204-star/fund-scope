@@ -197,22 +197,42 @@ async def latest_tracking_price(
     if asset_type != ASSET_TYPE_ETF:
         return await latest_price(session, asset_type, asset_code), None
     quote = await latest_intraday_quote(session, asset_code)
-    if is_fresh_decision_quote(quote):
-        assert quote is not None
+    if quote is not None:
         spread_pct = None
         if quote.bid_price and quote.ask_price and quote.bid_price > 0:
             midpoint = (quote.bid_price + quote.ask_price) / 2
             spread_pct = (quote.ask_price - quote.bid_price) / midpoint * 100 if midpoint else None
+        if is_fresh_decision_quote(quote):
+            intraday = TrackedEtfIntradaySnapshotOut(
+                current_price=round(quote.latest_price, 6),
+                quote_time=quote.quote_time,
+                trade_date=quote.trade_date,
+                price_source="intraday_quote",
+                reliability_level=RELIABILITY_FRESH_INTRADAY,
+                email_eligible=True,
+                email_eligibility_reason="新鲜盘中公开行情，可用于盘中提醒判断。",
+                is_stale=False,
+                freshness_status=quote.freshness_status,
+                bid_price=quote.bid_price,
+                ask_price=quote.ask_price,
+                spread_pct=_round_or_none(spread_pct, 4),
+                iopv=quote.iopv,
+                premium_discount_pct=quote.premium_discount_pct,
+                turnover=quote.turnover,
+                source=quote.source,
+                message="使用公开 ETF 盘中行情估算，仍可能和券商盘口存在延迟。",
+            )
+            return PriceSnapshot(quote.latest_price, quote.trade_date), intraday
         intraday = TrackedEtfIntradaySnapshotOut(
             current_price=round(quote.latest_price, 6),
             quote_time=quote.quote_time,
             trade_date=quote.trade_date,
             price_source="intraday_quote",
-            reliability_level=RELIABILITY_FRESH_INTRADAY,
-            email_eligible=True,
-            email_eligibility_reason="新鲜盘中公开行情，可用于盘中提醒判断。",
-            is_stale=False,
-            freshness_status=quote.freshness_status,
+            reliability_level=RELIABILITY_STALE_QUOTE,
+            email_eligible=False,
+            email_eligibility_reason="最近盘中行情已滞后，只能用于网页估算，不能触发盘中邮件。",
+            is_stale=True,
+            freshness_status="stale",
             bid_price=quote.bid_price,
             ask_price=quote.ask_price,
             spread_pct=_round_or_none(spread_pct, 4),
@@ -220,17 +240,13 @@ async def latest_tracking_price(
             premium_discount_pct=quote.premium_discount_pct,
             turnover=quote.turnover,
             source=quote.source,
-            message="使用公开 ETF 盘中行情估算，仍可能和券商盘口存在延迟。",
+            message="显示最近一次公开 ETF 盘中行情；行情已滞后，仅用于网页估算，不触发邮件。",
         )
         return PriceSnapshot(quote.latest_price, quote.trade_date), intraday
+
     daily = await latest_price(session, asset_type, asset_code)
-    reliability_level = RELIABILITY_STALE_QUOTE if quote is not None else (
-        RELIABILITY_DAILY_CLOSE if daily is not None else RELIABILITY_MISSING
-    )
     message = (
-        "盘中行情已滞后，暂用最近 ETF 日线收盘价估算；这不是盘中实时价格。"
-        if quote is not None and daily is not None
-        else "盘中行情缺失，暂用最近 ETF 日线收盘价估算；这不是盘中实时价格。"
+        "盘中行情缺失，暂用最近 ETF 日线收盘价估算；这不是盘中实时价格。"
         if daily is not None
         else "暂无可用盘中行情或日线收盘价，等待数据更新。"
     )
@@ -238,22 +254,14 @@ async def latest_tracking_price(
         current_price=round(daily.price, 6) if daily else None,
         trade_date=daily.price_date if daily else None,
         price_source="daily_close" if daily else "unavailable",
-        reliability_level=reliability_level,
+        reliability_level=RELIABILITY_DAILY_CLOSE if daily else RELIABILITY_MISSING,
         email_eligible=False,
         email_eligibility_reason="非新鲜盘中行情，只能用于估算或收盘后复盘，不能触发盘中邮件。",
         is_stale=True,
-        freshness_status="stale" if quote is not None else "missing",
-        quote_time=quote.quote_time if quote is not None else None,
-        bid_price=quote.bid_price if quote is not None else None,
-        ask_price=quote.ask_price if quote is not None else None,
-        iopv=quote.iopv if quote is not None else None,
-        premium_discount_pct=quote.premium_discount_pct if quote is not None else None,
-        turnover=quote.turnover if quote is not None else None,
-        source=quote.source if quote is not None else None,
+        freshness_status="missing",
         message=message,
     )
     return daily, intraday
-
 
 def tracking_start_date(position: TrackedPosition) -> date:
     if position.confirmed_nav_date is not None:
@@ -847,7 +855,13 @@ def _estimate_snapshot(
     if position.asset_type == ASSET_TYPE_ETF:
         price_source = intraday_snapshot.price_source if intraday_snapshot is not None else "unavailable"
         decision_eligible = bool(intraday_snapshot is not None and intraday_snapshot.email_eligible)
-        data_reliability = "verified" if decision_eligible else (RELIABILITY_STALE_QUOTE if price is not None else "unavailable")
+        data_reliability = (
+            "verified"
+            if decision_eligible
+            else intraday_snapshot.reliability_level
+            if intraday_snapshot is not None
+            else "unavailable"
+        )
         display_only_reason = None if decision_eligible else (
             intraday_snapshot.email_eligibility_reason if intraday_snapshot is not None else "暂无可用价格，不能触发邮件或计算持仓处理。"
         )

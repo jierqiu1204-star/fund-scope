@@ -1644,7 +1644,12 @@ export default function ShortTermPage() {
                 <span>
                   持有天数: {item.holding_days === null ? "暂无" : `${item.holding_days} 天`}
                 </span>
-                <span>当前价: {item.current_snapshot.current_price?.toFixed(4) ?? "暂无"}</span>
+                <span>
+                  当前价: {item.current_snapshot.current_price?.toFixed(4) ?? "暂无"}
+                  {item.asset_type === "etf"
+                    ? "（" + priceSourceLabel(item.current_snapshot.price_source) + (item.intraday_snapshot?.quote_time ? "，" + formatDateTime(item.intraday_snapshot.quote_time) : "") + "）"
+                    : ""}
+                </span>
                 {item.asset_type === "etf" ? (
                   <span>数据口径: {reliabilityLabel(item.intraday_snapshot?.reliability_level)}</span>
                 ) : null}
@@ -1713,9 +1718,14 @@ export default function ShortTermPage() {
               <span>下单：{formatCurrency(item.buy_amount)} / {formatDate(item.buy_date)}（{orderTimeBucketLabel(item.order_time_bucket)}）</span>
               <span>{item.asset_type === "etf" ? "买入价格日" : "确认净值日"}：{formatDate(item.confirmed_nav_date ?? item.entry_price_date)}</span>
               <span>{item.asset_type === "etf" ? "买入价" : "确认净值"}：{item.confirmed_nav?.toFixed(4) ?? item.entry_price?.toFixed(4) ?? "等待价格"}</span>
-              <span>当前价：{item.current_snapshot.current_price?.toFixed(4) ?? "暂无"}</span>
               <span>
-                决策口径：{priceSourceLabel(item.current_snapshot.price_source)} / {reliabilityLabel(item.current_snapshot.data_reliability)}
+                当前价：{item.current_snapshot.current_price?.toFixed(4) ?? "暂无"}
+                {item.asset_type === "etf"
+                  ? "（" + priceSourceLabel(item.current_snapshot.price_source) + (item.intraday_snapshot?.quote_time ? "，" + formatDateTime(item.intraday_snapshot.quote_time) : "") + "）"
+                  : ""}
+              </span>
+              <span>
+                展示口径：{priceSourceLabel(item.current_snapshot.price_source)} / {reliabilityLabel(item.current_snapshot.data_reliability)}
                 {item.current_snapshot.decision_eligible ? "，可用于提醒判断" : "，仅展示/估算参考"}
               </span>
               {item.current_snapshot.display_only_reason ? <span>说明：{item.current_snapshot.display_only_reason}</span> : null}

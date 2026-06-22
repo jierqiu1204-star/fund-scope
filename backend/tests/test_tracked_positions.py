@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
 
 from app.models.entities import (
+    EtfIntradayQuote,
     EtfPriceHistory,
     FundNavHistory,
     ShortResearchAdvisorReport,
@@ -339,6 +340,72 @@ async def test_confirmed_etf_shares_use_entry_price_cost_basis(client, app) -> N
     assert body["current_snapshot"]["estimated_pnl"] == pytest.approx(-27.3, abs=0.01)
     assert body["current_snapshot"]["estimated_pnl_pct"] == pytest.approx(-0.84, abs=0.01)
 
+
+@pytest.mark.asyncio
+async def test_stale_intraday_quote_is_used_for_display_but_not_email_decision(client, app) -> None:
+    async with app.state.db.session() as session:
+        session.add(
+            TradableEtf(
+                code="513520",
+                name="日经ETF",
+                exchange="SH",
+                theme_tags_json=["跨境"],
+                trading_rule_label="T+1",
+                asset_class="ETF",
+            )
+        )
+        session.add(
+            EtfPriceHistory(
+                etf_code="513520",
+                trade_date=date(2026, 6, 18),
+                open=2.50,
+                high=2.55,
+                low=2.48,
+                close=2.528,
+                volume=1_000_000,
+                turnover=2_528_000,
+                pct_change=1.2,
+            )
+        )
+        session.add(
+            EtfIntradayQuote(
+                etf_code="513520",
+                quote_time=datetime(2026, 6, 22, 11, 29),
+                trade_date=date(2026, 6, 22),
+                latest_price=2.586,
+                change_percent=2.0,
+                turnover=5_000_000,
+                source="akshare",
+                freshness_status="fresh",
+                raw_json={},
+            )
+        )
+        await session.commit()
+
+    await client.post(
+        "/api/tracked-positions",
+        json={
+            "asset_type": "etf",
+            "asset_code": "513520",
+            "buy_date": "2026-06-17",
+            "confirmed_nav": 2.491,
+            "confirmed_shares": 1300,
+            "buy_amount": 3000,
+        },
+    )
+
+    response = await client.get("/api/tracked-positions")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["current_snapshot"]["current_price"] == 2.586
+    assert item["current_snapshot"]["current_price_date"] == "2026-06-22"
+    assert item["current_snapshot"]["estimated_pnl"] == pytest.approx(1300 * (2.586 - 2.491), abs=0.01)
+    assert item["current_snapshot"]["price_source"] == "intraday_quote"
+    assert item["current_snapshot"]["decision_eligible"] is False
+    assert item["intraday_snapshot"]["price_source"] == "intraday_quote"
+    assert item["intraday_snapshot"]["reliability_level"] == "stale_quote"
+    assert item["intraday_snapshot"]["email_eligible"] is False
 
 @pytest.mark.asyncio
 async def test_tracking_chart_and_holding_days_start_from_confirmed_nav_date(client, app) -> None:
