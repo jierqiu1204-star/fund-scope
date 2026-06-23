@@ -18,6 +18,7 @@ from app.models.entities import (
     User,
     utcnow,
 )
+from app.services.intraday_etf.service import ASIA_SHANGHAI
 from app.services.tracked_positions.jobs import daily_tracked_position_alerts_job
 from app.services.tracked_positions.service import (
     create_alert_if_needed,
@@ -407,6 +408,89 @@ async def test_stale_intraday_quote_is_used_for_display_but_not_email_decision(c
     assert item["intraday_snapshot"]["price_source"] == "intraday_quote"
     assert item["intraday_snapshot"]["reliability_level"] == "stale_quote"
     assert item["intraday_snapshot"]["email_eligible"] is False
+
+
+@pytest.mark.asyncio
+async def test_etf_trailing_take_profit_starts_after_moderate_profit_giveback(client, app) -> None:
+    now = datetime.now(ASIA_SHANGHAI).replace(tzinfo=None)
+    async with app.state.db.session() as session:
+        session.add(
+            TradableEtf(
+                code="513520",
+                name="日经ETF",
+                exchange="SH",
+                theme_tags_json=["跨境"],
+                trading_rule_label="T+1",
+                asset_class="ETF",
+            )
+        )
+        session.add_all(
+            [
+                EtfPriceHistory(
+                    etf_code="513520",
+                    trade_date=trade_date,
+                    open=open_price,
+                    high=high_price,
+                    low=low_price,
+                    close=close_price,
+                    volume=1_000_000,
+                    turnover=close_price * 1_000_000,
+                    pct_change=0.0,
+                )
+                for trade_date, open_price, high_price, low_price, close_price in [
+                    (date(2026, 6, 10), 2.45, 2.52, 2.40, 2.45),
+                    (date(2026, 6, 11), 2.47, 2.53, 2.43, 2.48),
+                    (date(2026, 6, 12), 2.48, 2.52, 2.41, 2.46),
+                    (date(2026, 6, 15), 2.46, 2.56, 2.44, 2.50),
+                    (date(2026, 6, 16), 2.50, 2.55, 2.42, 2.48),
+                    (date(2026, 6, 17), 2.491, 2.53, 2.45, 2.491),
+                    (date(2026, 6, 18), 2.50, 2.56, 2.47, 2.54),
+                    (date(2026, 6, 19), 2.55, 2.58, 2.50, 2.52),
+                    (date(2026, 6, 22), 2.60, 2.65, 2.56, 2.609),
+                ]
+            ]
+        )
+        session.add(
+            EtfIntradayQuote(
+                etf_code="513520",
+                quote_time=now,
+                trade_date=now.date(),
+                latest_price=2.521,
+                change_percent=-1.0,
+                turnover=5_000_000,
+                iopv=None,
+                source="akshare",
+                freshness_status="fresh",
+                raw_json={},
+            )
+        )
+        await session.commit()
+
+    await client.post(
+        "/api/tracked-positions",
+        json={
+            "asset_type": "etf",
+            "asset_code": "513520",
+            "buy_date": "2026-06-17",
+            "confirmed_nav": 2.491,
+            "confirmed_shares": 1300,
+            "buy_amount": 3000,
+        },
+    )
+
+    response = await client.get("/api/tracked-positions")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["max_profit_pct"] == pytest.approx(4.74, abs=0.05)
+    assert item["profit_giveback_pct"] == pytest.approx(3.53, abs=0.05)
+    assert item["dynamic_thresholds"]["profit_start_pct"] == pytest.approx(4.0, abs=0.01)
+    assert item["dynamic_thresholds"]["trailing_giveback_pct"] == pytest.approx(2.5, abs=0.01)
+    assert item["exit_signal"]["alert_type"] == "trailing_take_profit"
+    assert item["exit_signal"]["email_eligible"] is True
+    assert item["intraday_snapshot"]["iopv"] is None
+    assert item["intraday_snapshot"]["email_eligible"] is True
+
 
 @pytest.mark.asyncio
 async def test_tracking_chart_and_holding_days_start_from_confirmed_nav_date(client, app) -> None:

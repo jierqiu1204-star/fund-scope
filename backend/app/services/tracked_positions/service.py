@@ -76,6 +76,12 @@ TAKE_PROFIT_WATCH_PCT = 3.0
 TRAILING_START_PROFIT_PCT = 5.0
 TRAILING_GIVEBACK_POINTS = 2.5
 TRAILING_GIVEBACK_RATIO = 0.35
+ETF_TRAILING_PROFIT_START_VOL_MULTIPLIER = 1.1
+ETF_TRAILING_PROFIT_START_MIN_PCT = 3.0
+ETF_TRAILING_PROFIT_START_MAX_PCT = 4.0
+ETF_TRAILING_GIVEBACK_VOL_MULTIPLIER = 0.65
+ETF_TRAILING_GIVEBACK_MIN_PCT = 1.8
+ETF_TRAILING_GIVEBACK_MAX_PCT = 2.5
 HARD_STOP_LOSS_PCT = -4.0
 TAKE_PROFIT_WATCH_COOLDOWN_DAYS = 3
 
@@ -432,8 +438,16 @@ async def dynamic_thresholds_for_position(
         if value is not None
     )
     hard_stop_pct = -_clamp(1.5 * volatility_unit_pct, 1.2, 4.5)
-    profit_start_pct = max(1.5 * volatility_unit_pct, 1.0)
-    trailing_giveback_pct = _clamp(0.9 * volatility_unit_pct, 0.8, 2.5)
+    profit_start_pct = _clamp(
+        ETF_TRAILING_PROFIT_START_VOL_MULTIPLIER * volatility_unit_pct,
+        ETF_TRAILING_PROFIT_START_MIN_PCT,
+        ETF_TRAILING_PROFIT_START_MAX_PCT,
+    )
+    trailing_giveback_pct = _clamp(
+        ETF_TRAILING_GIVEBACK_VOL_MULTIPLIER * volatility_unit_pct,
+        ETF_TRAILING_GIVEBACK_MIN_PCT,
+        ETF_TRAILING_GIVEBACK_MAX_PCT,
+    )
 
     prices = [point.price for point in chart]
     ma5 = _mean_or_none(prices[-5:]) if len(prices) >= 5 else None
@@ -512,7 +526,7 @@ def _alert_type_label(alert_type: str) -> str:
     return {
         ALERT_EXIT_WATCH: "卖出/减仓提醒",
         ALERT_TAKE_PROFIT_WATCH: "止盈观察提醒",
-        ALERT_TRAILING_TAKE_PROFIT: "卖出/减仓提醒",
+        ALERT_TRAILING_TAKE_PROFIT: "盈利回吐提醒 / 卖出减仓提醒",
         ALERT_TREND_WEAKENING: "卖出/减仓提醒",
         ALERT_HARD_STOP: "止损提醒",
     }.get(alert_type, "网页风险提示")
@@ -752,7 +766,7 @@ def _performance_analysis(
     elif trailing_threshold is not None and profit_giveback_pct >= trailing_threshold:
         exit_signal = _exit_signal(
             alert_type=ALERT_TRAILING_TAKE_PROFIT,
-            label="移动止盈提醒",
+            label="盈利回吐提醒",
             level="warning",
             reasons=[
                 f"最高盈利 {max_profit_pct:.2f}%，当前盈利 {current_pnl_pct:.2f}%，已从高点回吐 {profit_giveback_pct:.2f} 个百分点。",
@@ -796,10 +810,10 @@ def _performance_analysis(
         ]
         exit_signal.reason = exit_signal.reasons[0]
     elif exit_signal.alert_type == ALERT_TRAILING_TAKE_PROFIT and trailing_threshold is not None:
-        exit_signal.label = "移动止盈提醒"
+        exit_signal.label = "盈利回吐提醒"
         exit_signal.reasons = [
             f"最高盈利 {max_profit_pct:.2f}%，当前盈利 {current_pnl_pct:.2f}%，已从高点回吐 {profit_giveback_pct:.2f} 个百分点。",
-            f"动态移动止盈回吐线为 {trailing_threshold:.2f} 个百分点，距离触发还有 {distance_to_trailing_giveback_pct:.2f} 个百分点；当前价 {current_point.price:.4f}；{source_message}",
+            f"动态启动线 {profit_start_pct:.2f}%，动态回吐线 {trailing_threshold:.2f} 个百分点；当前价 {current_point.price:.4f}；{source_message}",
         ]
         exit_signal.reason = exit_signal.reasons[0]
     elif exit_signal.alert_type == ALERT_TREND_WEAKENING:
