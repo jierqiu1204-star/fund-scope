@@ -47,10 +47,8 @@ async def intraday_etf_watch_job(
             "signal_run_id": watchlist.signal_run_id,
             "signal_as_of_date": watchlist.signal_as_of_date.isoformat() if watchlist.signal_as_of_date else None,
             "signal_status": watchlist.signal_status,
-            "watchlist_sources": {
-                item.etf_code: sorted(item.sources)
-                for item in watchlist.items
-            },
+            "watchlist_source_counts": _watchlist_source_counts(watchlist.items),
+            "watchlist_codes": _sample_codes([item.etf_code for item in watchlist.items]),
         },
     )
     session.add(run)
@@ -97,11 +95,13 @@ async def intraday_etf_watch_job(
         run.details_json = {
             **dict(run.details_json or {}),
             "provider_returned": len(quotes),
-            "updated_codes": updated_codes,
+            "updated_code_count": len(updated_codes),
+            "updated_codes": _sample_codes(updated_codes),
             "missing_watch_count": len(missing_watch_codes),
-            "missing_watch_codes": missing_watch_codes,
+            "missing_watch_codes": _sample_codes(missing_watch_codes),
             "provider_error": provider_error,
-            "quote_audit": quote_audit,
+            "quote_audit": _sample_mapping(quote_audit),
+            "quote_audit_count": len(quote_audit),
             "alert_result": alert_result,
         }
         await session.commit()
@@ -140,6 +140,25 @@ def _quote_audit_for_watchlist(watch_codes: set[str], latest_quotes: dict[str, A
             "quote_time": quote.quote_time.isoformat() if quote.quote_time else None,
         }
     return audit
+
+
+def _watchlist_source_counts(items: list[Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        for source in item.sources:
+            counts[source] = counts.get(source, 0) + 1
+    return counts
+
+
+def _sample_codes(codes: list[str], *, limit: int = 50) -> list[str]:
+    sorted_codes = sorted(codes)
+    return sorted_codes if len(sorted_codes) <= limit else sorted_codes[:limit]
+
+
+def _sample_mapping(values: dict[str, Any], *, limit: int = 50) -> dict[str, Any]:
+    if len(values) <= limit:
+        return values
+    return {key: values[key] for key in sorted(values)[:limit]}
 
 
 async def _check_tracked_etf_alerts(session: AsyncSession, settings: Settings) -> dict[str, int]:

@@ -41,6 +41,7 @@ type OrderTimeBucket = "before_15" | "after_15" | "unknown";
 type MobileTab = "ranking" | "detail" | "tracking" | "explanation";
 type RankedAssetItem = ShortResearchAsset | IntradayEtfLiveRankingItem;
 type RankedAssetResponse = ShortResearchAssetList | IntradayEtfLiveRankingList;
+type FreshIntradayQuote = NonNullable<IntradayEtfLiveRankingItem["quote"]> & { change_percent: number };
 
 const ASSET_PAGE_SIZE = 12;
 
@@ -375,6 +376,36 @@ function liveScoreText(item: IntradayEtfLiveRankingItem) {
   return "暂无分数";
 }
 
+function hasFreshIntradayChange(
+  quote: IntradayEtfLiveRankingItem["quote"],
+  marketStatus?: string | null,
+): quote is FreshIntradayQuote {
+  return Boolean(
+    quote &&
+      !quote.is_stale &&
+      (!marketStatus || marketStatus === "open") &&
+      typeof quote.change_percent === "number"
+  );
+}
+
+function intradayChangeDisplay(
+  quote: IntradayEtfLiveRankingItem["quote"],
+  marketStatus?: string | null,
+) {
+  if (!quote) {
+    return { value: "等待盘中行情", time: "暂无行情时间" };
+  }
+  if (quote.is_stale) {
+    return { value: "行情滞后", time: formatDateTime(quote.quote_time) };
+  }
+  if (marketStatus && marketStatus !== "open") {
+    return { value: "非交易时段", time: formatDateTime(quote.quote_time) };
+  }
+  if (quote.change_percent === null || quote.change_percent === undefined) {
+    return { value: "等待新鲜盘中行情", time: formatDateTime(quote.quote_time) };
+  }
+  return { value: formatPercent(quote.change_percent), time: formatDateTime(quote.quote_time) };
+}
 function isLiveRankingResponse(value: RankedAssetResponse | undefined): value is IntradayEtfLiveRankingList {
   return Boolean(value && "signal_as_of_date" in value && "latest_run" in value);
 }
@@ -400,10 +431,24 @@ function itemEntryTimingDisplay(item: RankedAssetItem, marketStatus?: string | n
       reason: item.live_entry_timing_reason,
     };
   }
+  if (item.quote?.is_stale) {
+    return {
+      title: "盘中买点状态",
+      label: "数据不足",
+      reason: "盘中行情已滞后，等待新鲜盘中行情；日线买点只能作为参考。",
+    };
+  }
+  if (marketStatus !== "open") {
+    return {
+      title: "盘中买点状态",
+      label: "数据不足",
+      reason: "当前非交易时段，不输出实时买点；日线买点只能作为参考。",
+    };
+  }
   return {
-    title: "日线买点参考",
-    label: item.daily_entry_timing_label,
-    reason: item.daily_entry_timing_reason,
+    title: "盘中买点状态",
+    label: "数据不足",
+    reason: "等待新鲜盘中行情；日线买点只能作为参考。",
   };
 }
 
@@ -424,7 +469,7 @@ function previewAssetFromRankedItem(item: RankedAssetItem, marketStatus?: string
     "正在加载完整详情，先使用榜单数据展示核心摘要。";
   const quote = item.quote;
   const metrics: Record<string, unknown> = {};
-  if (quote?.change_percent !== null && quote?.change_percent !== undefined) {
+  if (hasFreshIntradayChange(quote, marketStatus)) {
     metrics.today_return_pct = quote.change_percent / 100;
   }
   if (quote?.turnover !== null && quote?.turnover !== undefined) {
@@ -1244,11 +1289,29 @@ export default function ShortTermPage() {
     ? visibleAssets.find((item) => isLiveRankingItem(item) && item.etf_code === selectedAsset.code)
     : null;
   const selectedLiveQuote = selectedLiveItem && isLiveRankingItem(selectedLiveItem) ? selectedLiveItem.quote : null;
+  const selectedIntradayChange = intradayChangeDisplay(selectedLiveQuote, etfLiveData?.market_status);
+  const selectedEntryTiming =
+    assetType === "etf" && selectedLiveItem && isLiveRankingItem(selectedLiveItem)
+      ? itemEntryTimingDisplay(selectedLiveItem, etfLiveData?.market_status)
+      : {
+          title: "今日买点",
+          label: selectedAsset?.entry_timing_label ?? "暂无",
+          reason: selectedAsset?.entry_timing_reason ?? "暂无买点原因",
+        };
+  const selectedDailyEntryTiming =
+    assetType === "etf" && selectedLiveItem && isLiveRankingItem(selectedLiveItem)
+      ? {
+          title: "日线买点参考",
+          label: selectedLiveItem.daily_entry_timing_label,
+          reason: selectedLiveItem.daily_entry_timing_reason,
+        }
+      : null;
   const selectedAssetMetrics = selectedAsset?.metrics ?? {};
   const validationGroups = labelValidationGroups(statusData);
+  const selectedValidationEntryLabel = selectedDailyEntryTiming?.label ?? selectedEntryTiming.label;
   const selectedValidationGroup = selectedAsset
     ? validationGroups.find(
-        (item) => item.label === selectedAsset.conclusion && item.entry_timing_label === selectedAsset.entry_timing_label
+        (item) => item.label === selectedAsset.conclusion && item.entry_timing_label === selectedValidationEntryLabel
       )
     : undefined;
   const selectedAssetTrendScore = numericMetric(selectedAssetMetrics, "trend_score");
@@ -1328,10 +1391,23 @@ export default function ShortTermPage() {
         <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">观察与持仓摘要</p>
         <div className="mt-3 grid gap-2 text-sm text-ink/70 md:grid-cols-2">
           <span>买入观察状态：{selectedAsset.conclusion}</span>
-          <span>今日买点状态：{selectedAsset.entry_timing_label}</span>
-          <span className="md:col-span-2">今日买点原因：{selectedAsset.entry_timing_reason}</span>
+          <span>{selectedEntryTiming.title}：{selectedEntryTiming.label}</span>
+          <span className="md:col-span-2">买点原因：{selectedEntryTiming.reason}</span>
+          {selectedDailyEntryTiming ? (
+            <>
+              <span>日线买点参考：{selectedDailyEntryTiming.label}</span>
+              <span className="md:col-span-2">日线参考原因：{selectedDailyEntryTiming.reason}</span>
+            </>
+          ) : null}
           <span>持仓状态：{selectedHoldingStatus}</span>
-          <span>今天涨跌：{percentMetric(selectedAssetMetrics, "today_return_pct")}</span>
+          {assetType === "etf" ? (
+            <>
+              <span>盘中涨跌：{selectedIntradayChange.value}</span>
+              <span>行情时间：{selectedIntradayChange.time}</span>
+            </>
+          ) : (
+            <span>最新日涨跌：{percentMetric(selectedAssetMetrics, "today_return_pct")}</span>
+          )}
           <span>近5日涨跌：{percentMetric(selectedAssetMetrics, "return_5d")}</span>
           <span>近20日涨跌：{percentMetric(selectedAssetMetrics, "return_20d")}</span>
           <span>近60日涨跌：{percentMetric(selectedAssetMetrics, "return_60d")}</span>
@@ -1467,9 +1543,9 @@ export default function ShortTermPage() {
             const trackedForItem = trackedByAsset.get(`${itemAssetType}-${itemCode}`);
             const isLiveItem = isLiveRankingItem(item);
             const quote = liveRankingQuote(item);
-            const quotedTime = quote?.quote_time;
             const livePrice = quote?.latest_price;
             const timingDisplay = itemEntryTimingDisplay(item, etfLiveData?.market_status);
+            const liveChange = intradayChangeDisplay(quote, etfLiveData?.market_status);
             return (
               <button
                 key={`${itemAssetType}-${itemCode}`}
@@ -1543,7 +1619,10 @@ export default function ShortTermPage() {
                         当前价：{quote ? (livePrice === null || livePrice === undefined ? "暂无" : livePrice.toFixed(4)) : "暂无"}
                       </span>
                       <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
-                        行情：{quote ? formatDateTime(quotedTime) : "等待盘中行情"}
+                        盘中涨跌：{liveChange.value}
+                      </span>
+                      <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                        行情：{liveChange.time}
                       </span>
                       <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
                         排名变化：{etfLiveRankChangeText(item.rank_change)}
@@ -1558,7 +1637,7 @@ export default function ShortTermPage() {
                         {validationEvidenceText(item as ShortResearchAsset)}
                       </span>
                       <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
-                        今天：{percentMetric(item.metrics, "today_return_pct")}
+                        最新日涨跌：{percentMetric(item.metrics, "today_return_pct")}
                       </span>
                       <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
                         近 20 日：{percentMetric(item.metrics, "return_20d")}
@@ -1623,9 +1702,9 @@ export default function ShortTermPage() {
               </p>
             </div>
             <div className="rounded-[16px] bg-paper px-4 py-3">
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">今日买点</p>
-              <p className="mt-2 text-lg font-semibold text-ink">{selectedAsset.entry_timing_label}</p>
-              <p className="mt-2 text-sm leading-6 text-ink/65">{selectedAsset.entry_timing_reason}</p>
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">{selectedEntryTiming.title}</p>
+              <p className="mt-2 text-lg font-semibold text-ink">{selectedEntryTiming.label}</p>
+              <p className="mt-2 text-sm leading-6 text-ink/65">{selectedEntryTiming.reason}</p>
             </div>
             <div className="rounded-[16px] bg-ink p-4 text-white">
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-white/50">持有建议</p>
@@ -1634,12 +1713,18 @@ export default function ShortTermPage() {
               </p>
             </div>
           </div>
-          <div className={`grid gap-2 text-sm ${assetType === "etf" ? "sm:grid-cols-6" : "sm:grid-cols-5"}`}>
+          <div className={`grid gap-2 text-sm ${assetType === "etf" ? "sm:grid-cols-4" : "sm:grid-cols-5"}`}>
             <StatPill label={mode.latestLabel} value={formatDate(selectedAsset.latest_date)} tone="bg-white text-ink" />
             <StatPill label={mode.priceLabel} value={selectedAsset.latest_value === null ? "暂无" : selectedAsset.latest_value.toFixed(4)} />
+            {assetType === "etf" ? (
+              <StatPill label="盘中涨跌" value={selectedIntradayChange.value} tone="bg-white text-ink" />
+            ) : null}
+            {assetType === "etf" ? (
+              <StatPill label="行情时间" value={selectedIntradayChange.time} tone="bg-white text-ink" />
+            ) : null}
             <StatPill label="样本天数" value={`${selectedAsset.usable_days} 天`} tone="bg-accentSoft text-ink" />
             <StatPill label="样本标签" value={selectedAsset.conclusion} tone="bg-white text-ink" />
-            <StatPill label="今日买点" value={selectedAsset.entry_timing_label} tone="bg-white text-ink" />
+            <StatPill label={assetType === "etf" ? "盘中买点" : "今日买点"} value={selectedEntryTiming.label} tone="bg-white text-ink" />
             {assetType === "etf" ? (
               <StatPill
                 label="20日换手"
@@ -2289,9 +2374,9 @@ export default function ShortTermPage() {
               const isSelected = selected?.asset_type === itemAssetType && selected.code === itemCode;
               const isLiveItem = isLiveRankingItem(item);
               const quote = liveRankingQuote(item);
-              const quotedTime = quote?.quote_time;
               const livePrice = quote?.latest_price;
               const timingDisplay = itemEntryTimingDisplay(item, etfLiveData?.market_status);
+              const liveChange = intradayChangeDisplay(quote, etfLiveData?.market_status);
               return (
                 <button
                   key={`${itemAssetType}-${itemCode}`}
@@ -2356,7 +2441,10 @@ export default function ShortTermPage() {
                           当前价：{quote ? (livePrice === null || livePrice === undefined ? "暂无" : livePrice.toFixed(4)) : "暂无"}
                         </span>
                         <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
-                          行情：{quote ? formatDateTime(quotedTime) : "等待盘中行情"}
+                          盘中涨跌：{liveChange.value}
+                        </span>
+                        <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                          行情：{liveChange.time}
                         </span>
                         <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
                           排名变化：{etfLiveRankChangeText(item.rank_change)}
@@ -2365,7 +2453,7 @@ export default function ShortTermPage() {
                     ) : (
                       <>
                         <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
-                          今天：{percentMetric(item.metrics, "today_return_pct")}
+                          最新日涨跌：{percentMetric(item.metrics, "today_return_pct")}
                         </span>
                         <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
                           近 20 日：{percentMetric(item.metrics, "return_20d")}
@@ -2434,8 +2522,8 @@ export default function ShortTermPage() {
                     <span className={`rounded-full px-4 py-2 text-sm font-semibold ${conclusionTone(selectedAsset.conclusion)}`}>
                       买入观察：{selectedAsset.conclusion}
                     </span>
-                    <span className={`rounded-full px-4 py-2 text-sm font-semibold ${entryTimingTone(selectedAsset.entry_timing_label)}`}>
-                      今日买点：{selectedAsset.entry_timing_label}
+                    <span className={`rounded-full px-4 py-2 text-sm font-semibold ${entryTimingTone(selectedEntryTiming.label)}`}>
+                      {assetType === "etf" ? "盘中买点" : "今日买点"}：{selectedEntryTiming.label}
                     </span>
                   </div>
                 </div>
@@ -2466,7 +2554,9 @@ export default function ShortTermPage() {
                     <div className="rounded-[20px] bg-ink p-4 text-white">
                       <p className="text-xs font-semibold uppercase tracking-[0.18em] text-white/50">买点口径</p>
                       <p className="mt-2 text-sm leading-7 text-white/75">
-                        短线观察 = 值得看；今日买点状态 = 今天更适合追、等、还是回避。{selectedAsset.entry_timing_reason}
+                        {assetType === "etf"
+                          ? `短线观察 = 值得看；盘中买点以实时行情为准，日线买点只做参考。${selectedEntryTiming.reason}`
+                          : `短线观察 = 值得看；今日买点状态 = 今天更适合追、等、还是回避。${selectedEntryTiming.reason}`}
                       </p>
                     </div>
                   </div>
@@ -2628,17 +2718,20 @@ export default function ShortTermPage() {
                   </div>
                 ) : null}
 
-                <div className={`mt-5 grid gap-3 ${assetType === "etf" ? "md:grid-cols-7" : "md:grid-cols-5"}`}>
+                <div className={`mt-5 grid gap-3 ${assetType === "etf" ? "md:grid-cols-3 xl:grid-cols-6" : "md:grid-cols-5"}`}>
                   <StatPill label={mode.latestLabel} value={formatDate(selectedAsset.latest_date)} tone="bg-white text-ink" />
                   <StatPill label={mode.priceLabel} value={selectedAsset.latest_value === null ? "暂无" : selectedAsset.latest_value.toFixed(4)} />
                   {assetType === "etf" ? (
                     <StatPill label="盘中价" value={selectedLiveQuote?.latest_price === undefined ? "暂无" : selectedLiveQuote.latest_price.toFixed(4)} tone="bg-white text-ink" />
                   ) : null}
                   {assetType === "etf" ? (
-                    <StatPill label="行情时间" value={formatDateTime(selectedLiveQuote?.quote_time)} tone="bg-white text-ink" />
+                    <StatPill label="盘中涨跌" value={selectedIntradayChange.value} tone="bg-white text-ink" />
+                  ) : null}
+                  {assetType === "etf" ? (
+                    <StatPill label="行情时间" value={selectedIntradayChange.time} tone="bg-white text-ink" />
                   ) : null}
                   <StatPill label="可用样本" value={`${selectedAsset.usable_days} 天`} tone="bg-accentSoft text-ink" />
-                  <StatPill label="今日买点" value={selectedAsset.entry_timing_label} tone="bg-white text-ink" />
+                  <StatPill label={assetType === "etf" ? "盘中买点" : "今日买点"} value={selectedEntryTiming.label} tone="bg-white text-ink" />
                   {assetType === "etf" ? (
                     <StatPill
                       label="20 日成交额"

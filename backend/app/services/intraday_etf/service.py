@@ -46,6 +46,7 @@ SOURCE_TOP20_SIGNAL = "top20_signal"
 SOURCE_SHORT_WATCH = "short_watch"
 SOURCE_HIGH_WATCH = "high_watch"
 SOURCE_TRACKED_POSITION = "tracked_position"
+SOURCE_ALL_ETF = "all_etf"
 LIVE_LABEL_DATA_INSUFFICIENT = "数据不足"
 LIVE_LABEL_DOWN_PERSISTENT = "跌破等待"
 LIVE_LABEL_HEALTHY_PULLBACK = "健康回踩"
@@ -375,17 +376,27 @@ async def latest_watch_run(session: AsyncSession) -> IntradayEtfWatchRun | None:
 
 
 async def build_watchlist(session: AsyncSession, *, top_limit: int = TOP_SIGNAL_LIMIT) -> WatchlistResult:
-    watch_map: dict[str, WatchItem] = {}
+    eligible_codes = (
+        await session.scalars(
+            select(TradableEtf.code)
+            .where(TradableEtf.is_short_term_eligible.is_(True))
+            .order_by(TradableEtf.code.asc())
+        )
+    ).all()
+    watch_map: dict[str, WatchItem] = {
+        code: WatchItem(etf_code=code, sources={SOURCE_ALL_ETF})
+        for code in eligible_codes
+    }
     run = await latest_signal_run(session, asset_type=ASSET_TYPE_ETF)
     signal_status = "missing"
-    message = "尚未生成 ETF 短线评分，当前盯盘已追踪 ETF。"
+    message = "尚未生成 ETF 短线评分，当前盯盘全部可交易 ETF。"
     signal_run_id: int | None = None
     signal_as_of_date: date | None = None
     if run is not None:
         signal_status = "ready"
         signal_run_id = run.id
         signal_as_of_date = run.as_of_date
-        message = "使用最新 ETF 短线评分前 20、短线观察/高位观察和已追踪 ETF 盯盘。"
+        message = "使用全部可交易 ETF 盘中行情；实时榜单优先显示最新评分前 20、短线观察、高位观察和已追踪 ETF。"
         signal_items = (
             await session.scalars(
                 select(ShortResearchSignalItem)
@@ -397,15 +408,14 @@ async def build_watchlist(session: AsyncSession, *, top_limit: int = TOP_SIGNAL_
             )
         ).all()
         for item in signal_items:
-            sources: set[str] = set()
+            watch_item = watch_map.setdefault(item.asset_code, WatchItem(etf_code=item.asset_code, sources={SOURCE_ALL_ETF}))
+            watch_item.rank = item.rank
             if item.rank is not None and item.rank <= top_limit:
-                sources.add(SOURCE_TOP20_SIGNAL)
+                watch_item.sources.add(SOURCE_TOP20_SIGNAL)
             if item.conclusion == CONCLUSION_WATCH:
-                sources.add(SOURCE_SHORT_WATCH)
+                watch_item.sources.add(SOURCE_SHORT_WATCH)
             if item.conclusion == CONCLUSION_HIGH_WATCH:
-                sources.add(SOURCE_HIGH_WATCH)
-            if sources:
-                watch_map[item.asset_code] = WatchItem(etf_code=item.asset_code, rank=item.rank, sources=sources)
+                watch_item.sources.add(SOURCE_HIGH_WATCH)
 
     tracked_rows = (
         await session.scalars(
@@ -416,7 +426,7 @@ async def build_watchlist(session: AsyncSession, *, top_limit: int = TOP_SIGNAL_
         )
     ).all()
     for position in tracked_rows:
-        watch_item = watch_map.setdefault(position.asset_code, WatchItem(etf_code=position.asset_code))
+        watch_item = watch_map.setdefault(position.asset_code, WatchItem(etf_code=position.asset_code, sources={SOURCE_ALL_ETF}))
         watch_item.sources.add(SOURCE_TRACKED_POSITION)
 
     items = sorted(watch_map.values(), key=lambda item: (item.rank is None, item.rank or 9999, item.etf_code))
