@@ -60,6 +60,24 @@ async def daily_short_research_data_job(session: AsyncSession) -> dict[str, Any]
     }
 
 
+async def post_close_etf_data_job(session: AsyncSession) -> dict[str, Any]:
+    today = date.today()
+    result = await sync_short_research_data(
+        session,
+        from_date=today - timedelta(days=120),
+        to_date=today,
+        asset_type=ASSET_TYPE_ETF,
+    )
+    return {
+        "from_date": (today - timedelta(days=120)).isoformat(),
+        "to_date": today.isoformat(),
+        "asset_type": ASSET_TYPE_ETF,
+        "etf": result,
+        "asset_count": _count(result, "asset_count"),
+        "failed": _count(result, "failed"),
+    }
+
+
 async def daily_etf_universe_job(session: AsyncSession) -> dict[str, Any]:
     return await refresh_etf_universe(session)
 
@@ -75,6 +93,16 @@ async def daily_short_research_signals_job(session: AsyncSession) -> dict[str, A
         "items": sum(_count(item, "items") for item in results.values()),
         "funds": sum(_count(item, "funds") for item in results.values()),
         "etfs": sum(_count(item, "etfs") for item in results.values()),
+    }
+
+
+async def post_close_etf_signals_job(session: AsyncSession) -> dict[str, Any]:
+    run = await run_signal_generation(session, asset_type=ASSET_TYPE_ETF)
+    result = _signal_result(run)
+    return {
+        "asset_type": ASSET_TYPE_ETF,
+        "etf": result,
+        **result,
     }
 
 
@@ -114,6 +142,10 @@ async def daily_etf_signal_validation_job(session: AsyncSession) -> dict[str, An
 
 
 async def daily_etf_observation_portfolio_job(session: AsyncSession) -> dict[str, Any]:
+    return await post_close_etf_observation_portfolio_job(session)
+
+
+async def post_close_etf_observation_portfolio_job(session: AsyncSession) -> dict[str, Any]:
     snapshot = await run_etf_observation_portfolio_optimization(session)
     summary = dict(snapshot.summary_json or {})
     constraint_summary = dict(summary.get("constraint_summary") or {})

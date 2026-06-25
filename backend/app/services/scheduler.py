@@ -27,6 +27,9 @@ from app.services.short_research.jobs import (
     daily_short_research_advisor_job,
     daily_short_research_data_job,
     daily_short_research_signals_job,
+    post_close_etf_data_job,
+    post_close_etf_observation_portfolio_job,
+    post_close_etf_signals_job,
 )
 from app.services.strategy_lab.jobs import daily_strategy_paper_job
 from app.services.tracked_positions.jobs import daily_tracked_position_alerts_job
@@ -137,6 +140,36 @@ def register_default_jobs(
         hour=20,
         minute=15,
         id="daily_strategy_paper",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_tracked_job,
+        "cron",
+        args=[db, "post_close_etf_data", post_close_etf_data_job],
+        day_of_week="mon-fri",
+        hour=15,
+        minute=5,
+        id="post_close_etf_data",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_tracked_job,
+        "cron",
+        args=[db, "post_close_etf_signals", post_close_etf_signals_job],
+        day_of_week="mon-fri",
+        hour=15,
+        minute=10,
+        id="post_close_etf_signals",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_tracked_job,
+        "cron",
+        args=[db, "post_close_etf_observation_portfolio", post_close_etf_observation_portfolio_job],
+        day_of_week="mon-fri",
+        hour=15,
+        minute=12,
+        id="post_close_etf_observation_portfolio",
         replace_existing=True,
     )
     scheduler.add_job(

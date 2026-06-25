@@ -38,17 +38,35 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
 
     job_ids = {job.id for job in scheduler.get_jobs()}
     intraday_11 = scheduler.get_job("intraday_etf_watch_11")
+    post_close_etf_data = scheduler.get_job("post_close_etf_data")
+    post_close_etf_signals = scheduler.get_job("post_close_etf_signals")
+    post_close_etf_observation = scheduler.get_job("post_close_etf_observation_portfolio")
+
+    def trigger_field(job: object, name: str) -> str:
+        return str(next(field for field in job.trigger.fields if field.name == name))
+
     assert "daily_short_research_data" in job_ids
     assert "daily_short_research_signals" in job_ids
     assert "daily_short_research_advisor" in job_ids
+    assert "post_close_etf_data" in job_ids
+    assert "post_close_etf_signals" in job_ids
+    assert "post_close_etf_observation_portfolio" in job_ids
     assert "intraday_etf_watch_0930" in job_ids
     assert "intraday_etf_watch_10" in job_ids
     assert "intraday_etf_watch_11" in job_ids
     assert "intraday_etf_watch_13_14" in job_ids
     assert "intraday_etf_watch_1500" not in job_ids
     assert intraday_11 is not None
-    minute_field = next(field for field in intraday_11.trigger.fields if field.name == "minute")
-    assert str(minute_field) == "0-29"
+    assert post_close_etf_data is not None
+    assert post_close_etf_signals is not None
+    assert post_close_etf_observation is not None
+    assert trigger_field(intraday_11, "minute") == "0-29"
+    assert trigger_field(post_close_etf_data, "hour") == "15"
+    assert trigger_field(post_close_etf_data, "minute") == "5"
+    assert trigger_field(post_close_etf_signals, "hour") == "15"
+    assert trigger_field(post_close_etf_signals, "minute") == "10"
+    assert trigger_field(post_close_etf_observation, "hour") == "15"
+    assert trigger_field(post_close_etf_observation, "minute") == "12"
     assert "daily_short_etf_data" not in job_ids
     assert "daily_short_etf_signals" not in job_ids
     assert "daily_short_etf_paper" not in job_ids

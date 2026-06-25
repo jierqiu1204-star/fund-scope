@@ -106,3 +106,89 @@ async def test_daily_short_research_advisor_job_generates_fund_and_etf_reports(m
     assert result["failed"] == 0
     assert result["fund"]["asset_type"] == ASSET_TYPE_FUND
     assert result["etf"]["asset_type"] == ASSET_TYPE_ETF
+
+
+@pytest.mark.asyncio
+async def test_post_close_etf_data_job_syncs_only_etfs(monkeypatch) -> None:
+    calls: list[str] = []
+
+    async def fake_sync_short_research_data(_session: object, **kwargs: Any) -> dict[str, Any]:
+        asset_type = kwargs["asset_type"]
+        calls.append(asset_type)
+        return {"asset_count": 4, "failed": 1, "asset_type": asset_type}
+
+    monkeypatch.setattr(jobs_module, "sync_short_research_data", fake_sync_short_research_data)
+
+    result = await jobs_module.post_close_etf_data_job(object())  # type: ignore[arg-type]
+
+    assert calls == [ASSET_TYPE_ETF]
+    assert result["asset_type"] == ASSET_TYPE_ETF
+    assert result["asset_count"] == 4
+    assert result["failed"] == 1
+    assert result["etf"]["asset_type"] == ASSET_TYPE_ETF
+
+
+@pytest.mark.asyncio
+async def test_post_close_etf_signals_job_generates_only_etf_run(monkeypatch) -> None:
+    calls: list[str] = []
+
+    async def fake_run_signal_generation(_session: object, **kwargs: Any) -> SimpleNamespace:
+        asset_type = kwargs["asset_type"]
+        calls.append(asset_type)
+        return SimpleNamespace(
+            id=7,
+            status="success",
+            as_of_date=date(2026, 6, 25),
+            summary_json={
+                "item_count": 9,
+                "fund_count": 0,
+                "etf_count": 9,
+                "conclusion_counts": {"短线观察": 3},
+            },
+        )
+
+    monkeypatch.setattr(jobs_module, "run_signal_generation", fake_run_signal_generation)
+
+    result = await jobs_module.post_close_etf_signals_job(object())  # type: ignore[arg-type]
+
+    assert calls == [ASSET_TYPE_ETF]
+    assert result["asset_type"] == ASSET_TYPE_ETF
+    assert result["run_id"] == 7
+    assert result["items"] == 9
+    assert result["etfs"] == 9
+
+
+@pytest.mark.asyncio
+async def test_post_close_etf_observation_portfolio_job_refreshes_weights(monkeypatch) -> None:
+    async def fake_run_etf_observation_portfolio_optimization(_session: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=11,
+            status="success",
+            as_of_date=date(2026, 6, 25),
+            summary_json={
+                "cash_weight": 0.1,
+                "constraint_summary": {
+                    "primary_count": 3,
+                    "watch_only_count": 2,
+                    "excluded_count": 1,
+                },
+            },
+        )
+
+    monkeypatch.setattr(
+        jobs_module,
+        "run_etf_observation_portfolio_optimization",
+        fake_run_etf_observation_portfolio_optimization,
+    )
+
+    result = await jobs_module.post_close_etf_observation_portfolio_job(object())  # type: ignore[arg-type]
+
+    assert result == {
+        "snapshot_id": 11,
+        "status": "success",
+        "as_of_date": "2026-06-25",
+        "cash_weight": 0.1,
+        "primary_count": 3,
+        "watch_only_count": 2,
+        "excluded_count": 1,
+    }
