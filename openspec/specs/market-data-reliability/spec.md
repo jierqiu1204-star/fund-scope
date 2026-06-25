@@ -136,3 +136,66 @@ Market data reliability SHALL determine whether data may be used for signal vali
 - **WHEN** required data is unavailable
 - **THEN** the system returns an explicit unavailable state instead of filling numeric outputs with zero or stale values
 
+### Requirement: Multi-Provider Quote Reliability Is Explicit
+The system SHALL classify ETF intraday quote reliability using provider freshness, provider agreement, and field completeness before any financial calculation uses the quote.
+
+#### Scenario: Providers agree
+- **WHEN** multiple fresh providers return materially consistent ETF prices and usable quote times
+- **THEN** the quote reliability is classified as verified or alternate-provider backed and may be used for decision-eligible calculations
+
+#### Scenario: Providers diverge
+- **WHEN** fresh providers return ETF prices that differ beyond the configured tolerance
+- **THEN** the quote reliability is classified as display-only and the API explains the source disagreement
+
+#### Scenario: Provider fallback time is used
+- **WHEN** a provider quote time is inferred from server fetch time instead of provider data
+- **THEN** the quote reliability is classified as display-only and MUST NOT drive realtime scoring, portfolio weights, or alert emails
+
+### Requirement: Multi-Provider Metadata Is Exposed To Users
+The system SHALL expose concise source and reliability metadata wherever ETF realtime quotes are displayed.
+
+#### Scenario: Realtime quote is displayed
+- **WHEN** the UI displays a current ETF intraday price, realtime score, buy-point label, or tracked-position P&L
+- **THEN** the API response includes selected source, consensus status, quote time, decision eligibility, and a readable limitation reason when not eligible
+
+#### Scenario: Source disagreement exists
+- **WHEN** provider disagreement makes the quote display-only
+- **THEN** the UI can show a small data-quality note and MUST NOT label the value as decision-ready realtime data
+
+### Requirement: Provider Failures Do Not Create Fake Fresh Data
+The system SHALL prefer unavailable or display-only states over filling realtime ETF values with stale cache or estimated provider output.
+
+#### Scenario: Cache exists but providers fail
+- **WHEN** current provider fetches fail but an older cached quote exists
+- **THEN** the cached quote may be shown as stale context but MUST NOT be marked fresh or decision-eligible
+
+#### Scenario: Partial provider fields exist
+- **WHEN** a provider returns price without required freshness metadata
+- **THEN** the system may display the price with limitations but MUST NOT use it for email-triggering logic
+
+### Requirement: Quote Reliability Uses A Common Vocabulary
+The system SHALL expose ETF quote reliability using a shared vocabulary across ranking, tracking, portfolio optimization, validation, and alert audit outputs.
+
+#### Scenario: Fresh consensus quote exists
+- **WHEN** multiple providers return fresh consistent ETF quotes
+- **THEN** the quote reliability is `fresh_consensus` and may be decision-eligible
+
+#### Scenario: Single fresh quote exists
+- **WHEN** only one provider returns a fresh ETF quote and no contradiction is known
+- **THEN** the quote reliability is `single_fresh` and may be decision-eligible with a single-provider note
+
+#### Scenario: Quote is not decision eligible
+- **WHEN** quotes are stale, diverged, estimated, missing timestamp, unavailable, or display-only
+- **THEN** the quote reliability marks the limitation and MUST NOT be used for live email triggers or optimized weights
+
+### Requirement: Daily Reference Cannot Override Intraday Context
+The system SHALL keep daily-cache labels and intraday labels separate for ETF realtime views.
+
+#### Scenario: Fresh intraday quote exists
+- **WHEN** an ETF has a fresh intraday quote and a stale daily signal cache
+- **THEN** realtime score, intraday change, and intraday entry timing use the intraday quote context
+
+#### Scenario: Market is closed
+- **WHEN** the market is closed and no fresh intraday quote is expected
+- **THEN** the UI labels the result as closed-market or daily reference instead of stale realtime data
+

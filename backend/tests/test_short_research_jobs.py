@@ -197,7 +197,9 @@ async def test_post_close_etf_observation_portfolio_job_refreshes_weights(monkey
             status="success",
             as_of_date=date(2026, 6, 25),
             summary_json={
-                "cash_weight": 0.1,
+                "cash_weight": 0.0,
+                "weight_sum": 1.0,
+                "unavailable_reason": None,
                 "constraint_summary": {
                     "primary_count": 3,
                     "watch_only_count": 2,
@@ -218,7 +220,9 @@ async def test_post_close_etf_observation_portfolio_job_refreshes_weights(monkey
         "snapshot_id": 11,
         "status": "success",
         "as_of_date": "2026-06-25",
-        "cash_weight": 0.1,
+        "cash_weight": 0.0,
+        "weight_sum": 1.0,
+        "unavailable_reason": None,
         "primary_count": 3,
         "watch_only_count": 2,
         "excluded_count": 1,

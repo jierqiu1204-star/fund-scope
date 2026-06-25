@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
 from app.core.auth import create_access_token, hash_password
 from app.core.config import Settings
-from app.models.entities import User
+from app.models.entities import TrackedPosition, TrackedPositionAlert, User
 
 
 @pytest.mark.asyncio
@@ -173,3 +175,107 @@ async def test_normal_user_cannot_approve_user(client, app) -> None:
     )
 
     assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_super_admin_can_read_user_observability_without_secrets(client, app) -> None:
+    async with app.state.db.session() as session:
+        target = User(
+            email="observable@example.com",
+            password_hash=hash_password("password-123"),
+            recipient_email="observable@example.com",
+            smtp_host="smtp.example.com",
+            smtp_port=465,
+            smtp_username="observable@example.com",
+            smtp_password_ref="secret-ref",
+            smtp_from="observable@example.com",
+            is_approved=True,
+            is_super_admin=False,
+        )
+        session.add(target)
+        await session.flush()
+        position = TrackedPosition(
+            user_id=target.id,
+            asset_type="etf",
+            asset_code="560777",
+            asset_name="只读观察ETF",
+            buy_date=date(2026, 6, 1),
+            buy_amount=3000,
+            confirmed_nav=1.0,
+            entry_price=1.0,
+            estimated_shares=3000,
+            status="active",
+        )
+        session.add(position)
+        await session.flush()
+        session.add(
+            TrackedPositionAlert(
+                tracked_position_id=position.id,
+                alert_date=date(2026, 6, 2),
+                alert_type="trend_weakening",
+                trigger_label="趋势转弱",
+                email_status="sent",
+                reasons_json=["测试提醒"],
+                risk_flags_json=[],
+            )
+        )
+        await session.commit()
+        target_id = target.id
+
+    list_response = await client.get("/api/admin/users")
+    assert list_response.status_code == 200
+    target_summary = next(item for item in list_response.json() if item["id"] == target_id)
+    assert target_summary["tracking_summary"]["active"] == 1
+    assert target_summary["smtp_username_masked"] == "ob***le@example.com"
+    assert "smtp_password_ref" not in target_summary
+    assert "password_hash" not in target_summary
+
+    detail_response = await client.get(f"/api/admin/users/{target_id}")
+    assert detail_response.status_code == 200
+    detail = detail_response.json()
+    assert detail["readonly"] is True
+    assert isinstance(detail["notification_configured"], bool)
+    assert "smtp_password_ref" not in detail
+    assert "password_hash" not in detail
+
+    positions_response = await client.get(f"/api/admin/users/{target_id}/tracked-positions")
+    assert positions_response.status_code == 200
+    positions = positions_response.json()
+    assert len(positions) == 1
+    assert positions[0]["asset_code"] == "560777"
+
+    alerts_response = await client.get(f"/api/admin/users/{target_id}/alerts")
+    assert alerts_response.status_code == 200
+    alerts = alerts_response.json()
+    assert len(alerts) == 1
+    assert alerts[0]["email_status"] == "sent"
+
+
+@pytest.mark.asyncio
+async def test_normal_user_cannot_read_admin_user_observability(client, app) -> None:
+    async with app.state.db.session() as session:
+        normal = User(
+            email="normal-observer@example.com",
+            password_hash=hash_password("password-123"),
+            recipient_email="normal-observer@example.com",
+            is_approved=True,
+            is_super_admin=False,
+        )
+        target = User(
+            email="private-target@example.com",
+            password_hash=hash_password("password-123"),
+            recipient_email="private-target@example.com",
+            is_approved=True,
+            is_super_admin=False,
+        )
+        session.add_all([normal, target])
+        await session.commit()
+        await session.refresh(normal)
+        await session.refresh(target)
+        token, _ = create_access_token(normal, app.state.settings)
+
+    headers = {"Authorization": f"Bearer {token}"}
+    assert (await client.get("/api/admin/users", headers=headers)).status_code == 403
+    assert (await client.get(f"/api/admin/users/{target.id}", headers=headers)).status_code == 403
+    assert (await client.get(f"/api/admin/users/{target.id}/tracked-positions", headers=headers)).status_code == 403
+    assert (await client.get(f"/api/admin/users/{target.id}/alerts", headers=headers)).status_code == 403

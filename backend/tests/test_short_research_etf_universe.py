@@ -81,7 +81,7 @@ async def _seed_cached_etf_signals(app: Any, count: int = 3) -> int:
                     code=code,
                     name=f"Cached ETF {index}",
                     exchange="SH",
-                    theme_tags_json=["cached"],
+                    theme_tags_json=[f"cached-{index}"],
                     trading_rule_label="T+1 ETF",
                     asset_class="sector",
                     is_short_term_eligible=True,
@@ -221,23 +221,22 @@ async def test_short_research_etf_status_universe_filter_and_dynamic_detail(clie
 
 
 @pytest.mark.asyncio
-async def test_etf_observation_portfolio_is_research_only_and_balances_cash(client, app) -> None:
-    await _seed_etf_history(app, code="560101", name="观察科技ETF", turnover=200_000_000, daily_return=0.003)
-    await _seed_etf_history(app, code="560102", name="观察红利ETF", turnover=180_000_000, daily_return=0.0015)
+async def test_etf_observation_portfolio_is_research_only_and_fully_invested(client, app) -> None:
+    await _seed_cached_etf_signals(app, count=4)
 
-    async with app.state.db.session() as session:
-        await short_research_service.run_signal_generation(session, asset_type="etf")
-
-    response = await client.get("/api/short-research/observation-portfolio?asset_type=etf&limit=3")
+    response = await client.get("/api/short-research/observation-portfolio?asset_type=etf&limit=4")
 
     assert response.status_code == 200
     body = response.json()
     assert body["research_only"] is True
     assert body["no_trade_instruction"] is True
-    assert body["items"]
-    assert 0 <= body["cash_weight"] <= 1
-    assert abs(sum(item["target_weight"] for item in body["items"]) + body["cash_weight"] - 1) < 0.01
+    assert len(body["items"]) == 4
+    assert body["target_invested_weight"] == 1.0
+    assert body["weight_sum"] == 1.0
+    assert body["cash_weight"] == 0.0
+    assert abs(sum(item["target_weight"] for item in body["items"]) - 1) < 0.01
     assert all(item["evidence"] for item in body["items"])
+    assert all(item["target_weight"] <= 0.3 for item in body["items"])
 
     payload = json.dumps(body, ensure_ascii=False).lower()
     for forbidden in ["buy", "sell", "target_price", "expected_return", "guaranteed_profit"]:
@@ -268,23 +267,25 @@ async def test_assets_endpoint_uses_cached_signal_items_and_paginates(client, ap
 
 @pytest.mark.asyncio
 async def test_observation_portfolio_uses_cached_signals(client, app, monkeypatch) -> None:
-    await _seed_cached_etf_signals(app, count=3)
+    await _seed_cached_etf_signals(app, count=4)
 
     async def fail_full_recompute(*_args: Any, **_kwargs: Any) -> list[Any]:
         raise AssertionError("observation portfolio should not recompute the full ETF universe")
 
     monkeypatch.setattr(short_research_service, "list_computed_assets", fail_full_recompute)
 
-    response = await client.get("/api/short-research/observation-portfolio?asset_type=etf&limit=2")
+    response = await client.get("/api/short-research/observation-portfolio?asset_type=etf&limit=4")
 
     assert response.status_code == 200
     body = response.json()
     assert body["research_only"] is True
-    assert len(body["items"]) == 2
-    assert [item["code"] for item in body["items"]] == ["562000", "562001"]
+    assert len(body["items"]) == 4
+    assert [item["code"] for item in body["items"]] == ["562000", "562001", "562002", "562003"]
     assert body["items"][0]["weight_explanation"]
     assert body["items"][0]["decision_factors"]
-    assert abs(sum(item["target_weight"] for item in body["items"]) + body["cash_weight"] - 1) < 0.01
+    assert body["weight_sum"] == 1.0
+    assert body["cash_weight"] == 0.0
+    assert abs(sum(item["target_weight"] for item in body["items"]) - 1) < 0.01
 
 
 @pytest.mark.asyncio

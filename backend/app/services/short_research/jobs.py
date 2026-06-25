@@ -147,13 +147,25 @@ async def daily_short_research_advisor_job(
 
 async def daily_etf_signal_validation_job(session: AsyncSession) -> dict[str, Any]:
     run = await run_etf_signal_validation(session)
+    summary = dict(run.summary_json or {})
     return {
         "run_id": run.id,
         "status": run.status,
         "as_of_date": run.as_of_date.isoformat(),
         "rule_version": run.rule_version,
-        "items": len((run.summary_json or {}).get("groups", [])),
+        "items": len(summary.get("groups", [])),
+        "outcome_source": summary.get("outcome_source"),
+        "pending_outcomes": summary.get("pending_count", 0),
+        "excluded_outcomes": summary.get("excluded_count", 0),
     }
+
+
+async def post_close_etf_label_outcome_review_job(session: AsyncSession) -> dict[str, Any]:
+    return await daily_etf_signal_validation_job(session)
+
+
+async def daily_etf_label_outcome_review_job(session: AsyncSession) -> dict[str, Any]:
+    return await daily_etf_signal_validation_job(session)
 
 
 async def daily_etf_observation_portfolio_job(session: AsyncSession) -> dict[str, Any]:
@@ -169,6 +181,8 @@ async def post_close_etf_observation_portfolio_job(session: AsyncSession) -> dic
         "status": snapshot.status,
         "as_of_date": snapshot.as_of_date.isoformat(),
         "cash_weight": summary.get("cash_weight"),
+        "weight_sum": summary.get("weight_sum"),
+        "unavailable_reason": summary.get("unavailable_reason"),
         "primary_count": constraint_summary.get("primary_count", 0),
         "watch_only_count": constraint_summary.get("watch_only_count", 0),
         "excluded_count": constraint_summary.get("excluded_count", 0),

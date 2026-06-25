@@ -56,3 +56,17 @@ class UserApprovalUpdate(BaseModel):
 
 class AdminUserOut(UserOut):
     last_login_at: datetime | None = None
+
+
+class AdminUserSummaryOut(AdminUserOut):
+    detail_url: str
+    notification_configured: bool = False
+    smtp_host: str | None = None
+    smtp_port: int | None = None
+    smtp_username_masked: str | None = None
+    smtp_from: str | None = None
+    tracking_summary: dict[str, int] = Field(default_factory=dict)
+
+
+class AdminUserDetailOut(AdminUserSummaryOut):
+    readonly: bool = True

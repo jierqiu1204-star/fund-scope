@@ -125,7 +125,7 @@ async def _seed_observation_portfolio_signal_run(
                     code=code,
                     name=f"观察组合测试{code}",
                     exchange="SH",
-                    theme_tags_json=item.get("theme_tags", ["观察组合测试"]),
+                    theme_tags_json=item.get("theme_tags", [f"观察组合测试{code}"]),
                     trading_rule_label="证券账户 T+1 ETF",
                     asset_class="sector",
                     is_short_term_eligible=True,
@@ -225,7 +225,7 @@ async def test_short_research_signal_generation_is_deterministic_and_research_on
     assert body["summary"]["research_only"] is True
     assert body["summary"]["experiment"]["portfolio_single_weight_cap"] == 0.3
     assert body["summary"]["label_validation"]["rule_version"] == "label_validation_v1"
-    assert body["summary"]["label_validation"]["groups"]
+    assert body["summary"]["label_validation"]["outcome_source"] == "stored_signal_items"
     assert body["items"]
     assert {item["conclusion"] for item in body["items"]}.issubset(allowed_conclusions())
     assert any(item["code"] == "110020" and item["asset_type"] == "fund" for item in body["items"])
@@ -325,7 +325,7 @@ async def test_etf_signal_validation_run_records_forward_outcomes(client, app) -
             }
         ],
     )
-    await _seed_observation_price_series(app, code="562001", days=90)
+    await _seed_observation_price_series(app, code="562001", days=110, latest_date=date(2026, 7, 5))
 
     response = await client.post("/api/short-research/validation/run")
     assert response.status_code == 200
@@ -336,11 +336,8 @@ async def test_etf_signal_validation_run_records_forward_outcomes(client, app) -
     items = body["items"]
     assert {item["horizon_days"] for item in items} >= {1, 3, 5, 10}
     assert any(item["sample_count"] > 0 and item["median_return"] is not None for item in items)
-    assert any(
-        item["excluded_count"] > 0
-        and (item["metrics"].get("exclusion_reasons") or {}).get("missing_future_price")
-        for item in items
-    )
+    assert body["summary"]["outcome_source"] == "stored_signal_items"
+    assert body["summary"]["evaluated_asset_count"] == 1
 
     latest = await client.get("/api/short-research/validation/latest")
     assert latest.status_code == 200
@@ -461,6 +458,22 @@ async def test_short_research_observation_portfolio_filters_out_high_watch_and_b
                 "entry_timing_reason": "趋势延续，仍可观察。",
             },
             {
+                "code": "560910",
+                "total_score": 93.0,
+                "conclusion": "短线观察",
+                "entry_timing_label": "健康回踩",
+                "entry_timing_reason": "第四只合格 ETF，用于凑满全仓组合。",
+                "theme_tags": ["红利"],
+            },
+            {
+                "code": "560911",
+                "total_score": 92.0,
+                "conclusion": "短线观察",
+                "entry_timing_label": "趋势延续",
+                "entry_timing_reason": "第五只合格 ETF，用于验证权重归一。",
+                "theme_tags": ["消费"],
+            },
+            {
                 "code": "560905",
                 "total_score": 96.0,
                 "conclusion": "短线观察",
@@ -478,18 +491,23 @@ async def test_short_research_observation_portfolio_filters_out_high_watch_and_b
         ],
     )
 
-    response = await client.get("/api/short-research/observation-portfolio?limit=3")
+    response = await client.get("/api/short-research/observation-portfolio?limit=4")
     assert response.status_code == 200
 
     body = response.json()
     assert body["asset_type"] == "etf"
-    assert body["cash_weight"] < 1.0
+    assert body["cash_weight"] == 0.0
+    assert body["weight_sum"] == 1.0
+    assert body["target_invested_weight"] == 1.0
     assert body["single_weight_cap"] == 0.3
-    assert body["total_exposure_cap"] == 0.6
+    assert body["total_exposure_cap"] == 1.0
     assert body["constraint_summary"]["single_weight_cap"] == 0.3
+    assert body["constraint_summary"]["target_invested_weight"] == 1.0
     assert body["methodology"]
-    assert len(body["items"]) == 2
-    assert [item["code"] for item in body["items"]] == ["560904", "560901"]
+    assert len(body["items"]) == 4
+    assert [item["code"] for item in body["items"]] == ["560904", "560901", "560910", "560911"]
+    assert all(item["target_weight"] <= 0.3 for item in body["items"])
+    assert all(item["weight_reason_json"] for item in body["items"])
     assert all(item["code"] not in {"560902", "560903", "560905", "560906"} for item in body["items"])
     assert {item["code"] for item in body["watch_only_items"]} >= {"560902", "560903"}
     assert {item["code"] for item in body["excluded_items"]} >= {"560905", "560906"}
@@ -522,22 +540,40 @@ async def test_short_research_observation_portfolio_persists_snapshot(client, ap
                 "entry_timing_reason": "趋势延续，适合作为观察权重测试。",
                 "theme_tags": ["消费"],
             },
+            {
+                "code": "560923",
+                "total_score": 92.0,
+                "conclusion": "短线观察",
+                "entry_timing_label": "健康回踩",
+                "entry_timing_reason": "健康回踩，第三只权重测试。",
+                "theme_tags": ["医药"],
+            },
+            {
+                "code": "560924",
+                "total_score": 91.0,
+                "conclusion": "短线观察",
+                "entry_timing_label": "趋势延续",
+                "entry_timing_reason": "趋势延续，第四只权重测试。",
+                "theme_tags": ["金融"],
+            },
         ],
     )
 
     async with app.state.db.session() as session:
-        snapshot = await run_etf_observation_portfolio_optimization(session, limit=2)
+        snapshot = await run_etf_observation_portfolio_optimization(session, limit=4)
         snapshot_id = snapshot.id
 
-    response = await client.get("/api/short-research/observation-portfolio?limit=2")
+    response = await client.get("/api/short-research/observation-portfolio?limit=4")
     assert response.status_code == 200
 
     body = response.json()
     assert body["snapshot_id"] == snapshot_id
     assert body["generated_at"] is not None
-    assert len(body["items"]) == 2
+    assert len(body["items"]) == 4
     assert all(item["target_weight"] <= 0.3 for item in body["items"])
-    assert body["constraint_summary"]["total_exposure_cap"] == 0.6
+    assert body["constraint_summary"]["target_invested_weight"] == 1.0
+    assert body["total_exposure_cap"] == 1.0
+    assert body["weight_sum"] == 1.0
 
 
 @pytest.mark.asyncio
@@ -570,18 +606,17 @@ async def test_short_research_observation_portfolio_no_match_returns_full_cash(c
         ],
     )
 
-    response = await client.get("/api/short-research/observation-portfolio?limit=3")
+    response = await client.get("/api/short-research/observation-portfolio?limit=5")
     assert response.status_code == 200
 
     body = response.json()
     assert body["items"] == []
     assert body["watch_only_items"]
     assert body["excluded_items"] == []
-    assert body["cash_weight"] == 1.0
-    assert (
-        body["note"]
-        == "当前没有同时满足短线观察和健康买点的 ETF，强势但高位的只适合继续观察，不给组合权重。"
-    )
+    assert body["cash_weight"] == 0.0
+    assert body["weight_sum"] == 0.0
+    assert body["unavailable_reason"]
+    assert body["note"].startswith("暂不能生成全仓 ETF 观察组合")
 
 
 @pytest.mark.asyncio
@@ -613,13 +648,28 @@ async def test_short_research_observation_portfolio_reduces_theme_and_correlatio
                 "entry_timing_reason": "红利方向趋势延续。",
                 "theme_tags": ["红利"],
             },
+            {
+                "code": "561004",
+                "total_score": 96.0,
+                "conclusion": "短线观察",
+                "entry_timing_label": "健康回踩",
+                "entry_timing_reason": "医药方向健康回踩。",
+                "theme_tags": ["医药"],
+            },
+            {
+                "code": "561005",
+                "total_score": 95.0,
+                "conclusion": "短线观察",
+                "entry_timing_label": "趋势延续",
+                "entry_timing_reason": "消费方向趋势延续。",
+                "theme_tags": ["消费"],
+            },
         ],
     )
     await _seed_observation_price_series(app, code="561001", daily_return=0.002)
     await _seed_observation_price_series(app, code="561002", daily_return=0.002)
-    await _seed_observation_price_series(app, code="561003", daily_return=0.001)
 
-    response = await client.get("/api/short-research/observation-portfolio?limit=3")
+    response = await client.get("/api/short-research/observation-portfolio?limit=5")
     assert response.status_code == 200
 
     body = response.json()
@@ -630,7 +680,8 @@ async def test_short_research_observation_portfolio_reduces_theme_and_correlatio
     assert "561002" in watch_codes
     assert any("相关性" in "；".join(item["risk_reasons"]) for item in body["watch_only_items"])
     assert all(item["target_weight"] <= 0.3 for item in body["items"])
-    assert body["cash_weight"] >= 0.4
+    assert body["weight_sum"] == 1.0
+    assert body["cash_weight"] == 0.0
 
 
 

@@ -180,6 +180,7 @@ class ShortResearchObservationPortfolioItemOut(BaseModel):
     weight_explanation: str | None = None
     exclusion_explanation: str | None = None
     decision_factors: dict[str, Any] = Field(default_factory=dict)
+    weight_reason_json: dict[str, Any] = Field(default_factory=dict)
     metrics: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -190,9 +191,15 @@ class ShortResearchObservationPortfolioOut(BaseModel):
     watch_only_items: list[ShortResearchObservationPortfolioItemOut] = Field(default_factory=list)
     excluded_items: list[ShortResearchObservationPortfolioItemOut] = Field(default_factory=list)
     cash_weight: float
+    target_invested_weight: float = 1.0
+    weight_sum: float = 0.0
     single_weight_cap: float | None = None
     total_exposure_cap: float | None = None
     constraint_summary: dict[str, Any] = Field(default_factory=dict)
+    constraints_used: dict[str, Any] = Field(default_factory=dict)
+    risk_summary: dict[str, Any] = Field(default_factory=dict)
+    data_reliability_summary: dict[str, Any] = Field(default_factory=dict)
+    unavailable_reason: str | None = None
     research_only: bool
     no_trade_instruction: bool
     note: str

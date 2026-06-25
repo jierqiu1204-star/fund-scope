@@ -575,6 +575,37 @@ class EtfSignalValidationItem(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class EtfLabelOutcome(Base):
+    __tablename__ = "etf_label_outcomes"
+    __table_args__ = (
+        UniqueConstraint("signal_item_id", "horizon_days", name="uq_etf_label_outcome_signal_horizon"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    signal_item_id: Mapped[int] = mapped_column(
+        ForeignKey("short_research_signal_items.id", ondelete="CASCADE")
+    )
+    signal_run_id: Mapped[int] = mapped_column(
+        ForeignKey("short_research_signal_runs.id", ondelete="CASCADE")
+    )
+    asset_type: Mapped[str] = mapped_column(String(16), default="etf")
+    asset_code: Mapped[str] = mapped_column(String(32))
+    label: Mapped[str] = mapped_column(String(64))
+    entry_timing_label: Mapped[str] = mapped_column(String(64))
+    rule_version: Mapped[str] = mapped_column(String(64), default="label_validation_v1")
+    signal_date: Mapped[date] = mapped_column(Date)
+    signal_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    horizon_days: Mapped[int] = mapped_column(Integer)
+    forward_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    adverse_drawdown: Mapped[float | None] = mapped_column(Float, nullable=True)
+    favorable_excursion: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending")
+    exclusion_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class EtfObservationPortfolioSnapshot(Base):
     __tablename__ = "etf_observation_portfolio_snapshots"
 

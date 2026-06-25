@@ -629,6 +629,7 @@ export type ShortResearchObservationPortfolioItem = {
   weight_explanation?: string | null;
   exclusion_explanation?: string | null;
   decision_factors?: Record<string, unknown>;
+  weight_reason_json?: Record<string, unknown>;
   metrics?: Record<string, unknown>;
 };
 
@@ -641,9 +642,15 @@ export type ShortResearchObservationPortfolio = {
   watch_only_items: ShortResearchObservationPortfolioItem[];
   excluded_items: ShortResearchObservationPortfolioItem[];
   cash_weight: number;
+  target_invested_weight?: number;
+  weight_sum?: number;
   single_weight_cap: number | null;
   total_exposure_cap: number | null;
   constraint_summary: Record<string, unknown>;
+  constraints_used?: Record<string, unknown>;
+  risk_summary?: Record<string, unknown>;
+  data_reliability_summary?: Record<string, unknown>;
+  unavailable_reason?: string | null;
   research_only: boolean;
   no_trade_instruction: boolean;
   note: string;

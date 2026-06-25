@@ -242,13 +242,13 @@ function validationEvidenceText(asset: ShortResearchAsset | null | undefined) {
 function observationPortfolioText(asset: ShortResearchAsset | null | undefined) {
   const context = asset?.observation_portfolio;
   if (!context || !context.status) {
-    return "观察组合：暂无权重快照";
+    return "全仓 ETF 组合：暂无权重快照";
   }
   if (context.status === "included") {
-    return context.weight_explanation ?? `观察组合：参考权重 ${formatPercent((context.target_weight ?? 0) * 100)}，仅作研究参考`;
+    return context.weight_explanation ?? `全仓 ETF 组合：参考权重 ${formatPercent((context.target_weight ?? 0) * 100)}，仅作研究参考`;
   }
   const reason = context.exclusion_explanation || context.exclusion_reason || context.risk_reasons?.[0] || "未进入主观察组合";
-  return `观察组合：${context.status === "watch_only" ? "只观察不配权" : "未配权"}，${reason}`;
+  return `全仓 ETF 组合：${context.status === "watch_only" ? "只观察不配权" : "未配权"}，${reason}`;
 }
 
 function auditOutcomeLabel(outcome: string) {
@@ -3310,23 +3310,27 @@ function ShortTermClient() {
         <Panel className="rounded-[12px] bg-white/70">
           <details>
             <summary className="cursor-pointer text-lg font-semibold text-ink">
-              ETF 观察组合参考
+              全仓 ETF 观察组合参考
               <span className="ml-3 rounded-full bg-accentSoft/60 px-3 py-1 text-xs text-ink">
-                现金比例 {observationPortfolio.data ? formatPercent(observationPortfolio.data.cash_weight * 100) : "暂无"}
+                权重合计 {observationPortfolio.data ? formatPercent((observationPortfolio.data.weight_sum ?? 0) * 100) : "暂无"}
               </span>
             </summary>
             <p className="mt-2 text-sm leading-6 text-ink/60">
-              主组合只保留短线观察且买点为健康回踩/趋势延续的 ETF；高位或冲高的 ETF 单独放入“强势但别追”。
-              这里是研究观察用权重，不连接证券账户，不自动下单。
+              这里的全仓只指你放进证券账户、准备买 ETF 的这部分资金，不代表你的全部资产。主组合只保留短线观察且买点为健康回踩/趋势延续、数据可靠的 ETF；高位或冲高的 ETF 单独放入观察组。
             </p>
             <p className="mt-3 rounded-[8px] bg-paper px-4 py-3 text-xs leading-5 text-ink/55">
-              {observationPortfolio.data?.methodology ?? "先按买点和风险筛选，再保留现金，不做收益承诺。"}
+              {observationPortfolio.data?.methodology ?? "按买点、风险和数据可靠性筛选，再做分散约束，不做收益承诺。"}
               {observationPortfolio.data
-                ? ` 单只 ETF 上限 ${formatPercent((observationPortfolio.data.single_weight_cap ?? 0) * 100)}，总观察仓位上限 ${formatPercent((observationPortfolio.data.total_exposure_cap ?? 0) * 100)}。`
+                ? ` 单只 ETF 上限 ${formatPercent((observationPortfolio.data.single_weight_cap ?? 0) * 100)}，目标 ETF 资金投入 ${formatPercent((observationPortfolio.data.target_invested_weight ?? 1) * 100)}。`
                 : ""}
             </p>
+            {observationPortfolio.data?.unavailable_reason ? (
+              <p className="mt-4 rounded-[10px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                {observationPortfolio.data.unavailable_reason}
+              </p>
+            ) : null}
             <div className="mt-5 flex items-center justify-between gap-3">
-              <p className="text-sm font-semibold text-ink">主观察组合</p>
+              <p className="text-sm font-semibold text-ink">主组合权重</p>
               <span className="rounded-full bg-ink px-3 py-1 text-xs font-semibold text-white">
                 {observationPortfolio.data?.items.length ?? 0} 只
               </span>
@@ -3352,7 +3356,7 @@ function ShortTermClient() {
             </div>
             {!observationPortfolio.isLoading && !(observationPortfolio.data?.items ?? []).length ? (
               <p className="mt-4 rounded-[10px] bg-paper px-4 py-3 text-sm text-ink/55">
-                暂无可用观察组合。当前高分 ETF 可能偏高位、买点不合适或数据不足，先继续观察，不给组合权重。
+                暂无可用全仓组合。当前高分 ETF 可能偏高位、买点不合适、候选不足 4 只，或数据不足；先继续观察，不给权重。
               </p>
             ) : null}
             {(observationPortfolio.data?.watch_only_items ?? []).length ? (
