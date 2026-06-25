@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.defaults.etfs import DEFAULT_SHORT_ETFS
 from app.models.entities import (
     EtfDataHealth,
+    EtfIntradayQuote,
     EtfMetric,
     EtfPriceHistory,
     EtfThemeExposure,
@@ -565,6 +566,101 @@ async def sync_etf_price_history(
         "failures": failures,
     }
 
+async def sync_etf_price_history_from_intraday_snapshot(
+    session: AsyncSession,
+    *,
+    trade_date: date,
+    codes: list[str] | None = None,
+) -> dict[str, Any]:
+    etfs = await list_short_etfs(session, codes)
+    target_codes = [etf.code for etf in etfs]
+    if not target_codes:
+        return {"etfs": 0, "inserted": 0, "updated": 0, "missing": 0, "quote_rows": 0}
+
+    quote_rows = (
+        await session.scalars(
+            select(EtfIntradayQuote)
+            .where(
+                EtfIntradayQuote.trade_date == trade_date,
+                EtfIntradayQuote.etf_code.in_(target_codes),
+            )
+            .order_by(
+                EtfIntradayQuote.etf_code.asc(),
+                EtfIntradayQuote.quote_time.asc(),
+                EtfIntradayQuote.id.asc(),
+            )
+        )
+    ).all()
+    grouped: dict[str, list[EtfIntradayQuote]] = {}
+    for quote in quote_rows:
+        grouped.setdefault(quote.etf_code, []).append(quote)
+
+    inserted = 0
+    updated = 0
+    missing = 0
+    changed_codes: list[str] = []
+    for code in target_codes:
+        quotes = grouped.get(code)
+        if not quotes:
+            missing += 1
+            continue
+
+        first_quote = quotes[0]
+        last_quote = quotes[-1]
+        latest_price = float(last_quote.latest_price)
+        pct_change = last_quote.change_percent
+        if pct_change is None:
+            previous = await latest_etf_price(session, code, trade_date - timedelta(days=1))
+            pct_change = latest_price / previous.close * 100 - 100 if previous and previous.close else 0.0
+
+        existing = await session.scalar(
+            select(EtfPriceHistory).where(
+                EtfPriceHistory.etf_code == code,
+                EtfPriceHistory.trade_date == trade_date,
+            )
+        )
+        values = {
+            "open": float(first_quote.latest_price),
+            "high": max(float(quote.latest_price) for quote in quotes),
+            "low": min(float(quote.latest_price) for quote in quotes),
+            "close": latest_price,
+            "volume": float(last_quote.volume or 0.0),
+            "turnover": float(last_quote.turnover or 0.0),
+            "pct_change": float(pct_change),
+        }
+        if existing is None:
+            session.add(EtfPriceHistory(etf_code=code, trade_date=trade_date, **values))
+            inserted += 1
+        else:
+            existing.open = values["open"]
+            existing.high = values["high"]
+            existing.low = values["low"]
+            existing.close = values["close"]
+            existing.volume = values["volume"]
+            existing.turnover = values["turnover"]
+            existing.pct_change = values["pct_change"]
+            updated += 1
+        changed_codes.append(code)
+        await upsert_etf_data_health_success(
+            session,
+            etf_code=code,
+            provider="intraday_snapshot",
+            latest_price_date=trade_date,
+            row_count=len(quotes),
+        )
+
+    await session.commit()
+    for code in changed_codes:
+        await compute_etf_metric(session, code, trade_date)
+
+    return {
+        "etfs": len(target_codes),
+        "inserted": inserted,
+        "updated": updated,
+        "missing": missing,
+        "quote_rows": len(quote_rows),
+        "provider": "intraday_snapshot",
+    }
 
 async def list_etf_data_health(session: AsyncSession) -> list[tuple[TradableEtf, EtfDataHealth | None, bool]]:
     etfs = await list_short_etfs(session)

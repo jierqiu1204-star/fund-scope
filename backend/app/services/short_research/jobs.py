@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings, get_settings
 from app.defaults.short_research import ASSET_TYPE_ETF, ASSET_TYPE_FUND
 from app.services.llm import LLMClient
+from app.services.short_etf.data import sync_etf_price_history_from_intraday_snapshot
 from app.services.short_research.advisor import run_advisor_generation
 from app.services.short_research.service import (
     run_etf_observation_portfolio_optimization,
@@ -62,6 +63,18 @@ async def daily_short_research_data_job(session: AsyncSession) -> dict[str, Any]
 
 async def post_close_etf_data_job(session: AsyncSession) -> dict[str, Any]:
     today = date.today()
+    snapshot_result = await sync_etf_price_history_from_intraday_snapshot(session, trade_date=today)
+    if _count(snapshot_result, "inserted") + _count(snapshot_result, "updated") > 0:
+        return {
+            "from_date": today.isoformat(),
+            "to_date": today.isoformat(),
+            "asset_type": ASSET_TYPE_ETF,
+            "etf": snapshot_result,
+            "asset_count": _count(snapshot_result, "etfs"),
+            "failed": 0,
+            "source": "intraday_snapshot",
+        }
+
     result = await sync_short_research_data(
         session,
         from_date=today - timedelta(days=120),
@@ -76,6 +89,7 @@ async def post_close_etf_data_job(session: AsyncSession) -> dict[str, Any]:
         "etf": result,
         "asset_count": _count(result, "asset_count"),
         "failed": _count(result, "failed"),
+        "source": "history_provider",
     }
 
 
