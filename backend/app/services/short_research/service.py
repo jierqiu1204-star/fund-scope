@@ -1835,6 +1835,7 @@ async def sync_short_research_data(
     to_date: date,
     asset_type: str | None = None,
     codes: list[str] | None = None,
+    sync_all_etfs: bool = False,
 ) -> dict[str, Any]:
     await ensure_short_research_universe(session)
     fund_codes = [
@@ -1856,7 +1857,7 @@ async def sync_short_research_data(
         "batches": 0,
         "batches_total": 0,
         "batch_size": _etf_sync_batch_size(),
-        "max_batches": None if codes else _etf_sync_max_batches(),
+        "max_batches": None if sync_all_etfs or codes else _etf_sync_max_batches(),
         "total_candidates": len(etf_codes),
         "processed": 0,
         "skipped": 0,
@@ -1865,7 +1866,7 @@ async def sync_short_research_data(
         fund_result = await sync_fund_nav_history(session, from_date, to_date, fund_codes)
     if etf_codes:
         all_batches = _chunks(etf_codes, _etf_sync_batch_size())
-        max_batches = len(all_batches) if codes else _etf_sync_max_batches()
+        max_batches = len(all_batches) if sync_all_etfs or codes else _etf_sync_max_batches()
         batches = all_batches[:max_batches]
         for batch in batches:
             batch_result = await sync_etf_price_history(session, from_date, to_date, batch)

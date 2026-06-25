@@ -67,6 +67,7 @@ async def post_close_etf_data_job(session: AsyncSession) -> dict[str, Any]:
         from_date=today - timedelta(days=120),
         to_date=today,
         asset_type=ASSET_TYPE_ETF,
+        sync_all_etfs=True,
     )
     return {
         "from_date": (today - timedelta(days=120)).isoformat(),

@@ -115,6 +115,7 @@ async def test_post_close_etf_data_job_syncs_only_etfs(monkeypatch) -> None:
     async def fake_sync_short_research_data(_session: object, **kwargs: Any) -> dict[str, Any]:
         asset_type = kwargs["asset_type"]
         calls.append(asset_type)
+        assert kwargs["sync_all_etfs"] is True
         return {"asset_count": 4, "failed": 1, "asset_type": asset_type}
 
     monkeypatch.setattr(jobs_module, "sync_short_research_data", fake_sync_short_research_data)
