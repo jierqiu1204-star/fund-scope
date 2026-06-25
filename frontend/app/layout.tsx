@@ -11,62 +11,73 @@ export const metadata: Metadata = {
   description: "个人基金和 ETF 短线研究工具"
 };
 
-const navItems = [
-  { href: "/short-term", label: "短线研究" },
+const primaryNavItems = [
+  { href: "/short-term", label: "短线研究", primary: true },
+  { href: "/short-term?section=tracking", label: "我的持仓" },
+  { href: "/admin/jobs", label: "数据任务" },
+  { href: "/settings/notifications", label: "设置" }
+];
+
+const advancedNavItems = [
   { href: "/portfolio", label: "资产" },
   { href: "/transactions", label: "交易" },
   { href: "/valuation", label: "估值" },
   { href: "/strategy-lab", label: "高级策略" },
-  { href: "/news", label: "新闻" },
-  { href: "/settings/notifications", label: "设置" },
-  { href: "/admin/jobs", label: "任务" }
+  { href: "/news", label: "新闻" }
 ];
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="zh-CN">
-      <body className="min-h-screen bg-paper font-body text-ink">
+      <body className="min-h-screen bg-paper font-body text-ink antialiased">
         <Providers>
-          <div className="mx-auto flex min-h-screen max-w-7xl flex-col px-6 pb-12 pt-8">
-            <header className="mb-10 overflow-hidden rounded-[28px] border border-ink/10 bg-white/70 shadow-card backdrop-blur">
-              <div className="grid gap-8 border-b border-ink/10 bg-[radial-gradient(circle_at_top_left,_rgba(181,83,45,0.12),_transparent_35%),linear-gradient(135deg,_rgba(255,255,255,0.95),_rgba(247,243,233,0.88))] p-6 md:grid-cols-[1.4fr_0.8fr]">
-                <div>
-                  <p className="text-sm uppercase tracking-[0.3em] text-accent">FundScope</p>
-                  <h1 className="mt-3 font-display text-4xl font-semibold md:text-5xl">
-                    基金和 ETF 的短线研究台
-                  </h1>
-                  <p className="mt-4 max-w-2xl text-sm leading-7 text-ink/70">
-                    把公开净值、ETF 日线、近期涨跌、回撤、波动和投资方向放到一个页面里。
-                    系统只做研究和模拟，不连接支付宝账户，也不会自动下单。
-                  </p>
-                </div>
-                <div className="rounded-[28px] border border-ink/10 bg-ink px-6 py-5 text-white">
-                  <p className="text-xs uppercase tracking-[0.35em] text-white/60">使用原则</p>
-                  <p className="mt-4 font-display text-3xl leading-tight">
-                    先看数据，再看风险。标签只代表观察优先级，不代表未来收益。
-                  </p>
-                  <Link
-                    className="mt-6 inline-flex rounded-full bg-white px-5 py-3 text-sm font-semibold text-ink transition hover:bg-accentSoft"
-                    href="/short-term"
-                  >
-                    进入短线研究
-                  </Link>
+          <div className="mx-auto flex min-h-screen max-w-[1440px] flex-col px-4 py-4 sm:px-6 lg:px-8">
+            <header className="sticky top-0 z-40 mb-6 rounded-[12px] border border-border bg-white/95 shadow-card backdrop-blur">
+              <div className="flex flex-col gap-3 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+                <Link href="/short-term" className="min-w-0">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-accent">FundScope</p>
+                  <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                    <h1 className="text-xl font-semibold leading-7 tracking-[-0.02em] text-ink">短线研究工作台</h1>
+                    <p className="text-sm text-ink/55">ETF / 基金短线排序、持仓追踪与邮件提醒</p>
+                  </div>
+                </Link>
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+                  <nav className="flex flex-wrap gap-1.5">
+                    {primaryNavItems.map((item) => (
+                      <Link
+                        key={item.href}
+                        href={item.href}
+                        className={`rounded-[6px] border px-3 py-2 text-sm font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
+                          item.primary
+                            ? "border-ink bg-ink text-white hover:bg-ink/90"
+                            : "border-border bg-white text-ink/75 hover:border-ink/30 hover:text-ink"
+                        }`}
+                      >
+                        {item.label}
+                      </Link>
+                    ))}
+                    <details className="group relative">
+                      <summary className="cursor-pointer list-none rounded-[6px] border border-border bg-white px-3 py-2 text-sm font-medium text-ink/75 transition hover:border-ink/30 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent [&::-webkit-details-marker]:hidden">
+                        高级功能
+                      </summary>
+                      <div className="mt-2 flex flex-wrap gap-1.5 rounded-[8px] border border-border bg-white p-2 shadow-card lg:absolute lg:right-0 lg:z-50 lg:w-48">
+                        {advancedNavItems.map((item) => (
+                          <Link
+                            key={item.href}
+                            href={item.href}
+                            className="rounded-[6px] px-3 py-2 text-sm font-medium text-ink/70 transition hover:bg-paper hover:text-ink"
+                          >
+                            {item.label}
+                          </Link>
+                        ))}
+                      </div>
+                    </details>
+                  </nav>
+                  <div className="lg:ml-2">
+                    <AuthStatus />
+                  </div>
                 </div>
               </div>
-              <nav className="flex flex-wrap gap-3 p-4">
-                {navItems.map((item) => (
-                  <Link
-                    key={item.href}
-                    href={item.href}
-                    className="rounded-full border border-ink/10 bg-white px-4 py-2 text-sm transition hover:border-accent hover:text-accent"
-                  >
-                    {item.label}
-                  </Link>
-                ))}
-                <div className="ml-auto">
-                  <AuthStatus />
-                </div>
-              </nav>
             </header>
             <main className="flex-1">{children}</main>
           </div>

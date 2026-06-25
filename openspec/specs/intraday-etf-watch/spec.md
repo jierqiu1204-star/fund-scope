@@ -142,3 +142,103 @@ The system SHALL allow profitable tracked ETFs to send soft take-profit-watch em
 #### Scenario: Fallback price remains web-only during intraday watch
 - **WHEN** a tracked ETF only has daily close, stale quote, or provider fallback price during intraday monitoring
 - **THEN** the system displays the estimated value as limited data and MUST NOT send a `止盈观察提醒` email
+
+### Requirement: Intraday Ranking Splits Base Score And Live Adjustment
+The system SHALL expose daily base score, intraday adjustment score, live total score, score source, and readable contribution reasons for ETF live ranking.
+
+#### Scenario: Fresh intraday quote exists
+- **WHEN** an ETF has a fresh eligible intraday quote during market hours
+- **THEN** the API returns score_source=intraday, daily base score, intraday adjustment score, live total score, quote time, and contribution reasons
+
+#### Scenario: Market is closed or quote is stale
+- **WHEN** the market is closed or the ETF quote is stale, estimated, or missing quote time
+- **THEN** the API returns score_source=daily or unavailable and MUST NOT present the score as real-time
+
+### Requirement: Intraday Watchlist Includes Top Signals And Observed Assets
+The system SHALL watch ETF candidates from the latest top ranked daily signals, short-watch labels, high-watch labels, and active tracked positions.
+
+#### Scenario: Watchlist is built from multiple sources
+- **WHEN** a successful ETF signal run exists
+- **THEN** the intraday watchlist includes top 20 ranked ETFs, ETFs labeled 短线观察, ETFs labeled 高位观察, and active tracked ETFs, with source tags for each item
+
+#### Scenario: Watchlist source is visible
+- **WHEN** the UI renders live ranking cards
+- **THEN** it shows whether the ETF is watched because of top ranking, short-watch label, high-watch label, or user tracking
+
+### Requirement: Intraday Timing Labels Are Data-Gated
+The system SHALL calculate intraday timing labels only from fresh verified or alternate-provider intraday quotes.
+
+#### Scenario: Timing label uses fresh quote
+- **WHEN** fresh intraday quote data is available
+- **THEN** the system may return timing labels such as 健康回踩, 趋势延续, 冲高别追, or 跌破等待 with contribution reasons
+
+#### Scenario: Timing label cannot use fallback data
+- **WHEN** only daily close, stale quote, missing quote time, or estimated price is available
+- **THEN** the system returns 数据不足 or daily timing reference and MUST NOT use it for intraday email decisions
+
+### Requirement: Intraday Watch Reads Only Latest Quote Per ETF
+The system SHALL retrieve the latest intraday quote for each watched ETF in SQL without loading all historical intraday quote rows into application memory.
+
+#### Scenario: Live ranking fetches latest quotes
+- **WHEN** the live ETF ranking is built for a watchlist of ETF codes
+- **THEN** the backend returns at most one latest quote row per ETF code from the database query
+
+#### Scenario: Query remains efficient as quote history grows
+- **WHEN** `etf_intraday_quotes` contains many days of minute-level rows
+- **THEN** the latest quote query uses indexed per-code lookup and does not perform a full table scan plus application-side de-duplication
+
+### Requirement: Intraday Quote Retention Is Bounded
+The system SHALL keep raw intraday ETF quote details for the latest 60 trading days and remove older raw intraday rows through a scheduled or manually runnable cleanup job.
+
+#### Scenario: Cleanup removes old raw intraday rows
+- **WHEN** the cleanup job runs after the market day
+- **THEN** rows older than the 60-trading-day cutoff are deleted from `etf_intraday_quotes`
+
+#### Scenario: Cleanup does not remove decision history
+- **WHEN** raw intraday rows are deleted
+- **THEN** daily ETF price history, signal cache, alert records, and persisted holding high-water state remain available
+
+### Requirement: Intraday Daily Summary Is Preserved
+The system SHALL preserve daily intraday summaries for ETF analysis before or while raw intraday rows are removed.
+
+#### Scenario: Daily summary records key intraday facts
+- **WHEN** intraday quotes exist for an ETF trading day
+- **THEN** the system stores or updates one daily summary containing last price, high, low, turnover, quote count, and data source
+
+#### Scenario: Historical analysis can use summaries
+- **WHEN** raw minute-level quotes are beyond the retention window
+- **THEN** the system can still display daily intraday summary information without using stale raw rows for live decisions
+
+### Requirement: Intraday watch scope audit
+The intraday ETF watch job SHALL expose why each watched ETF is included in the watch scope.
+
+#### Scenario: Watchlist source returned
+- **WHEN** the intraday watch job completes
+- **THEN** the result includes sources such as top20 signal, short/high observation label, and tracked position for each watched ETF
+
+### Requirement: Intraday quote freshness audit
+The intraday ETF watch job SHALL expose whether quotes are fresh enough for decisions.
+
+#### Scenario: Fresh quote eligible
+- **WHEN** a watched ETF has a fresh intraday quote
+- **THEN** the job marks it decision-eligible for intraday alert evaluation
+
+#### Scenario: Stale quote blocked
+- **WHEN** a watched ETF has stale or missing quote time
+- **THEN** the job marks it display-only or unavailable and does not use it for email decisions
+
+### Requirement: Intraday watch uses validation and portfolio scope without weakening reliability gates
+The intraday ETF watch SHALL prioritize watched ETFs from tracked holdings, top validated candidates, short/high observation labels, and optimized observation portfolio candidates, while preserving market session and data reliability gates.
+
+#### Scenario: Trading session is open
+- **WHEN** the market is open and fresh quotes are available
+- **THEN** the intraday watch updates eligible ETFs and records live score changes
+
+#### Scenario: Validation data is unavailable
+- **WHEN** validation data is missing or insufficient
+- **THEN** the intraday watch may still monitor configured scope but must mark validation confidence as unavailable
+
+#### Scenario: Quote is stale
+- **WHEN** an ETF quote is stale or missing quote time
+- **THEN** the intraday watch does not use it for live decision-eligible alerts
+

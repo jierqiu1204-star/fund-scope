@@ -23,6 +23,14 @@ class EtfIntradayQuoteOut(BaseModel):
     freshness_status: str
     is_stale: bool = False
     quote_time_is_fallback: bool = False
+    consensus_status: str = "single_provider"
+    quote_reliability: str = "single_fresh"
+    decision_eligible: bool = True
+    provider_count: int = 1
+    fresh_provider_count: int = 1
+    price_diff_abs: float | None = None
+    price_diff_pct: float | None = None
+    limitation_reason: str | None = None
 
 
 class IntradayEtfWatchRunOut(BaseModel):
@@ -117,6 +125,14 @@ class TrackedEtfIntradaySnapshotOut(BaseModel):
     turnover: float | None = None
     source: str | None = None
     message: str | None = None
+    consensus_status: str | None = None
+    quote_reliability: str | None = None
+    decision_eligible: bool = False
+    provider_count: int = 0
+    fresh_provider_count: int = 0
+    price_diff_abs: float | None = None
+    price_diff_pct: float | None = None
+    limitation_reason: str | None = None
 
 
 class DynamicExitThresholdsOut(BaseModel):

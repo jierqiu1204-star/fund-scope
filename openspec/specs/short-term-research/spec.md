@@ -252,3 +252,107 @@ The system SHALL explain on `/short-term` that AI reports are model-assisted exp
 #### Scenario: Take-profit watch is displayed
 - **WHEN** a tracked holding has `take_profit_watch`
 - **THEN** the UI labels it as `止盈观察提醒`, explains why it triggered, and avoids wording that implies automatic or guaranteed selling
+
+### Requirement: Short-Term Label Outcomes Are Backtested
+The system SHALL calculate historical outcome statistics for each observation label + entry timing label combination using public ETF or fund price history.
+
+#### Scenario: Label outcome statistics are generated
+- **WHEN** a short-term signal run is completed and enough future price data exists
+- **THEN** the system records sample count, 1/3/5/10 trading-day return, maximum drawdown, win rate, and data coverage for each label combination
+
+#### Scenario: Label outcome lacks enough samples
+- **WHEN** a label combination has insufficient completed future windows
+- **THEN** the UI marks the validation result as 样本不足 and MUST NOT present the label as historically reliable
+
+### Requirement: Short-Term Research Runs Are Auditable Experiments
+The system SHALL persist research experiment metadata for signal generation, label validation, and observation portfolio generation.
+
+#### Scenario: Signal experiment is recorded
+- **WHEN** short-term ranking is generated
+- **THEN** the system records run id, asset type, universe, data date, parameter version, rule version, item count, and data reliability summary
+
+#### Scenario: User views experiment context
+- **WHEN** the user opens /short-term
+- **THEN** the UI shows the latest experiment timestamp, data date, and whether label validation is available
+
+### Requirement: ETF Observation Portfolio Uses Risk-Constrained Weights
+The system SHALL generate ETF observation portfolio weights using deterministic risk constraints rather than naive equal weights.
+
+#### Scenario: Single ETF weight is capped
+- **WHEN** the observation portfolio allocates weight to an ETF
+- **THEN** no single ETF target weight exceeds 30%
+
+#### Scenario: Data-ineligible ETF receives no weight
+- **WHEN** an ETF has stale, estimated, unavailable, or insufficient data for portfolio construction
+- **THEN** it may appear as watch-only but MUST NOT receive target weight
+
+#### Scenario: Similar ETFs are de-duplicated
+- **WHEN** two candidate ETFs have high recent return correlation or overlapping theme exposure
+- **THEN** the system reduces or excludes one from target weights and explains the concentration reason
+
+#### Scenario: Portfolio remains research-only
+- **WHEN** portfolio weights are displayed
+- **THEN** the UI labels them as 观察组合参考 and states that they are not automatic buy instructions
+
+### Requirement: Short-Term Research Reads Cached Results Efficiently
+The system SHALL serve `/short-term` ranking data from the latest completed signal cache without recomputing all assets during page load.
+
+#### Scenario: First page ranking uses cached signal items
+- **WHEN** the frontend requests the first page of short-term ETF rankings
+- **THEN** the backend returns paginated cached signal items and does not scan all ETF price history to recompute every asset
+
+#### Scenario: Observation portfolio avoids unnecessary full recomputation
+- **WHEN** the frontend requests the ETF observation portfolio
+- **THEN** the backend uses the latest cached ETF ranking and only loads additional history for shortlisted portfolio candidates
+
+### Requirement: Short-Term Workbench Avoids Redundant Initial Queries
+The system SHALL avoid duplicate expensive reads when loading the `/short-term` workbench.
+
+#### Scenario: Workbench loads the same context once
+- **WHEN** the workbench needs status, ranking, selected detail, observation portfolio, and tracked holdings
+- **THEN** shared context such as the latest signal run and advisor reports is read once per request path or through a lightweight bootstrap endpoint
+
+#### Scenario: Legacy endpoints remain compatible
+- **WHEN** existing frontend code calls the current short-term endpoints
+- **THEN** the endpoints continue to return compatible response shapes while using optimized internal queries
+
+### Requirement: ETF label evidence display
+The short-term research page SHALL display evidence quality for ETF buy-observation labels and entry timing labels.
+
+#### Scenario: Sufficient evidence shown
+- **WHEN** an ETF label has enough valid historical samples
+- **THEN** the page shows sample count, forward performance summary, and confidence wording
+
+#### Scenario: Insufficient evidence shown
+- **WHEN** an ETF label has too few valid samples or stale evidence
+- **THEN** the page labels it as sample-insufficient and does not present it as reliable
+
+### Requirement: Label degradation warning
+The short-term research page SHALL show when recent label outcomes have degraded versus historical averages.
+
+#### Scenario: Recent degradation
+- **WHEN** recent forward outcomes are materially worse than the long-run label summary
+- **THEN** the page shows a warning that the label is weakening and needs observation
+
+### Requirement: Short-term ETF cards expose validation evidence
+The short-term research UI SHALL show whether each ETF label has sufficient validation evidence when validation data is available.
+
+#### Scenario: Validated label is displayed
+- **WHEN** a user views an ETF with validation evidence
+- **THEN** the card or detail panel shows sample count, horizon summary, and confidence state
+
+#### Scenario: Validation is insufficient
+- **WHEN** validation evidence is insufficient for the ETF's label combination
+- **THEN** the UI shows `样本不足` and does not present the label as historically reliable
+
+### Requirement: Short-term ETF detail explains optimized observation weight
+The short-term ETF detail panel SHALL explain an ETF's optimized observation weight when it is included in the observation portfolio.
+
+#### Scenario: ETF has optimized weight
+- **WHEN** an ETF is part of the latest optimized observation portfolio
+- **THEN** the detail panel shows weight, cap constraints, risk factors, and reason
+
+#### Scenario: ETF is excluded from optimized portfolio
+- **WHEN** an ETF is not assigned weight because of data, liquidity, correlation, or theme constraints
+- **THEN** the detail panel shows the exclusion reason
+

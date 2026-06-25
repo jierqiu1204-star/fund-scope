@@ -5,19 +5,25 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        ink: "#112031",
-        paper: "#f7f3e9",
-        accent: "#b5532d",
-        accentSoft: "#e1b477",
-        pine: "#1f5c4b",
-        blush: "#f1d7c9"
+        ink: "#171717",
+        paper: "#fafafa",
+        accent: "#006bff",
+        accentSoft: "#e9f4ff",
+        pine: "#107d32",
+        blush: "#f2f2f2",
+        muted: "#4d4d4d",
+        border: "#0000001a",
+        danger: "#ea001d",
+        warning: "#ffae00",
+        success: "#28a948"
       },
       fontFamily: {
-        display: ["'Fraunces'", "serif"],
-        body: ["'IBM Plex Sans'", "sans-serif"]
+        display: ["'Geist'", "'Geist Sans'", "Arial", "sans-serif"],
+        body: ["'Geist'", "'Geist Sans'", "Arial", "sans-serif"],
+        mono: ["'Geist Mono'", "'SFMono-Regular'", "Consolas", "monospace"]
       },
       boxShadow: {
-        card: "0 24px 60px rgba(17, 32, 49, 0.12)"
+        card: "0 2px 2px rgba(0, 0, 0, 0.04)"
       }
     }
   },

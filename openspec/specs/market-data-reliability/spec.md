@@ -52,3 +52,87 @@ The system SHALL label AI-generated, partially rule-completed, and fully rule-ba
 - **WHEN** the model is disabled, fails, times out, or fails validation
 - **THEN** the UI labels the report as rule fallback and states that deterministic rules are being used
 
+### Requirement: Research Calculations Use Decision-Eligible Data Only
+The system SHALL use only verified or alternate-provider real market data for label validation, portfolio weights, intraday score adjustments, and email-triggering holding signals.
+
+#### Scenario: Estimated data exists
+- **WHEN** a value is estimated, stale, unavailable, or generated from AI/rule fallback text
+- **THEN** it may be displayed with a limitation note but MUST NOT contribute to scores, label validation, portfolio target weight, or email-triggering logic
+
+#### Scenario: Alternate provider real data exists
+- **WHEN** a backup provider supplies real market data with valid date, source, and freshness metadata
+- **THEN** the system may use it for calculations while recording provider source and reliability level
+
+### Requirement: Data Reliability Is Auditable In Research Outputs
+The system SHALL expose data reliability summaries for ranking, label validation, portfolio weights, and tracked-position alerts.
+
+#### Scenario: User views ranking or portfolio
+- **WHEN** the UI displays a score, validation result, or portfolio weight
+- **THEN** it shows the relevant data date, source, reliability status, and whether missing data limited the calculation
+
+#### Scenario: Email alert is evaluated
+- **WHEN** the system evaluates a tracked-position email alert
+- **THEN** the alert record includes price source, quote time or NAV date, reliability level, and email eligibility reason
+
+### Requirement: Missing Data Prefers Waiting Over Fake Numbers
+The system SHALL prefer waiting states over numeric placeholders when financial data is missing.
+
+#### Scenario: Missing current value
+- **WHEN** holdings, tracked positions, or research metrics lack usable price or NAV data
+- **THEN** the API returns unavailable or null values with a readable status instead of returning zero, negative 100 percent, or fake fallback values
+
+### Requirement: Performance Optimizations Preserve Data Reliability Boundaries
+The system SHALL distinguish hot raw data, long-term verified data, and display-only derived summaries when optimizing storage and queries.
+
+#### Scenario: Raw intraday data is retained only as hot data
+- **WHEN** raw ETF intraday rows exceed the retention window
+- **THEN** they are removed only after verified daily data, summaries, signal caches, or holding state needed for research have been preserved
+
+#### Scenario: Old or summarized data cannot trigger live emails
+- **WHEN** only daily close data or intraday daily summary data is available
+- **THEN** the system does not treat it as fresh intraday data for live email reminders
+
+### Requirement: Query Optimizations Do Not Introduce Misleading Fallbacks
+The system SHALL prefer no value or display-only labels over estimated fallback values in optimized query paths.
+
+#### Scenario: Latest fresh quote is unavailable
+- **WHEN** optimized live ranking or tracked position queries cannot find a fresh intraday quote
+- **THEN** the response marks the data as daily, stale, or unavailable and does not expose it as a live decision-eligible quote
+
+#### Scenario: Summary data is used for display
+- **WHEN** daily intraday summary data is shown after raw quote cleanup
+- **THEN** the UI or API marks it as summary/display data rather than current live quote data
+
+### Requirement: Evidence data reliability labels
+ETF label evidence, portfolio weights, and alert audits SHALL label data reliability consistently.
+
+#### Scenario: Decision-eligible evidence
+- **WHEN** evidence or portfolio calculations use verified or alternate-provider data
+- **THEN** the result marks the data as decision-eligible and records its source
+
+#### Scenario: Display-only evidence
+- **WHEN** evidence or portfolio calculations encounter stale, estimated, or unavailable data
+- **THEN** the result excludes it from decision calculations or marks it display-only with a reason
+
+### Requirement: No fallback in financial decisions
+The system SHALL NOT use fallback explanations, zero placeholders, stale quotes, or estimated prices to produce financial decision emails or observation weights.
+
+#### Scenario: Fallback blocked
+- **WHEN** only fallback or estimated data is available
+- **THEN** the system shows an unavailable/display-only state instead of generating weights or email reminders
+
+### Requirement: Reliability gates apply to validation and optimization
+Market data reliability SHALL determine whether data may be used for signal validation, observation portfolio optimization, and adaptive exit reminders.
+
+#### Scenario: Data is verified or alternate provider
+- **WHEN** data is marked `verified` or `alternate_provider`
+- **THEN** it may be used for validation, optimization, and reminders if freshness rules are also satisfied
+
+#### Scenario: Data is estimated or stale
+- **WHEN** data is marked `estimated` or `stale`
+- **THEN** it may be displayed for context but MUST NOT be used for validation outcomes, optimized weights, or reminder emails
+
+#### Scenario: Data is unavailable
+- **WHEN** required data is unavailable
+- **THEN** the system returns an explicit unavailable state instead of filling numeric outputs with zero or stale values
+

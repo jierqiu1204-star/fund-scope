@@ -13,10 +13,16 @@ from app.services.intraday_etf.service import (
     ASIA_SHANGHAI,
     build_watchlist,
     current_market_state,
-    fetch_spot_quotes,
+    fetch_spot_quotes_with_metadata,
     is_fresh_decision_quote,
     latest_quotes_by_code,
     persist_quotes,
+    quote_consensus_status,
+    quote_decision_limitation_reason,
+    quote_fresh_provider_count,
+    quote_price_diff_abs,
+    quote_price_diff_pct,
+    quote_provider_count,
     summarize_and_cleanup_intraday_quotes,
 )
 from app.services.tracked_positions.service import (
@@ -69,14 +75,21 @@ async def intraday_etf_watch_job(
             return _result(run)
 
         watch_codes = {item.etf_code for item in watchlist.items}
-        provider_error = None
-        try:
-            quotes = await fetch_spot_quotes(fetcher)
-            updated = await persist_quotes(session, watchlist, quotes)
-        except Exception as exc:  # noqa: BLE001
-            provider_error = str(exc)
-            quotes = {}
-            updated = 0
+        fetch_result = await fetch_spot_quotes_with_metadata(fetcher)
+        quotes = fetch_result.quotes
+        provider_health = [
+            {
+                "provider": result.provider,
+                "quote_count": len(result.quotes),
+                "status": "failed" if result.error else "success",
+                "error": result.error,
+                "elapsed_ms": result.elapsed_ms,
+            }
+            for result in fetch_result.provider_results
+        ]
+        provider_errors = [str(item["error"]) for item in provider_health if item.get("error")]
+        provider_error = "; ".join(provider_errors) if provider_errors and not quotes else None
+        updated = await persist_quotes(session, watchlist, quotes)
         updated_codes = sorted(set(quotes).intersection(watch_codes))
         missing_watch_codes = sorted(watch_codes - set(quotes))
         latest_quotes = await latest_quotes_by_code(session, [item.etf_code for item in watchlist.items])
@@ -95,6 +108,9 @@ async def intraday_etf_watch_job(
         run.details_json = {
             **dict(run.details_json or {}),
             "provider_returned": len(quotes),
+            "provider_health": provider_health,
+            "provider_errors": provider_errors,
+            "consensus_counts": fetch_result.consensus_counts,
             "updated_code_count": len(updated_codes),
             "updated_codes": _sample_codes(updated_codes),
             "missing_watch_count": len(missing_watch_codes),
@@ -124,6 +140,12 @@ def _quote_audit_for_watchlist(watch_codes: set[str], latest_quotes: dict[str, A
                 "quote_freshness": "unavailable",
                 "source": None,
                 "quote_time": None,
+                "consensus_status": "unavailable",
+                "provider_count": 0,
+                "fresh_provider_count": 0,
+                "price_diff_abs": None,
+                "price_diff_pct": None,
+                "limitation_reason": "暂无盘中行情。",
             }
             continue
         decision_eligible = is_fresh_decision_quote(quote, local_now)
@@ -138,6 +160,12 @@ def _quote_audit_for_watchlist(watch_codes: set[str], latest_quotes: dict[str, A
             "quote_freshness": freshness,
             "source": quote.source,
             "quote_time": quote.quote_time.isoformat() if quote.quote_time else None,
+            "consensus_status": quote_consensus_status(quote),
+            "provider_count": quote_provider_count(quote),
+            "fresh_provider_count": quote_fresh_provider_count(quote),
+            "price_diff_abs": quote_price_diff_abs(quote),
+            "price_diff_pct": quote_price_diff_pct(quote),
+            "limitation_reason": None if decision_eligible else quote_decision_limitation_reason(quote, local_now),
         }
     return audit
 
@@ -235,3 +263,4 @@ def _result(run: IntradayEtfWatchRun) -> dict[str, Any]:
         "error_message": run.error_message,
         "details": dict(run.details_json or {}),
     }
+

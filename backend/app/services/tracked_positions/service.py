@@ -9,6 +9,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
+from app.core.market_data import (
+    DECISION_ELIGIBLE_RELIABILITIES,
+    RELIABILITY_STALE,
+    RELIABILITY_UNAVAILABLE,
+)
 from app.defaults.short_research import (
     ASSET_TYPE_ETF,
     ASSET_TYPE_FUND,
@@ -39,7 +44,16 @@ from app.schemas.tracked_positions import (
 from app.services.intraday_etf.service import (
     ASIA_SHANGHAI,
     is_fresh_decision_quote,
+    is_quote_stale,
+    is_quote_time_fallback,
     latest_intraday_quote,
+    quote_consensus_status,
+    quote_decision_limitation_reason,
+    quote_fresh_provider_count,
+    quote_price_diff_abs,
+    quote_price_diff_pct,
+    quote_provider_count,
+    quote_reliability,
 )
 from app.services.notifier import Notifier
 from app.services.short_research.advisor import (
@@ -87,10 +101,10 @@ TAKE_PROFIT_WATCH_COOLDOWN_DAYS = 3
 
 TAKE_PROFIT_RISKS = {"追高风险", "连续大涨"}
 
-RELIABILITY_FRESH_INTRADAY = "fresh_intraday"
-RELIABILITY_DAILY_CLOSE = "daily_close"
-RELIABILITY_STALE_QUOTE = "stale_quote"
-RELIABILITY_MISSING = "missing"
+RELIABILITY_FRESH_INTRADAY = "single_fresh"
+RELIABILITY_DAILY_CLOSE = RELIABILITY_STALE
+RELIABILITY_STALE_QUOTE = RELIABILITY_STALE
+RELIABILITY_MISSING = RELIABILITY_UNAVAILABLE
 
 
 @dataclass(frozen=True)
@@ -210,37 +224,25 @@ async def latest_tracking_price(
         if quote.bid_price and quote.ask_price and quote.bid_price > 0:
             midpoint = (quote.bid_price + quote.ask_price) / 2
             spread_pct = (quote.ask_price - quote.bid_price) / midpoint * 100 if midpoint else None
-        if is_fresh_decision_quote(quote):
-            intraday = TrackedEtfIntradaySnapshotOut(
-                current_price=round(quote.latest_price, 6),
-                quote_time=quote.quote_time,
-                trade_date=quote.trade_date,
-                price_source="intraday_quote",
-                reliability_level=RELIABILITY_FRESH_INTRADAY,
-                email_eligible=True,
-                email_eligibility_reason="新鲜盘中公开行情，可用于盘中提醒判断。",
-                is_stale=False,
-                freshness_status=quote.freshness_status,
-                bid_price=quote.bid_price,
-                ask_price=quote.ask_price,
-                spread_pct=_round_or_none(spread_pct, 4),
-                iopv=quote.iopv,
-                premium_discount_pct=quote.premium_discount_pct,
-                turnover=quote.turnover,
-                source=quote.source,
-                message="使用公开 ETF 盘中行情估算，仍可能和券商盘口存在延迟。",
-            )
-            return PriceSnapshot(quote.latest_price, quote.trade_date), intraday
+        decision_eligible = is_fresh_decision_quote(quote)
+        limitation_reason = None if decision_eligible else quote_decision_limitation_reason(quote)
+        reliability_level = quote_reliability(quote)
+        if is_quote_time_fallback(quote) or is_quote_stale(quote.quote_time):
+            reliability_level = RELIABILITY_STALE
         intraday = TrackedEtfIntradaySnapshotOut(
             current_price=round(quote.latest_price, 6),
             quote_time=quote.quote_time,
             trade_date=quote.trade_date,
             price_source="intraday_quote",
-            reliability_level=RELIABILITY_STALE_QUOTE,
-            email_eligible=False,
-            email_eligibility_reason="最近盘中行情已滞后，只能用于网页估算，不能触发盘中邮件。",
-            is_stale=True,
-            freshness_status="stale",
+            reliability_level=reliability_level,
+            email_eligible=decision_eligible,
+            email_eligibility_reason=(
+                "多源校验通过的新鲜盘中公开行情，可用于盘中提醒判断。"
+                if decision_eligible
+                else limitation_reason or "盘中行情不可用于邮件提醒。"
+            ),
+            is_stale=not decision_eligible,
+            freshness_status=quote.freshness_status if decision_eligible else "display_only",
             bid_price=quote.bid_price,
             ask_price=quote.ask_price,
             spread_pct=_round_or_none(spread_pct, 4),
@@ -248,7 +250,19 @@ async def latest_tracking_price(
             premium_discount_pct=quote.premium_discount_pct,
             turnover=quote.turnover,
             source=quote.source,
-            message="显示最近一次公开 ETF 盘中行情；行情已滞后，仅用于网页估算，不触发邮件。",
+            message=(
+                "使用多源校验后的公开 ETF 盘中行情估算，仍可能和券商盘口存在延迟。"
+                if decision_eligible
+                else f"显示最近公开 ETF 盘中行情；{limitation_reason or '仅用于网页估算，不触发邮件。'}"
+            ),
+            consensus_status=quote_consensus_status(quote),
+            quote_reliability=reliability_level,
+            decision_eligible=decision_eligible,
+            provider_count=quote_provider_count(quote),
+            fresh_provider_count=quote_fresh_provider_count(quote),
+            price_diff_abs=quote_price_diff_abs(quote),
+            price_diff_pct=quote_price_diff_pct(quote),
+            limitation_reason=limitation_reason,
         )
         return PriceSnapshot(quote.latest_price, quote.trade_date), intraday
 
@@ -268,6 +282,12 @@ async def latest_tracking_price(
         is_stale=True,
         freshness_status="missing",
         message=message,
+        consensus_status="unavailable",
+        quote_reliability=RELIABILITY_UNAVAILABLE,
+        decision_eligible=False,
+        provider_count=0,
+        fresh_provider_count=0,
+        limitation_reason="暂无盘中行情。",
     )
     return daily, intraday
 
@@ -540,8 +560,10 @@ def _is_fresh_intraday_snapshot(snapshot: TrackedEtfIntradaySnapshotOut | None) 
     return bool(
         snapshot is not None
         and snapshot.price_source == "intraday_quote"
-        and snapshot.reliability_level == RELIABILITY_FRESH_INTRADAY
+        and snapshot.reliability_level in DECISION_ELIGIBLE_RELIABILITIES
         and not snapshot.is_stale
+        and snapshot.email_eligible
+        and snapshot.decision_eligible
         and snapshot.current_price is not None
     )
 
@@ -1425,6 +1447,12 @@ def _audit_decision_context(
         "risk_flags": list(decision.risk_flags),
         "data_reliability": _data_reliability_for_position(position, intraday_snapshot),
         "quote_time": decision.quote_time.isoformat() if decision.quote_time else None,
+        "consensus_status": intraday_snapshot.consensus_status if intraday_snapshot else None,
+        "provider_count": intraday_snapshot.provider_count if intraday_snapshot else 0,
+        "fresh_provider_count": intraday_snapshot.fresh_provider_count if intraday_snapshot else 0,
+        "price_diff_abs": intraday_snapshot.price_diff_abs if intraday_snapshot else None,
+        "price_diff_pct": intraday_snapshot.price_diff_pct if intraday_snapshot else None,
+        "limitation_reason": intraday_snapshot.limitation_reason if intraday_snapshot else None,
     }
 
 
@@ -1478,7 +1506,7 @@ def legacy_alert_audit_out(row: TrackedPositionAlert) -> TrackedPositionAlertAud
         alert_type=row.alert_type,
         trigger_label=row.trigger_label,
         data_source=row.alert_source or "unknown",
-        quote_freshness="fresh_intraday" if row.alert_source == "intraday_quote" and row.quote_time else str(threshold_context.get("data_reliability") or "unknown"),
+        quote_freshness=str(threshold_context.get("data_reliability") or "unknown"),
         threshold_context=threshold_context,
         decision_context={
             "legacy_alert_row": True,
@@ -1980,3 +2008,6 @@ def _email_payload(
         ),
         "threshold_context": _alert_threshold_context(position, alert, decision),
     }
+
+
+

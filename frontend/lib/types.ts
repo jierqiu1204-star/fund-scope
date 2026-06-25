@@ -808,6 +808,14 @@ export type EtfIntradayQuote = {
   freshness_status: string;
   is_stale: boolean;
   quote_time_is_fallback: boolean;
+  consensus_status: string;
+  quote_reliability: string;
+  decision_eligible: boolean;
+  provider_count: number;
+  fresh_provider_count: number;
+  price_diff_abs: number | null;
+  price_diff_pct: number | null;
+  limitation_reason: string | null;
 };
 
 export type IntradayEtfWatchItem = {
@@ -902,6 +910,14 @@ export type TrackedEtfIntradaySnapshot = {
   turnover: number | null;
   source: string | null;
   message: string | null;
+  consensus_status: string | null;
+  quote_reliability: string | null;
+  decision_eligible: boolean;
+  provider_count: number;
+  fresh_provider_count: number;
+  price_diff_abs: number | null;
+  price_diff_pct: number | null;
+  limitation_reason: string | null;
 };
 
 export type DynamicExitThresholds = {

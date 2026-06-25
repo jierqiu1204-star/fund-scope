@@ -406,7 +406,7 @@ async def test_stale_intraday_quote_is_used_for_display_but_not_email_decision(c
     assert item["current_snapshot"]["price_source"] == "intraday_quote"
     assert item["current_snapshot"]["decision_eligible"] is False
     assert item["intraday_snapshot"]["price_source"] == "intraday_quote"
-    assert item["intraday_snapshot"]["reliability_level"] == "stale_quote"
+    assert item["intraday_snapshot"]["reliability_level"] == "stale"
     assert item["intraday_snapshot"]["email_eligible"] is False
 
 
@@ -1004,3 +1004,4 @@ async def test_tracked_position_audit_endpoint_returns_owner_events(client, app)
     assert item["quote_freshness"] == "stale_quote"
     assert item["threshold_context"]["hard_stop_pct"] == -4.5
     assert "不发送" in item["audit_summary"]
+

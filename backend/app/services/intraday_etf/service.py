@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from math import isfinite
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import akshare as ak
+import httpx
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.market_data import RELIABILITY_STALE, quote_reliability_from_consensus
 from app.defaults.short_research import ASSET_TYPE_ETF
 from app.models.entities import (
     EtfIntradayDailySummary,
@@ -36,7 +38,11 @@ from app.services.short_research.service import (
 
 ASIA_SHANGHAI = ZoneInfo("Asia/Shanghai")
 QUOTE_SOURCE_AKSHARE = "akshare"
+QUOTE_SOURCE_EASTMONEY = "eastmoney"
 QUOTE_FRESH_SECONDS = 180
+QUOTE_PROVIDER_TIMEOUT_SECONDS = 4.0
+QUOTE_PRICE_DIFF_PCT_TOLERANCE = 0.003
+QUOTE_PRICE_DIFF_ABS_TOLERANCE = 0.003
 WATCH_REFRESH_SECONDS = 60
 PAGE_POLL_SECONDS = 30
 TOP_SIGNAL_LIMIT = 20
@@ -55,6 +61,12 @@ LIVE_LABEL_CHASE_WARNING = "冲高别追"
 _PROVIDER_FAILURE_COUNT = 0
 _PROVIDER_BACKOFF_UNTIL: datetime | None = None
 _INTRADAY_RANKING_DATA_INSUFFICIENT_REASON = "暂无新鲜盘中行情，暂不做盘中加分。"
+CONSENSUS_CONSISTENT = "consistent"
+CONSENSUS_SINGLE_PROVIDER = "single_provider"
+CONSENSUS_DIVERGED = "diverged"
+CONSENSUS_STALE = "stale"
+CONSENSUS_UNAVAILABLE = "unavailable"
+DISPLAY_ONLY_CONSENSUS = {CONSENSUS_DIVERGED, CONSENSUS_STALE, CONSENSUS_UNAVAILABLE}
 
 
 @dataclass(frozen=True)
@@ -151,6 +163,21 @@ class NormalizedQuote:
     raw: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class ProviderQuoteResult:
+    provider: str
+    quotes: dict[str, NormalizedQuote]
+    error: str | None = None
+    elapsed_ms: int | None = None
+
+
+@dataclass(frozen=True)
+class SpotQuoteFetchResult:
+    quotes: dict[str, NormalizedQuote]
+    provider_results: list[ProviderQuoteResult]
+    consensus_counts: dict[str, int]
+
+
 def current_market_state(now: datetime | None = None) -> MarketState:
     local_now = (now or datetime.now(ASIA_SHANGHAI)).astimezone(ASIA_SHANGHAI)
     if local_now.weekday() >= 5:
@@ -215,12 +242,82 @@ def _parse_quote_time(record: dict[str, Any], fallback: datetime | None = None) 
     return quote_time, True
 
 
+def _quote_raw(quote: EtfIntradayQuote | None) -> dict[str, Any]:
+    return dict(quote.raw_json or {}) if quote is not None else {}
+
+
 def is_quote_time_fallback(quote: EtfIntradayQuote | None) -> bool:
-    return bool(quote is not None and (quote.raw_json or {}).get("quote_time_is_fallback"))
+    return bool(quote is not None and _quote_raw(quote).get("quote_time_is_fallback"))
+
+
+def quote_consensus_status(quote: EtfIntradayQuote | None) -> str:
+    if quote is None:
+        return CONSENSUS_UNAVAILABLE
+    return str(_quote_raw(quote).get("consensus_status") or CONSENSUS_SINGLE_PROVIDER)
+
+
+def quote_reliability(quote: EtfIntradayQuote | None) -> str:
+    return quote_reliability_from_consensus(quote_consensus_status(quote))
+
+
+def quote_decision_eligible_flag(quote: EtfIntradayQuote | None) -> bool:
+    if quote is None:
+        return False
+    raw = _quote_raw(quote)
+    value = raw.get("decision_eligible")
+    return True if value is None else bool(value)
+
+
+def quote_provider_count(quote: EtfIntradayQuote | None) -> int:
+    raw = _quote_raw(quote)
+    value = raw.get("provider_count")
+    return int(value) if isinstance(value, int | float) else (1 if quote is not None else 0)
+
+
+def quote_fresh_provider_count(quote: EtfIntradayQuote | None) -> int:
+    raw = _quote_raw(quote)
+    value = raw.get("fresh_provider_count")
+    return int(value) if isinstance(value, int | float) else (1 if quote is not None and not is_quote_time_fallback(quote) else 0)
+
+
+def quote_price_diff_abs(quote: EtfIntradayQuote | None) -> float | None:
+    return _float_or_none(_quote_raw(quote).get("price_diff_abs"))
+
+
+def quote_price_diff_pct(quote: EtfIntradayQuote | None) -> float | None:
+    return _float_or_none(_quote_raw(quote).get("price_diff_pct"))
+
+
+def quote_decision_limitation_reason(quote: EtfIntradayQuote | None, now: datetime | None = None) -> str | None:
+    if quote is None:
+        return "暂无盘中行情。"
+    raw = _quote_raw(quote)
+    reason = raw.get("decision_ineligible_reason")
+    if reason:
+        return str(reason)
+    if is_quote_time_fallback(quote):
+        return "行情时间来自服务器兜底，只能网页参考。"
+    if is_quote_stale(quote.quote_time, now):
+        return "盘中行情已滞后，只能网页参考。"
+    status = quote_consensus_status(quote)
+    if status == CONSENSUS_DIVERGED:
+        return "多行情源价格分歧，只能网页参考。"
+    if status == CONSENSUS_STALE:
+        return "多行情源没有新鲜可决策报价。"
+    if status == CONSENSUS_UNAVAILABLE:
+        return "多行情源当前不可用。"
+    return None
 
 
 def is_fresh_decision_quote(quote: EtfIntradayQuote | None, now: datetime | None = None) -> bool:
-    return bool(quote is not None and not is_quote_time_fallback(quote) and not is_quote_stale(quote.quote_time, now))
+    if quote is None:
+        return False
+    return bool(
+        quote_decision_eligible_flag(quote)
+        and quote_consensus_status(quote) not in DISPLAY_ONLY_CONSENSUS
+        and not is_quote_time_fallback(quote)
+        and not is_quote_stale(quote.quote_time, now)
+    )
 
 
 def _json_safe(value: Any) -> Any:
@@ -249,7 +346,7 @@ def _json_safe_record(record: dict[str, Any]) -> dict[str, Any]:
     return {str(key): _json_safe(value) for key, value in record.items()}
 
 
-def normalize_spot_record(record: dict[str, Any], *, fallback_time: datetime | None = None) -> NormalizedQuote | None:
+def normalize_spot_record(record: dict[str, Any], *, fallback_time: datetime | None = None, source: str = QUOTE_SOURCE_AKSHARE) -> NormalizedQuote | None:
     code = _text(record, "代码", "code", "symbol")
     price = _number(record, "最新价", "现价", "最新", "price", "latest_price")
     if not code or price is None or price <= 0:
@@ -269,39 +366,235 @@ def normalize_spot_record(record: dict[str, Any], *, fallback_time: datetime | N
         ask_price=_number(record, "卖一", "卖出", "ask", "ask_price"),
         iopv=_number(record, "IOPV", "iopv"),
         premium_discount_pct=_number(record, "折价率", "溢价率", "折溢价率", "premium_discount_pct"),
-        source=QUOTE_SOURCE_AKSHARE,
+        source=source,
         raw=raw,
     )
 
 
-async def fetch_spot_quotes(fetcher: Any | None = None) -> dict[str, NormalizedQuote]:
+def _elapsed_ms(started: datetime) -> int:
+    return max(0, int((datetime.now(ASIA_SHANGHAI) - started).total_seconds() * 1000))
+
+
+def _quote_field_completeness(quote: NormalizedQuote) -> int:
+    fields = (
+        quote.change_percent,
+        quote.volume,
+        quote.turnover,
+        quote.bid_price,
+        quote.ask_price,
+        quote.iopv,
+        quote.premium_discount_pct,
+    )
+    return sum(1 for value in fields if value is not None)
+
+
+def _normalized_quote_summary(quote: NormalizedQuote) -> dict[str, Any]:
+    return {
+        "provider": quote.source,
+        "quote_time": quote.quote_time.isoformat(),
+        "latest_price": quote.latest_price,
+        "change_percent": quote.change_percent,
+        "turnover": quote.turnover,
+        "quote_time_is_fallback": bool(quote.raw.get("quote_time_is_fallback")),
+        "field_completeness": _quote_field_completeness(quote),
+    }
+
+
+def _provider_status_summary(result: ProviderQuoteResult) -> dict[str, Any]:
+    return {
+        "provider": result.provider,
+        "quote_count": len(result.quotes),
+        "status": "failed" if result.error else "success",
+        "error": result.error,
+        "elapsed_ms": result.elapsed_ms,
+    }
+
+
+def _provider_quote_sort_key(quote: NormalizedQuote) -> tuple[int, datetime, int]:
+    fallback_penalty = 0 if quote.raw.get("quote_time_is_fallback") else 1
+    return (fallback_penalty, quote.quote_time, _quote_field_completeness(quote))
+
+
+def _consensus_counts() -> dict[str, int]:
+    return {
+        CONSENSUS_CONSISTENT: 0,
+        CONSENSUS_SINGLE_PROVIDER: 0,
+        CONSENSUS_DIVERGED: 0,
+        CONSENSUS_STALE: 0,
+        CONSENSUS_UNAVAILABLE: 0,
+    }
+
+
+def select_consensus_quotes(
+    provider_results: list[ProviderQuoteResult],
+    *,
+    now: datetime | None = None,
+) -> SpotQuoteFetchResult:
+    local_now = (now or datetime.now(ASIA_SHANGHAI)).replace(tzinfo=None)
+    counts = _consensus_counts()
+    by_code: dict[str, list[NormalizedQuote]] = {}
+    provider_status = [_provider_status_summary(result) for result in provider_results]
+    for result in provider_results:
+        for code, quote in result.quotes.items():
+            by_code.setdefault(code, []).append(quote)
+
+    selected: dict[str, NormalizedQuote] = {}
+    for code, quotes in by_code.items():
+        valid_quotes = [quote for quote in quotes if quote.latest_price > 0]
+        if not valid_quotes:
+            counts[CONSENSUS_UNAVAILABLE] += 1
+            continue
+        fresh_quotes = [
+            quote
+            for quote in valid_quotes
+            if not quote.raw.get("quote_time_is_fallback") and not is_quote_stale(quote.quote_time, local_now)
+        ]
+        chosen = max(fresh_quotes or valid_quotes, key=_provider_quote_sort_key)
+        price_values = [quote.latest_price for quote in fresh_quotes]
+        price_diff_abs = max(price_values) - min(price_values) if len(price_values) >= 2 else None
+        price_diff_pct = (price_diff_abs / min(price_values) * 100) if price_diff_abs is not None and min(price_values) > 0 else None
+        reason: str | None = None
+        if not fresh_quotes:
+            status = CONSENSUS_STALE
+            decision_eligible = False
+            reason = "多行情源没有新鲜且带真实时间的 ETF 盘中行情，只能网页参考。"
+        elif len(fresh_quotes) == 1:
+            status = CONSENSUS_SINGLE_PROVIDER
+            decision_eligible = True
+        else:
+            diverged = bool(
+                price_diff_abs is not None
+                and price_diff_pct is not None
+                and (
+                    price_diff_abs > QUOTE_PRICE_DIFF_ABS_TOLERANCE
+                    or price_diff_pct / 100 > QUOTE_PRICE_DIFF_PCT_TOLERANCE
+                )
+            )
+            status = CONSENSUS_DIVERGED if diverged else CONSENSUS_CONSISTENT
+            decision_eligible = not diverged
+            if diverged:
+                reason = f"多行情源价格分歧：最大价差约 {price_diff_abs:.4f}，占 {price_diff_pct:.2f}%，仅网页参考。"
+        counts[status] += 1
+        provider_quotes = [_normalized_quote_summary(quote) for quote in valid_quotes]
+        raw = dict(chosen.raw)
+        raw.update(
+            {
+                "selected_source": chosen.source,
+                "primary_provider": chosen.source,
+                "provider_count": len(valid_quotes),
+                "fresh_provider_count": len(fresh_quotes),
+                "provider_quotes": provider_quotes,
+                "provider_status": provider_status,
+                "consensus_status": status,
+                "price_diff_abs": round(price_diff_abs, 6) if price_diff_abs is not None else None,
+                "price_diff_pct": round(price_diff_pct, 4) if price_diff_pct is not None else None,
+                "decision_eligible": decision_eligible,
+                "decision_ineligible_reason": reason,
+            }
+        )
+        selected[code] = replace(chosen, raw=raw)
+    return SpotQuoteFetchResult(selected, provider_results, counts)
+
+
+async def _fetch_akshare_provider(fetcher: Any | None = None) -> ProviderQuoteResult:
     global _PROVIDER_BACKOFF_UNTIL, _PROVIDER_FAILURE_COUNT
-    now = datetime.now(ASIA_SHANGHAI)
+    started = datetime.now(ASIA_SHANGHAI)
+    now = started
     use_default_provider = fetcher is None
     if use_default_provider and _PROVIDER_BACKOFF_UNTIL is not None and now < _PROVIDER_BACKOFF_UNTIL:
         wait_seconds = int((_PROVIDER_BACKOFF_UNTIL - now).total_seconds())
-        raise RuntimeError(f"ETF 行情源正在退避，约 {wait_seconds} 秒后再试；本次使用最近缓存。")
+        return ProviderQuoteResult(
+            QUOTE_SOURCE_AKSHARE,
+            {},
+            f"ETF 行情源正在退避，约 {wait_seconds} 秒后再试。",
+            _elapsed_ms(started),
+        )
     effective_fetcher = fetcher or ak.fund_etf_spot_em
     try:
-        frame = await asyncio.to_thread(effective_fetcher)
+        frame = await asyncio.wait_for(asyncio.to_thread(effective_fetcher), timeout=QUOTE_PROVIDER_TIMEOUT_SECONDS)
     except Exception as exc:  # noqa: BLE001
-        backoff_seconds = 0
         if use_default_provider:
             _PROVIDER_FAILURE_COUNT += 1
             backoff_seconds = min(300, 30 * (2 ** min(_PROVIDER_FAILURE_COUNT - 1, 4)))
             _PROVIDER_BACKOFF_UNTIL = now + timedelta(seconds=backoff_seconds)
-        raise RuntimeError(
-            f"ETF 行情源请求失败，已退避 {backoff_seconds} 秒；本次使用最近缓存。原始错误：{exc}"
-        ) from exc
+            error = f"AKShare ETF 行情源请求失败，已退避 {backoff_seconds} 秒。原始错误：{exc}"
+        else:
+            error = f"AKShare ETF 行情源请求失败：{exc}"
+        return ProviderQuoteResult(QUOTE_SOURCE_AKSHARE, {}, error, _elapsed_ms(started))
     if use_default_provider:
         _PROVIDER_FAILURE_COUNT = 0
         _PROVIDER_BACKOFF_UNTIL = None
     quotes: dict[str, NormalizedQuote] = {}
     for _, row in frame.iterrows():
-        quote = normalize_spot_record(dict(row), fallback_time=now)
+        quote = normalize_spot_record(dict(row), fallback_time=now, source=QUOTE_SOURCE_AKSHARE)
         if quote is not None:
             quotes[quote.etf_code] = quote
-    return quotes
+    return ProviderQuoteResult(QUOTE_SOURCE_AKSHARE, quotes, elapsed_ms=_elapsed_ms(started))
+
+
+def _eastmoney_quote_time(value: Any) -> datetime | None:
+    raw = _float_or_none(value)
+    if raw is None or raw <= 0:
+        return None
+    return datetime.fromtimestamp(int(raw), tz=ASIA_SHANGHAI).replace(tzinfo=None)
+
+
+async def _fetch_eastmoney_provider() -> ProviderQuoteResult:
+    started = datetime.now(ASIA_SHANGHAI)
+    url = "https://push2.eastmoney.com/api/qt/clist/get"
+    params = {
+        "pn": "1",
+        "pz": "5000",
+        "po": "1",
+        "np": "1",
+        "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+        "fltt": "2",
+        "invt": "2",
+        "fid": "f3",
+        "fs": "b:MK0021,b:MK0022,b:MK0023,b:MK0024",
+        "fields": "f12,f14,f2,f3,f5,f6,f124",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=QUOTE_PROVIDER_TIMEOUT_SECONDS) as client:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            payload = response.json()
+    except Exception as exc:  # noqa: BLE001
+        return ProviderQuoteResult(QUOTE_SOURCE_EASTMONEY, {}, f"东方财富 ETF 行情源请求失败：{exc}", _elapsed_ms(started))
+    rows = ((payload or {}).get("data") or {}).get("diff") or []
+    quotes: dict[str, NormalizedQuote] = {}
+    now = datetime.now(ASIA_SHANGHAI)
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        quote_time = _eastmoney_quote_time(row.get("f124"))
+        record = {
+            "code": row.get("f12"),
+            "name": row.get("f14"),
+            "latest_price": row.get("f2"),
+            "change_percent": row.get("f3"),
+            "volume": row.get("f5"),
+            "turnover": row.get("f6"),
+            "provider_timestamp": row.get("f124"),
+        }
+        if quote_time is not None:
+            record["quote_time"] = quote_time.isoformat(sep=" ")
+        quote = normalize_spot_record(record, fallback_time=now, source=QUOTE_SOURCE_EASTMONEY)
+        if quote is not None:
+            quotes[quote.etf_code] = quote
+    return ProviderQuoteResult(QUOTE_SOURCE_EASTMONEY, quotes, elapsed_ms=_elapsed_ms(started))
+
+
+async def fetch_spot_quotes_with_metadata(fetcher: Any | None = None) -> SpotQuoteFetchResult:
+    if fetcher is not None:
+        results = [await _fetch_akshare_provider(fetcher)]
+    else:
+        results = await asyncio.gather(_fetch_akshare_provider(), _fetch_eastmoney_provider())
+    return select_consensus_quotes(list(results))
+
+
+async def fetch_spot_quotes(fetcher: Any | None = None) -> dict[str, NormalizedQuote]:
+    return (await fetch_spot_quotes_with_metadata(fetcher)).quotes
 
 
 async def latest_intraday_quote(session: AsyncSession, etf_code: str) -> EtfIntradayQuote | None:
@@ -614,6 +907,7 @@ def quote_out(
     now: datetime | None = None,
 ) -> EtfIntradayQuoteOut:
     stale = is_quote_stale(quote.quote_time, now) or is_quote_time_fallback(quote)
+    decision_eligible = is_fresh_decision_quote(quote, now)
     return EtfIntradayQuoteOut(
         etf_code=quote.etf_code,
         etf_name=etf_name,
@@ -631,6 +925,14 @@ def quote_out(
         freshness_status="stale" if stale else quote.freshness_status,
         is_stale=stale,
         quote_time_is_fallback=is_quote_time_fallback(quote),
+        consensus_status=quote_consensus_status(quote),
+        quote_reliability=RELIABILITY_STALE if stale else quote_reliability(quote),
+        decision_eligible=decision_eligible,
+        provider_count=quote_provider_count(quote),
+        fresh_provider_count=quote_fresh_provider_count(quote),
+        price_diff_abs=quote_price_diff_abs(quote),
+        price_diff_pct=quote_price_diff_pct(quote),
+        limitation_reason=None if decision_eligible else quote_decision_limitation_reason(quote, now),
     )
 
 
@@ -664,6 +966,9 @@ async def persist_quotes(
         quote = quotes.get(item.etf_code)
         if quote is None:
             continue
+        freshness_status = "fresh" if quote.raw.get("decision_eligible", True) else "display_only"
+        if quote.raw.get("consensus_status") == CONSENSUS_STALE:
+            freshness_status = "stale"
         existing = await session.scalar(
             select(EtfIntradayQuote).where(
                 EtfIntradayQuote.etf_code == quote.etf_code,
@@ -685,7 +990,7 @@ async def persist_quotes(
                     iopv=quote.iopv,
                     premium_discount_pct=quote.premium_discount_pct,
                     source=quote.source,
-                    freshness_status="fresh",
+                    freshness_status=freshness_status,
                     raw_json=quote.raw,
                 )
             )
@@ -698,8 +1003,9 @@ async def persist_quotes(
             existing.ask_price = quote.ask_price
             existing.iopv = quote.iopv
             existing.premium_discount_pct = quote.premium_discount_pct
+            existing.source = quote.source
             existing.raw_json = quote.raw
-            existing.freshness_status = "fresh"
+            existing.freshness_status = freshness_status
         updated += 1
     await session.commit()
     return updated
@@ -834,3 +1140,7 @@ async def watch_status(session: AsyncSession) -> IntradayEtfWatchStatusOut:
             for item in watchlist.items
         ],
     )
+
+
+
+

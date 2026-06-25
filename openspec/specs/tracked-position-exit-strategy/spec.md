@@ -97,3 +97,115 @@ The system SHALL evaluate active tracked positions for hard stop, trailing take-
 #### Scenario: Exit watch requires ranking context
 - **WHEN** no latest signal item exists for a tracked position
 - **THEN** the system MUST NOT create `exit_watch` solely from missing ranking data
+
+### Requirement: Dynamic Exit Lines Explain Threshold Source And Distance
+The system SHALL show how each tracked-position dynamic exit line was calculated and how far the current position is from triggering it.
+
+#### Scenario: Dynamic lines are returned
+- **WHEN** a tracked position snapshot is returned
+- **THEN** the response includes hard-stop threshold, take-profit-watch threshold, trailing-giveback threshold, trend-weakening state, threshold source, rule version, and current distance to each applicable line
+
+#### Scenario: Threshold lacks enough data
+- **WHEN** the system cannot compute an asset-specific dynamic threshold due to insufficient history or ineligible price data
+- **THEN** it uses a conservative default or waiting status and explains that the threshold is not asset-specific yet
+
+### Requirement: Profit Protection Adapts To Volatility And Existing Profit
+The system SHALL make take-profit-watch and trailing-giveback thresholds responsive to recent volatility, drawdown behavior, and current maximum profit.
+
+#### Scenario: High volatility receives wider giveback
+- **WHEN** a tracked ETF has higher recent volatility or larger normal pullbacks
+- **THEN** the trailing-giveback threshold is wider within configured safety bounds and the UI explains the volatility reason
+
+#### Scenario: Larger profit receives stronger protection
+- **WHEN** a tracked position has materially higher maximum profit after entry
+- **THEN** the profit-protection explanation highlights highest profit, current profit, giveback, and whether the soft watch or trailing condition is close to triggering
+
+### Requirement: Holding Signals Remain Separate From Buy Observation Labels
+The system SHALL keep ranked asset observation labels separate from tracked-position handling signals.
+
+#### Scenario: High ranked ETF triggers exit signal
+- **WHEN** an ETF remains high ranked but the user tracked position breaches an exit threshold
+- **THEN** the UI shows the ranked observation state separately from the holding signal and explains why both can be true
+
+#### Scenario: High watch without threshold breach
+- **WHEN** a tracked position is profitable and the asset is 高位观察 but no threshold is breached
+- **THEN** the system shows a web-only caution and MUST NOT send a sell or reduce-position email
+
+### Requirement: Tracked positions are scoped to their owner
+The system SHALL bind every tracked position to a user and SHALL only expose tracked positions to their owner.
+
+#### Scenario: User lists tracked positions
+- **WHEN** an approved user calls `GET /api/tracked-positions`
+- **THEN** the system returns only tracked positions where `user_id` equals the current user's id
+
+#### Scenario: User creates tracked position
+- **WHEN** an approved user creates a tracked position
+- **THEN** the system stores the current user's id on the tracked position
+
+#### Scenario: User accesses another user's tracked position
+- **WHEN** an approved user tries to read, update, or close a tracked position owned by another user
+- **THEN** the system returns not found or forbidden and does not expose the other user's data
+
+#### Scenario: Existing tracked positions are migrated
+- **WHEN** the user-scoping migration runs on an existing database
+- **THEN** all existing tracked positions are assigned to the qje owner account
+
+### Requirement: Tracked position emails use owner recipient
+The system SHALL send actionable tracked-position emails to the recipient email configured by the tracked position owner.
+
+#### Scenario: Owner has configured recipient email
+- **WHEN** a tracked position triggers `hard_stop`, `trailing_take_profit`, `trend_weakening`, or `exit_watch`
+- **THEN** the system sends the email to that position owner's `recipient_email` and records the recipient in the alert or notification log
+
+#### Scenario: Owner email is not configured
+- **WHEN** a tracked position triggers an actionable signal but the owner has no usable recipient email or SMTP channel
+- **THEN** the system records the alert with a failed or skipped email status and continues evaluating other users' positions
+
+#### Scenario: Data-only warning is created
+- **WHEN** a tracked position has a data-quality warning without an actionable exit signal
+- **THEN** the system keeps the warning web-only and does not email the owner
+
+### Requirement: Exit decision audit context
+Tracked-position exit evaluations SHALL expose the context behind each holding处理状态.
+
+#### Scenario: Exit signal context
+- **WHEN** a tracked position triggers hard stop, trailing take profit, trend weakening, take profit watch, or exit watch
+- **THEN** the result includes the threshold, current profit, high-water profit, price source, freshness, and reason text
+
+#### Scenario: No action context
+- **WHEN** a tracked position does not trigger an exit signal
+- **THEN** the result includes the main reason no action was taken when that reason is available
+
+### Requirement: Display-only data cannot trigger exit email
+Tracked-position exit evaluations SHALL prevent display-only, stale, estimated, or unavailable data from triggering email reminders.
+
+#### Scenario: Stale quote exit blocked
+- **WHEN** the latest quote is stale or display-only
+- **THEN** the system may show estimated context on the page but MUST NOT send an exit email
+
+### Requirement: Exit thresholds are volatility-adaptive
+The tracked position exit strategy SHALL calculate hard stop and trailing take-profit thresholds using recent realized volatility, recent drawdown, current profit state, and data reliability.
+
+#### Scenario: ETF has high recent volatility
+- **WHEN** a tracked ETF has high recent realized volatility and decision-eligible prices
+- **THEN** the exit strategy uses wider volatility-adjusted thresholds and records the calculation reason
+
+#### Scenario: ETF has low recent volatility
+- **WHEN** a tracked ETF has low recent realized volatility and decision-eligible prices
+- **THEN** the exit strategy uses tighter volatility-adjusted thresholds and records the calculation reason
+
+#### Scenario: Volatility data is insufficient
+- **WHEN** recent volatility cannot be calculated from decision-eligible data
+- **THEN** the system falls back to conservative fixed thresholds marked as `fixed_fallback` or suppresses the alert if the price is not decision-eligible
+
+### Requirement: Adaptive threshold context is persisted
+The tracked position exit strategy SHALL persist high-water profit, current threshold values, threshold mode, and explanation for each active tracked position.
+
+#### Scenario: Position reaches a new high-water profit
+- **WHEN** a tracked ETF reaches a new high-water profit
+- **THEN** the persisted exit state updates high-water profit and recalculates trailing threshold context
+
+#### Scenario: Alert is generated
+- **WHEN** an exit alert is generated
+- **THEN** the alert includes threshold mode, threshold value, current profit, high-water profit, and human-readable reason
+

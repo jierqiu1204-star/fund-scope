@@ -21,12 +21,18 @@ from app.models.entities import (
 from app.services.intraday_etf.jobs import intraday_etf_watch_job
 from app.services.intraday_etf.service import (
     ASIA_SHANGHAI,
+    CONSENSUS_CONSISTENT,
+    CONSENSUS_DIVERGED,
+    CONSENSUS_SINGLE_PROVIDER,
+    CONSENSUS_STALE,
     MarketState,
+    ProviderQuoteResult,
     build_watchlist,
     current_market_state,
     is_quote_stale,
     latest_quotes_by_code,
     normalize_spot_record,
+    select_consensus_quotes,
     summarize_and_cleanup_intraday_quotes,
 )
 from app.services.short_research.service import CONCLUSION_HIGH_WATCH, CONCLUSION_WATCH
@@ -1167,3 +1173,149 @@ async def test_intraday_cleanup_summarizes_and_deletes_old_raw_quotes(app) -> No
     assert raw_count == 4
     assert summary_count == 2
 
+
+
+def _normalized_provider_quote(code: str, price: float, source: str, quote_time: datetime) -> object:
+    quote = normalize_spot_record(
+        {
+            "code": code,
+            "latest_price": price,
+            "change_percent": 0.5,
+            "turnover": 100_000_000,
+            "quote_time": quote_time.strftime("%Y-%m-%d %H:%M:%S"),
+        },
+        fallback_time=quote_time.replace(tzinfo=ASIA_SHANGHAI),
+        source=source,
+    )
+    assert quote is not None
+    return quote
+
+
+def test_select_consensus_quotes_marks_consistent_and_single_provider() -> None:
+    now = datetime(2026, 6, 24, 10, 0, 0)
+    ak_quote = _normalized_provider_quote("510000", 1.0000, "akshare", now)
+    eastmoney_quote = _normalized_provider_quote("510000", 1.0005, "eastmoney", now)
+
+    consistent = select_consensus_quotes(
+        [
+            ProviderQuoteResult("akshare", {"510000": ak_quote}),
+            ProviderQuoteResult("eastmoney", {"510000": eastmoney_quote}),
+        ],
+        now=now,
+    )
+
+    selected = consistent.quotes["510000"]
+    assert selected.raw["consensus_status"] == CONSENSUS_CONSISTENT
+    assert selected.raw["decision_eligible"] is True
+    assert selected.raw["provider_count"] == 2
+    assert consistent.consensus_counts[CONSENSUS_CONSISTENT] == 1
+
+    single = select_consensus_quotes(
+        [
+            ProviderQuoteResult("akshare", {"510001": ak_quote}),
+            ProviderQuoteResult("eastmoney", {}, error="provider down"),
+        ],
+        now=now,
+    )
+
+    assert single.quotes["510001"].raw["consensus_status"] == CONSENSUS_SINGLE_PROVIDER
+    assert single.quotes["510001"].raw["decision_eligible"] is True
+    assert single.consensus_counts[CONSENSUS_SINGLE_PROVIDER] == 1
+
+
+def test_select_consensus_quotes_blocks_diverged_and_missing_time_quotes() -> None:
+    now = datetime(2026, 6, 24, 10, 0, 0)
+    ak_quote = _normalized_provider_quote("510000", 1.0000, "akshare", now)
+    eastmoney_quote = _normalized_provider_quote("510000", 1.0200, "eastmoney", now)
+
+    diverged = select_consensus_quotes(
+        [
+            ProviderQuoteResult("akshare", {"510000": ak_quote}),
+            ProviderQuoteResult("eastmoney", {"510000": eastmoney_quote}),
+        ],
+        now=now,
+    )
+
+    selected = diverged.quotes["510000"]
+    assert selected.raw["consensus_status"] == CONSENSUS_DIVERGED
+    assert selected.raw["decision_eligible"] is False
+    assert selected.raw["decision_ineligible_reason"]
+
+    fallback_quote = normalize_spot_record(
+        {"code": "510002", "latest_price": 1.0, "change_percent": 0.1},
+        fallback_time=now.replace(tzinfo=ASIA_SHANGHAI),
+        source="akshare",
+    )
+    assert fallback_quote is not None
+    stale = select_consensus_quotes([ProviderQuoteResult("akshare", {"510002": fallback_quote})], now=now)
+
+    assert stale.quotes["510002"].raw["consensus_status"] == CONSENSUS_STALE
+    assert stale.quotes["510002"].raw["decision_eligible"] is False
+    assert stale.consensus_counts[CONSENSUS_STALE] == 1
+
+
+@pytest.mark.asyncio
+async def test_diverged_quote_does_not_drive_live_ranking_or_tracked_email(client, app, settings, monkeypatch) -> None:
+    await _seed_signal_run(app, count=1, total_scores=[80.0])
+    await _seed_price_history(app, "510000")
+    now = datetime.now().replace(microsecond=0)
+    sent: list[dict] = []
+
+    async def fake_send_template(self, session, *, recipient: str, template_name: str, payload: dict) -> str:
+        sent.append(payload)
+        return "sent"
+
+    monkeypatch.setattr("app.services.notifier.Notifier.send_template", fake_send_template)
+    monkeypatch.setattr(
+        "app.services.intraday_etf.service.current_market_state",
+        lambda: MarketState("open", "morning", now.replace(tzinfo=ASIA_SHANGHAI)),
+    )
+
+    async with app.state.db.session() as session:
+        position = TrackedPosition(
+            user_id=1,
+            asset_type="etf",
+            asset_code="510000",
+            asset_name="ETF510000",
+            buy_date=date(2026, 6, 1),
+            buy_amount=3000,
+            entry_price=1.0,
+            entry_price_date=date(2026, 6, 1),
+            estimated_shares=3000,
+            status="active",
+        )
+        session.add(position)
+        session.add(
+            EtfIntradayQuote(
+                etf_code="510000",
+                quote_time=now,
+                trade_date=now.date(),
+                latest_price=0.95,
+                change_percent=-5.0,
+                source="akshare",
+                freshness_status="display_only",
+                raw_json={
+                    "consensus_status": CONSENSUS_DIVERGED,
+                    "decision_eligible": False,
+                    "provider_count": 2,
+                    "fresh_provider_count": 2,
+                    "price_diff_pct": 1.2,
+                    "decision_ineligible_reason": "多行情源价格分歧，只能网页参考。",
+                },
+            )
+        )
+        await session.commit()
+        await session.refresh(position)
+
+        alert, status = await create_alert_if_needed(session, position, settings, evaluation_mode="intraday")
+
+    ranking_response = await client.get("/api/etf-quotes/live-rankings")
+    item = ranking_response.json()["items"][0]
+
+    assert item["score_source"] == "daily"
+    assert item["quote"]["decision_eligible"] is False
+    assert item["quote"]["consensus_status"] == CONSENSUS_DIVERGED
+    assert status in {"data_ineligible", "web_only"}
+    if alert is not None:
+        assert alert.email_status == "skipped"
+    assert sent == []
