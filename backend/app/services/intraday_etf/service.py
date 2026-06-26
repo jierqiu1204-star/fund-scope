@@ -43,6 +43,8 @@ QUOTE_FRESH_SECONDS = 180
 QUOTE_PROVIDER_TIMEOUT_SECONDS = 4.0
 QUOTE_PRICE_DIFF_PCT_TOLERANCE = 0.003
 QUOTE_PRICE_DIFF_ABS_TOLERANCE = 0.003
+EASTMONEY_PAGE_SIZE = 5000
+EASTMONEY_MAX_PAGES = 30
 WATCH_REFRESH_SECONDS = 60
 PAGE_POLL_SECONDS = 30
 TOP_SIGNAL_LIMIT = 20
@@ -542,9 +544,9 @@ def _eastmoney_quote_time(value: Any) -> datetime | None:
 async def _fetch_eastmoney_provider() -> ProviderQuoteResult:
     started = datetime.now(ASIA_SHANGHAI)
     url = "https://push2.eastmoney.com/api/qt/clist/get"
-    params = {
+    base_params = {
         "pn": "1",
-        "pz": "5000",
+        "pz": str(EASTMONEY_PAGE_SIZE),
         "po": "1",
         "np": "1",
         "ut": "bd1d9ddb04089700cf9c27f6f7426281",
@@ -554,19 +556,31 @@ async def _fetch_eastmoney_provider() -> ProviderQuoteResult:
         "fs": "b:MK0021,b:MK0022,b:MK0023,b:MK0024",
         "fields": "f12,f14,f2,f3,f5,f6,f124",
     }
+    rows: list[dict[str, Any]] = []
+    total: int | None = None
     try:
         async with httpx.AsyncClient(timeout=QUOTE_PROVIDER_TIMEOUT_SECONDS) as client:
-            response = await client.get(url, params=params)
-            response.raise_for_status()
-            payload = response.json()
+            for page in range(1, EASTMONEY_MAX_PAGES + 1):
+                params = dict(base_params)
+                params["pn"] = str(page)
+                response = await client.get(url, params=params)
+                response.raise_for_status()
+                payload = response.json()
+                data = ((payload or {}).get("data") or {})
+                page_rows = data.get("diff") or []
+                if not isinstance(page_rows, list) or not page_rows:
+                    break
+                rows.extend(row for row in page_rows if isinstance(row, dict))
+                if total is None:
+                    total_raw = _float_or_none(data.get("total"))
+                    total = int(total_raw) if total_raw is not None and total_raw > 0 else None
+                if total is None or len(rows) >= total:
+                    break
     except Exception as exc:  # noqa: BLE001
         return ProviderQuoteResult(QUOTE_SOURCE_EASTMONEY, {}, f"东方财富 ETF 行情源请求失败：{exc}", _elapsed_ms(started))
-    rows = ((payload or {}).get("data") or {}).get("diff") or []
     quotes: dict[str, NormalizedQuote] = {}
     now = datetime.now(ASIA_SHANGHAI)
     for row in rows:
-        if not isinstance(row, dict):
-            continue
         quote_time = _eastmoney_quote_time(row.get("f124"))
         record = {
             "code": row.get("f12"),
@@ -583,7 +597,6 @@ async def _fetch_eastmoney_provider() -> ProviderQuoteResult:
         if quote is not None:
             quotes[quote.etf_code] = quote
     return ProviderQuoteResult(QUOTE_SOURCE_EASTMONEY, quotes, elapsed_ms=_elapsed_ms(started))
-
 
 async def fetch_spot_quotes_with_metadata(fetcher: Any | None = None) -> SpotQuoteFetchResult:
     if fetcher is not None:
@@ -1140,7 +1153,4 @@ async def watch_status(session: AsyncSession) -> IntradayEtfWatchStatusOut:
             for item in watchlist.items
         ],
     )
-
-
-
 

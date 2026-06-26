@@ -27,6 +27,7 @@ from app.services.intraday_etf.service import (
     CONSENSUS_STALE,
     MarketState,
     ProviderQuoteResult,
+    _fetch_eastmoney_provider,
     build_watchlist,
     current_market_state,
     is_quote_stale,
@@ -471,6 +472,60 @@ def test_quote_normalization_parses_timezone_update_time() -> None:
     assert quote.trade_date == date(2026, 6, 22)
     assert quote.raw["quote_time_is_fallback"] is False
 
+
+@pytest.mark.asyncio
+async def test_eastmoney_provider_fetches_all_pages(monkeypatch) -> None:
+    quote_timestamp = int(datetime(2026, 6, 25, 14, 57, 0, tzinfo=ASIA_SHANGHAI).timestamp())
+    calls: list[dict[str, str]] = []
+
+    def row(code: str, price: float) -> dict[str, object]:
+        return {
+            "f12": code,
+            "f14": f"ETF{code}",
+            "f2": price,
+            "f3": 0.5,
+            "f5": 1000,
+            "f6": 1_000_000,
+            "f124": quote_timestamp,
+        }
+
+    class FakeResponse:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self._payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self._payload
+
+    class FakeAsyncClient:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeAsyncClient:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def get(self, _url: str, *, params: dict[str, str]) -> FakeResponse:
+            calls.append(dict(params))
+            page = params["pn"]
+            if page == "1":
+                rows = [row("510000", 1.0), row("510001", 1.1)]
+            elif page == "2":
+                rows = [row("510002", 1.2)]
+            else:
+                rows = []
+            return FakeResponse({"data": {"total": 3, "diff": rows}})
+
+    monkeypatch.setattr("app.services.intraday_etf.service.httpx.AsyncClient", FakeAsyncClient)
+
+    result = await _fetch_eastmoney_provider()
+
+    assert set(result.quotes) == {"510000", "510001", "510002"}
+    assert [call["pn"] for call in calls] == ["1", "2"]
 
 @pytest.mark.asyncio
 async def test_intraday_watch_reports_watch_codes_missing_from_provider(app) -> None:
@@ -1319,3 +1374,4 @@ async def test_diverged_quote_does_not_drive_live_ranking_or_tracked_email(clien
     if alert is not None:
         assert alert.email_status == "skipped"
     assert sent == []
+
