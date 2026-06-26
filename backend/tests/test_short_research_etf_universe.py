@@ -125,6 +125,112 @@ async def _seed_cached_etf_signals(app: Any, count: int = 3) -> int:
         return run.id
 
 
+
+async def _seed_observation_portfolio_signal_run(app: Any, *, items: list[dict[str, Any]]) -> None:
+    async with app.state.db.session() as session:
+        run = ShortResearchSignalRun(
+            status="success",
+            as_of_date=date(2026, 6, 15),
+            config_json={"asset_type": "etf"},
+            summary_json={"item_count": len(items), "fund_count": 0, "etf_count": len(items)},
+        )
+        session.add(run)
+        await session.flush()
+        for index, item in enumerate(items):
+            code = item["code"]
+            session.add(
+                TradableEtf(
+                    code=code,
+                    name=item.get("name", f"观察组合ETF{index}"),
+                    exchange="SH" if code.startswith("5") else "SZ",
+                    theme_tags_json=item.get("theme_tags", ["测试主题"]),
+                    trading_rule_label="证券账户 T+1 ETF",
+                    asset_class=item.get("asset_class", "sector"),
+                    is_short_term_eligible=True,
+                    is_watchlist=True,
+                )
+            )
+            session.add(
+                ShortResearchSignalItem(
+                    run_id=run.id,
+                    asset_type="etf",
+                    asset_code=code,
+                    rank=index + 1,
+                    total_score=item.get("total_score", 80),
+                    conclusion=item.get("conclusion", "短线观察"),
+                    score_breakdown_json={
+                        "trend": {"score": item.get("trend_score", 80), "weight": 0.55},
+                        "risk": {"score": 80, "weight": 0.30},
+                        "liquidity": {"score": 90, "weight": 0.15},
+                    },
+                    risk_flags_json=item.get("risk_flags", []),
+                    rationale_json={"key_reason": item.get("entry_timing_reason", "测试原因。")},
+                    metrics_json={
+                        "return_5d": 0.02,
+                        "return_20d": 0.06,
+                        "return_60d": 0.12,
+                        "max_drawdown_60d": -0.05,
+                        "volatility_20d": 0.02,
+                        "average_turnover_20d": 160_000_000,
+                        "latest_date": "2026-06-15",
+                        "latest_value": 1.2 + index / 10,
+                        "usable_days": 100,
+                        "sample_level": "样本充足",
+                        "source_note": "pytest",
+                        "default_display_eligible": True,
+                        "entry_timing_label": item.get("entry_timing_label", "趋势延续"),
+                        "entry_timing_reason": item.get("entry_timing_reason", "测试原因。"),
+                    },
+                )
+            )
+        await session.commit()
+
+
+async def _seed_observation_price_series(app: Any, *, code: str) -> None:
+    async with app.state.db.session() as session:
+        existing = await session.scalar(select(TradableEtf).where(TradableEtf.code == code))
+        if existing is None:
+            session.add(
+                TradableEtf(
+                    code=code,
+                    name=f"观察组合价格{code}",
+                    exchange="SH" if code.startswith("5") else "SZ",
+                    theme_tags_json=["测试主题"],
+                    trading_rule_label="证券账户 T+1 ETF",
+                    asset_class="sector",
+                    is_short_term_eligible=True,
+                    is_watchlist=True,
+                )
+            )
+        latest = date(2026, 6, 15)
+        start = latest - timedelta(days=99)
+        value = 1.0
+        patterns = {
+            "1": [0.0010, 0.0022, -0.0008, 0.0017, 0.0004, 0.0028, -0.0002],
+            "2": [0.0024, -0.0007, 0.0011, 0.0002, 0.0030, -0.0004, 0.0015],
+            "3": [-0.0005, 0.0018, 0.0006, 0.0026, -0.0009, 0.0012, 0.0020],
+            "4": [0.0016, 0.0001, 0.0029, -0.0006, 0.0013, 0.0005, 0.0023],
+        }
+        pattern = patterns.get(code[-1], patterns["1"])
+        for offset in range(100):
+            current = start + timedelta(days=offset)
+            change = pattern[offset % len(pattern)]
+            value *= 1 + change
+            session.add(
+                EtfPriceHistory(
+                    etf_code=code,
+                    trade_date=current,
+                    open=value * 0.995,
+                    high=value * 1.01,
+                    low=value * 0.99,
+                    close=value,
+                    volume=160_000_000 / value,
+                    turnover=160_000_000,
+                    pct_change=0.0 if offset == 0 else change * 100,
+                )
+            )
+        await session.commit()
+
 @pytest.mark.asyncio
 async def test_etf_universe_refresh_is_idempotent_excludes_unsuitable_and_preserves_manual_theme(app) -> None:
     async with app.state.db.session() as session:
@@ -241,6 +347,65 @@ async def test_etf_observation_portfolio_is_research_only_and_fully_invested(cli
     payload = json.dumps(body, ensure_ascii=False).lower()
     for forbidden in ["buy", "sell", "target_price", "expected_return", "guaranteed_profit"]:
         assert forbidden not in payload
+
+
+@pytest.mark.asyncio
+async def test_etf_observation_portfolio_fills_to_full_exposure_with_defensive_candidates(client, app) -> None:
+    await _seed_observation_portfolio_signal_run(
+        app,
+        items=[
+            {
+                "code": "562101",
+                "total_score": 92,
+                "conclusion": "短线观察",
+                "entry_timing_label": "趋势延续",
+                "entry_timing_reason": "测试主组合候选 1。",
+                "theme_tags": ["证券"],
+            },
+            {
+                "code": "562102",
+                "total_score": 91,
+                "conclusion": "短线观察",
+                "entry_timing_label": "趋势延续",
+                "entry_timing_reason": "测试主组合候选 2。",
+                "theme_tags": ["宽基"],
+            },
+            {
+                "code": "562103",
+                "total_score": 90,
+                "conclusion": "短线观察",
+                "entry_timing_label": "健康回踩",
+                "entry_timing_reason": "测试主组合候选 3。",
+                "theme_tags": ["红利"],
+            },
+            {
+                "code": "562104",
+                "total_score": 82,
+                "conclusion": "谨慎观察",
+                "entry_timing_label": "趋势延续",
+                "entry_timing_reason": "测试宽基补位候选。",
+                "theme_tags": ["宽基"],
+            },
+        ],
+    )
+    for code in ["562101", "562102", "562103", "562104"]:
+        await _seed_observation_price_series(app, code=code)
+
+    response = await client.get("/api/short-research/observation-portfolio?asset_type=etf&limit=4")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["unavailable_reason"] is None
+    assert body["target_invested_weight"] == 1.0
+    assert body["weight_sum"] == 1.0
+    assert body["cash_weight"] == 0.0
+    assert len(body["items"]) == 4
+    assert any(item["code"] == "562104" for item in body["items"])
+    assert all(item["target_weight"] <= 0.3 for item in body["items"])
+    assert body["data_as_of_time"] is not None
+    assert body["daily_signal_date"] == "2026-06-15"
+    assert body["portfolio_generated_at"] is not None
+    assert any(item["weight_reason_json"].get("weight_fill_reason") for item in body["items"])
 
 
 @pytest.mark.asyncio

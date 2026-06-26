@@ -21,6 +21,7 @@ from app.defaults.short_research import (
 )
 from app.models.entities import (
     EtfDataHealth,
+    EtfIntradayLatestQuote,
     EtfLabelOutcome,
     EtfObservationPortfolioItem,
     EtfObservationPortfolioSnapshot,
@@ -2141,6 +2142,33 @@ def _portfolio_candidate_group(asset: ComputedAsset) -> tuple[str, str | None]:
     return "primary", None
 
 
+def _portfolio_fill_priority(asset: ComputedAsset) -> int:
+    tags = set(asset.metadata.theme_tags)
+    name = asset.metadata.name
+    asset_class = asset.metadata.category or ""
+    if asset_class == "broad" or "宽基" in tags or "宽基" in name:
+        return 0
+    if asset_class in {"bond", "commodity"} or any(key in name for key in ("国债", "债", "黄金", "红利")):
+        return 1
+    if tags.intersection({"红利", "金融", "银行", "消费"}):
+        return 2
+    return 9
+
+
+def _portfolio_fill_reason(asset: ComputedAsset, original_reason: str | None) -> str | None:
+    if not asset.metrics.get("default_display_eligible", True):
+        return None
+    if asset.entry_timing_label not in _PORTFOLIO_ENTRY_TIMING_OK:
+        return None
+    if any(flag in asset.risk_flags for flag in _PORTFOLIO_RISK_FLAGS_FORBIDDEN):
+        return None
+    if _portfolio_fill_priority(asset) > 2:
+        return None
+    base = "主组合高分候选不足 4 只；用数据可靠、流动性合格、非冲高别追的宽基/防守候选补足 ETF 账户资金 100%。"
+    if original_reason:
+        return f"{base}原分组原因：{original_reason}"
+    return base
+
 def _portfolio_decision_factors(
     asset: ComputedAsset,
     *,
@@ -2387,6 +2415,23 @@ def _snapshot_item_out(row: EtfObservationPortfolioItem) -> dict[str, Any]:
     }
 
 
+def _json_time(value: Any) -> Any:
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    return value
+
+
+def _observation_snapshot_is_full_exposure(snapshot: EtfObservationPortfolioSnapshot) -> bool:
+    summary = dict(snapshot.summary_json or {})
+    try:
+        cash_weight = float(summary.get("cash_weight", 1.0))
+        target_weight = float(summary.get("target_invested_weight", 0.0))
+        weight_sum = float(summary.get("weight_sum", 0.0))
+    except (TypeError, ValueError):
+        return False
+    return cash_weight <= 0.0001 and target_weight >= 0.999 and weight_sum >= 0.999
+
+
 async def observation_portfolio_from_snapshot(
     session: AsyncSession,
     snapshot: EtfObservationPortfolioSnapshot,
@@ -2425,6 +2470,11 @@ async def observation_portfolio_from_snapshot(
         "no_trade_instruction": True,
         "note": str(summary.get("note") or "观察组合只用于手动研究参考，不连接券商、不自动下单。"),
         "methodology": str(summary.get("methodology") or "按评分、波动、回撤、流动性、主题和相关性约束生成。"),
+        "data_as_of_time": summary.get("data_as_of_time"),
+        "quote_time": summary.get("quote_time"),
+        "daily_signal_date": summary.get("daily_signal_date"),
+        "portfolio_generated_at": summary.get("portfolio_generated_at") or snapshot.created_at,
+        "weight_fill_reason": summary.get("weight_fill_reason"),
     }
 
 
@@ -2448,6 +2498,11 @@ async def persist_observation_portfolio_snapshot(
         "unavailable_reason": portfolio.get("unavailable_reason"),
         "note": portfolio.get("note", ""),
         "methodology": portfolio.get("methodology", ""),
+        "data_as_of_time": _json_time(portfolio.get("data_as_of_time")),
+        "quote_time": _json_time(portfolio.get("quote_time")),
+        "daily_signal_date": _json_time(portfolio.get("daily_signal_date")),
+        "portfolio_generated_at": _json_time(portfolio.get("portfolio_generated_at")),
+        "weight_fill_reason": portfolio.get("weight_fill_reason"),
     }
     snapshot = EtfObservationPortfolioSnapshot(
         status=RUN_STATUS_SUCCESS,
@@ -2521,7 +2576,7 @@ async def etf_observation_portfolio(
 ) -> dict[str, Any]:
     if use_snapshot and universe == UNIVERSE_DEFAULT:
         snapshot = await latest_observation_portfolio_snapshot(session)
-        if snapshot is not None:
+        if snapshot is not None and _observation_snapshot_is_full_exposure(snapshot):
             return await observation_portfolio_from_snapshot(session, snapshot)
     run = await latest_signal_run(session, asset_type=ASSET_TYPE_ETF)
     if run is None:
@@ -2568,6 +2623,7 @@ async def etf_observation_portfolio(
     if validation_by_label:
         assets = [_asset_with_validation_evidence(asset, validation_by_label) for asset in assets]
     primary_candidates: list[ComputedAsset] = []
+    watch_only_candidates: list[tuple[ComputedAsset, str | None]] = []
     watch_only_items: list[dict[str, Any]] = []
     excluded_items: list[dict[str, Any]] = []
     for asset in assets:
@@ -2575,13 +2631,18 @@ async def etf_observation_portfolio(
         if group == "primary":
             primary_candidates.append(asset)
         elif group == "watch_only":
-            watch_only_items.append(_portfolio_item(asset, target_weight=0.0, reason=reason))
+            watch_only_candidates.append((asset, reason))
         else:
             excluded_items.append(_portfolio_item(asset, target_weight=0.0, reason=reason))
 
-    return_maps = await _portfolio_return_maps(session, primary_candidates, run.as_of_date)
+    return_maps = await _portfolio_return_maps(
+        session,
+        [*primary_candidates, *[asset for asset, _reason in watch_only_candidates]],
+        run.as_of_date,
+    )
     selected_assets: list[ComputedAsset] = []
     selected_return_maps: dict[str, dict[date, float]] = {}
+    selected_fill_reasons: dict[str, str] = {}
     theme_counts: dict[str, int] = {}
     selected_limit = max(4, min(limit, 10))
     for asset in primary_candidates:
@@ -2607,6 +2668,37 @@ async def etf_observation_portfolio(
         if asset_returns:
             selected_return_maps[asset.metadata.code] = asset_returns
 
+    for asset, original_reason in sorted(
+        watch_only_candidates,
+        key=lambda row: (_portfolio_fill_priority(row[0]), -float(row[0].total_score or 0.0)),
+    ):
+        if len(selected_assets) >= 4:
+            watch_only_items.append(_portfolio_item(asset, target_weight=0.0, reason=original_reason))
+            continue
+        fill_reason = _portfolio_fill_reason(asset, original_reason)
+        if fill_reason is None:
+            watch_only_items.append(_portfolio_item(asset, target_weight=0.0, reason=original_reason))
+            continue
+        selection_reason = None
+        asset_themes = list(asset.metadata.theme_tags[:2]) or ["ETF"]
+        if any(theme_counts.get(theme, 0) >= 2 for theme in asset_themes):
+            selection_reason = "补位候选同主题已有足够权重，继续留在观察组。"
+        asset_returns = return_maps.get(asset.metadata.code)
+        if selection_reason is None and asset_returns:
+            for selected_code, selected_returns in selected_return_maps.items():
+                correlation = _correlation(asset_returns, selected_returns)
+                if correlation is not None and correlation >= _PORTFOLIO_HIGH_CORRELATION:
+                    selection_reason = f"补位候选与已选 ETF {selected_code} 近60日相关性约 {correlation:.2f}，继续留在观察组。"
+                    break
+        if selection_reason is not None:
+            watch_only_items.append(_portfolio_item(asset, target_weight=0.0, reason=selection_reason))
+            continue
+        selected_assets.append(asset)
+        selected_fill_reasons[asset.metadata.code] = fill_reason
+        for theme in asset_themes:
+            theme_counts[theme] = theme_counts.get(theme, 0) + 1
+        if asset_returns:
+            selected_return_maps[asset.metadata.code] = asset_returns
     raw_weight_rows = [_portfolio_raw_weight(asset) for asset in selected_assets]
     normalized_weights = _cap_normalized_weights(
         [row[0] for row in raw_weight_rows],
@@ -2630,10 +2722,13 @@ async def etf_observation_portfolio(
                     "target_invested_weight": _PORTFOLIO_TOTAL_EXPOSURE_CAP,
                 }
             )
+            fill_reason = selected_fill_reasons.get(asset.metadata.code)
+            if fill_reason:
+                weight_reason["weight_fill_reason"] = fill_reason
             items.append(_portfolio_item(asset, target_weight=target, weight_reason=weight_reason))
 
     weight_sum = round(sum(float(item["target_weight"]) for item in items), 4)
-    rounding_residual = round(max(0.0, 1.0 - weight_sum), 4) if items else 0.0
+    rounding_residual = 0.0 if items and abs(1.0 - weight_sum) <= 0.01 else (round(max(0.0, 1.0 - weight_sum), 4) if items else 0.0)
     constraints_used = {
         "target_invested_weight": _PORTFOLIO_TOTAL_EXPOSURE_CAP,
         "single_weight_cap": _PORTFOLIO_SINGLE_WEIGHT_CAP,
@@ -2665,8 +2760,15 @@ async def etf_observation_portfolio(
         rounding_residual = 0.0
     elif watch_only_items or excluded_items:
         note = "高位/追高/数据不足资产会分到观察或等待分组，不进入主组合权重。" + note
+    quote_time = await session.scalar(select(func.max(EtfIntradayLatestQuote.quote_time)))
+    portfolio_generated_at = utcnow()
+    data_as_of_time = quote_time or portfolio_generated_at
     return {
         "as_of_date": as_of_date or run.as_of_date,
+        "data_as_of_time": data_as_of_time,
+        "quote_time": quote_time,
+        "daily_signal_date": run.as_of_date,
+        "portfolio_generated_at": portfolio_generated_at,
         "asset_type": ASSET_TYPE_ETF,
         "items": items,
         "watch_only_items": watch_only_items[:10],

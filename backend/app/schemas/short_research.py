@@ -206,3 +206,8 @@ class ShortResearchObservationPortfolioOut(BaseModel):
     methodology: str = ""
     snapshot_id: int | None = None
     generated_at: datetime | None = None
+    data_as_of_time: datetime | None = None
+    quote_time: datetime | None = None
+    daily_signal_date: date | None = None
+    portfolio_generated_at: datetime | None = None
+    weight_fill_reason: str | None = None

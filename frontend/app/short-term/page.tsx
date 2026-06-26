@@ -428,12 +428,39 @@ function liveRankingQuote(item: RankedAssetItem) {
   return isLiveRankingItem(item) ? item.quote : null;
 }
 
-function dailyReferenceReason(reason: string | null | undefined, asOfDate: string | null | undefined) {
+function dailyReferenceParts(reason: string | null | undefined, asOfDate: string | null | undefined) {
   const normalized = (reason?.trim() || "暂无日线参考原因").replaceAll("今天", "该日");
-  if (!asOfDate) {
-    return normalized.replaceAll("该日", "最近日线");
+  const readable = asOfDate ? normalized : normalized.replaceAll("该日", "最近日线");
+  const clauses = readable
+    .split(/[，。；]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const parts: Array<{ label: string; value: string }> = [
+    { label: "参考日", value: asOfDate ? formatDate(asOfDate) : "最近日线" },
+  ];
+  for (const clause of clauses) {
+    if (clause.includes("近5/20/60") || clause.includes("近 5 / 20 / 60")) {
+      parts.push({ label: "趋势", value: clause });
+    } else if (clause.includes("该日") || clause.includes("最近日线")) {
+      parts.push({ label: "当日涨跌", value: clause });
+    } else if (clause.includes("10日线") || clause.includes("均线")) {
+      parts.push({ label: "均线位置", value: clause });
+    } else if (clause.includes("趋势") || clause.includes("破坏")) {
+      parts.push({ label: "结论", value: clause });
+    } else {
+      parts.push({ label: "补充", value: clause });
+    }
   }
-  return `日线参考日 ${formatDate(asOfDate)}：${normalized}`;
+  if (!parts.some((part) => part.label === "结论")) {
+    parts.push({ label: "结论", value: "日线只作背景，需结合最新盘中走势。" });
+  }
+  return parts;
+}
+
+function dailyReferenceReason(reason: string | null | undefined, asOfDate: string | null | undefined) {
+  return dailyReferenceParts(reason, asOfDate)
+    .map((part) => `${part.label}：${part.value}`)
+    .join("；");
 }
 function itemEntryTimingDisplay(item: RankedAssetItem, marketStatus?: string | null) {
   if (!isLiveRankingItem(item)) {
@@ -1488,6 +1515,7 @@ function ShortTermClient() {
           title: "日线买点参考",
           label: selectedLiveItem.daily_entry_timing_label,
           reason: dailyReferenceReason(selectedLiveItem.daily_entry_timing_reason, etfLiveData?.signal_as_of_date),
+          parts: dailyReferenceParts(selectedLiveItem.daily_entry_timing_reason, etfLiveData?.signal_as_of_date),
         }
       : null;
   const selectedAssetMetrics = selectedAsset?.metrics ?? {};
@@ -1584,29 +1612,93 @@ function ShortTermClient() {
           trendWeakening
         }
       : null;
+    const selectedLivePrice = selectedLiveQuote?.latest_price;
+    const quoteStatus = !selectedLiveQuote
+      ? "等待盘中行情"
+      : etfLiveData?.market_status !== "open"
+      ? "休市，使用最近公开行情"
+      : selectedLiveQuote.is_stale
+      ? "行情滞后，仅网页参考"
+      : selectedLiveQuote.decision_eligible
+      ? "新鲜盘中行情"
+      : "仅网页参考";
+    const intradayChangeValue = selectedLiveQuote?.change_percent;
+    const hasLargeIntradayDrop = assetType === "etf" && typeof intradayChangeValue === "number" && intradayChangeValue <= -3;
+    const headlinePrice =
+      assetType === "etf"
+        ? selectedLivePrice === null || selectedLivePrice === undefined
+          ? "暂无"
+          : selectedLivePrice.toFixed(4)
+        : selectedAsset.latest_value === null
+        ? "暂无"
+        : selectedAsset.latest_value.toFixed(4);
 
     return (
       <div className="mt-5 rounded-[10px] border border-ink/10 bg-white p-4">
         <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">观察与持仓摘要</p>
+        <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="rounded-[8px] border border-ink/10 bg-paper px-3 py-2">
+            <p className="text-xs text-ink/45">{assetType === "etf" ? "盘中/最近价" : "最新净值"}</p>
+            <p className="mt-1 text-base font-semibold text-ink">{headlinePrice}</p>
+          </div>
+          <div className="rounded-[8px] border border-ink/10 bg-paper px-3 py-2">
+            <p className="text-xs text-ink/45">{assetType === "etf" ? "盘中涨跌" : "最新日涨跌"}</p>
+            <p className="mt-1 text-base font-semibold text-ink">
+              {assetType === "etf" ? selectedIntradayChange.value : percentMetric(selectedAssetMetrics, "today_return_pct")}
+            </p>
+          </div>
+          <div className="rounded-[8px] border border-ink/10 bg-paper px-3 py-2">
+            <p className="text-xs text-ink/45">行情时间</p>
+            <p className="mt-1 text-sm font-semibold text-ink">{assetType === "etf" ? selectedIntradayChange.time : formatDate(selectedAsset.latest_date)}</p>
+          </div>
+          <div className="rounded-[8px] border border-ink/10 bg-paper px-3 py-2">
+            <p className="text-xs text-ink/45">数据状态</p>
+            <p className="mt-1 text-sm font-semibold text-ink">{assetType === "etf" ? quoteStatus : "公开净值"}</p>
+          </div>
+        </div>
+
+        {hasLargeIntradayDrop ? (
+          <div className="mt-3 rounded-[8px] border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-800">
+            盘中回撤较大：当前盘中涨跌 {formatPercent(intradayChangeValue)}，请优先看盘中风险，不要只看昨日日线趋势。
+          </div>
+        ) : null}
+
+        <div className="mt-3 grid gap-3 md:grid-cols-3">
+          <div className="rounded-[8px] border border-ink/10 p-3">
+            <p className="text-xs font-semibold text-accent">买入观察</p>
+            <p className="mt-2 text-base font-semibold text-ink">{selectedAsset.conclusion}</p>
+            <p className="mt-1 text-sm leading-6 text-ink/60">表示是否值得放入观察清单，不等于现在必须买入。</p>
+          </div>
+          <div className="rounded-[8px] border border-ink/10 p-3">
+            <p className="text-xs font-semibold text-accent">{selectedEntryTiming.title}</p>
+            <p className="mt-2 text-base font-semibold text-ink">{selectedEntryTiming.label}</p>
+            <p className="mt-1 text-sm leading-6 text-ink/60">{selectedEntryTiming.reason}</p>
+          </div>
+          <div className="rounded-[8px] border border-ink/10 p-3">
+            <p className="text-xs font-semibold text-accent">持仓处理</p>
+            <p className="mt-2 text-base font-semibold text-ink">{selectedHoldingDecision}</p>
+            <p className="mt-1 text-sm leading-6 text-ink/60">{selectedLatestReason}</p>
+          </div>
+        </div>
+
+        {selectedDailyEntryTiming ? (
+          <div className="mt-3 rounded-[8px] border border-ink/10 bg-paper p-3">
+            <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+              <p className="text-xs font-semibold text-accent">日线参考</p>
+              <span className="w-fit rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-ink/60">{selectedDailyEntryTiming.label}</span>
+            </div>
+            <div className="mt-2 grid gap-2 text-sm text-ink/70 md:grid-cols-2">
+              {selectedDailyEntryTiming.parts.map((part) => (
+                <div key={`${part.label}-${part.value}`} className="rounded-[8px] bg-white px-3 py-2">
+                  <span className="text-ink/45">{part.label}：</span>
+                  <span className="font-medium text-ink/75">{part.value}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
         <div className="mt-3 grid gap-2 text-sm text-ink/70 md:grid-cols-2">
-          <span>买入观察状态：{selectedAsset.conclusion}</span>
-          <span>{selectedEntryTiming.title}：{selectedEntryTiming.label}</span>
-          <span className="md:col-span-2">买点原因：{selectedEntryTiming.reason}</span>
-          {selectedDailyEntryTiming ? (
-            <>
-              <span>日线买点参考：{selectedDailyEntryTiming.label}</span>
-              <span className="md:col-span-2">日线参考原因：{selectedDailyEntryTiming.reason}</span>
-            </>
-          ) : null}
-          <span>持仓状态：{selectedHoldingStatus}</span>
-          {assetType === "etf" ? (
-            <>
-              <span>盘中涨跌：{selectedIntradayChange.value}</span>
-              <span>行情时间：{selectedIntradayChange.time}</span>
-            </>
-          ) : (
-            <span>最新日涨跌：{percentMetric(selectedAssetMetrics, "today_return_pct")}</span>
-          )}
           <span>近5日涨跌：{percentMetric(selectedAssetMetrics, "return_5d")}</span>
           <span>近20日涨跌：{percentMetric(selectedAssetMetrics, "return_20d")}</span>
           <span>近60日涨跌：{percentMetric(selectedAssetMetrics, "return_60d")}</span>
@@ -1614,8 +1706,7 @@ function ShortTermClient() {
           <span>波动（20日）：{percentMetric(selectedAssetMetrics, "volatility_20d")}</span>
           <span>趋势强度：{scoreOrWaiting(selectedAssetTrendScore)}</span>
           <span>数据来源：{selectedAssetSource}</span>
-          <span>持仓处理状态：{selectedHoldingDecision}</span>
-          <span>最新原因：{selectedLatestReason}</span>
+          <span>持仓状态：{selectedHoldingStatus}</span>
         </div>
         {assetType === "etf" ? (
           <div className="mt-3 rounded-[8px] bg-paper px-3 py-2 text-xs leading-5 text-ink/60">
