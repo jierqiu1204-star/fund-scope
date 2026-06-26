@@ -15,6 +15,9 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy import (
+    Index as SaIndex,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -296,6 +299,10 @@ class EtfDataHealth(Base):
 
 class EtfIntradayQuote(Base):
     __tablename__ = "etf_intraday_quotes"
+    __table_args__ = (
+        SaIndex("uq_etf_intraday_quote_code_time", "etf_code", "quote_time", unique=True),
+        SaIndex("ix_etf_intraday_quotes_trade_date", "trade_date"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     etf_code: Mapped[str] = mapped_column(ForeignKey("tradable_etfs.code", ondelete="CASCADE"))
@@ -313,6 +320,30 @@ class EtfIntradayQuote(Base):
     freshness_status: Mapped[str] = mapped_column(String(32), default="fresh")
     raw_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class EtfIntradayLatestQuote(Base):
+    __tablename__ = "etf_intraday_latest_quotes"
+    __table_args__ = (SaIndex("ix_etf_intraday_latest_quotes_quote_time", "quote_time"),)
+
+    etf_code: Mapped[str] = mapped_column(
+        ForeignKey("tradable_etfs.code", ondelete="CASCADE"), primary_key=True
+    )
+    quote_time: Mapped[datetime] = mapped_column(DateTime)
+    trade_date: Mapped[date] = mapped_column(Date)
+    latest_price: Mapped[float] = mapped_column(Float)
+    change_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+    turnover: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bid_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ask_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    iopv: Mapped[float | None] = mapped_column(Float, nullable=True)
+    premium_discount_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source: Mapped[str] = mapped_column(String(64), default="akshare")
+    freshness_status: Mapped[str] = mapped_column(String(32), default="fresh")
+    raw_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
 class EtfIntradayDailySummary(Base):
@@ -1029,3 +1060,5 @@ class JobRun(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     details_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+

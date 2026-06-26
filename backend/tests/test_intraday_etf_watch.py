@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 
 from app.models.entities import (
     EtfIntradayDailySummary,
+    EtfIntradayLatestQuote,
     EtfIntradayQuote,
     EtfPriceHistory,
     ShortResearchSignalItem,
@@ -27,12 +28,15 @@ from app.services.intraday_etf.service import (
     CONSENSUS_STALE,
     MarketState,
     ProviderQuoteResult,
+    WatchItem,
+    WatchlistResult,
     _fetch_eastmoney_provider,
     build_watchlist,
     current_market_state,
     is_quote_stale,
     latest_quotes_by_code,
     normalize_spot_record,
+    persist_quotes,
     select_consensus_quotes,
     summarize_and_cleanup_intraday_quotes,
 )
@@ -1154,6 +1158,67 @@ async def test_intraday_provider_failure_falls_back_to_cached_quote(app, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_persist_quotes_writes_latest_snapshot_and_dedupes_history(app) -> None:
+    async with app.state.db.session() as session:
+        session.add(_etf("510001"))
+        await session.flush()
+        watchlist = WatchlistResult(
+            items=[WatchItem(etf_code="510001")],
+            signal_run_id=None,
+            signal_as_of_date=None,
+            signal_status="ready",
+            message="test",
+        )
+        first = _normalized_provider_quote("510001", 1.0, "akshare", datetime(2026, 6, 18, 9, 31))
+        second = _normalized_provider_quote("510001", 1.2, "akshare", datetime(2026, 6, 18, 9, 32))
+
+        assert await persist_quotes(session, watchlist, {"510001": first}) == 1
+        assert await persist_quotes(session, watchlist, {"510001": second}) == 1
+        assert await persist_quotes(session, watchlist, {"510001": second}) == 1
+
+        latest_count = await session.scalar(select(func.count()).select_from(EtfIntradayLatestQuote))
+        history_count = await session.scalar(select(func.count()).select_from(EtfIntradayQuote))
+        latest = await session.get(EtfIntradayLatestQuote, "510001")
+
+    assert latest_count == 1
+    assert history_count == 2
+    assert latest is not None
+    assert latest.latest_price == 1.2
+    assert latest.quote_time == datetime(2026, 6, 18, 9, 32)
+
+
+@pytest.mark.asyncio
+async def test_latest_quotes_by_code_prefers_latest_snapshot(app) -> None:
+    async with app.state.db.session() as session:
+        session.add(_etf("510001"))
+        await session.flush()
+        session.add(
+            EtfIntradayQuote(
+                etf_code="510001",
+                quote_time=datetime(2026, 6, 18, 9, 35),
+                trade_date=date(2026, 6, 18),
+                latest_price=1.1,
+            )
+        )
+        session.add(
+            EtfIntradayLatestQuote(
+                etf_code="510001",
+                quote_time=datetime(2026, 6, 18, 9, 34),
+                trade_date=date(2026, 6, 18),
+                latest_price=1.3,
+                source="snapshot",
+                freshness_status="fresh",
+                raw_json={},
+            )
+        )
+        await session.commit()
+
+        quotes = await latest_quotes_by_code(session, ["510001"])
+
+    assert quotes["510001"].latest_price == 1.3
+    assert quotes["510001"].source == "snapshot"
+
+@pytest.mark.asyncio
 async def test_latest_quotes_by_code_returns_one_latest_quote_per_etf(app) -> None:
     async with app.state.db.session() as session:
         session.add_all([_etf("510001"), _etf("510002")])
@@ -1374,4 +1439,6 @@ async def test_diverged_quote_does_not_drive_live_ranking_or_tracked_email(clien
     if alert is not None:
         assert alert.email_status == "skipped"
     assert sent == []
+
+
 

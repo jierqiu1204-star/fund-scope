@@ -10,17 +10,20 @@ from zoneinfo import ZoneInfo
 import akshare as ak
 import httpx
 from sqlalchemy import delete, func, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.market_data import RELIABILITY_STALE, quote_reliability_from_consensus
 from app.defaults.short_research import ASSET_TYPE_ETF
 from app.models.entities import (
     EtfIntradayDailySummary,
+    EtfIntradayLatestQuote,
     EtfIntradayQuote,
     IntradayEtfWatchRun,
     ShortResearchSignalItem,
     TrackedPosition,
     TradableEtf,
+    utcnow,
 )
 from app.schemas.etf_quotes import (
     EtfIntradayQuoteOut,
@@ -621,7 +624,10 @@ async def latest_intraday_quote(session: AsyncSession, etf_code: str) -> EtfIntr
     )
 
 
-async def latest_quotes_by_code(session: AsyncSession, codes: list[str]) -> dict[str, EtfIntradayQuote]:
+async def _latest_historical_quotes_by_code(
+    session: AsyncSession,
+    codes: list[str],
+) -> dict[str, EtfIntradayQuote]:
     unique_codes = list(dict.fromkeys(code for code in codes if code))
     if not unique_codes:
         return {}
@@ -668,6 +674,27 @@ async def latest_quotes_by_code(session: AsyncSession, codes: list[str]) -> dict
         )
     ).all()
     return {row.etf_code: row for row in rows}
+
+
+async def latest_quotes_by_code(
+    session: AsyncSession,
+    codes: list[str],
+) -> dict[str, EtfIntradayLatestQuote | EtfIntradayQuote]:
+    unique_codes = list(dict.fromkeys(code for code in codes if code))
+    if not unique_codes:
+        return {}
+
+    latest_rows = (
+        await session.scalars(
+            select(EtfIntradayLatestQuote).where(EtfIntradayLatestQuote.etf_code.in_(unique_codes))
+        )
+    ).all()
+    result: dict[str, EtfIntradayLatestQuote | EtfIntradayQuote] = {row.etf_code: row for row in latest_rows}
+    missing_codes = [code for code in unique_codes if code not in result]
+    if missing_codes:
+        result.update(await _latest_historical_quotes_by_code(session, missing_codes))
+    return result
+
 
 async def latest_watch_run(session: AsyncSession) -> IntradayEtfWatchRun | None:
     return cast(
@@ -969,59 +996,127 @@ def watch_run_out(row: IntradayEtfWatchRun) -> IntradayEtfWatchRunOut:
     )
 
 
+_QUOTE_DB_FIELDS = (
+    "etf_code",
+    "quote_time",
+    "trade_date",
+    "latest_price",
+    "change_percent",
+    "volume",
+    "turnover",
+    "bid_price",
+    "ask_price",
+    "iopv",
+    "premium_discount_pct",
+    "source",
+    "freshness_status",
+    "raw_json",
+)
+
+
+def _quote_freshness_status(quote: NormalizedQuote) -> str:
+    if quote.raw.get("consensus_status") == CONSENSUS_STALE:
+        return "stale"
+    return "fresh" if quote.raw.get("decision_eligible", True) else "display_only"
+
+
+def _quote_record(quote: NormalizedQuote) -> dict[str, Any]:
+    return {
+        "etf_code": quote.etf_code,
+        "quote_time": quote.quote_time,
+        "trade_date": quote.trade_date,
+        "latest_price": quote.latest_price,
+        "change_percent": quote.change_percent,
+        "volume": quote.volume,
+        "turnover": quote.turnover,
+        "bid_price": quote.bid_price,
+        "ask_price": quote.ask_price,
+        "iopv": quote.iopv,
+        "premium_discount_pct": quote.premium_discount_pct,
+        "source": quote.source,
+        "freshness_status": _quote_freshness_status(quote),
+        "raw_json": quote.raw,
+    }
+
+
+def _apply_quote_record(row: EtfIntradayQuote | EtfIntradayLatestQuote, record: dict[str, Any]) -> None:
+    for field_name in _QUOTE_DB_FIELDS:
+        setattr(row, field_name, record[field_name])
+
+
+async def _persist_quotes_postgresql(session: AsyncSession, records: list[dict[str, Any]]) -> None:
+    now = utcnow()
+    history_rows = [{**record, "created_at": now} for record in records]
+    latest_rows = [{**record, "created_at": now, "updated_at": now} for record in records]
+
+    history_insert = pg_insert(EtfIntradayQuote).values(history_rows)
+    history_update = {
+        field_name: getattr(history_insert.excluded, field_name)
+        for field_name in _QUOTE_DB_FIELDS
+        if field_name not in {"etf_code", "quote_time"}
+    }
+    await session.execute(
+        history_insert.on_conflict_do_update(
+            index_elements=["etf_code", "quote_time"],
+            set_=history_update,
+        )
+    )
+
+    latest_insert = pg_insert(EtfIntradayLatestQuote).values(latest_rows)
+    latest_update = {
+        field_name: getattr(latest_insert.excluded, field_name)
+        for field_name in _QUOTE_DB_FIELDS
+        if field_name != "etf_code"
+    }
+    latest_update["updated_at"] = now
+    await session.execute(
+        latest_insert.on_conflict_do_update(
+            index_elements=["etf_code"],
+            set_=latest_update,
+        )
+    )
+
+
+async def _persist_quotes_row_by_row(session: AsyncSession, records: list[dict[str, Any]]) -> None:
+    for record in records:
+        existing = await session.scalar(
+            select(EtfIntradayQuote).where(
+                EtfIntradayQuote.etf_code == record["etf_code"],
+                EtfIntradayQuote.quote_time == record["quote_time"],
+            )
+        )
+        if existing is None:
+            session.add(EtfIntradayQuote(**record))
+        else:
+            _apply_quote_record(existing, record)
+
+        latest = await session.get(EtfIntradayLatestQuote, record["etf_code"])
+        if latest is None:
+            session.add(EtfIntradayLatestQuote(**record))
+        elif record["quote_time"] >= latest.quote_time:
+            _apply_quote_record(latest, record)
+
+
 async def persist_quotes(
     session: AsyncSession,
     watchlist: WatchlistResult,
     quotes: dict[str, NormalizedQuote],
 ) -> int:
-    updated = 0
+    records: list[dict[str, Any]] = []
     for item in watchlist.items:
         quote = quotes.get(item.etf_code)
-        if quote is None:
-            continue
-        freshness_status = "fresh" if quote.raw.get("decision_eligible", True) else "display_only"
-        if quote.raw.get("consensus_status") == CONSENSUS_STALE:
-            freshness_status = "stale"
-        existing = await session.scalar(
-            select(EtfIntradayQuote).where(
-                EtfIntradayQuote.etf_code == quote.etf_code,
-                EtfIntradayQuote.quote_time == quote.quote_time,
-            )
-        )
-        if existing is None:
-            session.add(
-                EtfIntradayQuote(
-                    etf_code=quote.etf_code,
-                    quote_time=quote.quote_time,
-                    trade_date=quote.trade_date,
-                    latest_price=quote.latest_price,
-                    change_percent=quote.change_percent,
-                    volume=quote.volume,
-                    turnover=quote.turnover,
-                    bid_price=quote.bid_price,
-                    ask_price=quote.ask_price,
-                    iopv=quote.iopv,
-                    premium_discount_pct=quote.premium_discount_pct,
-                    source=quote.source,
-                    freshness_status=freshness_status,
-                    raw_json=quote.raw,
-                )
-            )
-        else:
-            existing.latest_price = quote.latest_price
-            existing.change_percent = quote.change_percent
-            existing.volume = quote.volume
-            existing.turnover = quote.turnover
-            existing.bid_price = quote.bid_price
-            existing.ask_price = quote.ask_price
-            existing.iopv = quote.iopv
-            existing.premium_discount_pct = quote.premium_discount_pct
-            existing.source = quote.source
-            existing.raw_json = quote.raw
-            existing.freshness_status = freshness_status
-        updated += 1
+        if quote is not None:
+            records.append(_quote_record(quote))
+    if not records:
+        await session.commit()
+        return 0
+
+    if session.get_bind().dialect.name == "postgresql":
+        await _persist_quotes_postgresql(session, records)
+    else:
+        await _persist_quotes_row_by_row(session, records)
     await session.commit()
-    return updated
+    return len(records)
 
 
 async def summarize_and_cleanup_intraday_quotes(
@@ -1153,4 +1248,6 @@ async def watch_status(session: AsyncSession) -> IntradayEtfWatchStatusOut:
             for item in watchlist.items
         ],
     )
+
+
 
