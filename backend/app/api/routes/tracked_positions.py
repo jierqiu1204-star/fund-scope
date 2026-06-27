@@ -38,6 +38,7 @@ from app.services.tracked_positions.service import (
     latest_signal_contexts,
     legacy_alert_audit_out,
     position_analysis,
+    position_sizing_recommendation,
     recalculate_entry,
     recent_intraday_alerts_for_position,
     recent_intraday_alerts_for_positions,
@@ -51,6 +52,7 @@ async def _position_out(
     session: AsyncSession,
     row: TrackedPosition,
     *,
+    user: User,
     signal_context: SignalContext | None = None,
     latest_alert: TrackedPositionAlert | None = None,
     latest_alert_loaded: bool = False,
@@ -73,6 +75,21 @@ async def _position_out(
         recent_intraday_alerts = []
     analysis = await position_analysis(session, row, item=item)
     cost_basis, cost_basis_source = cost_basis_for_position(row)
+    snapshot = await current_snapshot(
+        session,
+        row,
+        item=item,
+        report=report,
+        signal_context_loaded=signal_context_loaded,
+    )
+    sizing = await position_sizing_recommendation(
+        session,
+        user,
+        row,
+        snapshot,
+        analysis.exit_signal,
+        trend_weakening=bool(analysis.technical_metrics.get('trend_weakening')),
+    )
     return TrackedPositionOut(
         id=row.id,
         asset_type=row.asset_type,
@@ -93,14 +110,16 @@ async def _position_out(
         note=row.note,
         created_at=row.created_at,
         updated_at=row.updated_at,
-        current_snapshot=await current_snapshot(
-            session,
-            row,
-            item=item,
-            report=report,
-            signal_context_loaded=signal_context_loaded,
-        ),
+        current_snapshot=snapshot,
         exit_signal=analysis.exit_signal,
+        position_action=sizing.action,
+        recommended_action_label=sizing.label,
+        current_market_value=sizing.current_market_value,
+        current_account_weight=sizing.current_account_weight,
+        target_account_weight=sizing.target_account_weight,
+        recommended_trade_amount=sizing.recommended_trade_amount,
+        recommended_trade_shares=sizing.recommended_trade_shares,
+        position_sizing_reason=sizing.reason,
         max_profit_pct=analysis.max_profit_pct,
         profit_giveback_pct=analysis.profit_giveback_pct,
         holding_days=analysis.holding_days,
@@ -112,8 +131,8 @@ async def _position_out(
     )
 
 
-async def _position_detail_out(session: AsyncSession, row: TrackedPosition) -> TrackedPositionDetailOut:
-    base = await _position_out(session, row)
+async def _position_detail_out(session: AsyncSession, row: TrackedPosition, *, user: User) -> TrackedPositionDetailOut:
+    base = await _position_out(session, row, user=user)
     alerts = (
         await session.scalars(
             select(TrackedPositionAlert)
@@ -159,6 +178,7 @@ async def list_tracked_positions(
             await _position_out(
                 session,
                 row,
+                user=user,
                 signal_context=signal_context_by_id.get(row.id),
                 latest_alert=latest_alert_by_id.get(row.id),
                 latest_alert_loaded=True,
@@ -195,7 +215,7 @@ async def create_tracked_position(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return await _position_out(session, row)
+    return await _position_out(session, row, user=user)
 
 
 @router.get("/{position_id}/audit", response_model=TrackedPositionAlertAuditListOut)
@@ -242,7 +262,7 @@ async def get_tracked_position(
     row = await session.get(TrackedPosition, position_id)
     if row is None or row.user_id != user.id:
         raise HTTPException(status_code=404, detail="未找到这笔追踪")
-    return await _position_detail_out(session, row)
+    return await _position_detail_out(session, row, user=user)
 
 
 @router.patch("/{position_id}", response_model=TrackedPositionOut)
@@ -288,7 +308,7 @@ async def update_tracked_position(
     row.updated_at = utcnow()
     await session.commit()
     await session.refresh(row)
-    return await _position_out(session, row)
+    return await _position_out(session, row, user=user)
 
 
 @router.post("/{position_id}/close", response_model=TrackedPositionOut)
@@ -307,4 +327,4 @@ async def close_tracked_position(
     row.updated_at = utcnow()
     await session.commit()
     await session.refresh(row)
-    return await _position_out(session, row)
+    return await _position_out(session, row, user=user)

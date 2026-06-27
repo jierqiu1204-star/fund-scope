@@ -18,6 +18,17 @@
   <li>估算盈亏：{{ estimated_pnl or "暂无" }} 元{% if estimated_pnl_pct is not none %}（{{ estimated_pnl_pct }}%）{% endif %}</li>
 </ul>
 
+{% if position_sizing %}
+<h2>建议处理</h2>
+<p class="muted">
+  {{ position_sizing.recommended_action_label or "继续观察" }}。
+  {% if position_sizing.recommended_trade_amount %}
+  参考金额：{{ position_sizing.recommended_trade_amount }} 元；参考份额：{{ position_sizing.recommended_trade_shares or "暂无" }} 份。
+  {% endif %}
+  {{ position_sizing.position_sizing_reason or "仓位建议基于你的 ETF 账户资金配置和当前公开价格估算。" }}
+</p>
+{% endif %}
+
 <h2>为什么提醒</h2>
 <p class="muted">当前研究标签：{{ current_label }}；保守动作：{{ trigger_label }}。</p>
 <ul>

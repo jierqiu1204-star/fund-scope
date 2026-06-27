@@ -72,6 +72,7 @@ CONSENSUS_DIVERGED = "diverged"
 CONSENSUS_STALE = "stale"
 CONSENSUS_UNAVAILABLE = "unavailable"
 DISPLAY_ONLY_CONSENSUS = {CONSENSUS_DIVERGED, CONSENSUS_STALE, CONSENSUS_UNAVAILABLE}
+QuoteRow = EtfIntradayQuote | EtfIntradayLatestQuote
 
 
 @dataclass(frozen=True)
@@ -247,25 +248,25 @@ def _parse_quote_time(record: dict[str, Any], fallback: datetime | None = None) 
     return quote_time, True
 
 
-def _quote_raw(quote: EtfIntradayQuote | None) -> dict[str, Any]:
+def _quote_raw(quote: QuoteRow | None) -> dict[str, Any]:
     return dict(quote.raw_json or {}) if quote is not None else {}
 
 
-def is_quote_time_fallback(quote: EtfIntradayQuote | None) -> bool:
+def is_quote_time_fallback(quote: QuoteRow | None) -> bool:
     return bool(quote is not None and _quote_raw(quote).get("quote_time_is_fallback"))
 
 
-def quote_consensus_status(quote: EtfIntradayQuote | None) -> str:
+def quote_consensus_status(quote: QuoteRow | None) -> str:
     if quote is None:
         return CONSENSUS_UNAVAILABLE
     return str(_quote_raw(quote).get("consensus_status") or CONSENSUS_SINGLE_PROVIDER)
 
 
-def quote_reliability(quote: EtfIntradayQuote | None) -> str:
+def quote_reliability(quote: QuoteRow | None) -> str:
     return quote_reliability_from_consensus(quote_consensus_status(quote))
 
 
-def quote_decision_eligible_flag(quote: EtfIntradayQuote | None) -> bool:
+def quote_decision_eligible_flag(quote: QuoteRow | None) -> bool:
     if quote is None:
         return False
     raw = _quote_raw(quote)
@@ -273,27 +274,27 @@ def quote_decision_eligible_flag(quote: EtfIntradayQuote | None) -> bool:
     return True if value is None else bool(value)
 
 
-def quote_provider_count(quote: EtfIntradayQuote | None) -> int:
+def quote_provider_count(quote: QuoteRow | None) -> int:
     raw = _quote_raw(quote)
     value = raw.get("provider_count")
     return int(value) if isinstance(value, int | float) else (1 if quote is not None else 0)
 
 
-def quote_fresh_provider_count(quote: EtfIntradayQuote | None) -> int:
+def quote_fresh_provider_count(quote: QuoteRow | None) -> int:
     raw = _quote_raw(quote)
     value = raw.get("fresh_provider_count")
     return int(value) if isinstance(value, int | float) else (1 if quote is not None and not is_quote_time_fallback(quote) else 0)
 
 
-def quote_price_diff_abs(quote: EtfIntradayQuote | None) -> float | None:
+def quote_price_diff_abs(quote: QuoteRow | None) -> float | None:
     return _float_or_none(_quote_raw(quote).get("price_diff_abs"))
 
 
-def quote_price_diff_pct(quote: EtfIntradayQuote | None) -> float | None:
+def quote_price_diff_pct(quote: QuoteRow | None) -> float | None:
     return _float_or_none(_quote_raw(quote).get("price_diff_pct"))
 
 
-def quote_decision_limitation_reason(quote: EtfIntradayQuote | None, now: datetime | None = None) -> str | None:
+def quote_decision_limitation_reason(quote: QuoteRow | None, now: datetime | None = None) -> str | None:
     if quote is None:
         return "暂无盘中行情。"
     raw = _quote_raw(quote)
@@ -314,7 +315,7 @@ def quote_decision_limitation_reason(quote: EtfIntradayQuote | None, now: dateti
     return None
 
 
-def is_fresh_decision_quote(quote: EtfIntradayQuote | None, now: datetime | None = None) -> bool:
+def is_fresh_decision_quote(quote: QuoteRow | None, now: datetime | None = None) -> bool:
     if quote is None:
         return False
     return bool(
@@ -613,7 +614,10 @@ async def fetch_spot_quotes(fetcher: Any | None = None) -> dict[str, NormalizedQ
     return (await fetch_spot_quotes_with_metadata(fetcher)).quotes
 
 
-async def latest_intraday_quote(session: AsyncSession, etf_code: str) -> EtfIntradayQuote | None:
+async def latest_intraday_quote(session: AsyncSession, etf_code: str) -> QuoteRow | None:
+    latest = await session.get(EtfIntradayLatestQuote, etf_code)
+    if latest is not None:
+        return latest
     return cast(
         EtfIntradayQuote | None,
         await session.scalar(
@@ -1073,6 +1077,7 @@ async def _persist_quotes_postgresql(session: AsyncSession, records: list[dict[s
         latest_insert.on_conflict_do_update(
             index_elements=["etf_code"],
             set_=latest_update,
+            where=latest_insert.excluded.quote_time >= EtfIntradayLatestQuote.quote_time,
         )
     )
 

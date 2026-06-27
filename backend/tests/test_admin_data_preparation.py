@@ -1,13 +1,21 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 import pytest
 from sqlalchemy import select
 
 from app.defaults.funds import DEFAULT_RESEARCH_FUNDS
-from app.models.entities import FundNavHistory, PaperPortfolio, StrategyDefinition
+from app.models.entities import (
+    EtfIntradayLatestQuote,
+    EtfIntradayQuote,
+    EtfPriceHistory,
+    FundNavHistory,
+    PaperPortfolio,
+    StrategyDefinition,
+    TradableEtf,
+)
 from app.services import jobs
 
 
@@ -52,6 +60,83 @@ async def test_admin_data_status_reports_nav_strategy_and_paper_counts(client, a
         "strategy_count": 1,
         "paper_portfolio_count": 1,
     }
+
+
+@pytest.mark.asyncio
+async def test_admin_etf_quote_diagnostics_reports_display_source(client, app) -> None:
+    async with app.state.db.session() as session:
+        session.add_all(
+            [
+                TradableEtf(
+                    code="513520",
+                    name="日经ETF",
+                    exchange="SH",
+                    theme_tags_json=["跨境"],
+                    trading_rule_label="T+1",
+                    asset_class="ETF",
+                    is_short_term_eligible=True,
+                    is_watchlist=True,
+                ),
+                TradableEtf(
+                    code="510300",
+                    name="沪深300ETF",
+                    exchange="SH",
+                    theme_tags_json=["宽基"],
+                    trading_rule_label="T+1",
+                    asset_class="ETF",
+                    is_short_term_eligible=True,
+                    is_watchlist=True,
+                ),
+            ]
+        )
+        session.add(
+            EtfIntradayQuote(
+                etf_code="513520",
+                quote_time=datetime(2026, 6, 25, 14, 59, 0),
+                trade_date=date(2026, 6, 25),
+                latest_price=2.50,
+                source="history",
+                freshness_status="fresh",
+                raw_json={},
+            )
+        )
+        session.add(
+            EtfIntradayLatestQuote(
+                etf_code="513520",
+                quote_time=datetime(2026, 6, 25, 14, 58, 0),
+                trade_date=date(2026, 6, 25),
+                latest_price=2.58,
+                source="snapshot",
+                freshness_status="fresh",
+                raw_json={},
+            )
+        )
+        session.add(
+            EtfPriceHistory(
+                etf_code="510300",
+                trade_date=date(2026, 6, 25),
+                open=4.0,
+                high=4.1,
+                low=3.9,
+                close=4.05,
+                volume=1000,
+                turnover=4050,
+                pct_change=1.2,
+            )
+        )
+        await session.commit()
+
+    response = await client.get("/api/admin/etf-quote-diagnostics?codes=513520&codes=510300")
+
+    assert response.status_code == 200
+    payload = response.json()
+    by_code = {item["code"]: item for item in payload["items"]}
+    assert by_code["513520"]["display_price"] == 2.58
+    assert by_code["513520"]["display_price_source"] == "latest_snapshot"
+    assert by_code["513520"]["latest_history"]["price"] == 2.5
+    assert by_code["510300"]["display_price"] == 4.05
+    assert by_code["510300"]["display_price_source"] == "daily_reference"
+    assert by_code["510300"]["email_eligible"] is False
 
 
 @pytest.mark.asyncio

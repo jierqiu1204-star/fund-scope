@@ -79,6 +79,8 @@ export type NotificationSettings = {
   reminder_day: number;
   reference_index_code: string | null;
   base_monthly_amount: number;
+  etf_trading_capital: number;
+  allow_full_exit: boolean;
   smtp_host: string | null;
   smtp_port: number | null;
   smtp_username: string | null;
@@ -776,6 +778,14 @@ export type TrackedPosition = {
   updated_at: string;
   current_snapshot: TrackedPositionSnapshot;
   exit_signal: TrackedPositionExitSignal;
+  position_action: string;
+  recommended_action_label: string;
+  current_market_value: number | null;
+  current_account_weight: number | null;
+  target_account_weight: number | null;
+  recommended_trade_amount: number | null;
+  recommended_trade_shares: number | null;
+  position_sizing_reason: string | null;
   max_profit_pct: number | null;
   profit_giveback_pct: number | null;
   holding_days: number | null;

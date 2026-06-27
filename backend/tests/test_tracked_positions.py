@@ -21,10 +21,96 @@ from app.models.entities import (
 from app.services.intraday_etf.service import ASIA_SHANGHAI
 from app.services.tracked_positions.jobs import daily_tracked_position_alerts_job
 from app.services.tracked_positions.service import (
+    ALERT_HARD_STOP,
+    ALERT_TAKE_PROFIT_WATCH,
+    ALERT_TRAILING_TAKE_PROFIT,
+    calculate_position_sizing,
     create_alert_if_needed,
     create_position,
     position_analysis,
 )
+
+
+def test_position_sizing_hard_stop_exits_when_allowed() -> None:
+    sizing = calculate_position_sizing(
+        asset_type="etf",
+        alert_type=ALERT_HARD_STOP,
+        current_market_value=3000.0,
+        current_price=2.0,
+        etf_trading_capital=10000.0,
+        allow_full_exit=True,
+    )
+
+    assert sizing.action == "exit"
+    assert sizing.current_account_weight == 0.3
+    assert sizing.target_account_weight == 0.0
+    assert sizing.recommended_trade_amount == 3000.0
+    assert sizing.recommended_trade_shares == 1500.0
+
+
+def test_position_sizing_trailing_take_profit_reduces_half() -> None:
+    sizing = calculate_position_sizing(
+        asset_type="etf",
+        alert_type=ALERT_TRAILING_TAKE_PROFIT,
+        current_market_value=3000.0,
+        current_price=2.0,
+        etf_trading_capital=10000.0,
+        allow_full_exit=True,
+    )
+
+    assert sizing.action == "reduce"
+    assert sizing.target_account_weight == 0.15
+    assert sizing.recommended_trade_amount == 1500.0
+    assert sizing.recommended_trade_shares == 750.0
+
+
+def test_position_sizing_take_profit_watch_trims_to_seventy_percent() -> None:
+    sizing = calculate_position_sizing(
+        asset_type="etf",
+        alert_type=ALERT_TAKE_PROFIT_WATCH,
+        current_market_value=3000.0,
+        current_price=2.0,
+        etf_trading_capital=10000.0,
+        allow_full_exit=True,
+    )
+
+    assert sizing.action == "trim"
+    assert sizing.target_account_weight == 0.21
+    assert sizing.recommended_trade_amount == 900.0
+    assert sizing.recommended_trade_shares == 450.0
+
+
+def test_position_sizing_add_uses_single_etf_cap() -> None:
+    sizing = calculate_position_sizing(
+        asset_type="etf",
+        alert_type=None,
+        current_market_value=2000.0,
+        current_price=2.0,
+        etf_trading_capital=10000.0,
+        allow_full_exit=True,
+        target_portfolio_weight=0.4,
+        entry_timing_label="健康回踩",
+    )
+
+    assert sizing.action == "add"
+    assert sizing.target_account_weight == 0.3
+    assert sizing.recommended_trade_amount == 1000.0
+    assert sizing.recommended_trade_shares == 500.0
+
+
+def test_position_sizing_missing_price_does_not_output_amount() -> None:
+    sizing = calculate_position_sizing(
+        asset_type="etf",
+        alert_type=ALERT_HARD_STOP,
+        current_market_value=3000.0,
+        current_price=None,
+        etf_trading_capital=10000.0,
+        allow_full_exit=True,
+    )
+
+    assert sizing.action == "hold"
+    assert sizing.recommended_trade_amount is None
+    assert sizing.recommended_trade_shares is None
 
 
 async def _seed_nav(app, fund_code: str = "270042") -> None:
@@ -1004,4 +1090,3 @@ async def test_tracked_position_audit_endpoint_returns_owner_events(client, app)
     assert item["quote_freshness"] == "stale_quote"
     assert item["threshold_context"]["hard_stop_pct"] == -4.5
     assert "不发送" in item["audit_summary"]
-

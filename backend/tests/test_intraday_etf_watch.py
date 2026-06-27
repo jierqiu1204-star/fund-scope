@@ -34,6 +34,7 @@ from app.services.intraday_etf.service import (
     build_watchlist,
     current_market_state,
     is_quote_stale,
+    latest_intraday_quote,
     latest_quotes_by_code,
     normalize_spot_record,
     persist_quotes,
@@ -1217,6 +1218,43 @@ async def test_latest_quotes_by_code_prefers_latest_snapshot(app) -> None:
 
     assert quotes["510001"].latest_price == 1.3
     assert quotes["510001"].source == "snapshot"
+
+
+@pytest.mark.asyncio
+async def test_latest_intraday_quote_prefers_latest_snapshot_for_tracking_consistency(app) -> None:
+    async with app.state.db.session() as session:
+        session.add(_etf("510001"))
+        await session.flush()
+        session.add(
+            EtfIntradayQuote(
+                etf_code="510001",
+                quote_time=datetime(2026, 6, 18, 9, 35),
+                trade_date=date(2026, 6, 18),
+                latest_price=1.1,
+                source="history",
+                freshness_status="fresh",
+                raw_json={},
+            )
+        )
+        session.add(
+            EtfIntradayLatestQuote(
+                etf_code="510001",
+                quote_time=datetime(2026, 6, 18, 9, 34),
+                trade_date=date(2026, 6, 18),
+                latest_price=1.3,
+                source="snapshot",
+                freshness_status="fresh",
+                raw_json={},
+            )
+        )
+        await session.commit()
+
+        quote = await latest_intraday_quote(session, "510001")
+
+    assert quote is not None
+    assert quote.latest_price == 1.3
+    assert quote.source == "snapshot"
+
 
 @pytest.mark.asyncio
 async def test_latest_quotes_by_code_returns_one_latest_quote_per_etf(app) -> None:

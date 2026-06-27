@@ -134,6 +134,42 @@ async def test_post_close_etf_data_job_prefers_intraday_snapshot(monkeypatch) ->
 
 
 @pytest.mark.asyncio
+async def test_post_close_etf_data_job_falls_back_when_snapshot_is_partial(monkeypatch) -> None:
+    history_called = False
+
+    async def fake_snapshot(_session: object, **kwargs: Any) -> dict[str, Any]:
+        assert kwargs["trade_date"] == date.today()
+        return {
+            "etfs": 4,
+            "inserted": 1,
+            "updated": 0,
+            "missing": 1,
+            "skipped_too_early": 2,
+            "quote_rows": 6,
+            "needs_history_provider": True,
+        }
+
+    async def fake_sync_short_research_data(_session: object, **kwargs: Any) -> dict[str, Any]:
+        nonlocal history_called
+        history_called = True
+        assert kwargs["asset_type"] == ASSET_TYPE_ETF
+        assert kwargs["sync_all_etfs"] is True
+        return {"asset_count": 4, "failed": 0, "asset_type": ASSET_TYPE_ETF}
+
+    monkeypatch.setattr(jobs_module, "sync_etf_price_history_from_intraday_snapshot", fake_snapshot)
+    monkeypatch.setattr(jobs_module, "sync_short_research_data", fake_sync_short_research_data)
+
+    result = await jobs_module.post_close_etf_data_job(object())  # type: ignore[arg-type]
+
+    assert history_called is True
+    assert result["asset_type"] == ASSET_TYPE_ETF
+    assert result["asset_count"] == 4
+    assert result["source"] == "intraday_snapshot_plus_history_provider"
+    assert result["snapshot"]["skipped_too_early"] == 2
+    assert result["history_provider"]["asset_type"] == ASSET_TYPE_ETF
+
+
+@pytest.mark.asyncio
 async def test_post_close_etf_data_job_falls_back_to_history_provider(monkeypatch) -> None:
     calls: list[str] = []
 

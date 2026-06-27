@@ -151,6 +151,14 @@ class TrackedPositionOut(BaseModel):
     updated_at: datetime
     current_snapshot: TrackedPositionSnapshot
     exit_signal: TrackedPositionExitSignal
+    position_action: str = 'hold'
+    recommended_action_label: str = '继续观察'
+    current_market_value: float | None = None
+    current_account_weight: float | None = None
+    target_account_weight: float | None = None
+    recommended_trade_amount: float | None = None
+    recommended_trade_shares: float | None = None
+    position_sizing_reason: str | None = None
     max_profit_pct: float | None = None
     profit_giveback_pct: float | None = None
     holding_days: int | None = None

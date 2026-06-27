@@ -40,6 +40,8 @@ class User(Base):
     reminder_day: Mapped[int] = mapped_column(Integer, default=1)
     reference_index_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
     base_monthly_amount: Mapped[float] = mapped_column(Float, default=0.0)
+    etf_trading_capital: Mapped[float] = mapped_column(Float, default=10000.0)
+    allow_full_exit: Mapped[bool] = mapped_column(Boolean, default=True)
     smtp_host: Mapped[str | None] = mapped_column(String(255), nullable=True)
     smtp_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
     smtp_username: Mapped[str | None] = mapped_column(String(255), nullable=True)

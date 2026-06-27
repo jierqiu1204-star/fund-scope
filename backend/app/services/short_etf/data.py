@@ -5,7 +5,7 @@ import json
 import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from math import sqrt
 from statistics import mean, pstdev
 from typing import Any, cast
@@ -40,6 +40,7 @@ DEFAULT_PROVIDER_RETRY_DELAY_SECONDS = 1.0
 
 INELIGIBLE_NAME_KEYWORDS = ("一年持有", "持有期", "定开", "封闭", "封闭期")
 PRICE_HISTORY_PROVIDER_NAMES = ("akshare", "efinance", "sina")
+CLOSE_SNAPSHOT_MIN_TIME = time(14, 55)
 
 PriceHistoryRows = list[dict[str, float | str]]
 PriceHistoryFetcher = Callable[[str, date, date], Awaitable[PriceHistoryRows]]
@@ -575,7 +576,15 @@ async def sync_etf_price_history_from_intraday_snapshot(
     etfs = await list_short_etfs(session, codes)
     target_codes = [etf.code for etf in etfs]
     if not target_codes:
-        return {"etfs": 0, "inserted": 0, "updated": 0, "missing": 0, "quote_rows": 0}
+        return {
+            "etfs": 0,
+            "inserted": 0,
+            "updated": 0,
+            "missing": 0,
+            "skipped_too_early": 0,
+            "quote_rows": 0,
+            "needs_history_provider": False,
+        }
 
     quote_rows = (
         await session.scalars(
@@ -598,15 +607,22 @@ async def sync_etf_price_history_from_intraday_snapshot(
     inserted = 0
     updated = 0
     missing = 0
+    skipped_too_early = 0
+    skipped_codes: list[str] = []
     changed_codes: list[str] = []
     for code in target_codes:
         quotes = grouped.get(code)
         if not quotes:
             missing += 1
+            skipped_codes.append(code)
             continue
 
         first_quote = quotes[0]
         last_quote = quotes[-1]
+        if last_quote.quote_time.time() < CLOSE_SNAPSHOT_MIN_TIME:
+            skipped_too_early += 1
+            skipped_codes.append(code)
+            continue
         latest_price = float(last_quote.latest_price)
         pct_change = last_quote.change_percent
         if pct_change is None:
@@ -658,8 +674,11 @@ async def sync_etf_price_history_from_intraday_snapshot(
         "inserted": inserted,
         "updated": updated,
         "missing": missing,
+        "skipped_too_early": skipped_too_early,
+        "skipped_codes": skipped_codes[:50],
         "quote_rows": len(quote_rows),
         "provider": "intraday_snapshot",
+        "needs_history_provider": bool(missing or skipped_too_early),
     }
 
 async def list_etf_data_health(session: AsyncSession) -> list[tuple[TradableEtf, EtfDataHealth | None, bool]]:

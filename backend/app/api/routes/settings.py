@@ -33,6 +33,8 @@ async def update_notification_settings(
     user.reminder_day = payload.reminder_day
     user.reference_index_code = payload.reference_index_code
     user.base_monthly_amount = payload.base_monthly_amount
+    user.etf_trading_capital = payload.etf_trading_capital
+    user.allow_full_exit = payload.allow_full_exit
     user.smtp_host = payload.smtp_host
     user.smtp_port = payload.smtp_port
     user.smtp_username = payload.smtp_username

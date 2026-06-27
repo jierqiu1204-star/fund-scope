@@ -1,17 +1,19 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select
 
 from app.models.entities import (
+    EtfIntradayQuote,
     EtfPriceHistory,
     ShortEtfPaperOrder,
     ShortEtfReliabilityEvaluation,
     ShortEtfSignalRun,
     TradableEtf,
 )
+from app.services.short_etf.data import sync_etf_price_history_from_intraday_snapshot
 
 
 async def _seed_etf(
@@ -110,6 +112,134 @@ async def test_short_etf_sync_uses_backup_provider_and_records_health(client, mo
     assert item["latest_price_date"] == "2026-01-02"
     assert item["consecutive_failures"] == 0
     assert item["last_error_message"] is None
+
+
+@pytest.mark.asyncio
+async def test_intraday_snapshot_before_close_is_not_promoted_to_daily_price(app) -> None:
+    async with app.state.db.session() as session:
+        session.add(
+            TradableEtf(
+                code="513520",
+                name="日经ETF",
+                exchange="SH",
+                theme_tags_json=["跨境"],
+                trading_rule_label="T+1",
+                asset_class="ETF",
+                is_short_term_eligible=True,
+                is_watchlist=True,
+            )
+        )
+        session.add_all(
+            [
+                EtfIntradayQuote(
+                    etf_code="513520",
+                    quote_time=datetime(2026, 6, 25, 11, 29, 0),
+                    trade_date=date(2026, 6, 25),
+                    latest_price=2.52,
+                    volume=1_000_000,
+                    turnover=2_520_000,
+                    change_percent=-1.0,
+                    source="test",
+                    freshness_status="fresh",
+                    raw_json={},
+                ),
+                EtfIntradayQuote(
+                    etf_code="513520",
+                    quote_time=datetime(2026, 6, 25, 13, 17, 58),
+                    trade_date=date(2026, 6, 25),
+                    latest_price=2.48,
+                    volume=1_200_000,
+                    turnover=2_976_000,
+                    change_percent=-2.5,
+                    source="test",
+                    freshness_status="fresh",
+                    raw_json={},
+                ),
+            ]
+        )
+        await session.commit()
+
+        result = await sync_etf_price_history_from_intraday_snapshot(
+            session,
+            trade_date=date(2026, 6, 25),
+            codes=["513520"],
+        )
+        daily = await session.scalar(
+            select(EtfPriceHistory).where(
+                EtfPriceHistory.etf_code == "513520",
+                EtfPriceHistory.trade_date == date(2026, 6, 25),
+            )
+        )
+
+    assert result["inserted"] == 0
+    assert result["updated"] == 0
+    assert result["skipped_too_early"] == 1
+    assert result["needs_history_provider"] is True
+    assert daily is None
+
+
+@pytest.mark.asyncio
+async def test_intraday_snapshot_near_close_can_be_promoted_to_daily_price(app) -> None:
+    async with app.state.db.session() as session:
+        session.add(
+            TradableEtf(
+                code="513520",
+                name="日经ETF",
+                exchange="SH",
+                theme_tags_json=["跨境"],
+                trading_rule_label="T+1",
+                asset_class="ETF",
+                is_short_term_eligible=True,
+                is_watchlist=True,
+            )
+        )
+        session.add_all(
+            [
+                EtfIntradayQuote(
+                    etf_code="513520",
+                    quote_time=datetime(2026, 6, 25, 9, 31, 0),
+                    trade_date=date(2026, 6, 25),
+                    latest_price=2.5,
+                    volume=500_000,
+                    turnover=1_250_000,
+                    change_percent=0.1,
+                    source="test",
+                    freshness_status="fresh",
+                    raw_json={},
+                ),
+                EtfIntradayQuote(
+                    etf_code="513520",
+                    quote_time=datetime(2026, 6, 25, 14, 59, 5),
+                    trade_date=date(2026, 6, 25),
+                    latest_price=2.58,
+                    volume=2_000_000,
+                    turnover=5_160_000,
+                    change_percent=3.1,
+                    source="test",
+                    freshness_status="fresh",
+                    raw_json={},
+                ),
+            ]
+        )
+        await session.commit()
+
+        result = await sync_etf_price_history_from_intraday_snapshot(
+            session,
+            trade_date=date(2026, 6, 25),
+            codes=["513520"],
+        )
+        daily = await session.scalar(
+            select(EtfPriceHistory).where(
+                EtfPriceHistory.etf_code == "513520",
+                EtfPriceHistory.trade_date == date(2026, 6, 25),
+            )
+        )
+
+    assert result["inserted"] == 1
+    assert result["skipped_too_early"] == 0
+    assert result["needs_history_provider"] is False
+    assert daily is not None
+    assert daily.close == 2.58
 
 
 @pytest.mark.asyncio

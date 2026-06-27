@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class NotificationSettingsRead(BaseModel):
@@ -8,6 +8,8 @@ class NotificationSettingsRead(BaseModel):
     reminder_day: int
     reference_index_code: str | None
     base_monthly_amount: float
+    etf_trading_capital: float
+    allow_full_exit: bool
     smtp_host: str | None
     smtp_port: int | None
     smtp_username: str | None
@@ -19,6 +21,8 @@ class NotificationSettingsUpdate(BaseModel):
     reminder_day: int
     reference_index_code: str
     base_monthly_amount: float
+    etf_trading_capital: float = Field(gt=0)
+    allow_full_exit: bool
     smtp_host: str
     smtp_port: int
     smtp_username: str

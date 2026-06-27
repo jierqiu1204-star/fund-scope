@@ -112,7 +112,7 @@ async def list_user_tracked_positions(
             .order_by(TrackedPosition.status.asc(), TrackedPosition.created_at.desc(), TrackedPosition.id.desc())
         )
     ).all()
-    return [await _position_out(session, row) for row in rows]
+    return [await _position_out(session, row, user=user) for row in rows]
 
 
 @router.get("/{user_id}/alerts", response_model=list[TrackedPositionAlertOut])

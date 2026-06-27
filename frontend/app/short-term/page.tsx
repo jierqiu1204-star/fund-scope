@@ -406,19 +406,23 @@ function intradayChangeDisplay(
   if (!quote) {
     return { value: "等待盘中行情", time: "暂无行情时间" };
   }
+  const changeValue =
+    quote.change_percent === null || quote.change_percent === undefined
+      ? null
+      : formatPercent(quote.change_percent);
   if (marketStatus && marketStatus !== "open") {
-    return { value: "休市，最近行情", time: formatDateTime(quote.quote_time) };
+    return { value: changeValue ? `${changeValue}（最近行情）` : "休市，最近行情", time: formatDateTime(quote.quote_time) };
   }
   if (!quote.decision_eligible) {
-    return { value: "仅网页参考", time: formatDateTime(quote.quote_time) };
+    return { value: changeValue ? `${changeValue}（仅网页参考）` : "仅网页参考", time: formatDateTime(quote.quote_time) };
   }
   if (quote.is_stale) {
-    return { value: "行情滞后", time: formatDateTime(quote.quote_time) };
+    return { value: changeValue ? `${changeValue}（行情滞后）` : "行情滞后", time: formatDateTime(quote.quote_time) };
   }
-  if (quote.change_percent === null || quote.change_percent === undefined) {
+  if (!changeValue) {
     return { value: "等待新鲜盘中行情", time: formatDateTime(quote.quote_time) };
   }
-  return { value: formatPercent(quote.change_percent), time: formatDateTime(quote.quote_time) };
+  return { value: changeValue, time: formatDateTime(quote.quote_time) };
 }
 function isLiveRankingResponse(value: RankedAssetResponse | undefined): value is IntradayEtfLiveRankingList {
   return Boolean(value && "signal_as_of_date" in value && "latest_run" in value);
@@ -2244,6 +2248,28 @@ function ShortTermClient() {
     );
   };
 
+  const renderPositionSizingRows = (item: TrackedPosition) => {
+    const tradeVerb = item.position_action === "add" ? "建议买入" : "建议卖出";
+    return (
+      <>
+        <span>
+          当前市值：{item.current_market_value === null ? "等待价格/份额" : formatCurrency(item.current_market_value)}
+        </span>
+        <span>
+          ETF账户占比：{item.current_account_weight === null ? "暂无" : (item.current_account_weight * 100).toFixed(1) + "%"}
+        </span>
+        <span>
+          目标占比：{item.target_account_weight === null ? "暂无" : (item.target_account_weight * 100).toFixed(1) + "%"}
+        </span>
+        <span>建议动作：{item.recommended_action_label}</span>
+        {item.recommended_trade_amount !== null ? (
+          <span>{tradeVerb}：{formatCurrency(item.recommended_trade_amount)}</span>
+        ) : null}
+        {item.recommended_trade_shares !== null ? <span>建议份额：约 {item.recommended_trade_shares.toFixed(0)} 份</span> : null}
+        {item.position_sizing_reason ? <span>仓位说明：{item.position_sizing_reason}</span> : null}
+      </>
+    );
+  };
   const renderMobileTrackingPanel = () => (
     <Panel className="rounded-[12px]">
       {activeTracked.length ? (
@@ -2265,6 +2291,7 @@ function ShortTermClient() {
               </div>
               <div className="mt-3 grid gap-1 text-sm text-ink/65 sm:grid-cols-2">
                 <span>盈亏: {pnlText(item)}</span>
+                {renderPositionSizingRows(item)}
                 <span>
                   持有天数: {item.holding_days === null ? "暂无" : `${item.holding_days} 天`}
                 </span>
@@ -2380,6 +2407,7 @@ function ShortTermClient() {
               <span>持有：{item.holding_days === null ? "等待数据" : `${item.holding_days} 天`}</span>
               <span>{item.confirmed_shares === null ? "估算份额" : "确认份额"}：{item.estimated_shares === null ? "等待价格" : item.estimated_shares.toFixed(2)}</span>
               <span className={pnlTone(item.current_snapshot.estimated_pnl)}>估算盈亏：{pnlText(item)}</span>
+              {renderPositionSizingRows(item)}
             </div>
 
             <div className={`mt-4 rounded-[8px] p-3 text-sm leading-6 ${exitSignalTone(item.exit_signal.level)}`}>
