@@ -242,13 +242,14 @@ function validationEvidenceText(asset: ShortResearchAsset | null | undefined) {
 function observationPortfolioText(asset: ShortResearchAsset | null | undefined) {
   const context = asset?.observation_portfolio;
   if (!context || !context.status) {
-    return "全仓 ETF 组合：暂无权重快照";
+    return "ETF 资金配置：暂无权重快照";
   }
-  if (context.status === "included") {
-    return context.weight_explanation ?? `全仓 ETF 组合：参考权重 ${formatPercent((context.target_weight ?? 0) * 100)}，仅作研究参考`;
+  if (context.status === "included" || context.status === "defensive") {
+    const label = context.status === "defensive" ? "防守仓位" : "进攻仓位";
+    return context.weight_explanation ?? `ETF 资金配置：${label}参考权重 ${formatPercent((context.target_weight ?? 0) * 100)}，仅作研究参考`;
   }
   const reason = context.exclusion_explanation || context.exclusion_reason || context.risk_reasons?.[0] || "未进入主观察组合";
-  return `全仓 ETF 组合：${context.status === "watch_only" ? "只观察不配权" : "未配权"}，${reason}`;
+  return `ETF 资金配置：${context.status === "watch_only" ? "只观察不配权" : "未配权"}，${reason}`;
 }
 
 function auditOutcomeLabel(outcome: string) {
@@ -3429,13 +3430,20 @@ function ShortTermClient() {
         <Panel className="rounded-[12px] bg-white/70">
           <details>
             <summary className="cursor-pointer text-lg font-semibold text-ink">
-              全仓 ETF 观察组合参考
+              ETF 资金配置参考
               <span className="ml-3 rounded-full bg-accentSoft/60 px-3 py-1 text-xs text-ink">
                 权重合计 {observationPortfolio.data ? formatPercent((observationPortfolio.data.weight_sum ?? 0) * 100) : "暂无"}
               </span>
+              <span className="ml-2 rounded-full bg-white px-3 py-1 text-xs text-ink/60">
+                {observationPortfolio.data?.portfolio_mode === "defensive"
+                  ? "防守优先"
+                  : observationPortfolio.data?.portfolio_mode === "cash_wait"
+                    ? "等待现金"
+                    : "进攻配置"}
+              </span>
             </summary>
             <p className="mt-2 text-sm leading-6 text-ink/60">
-              这里的全仓只指你放进证券账户、准备买 ETF 的这部分资金，不代表你的全部资产。主组合只保留短线观察且买点为健康回踩/趋势延续、数据可靠的 ETF；高位或冲高的 ETF 单独放入观察组。
+              这里的 100% 只指你放进证券账户、准备买 ETF 的这部分资金，不代表你的全部资产。系统会先找进攻仓位；大趋势不好时转向防守仓位；进攻和防守都不合格时保留等待资金。
             </p>
             <p className="mt-3 rounded-[8px] bg-paper px-4 py-3 text-xs leading-5 text-ink/55">
               {observationPortfolio.data?.methodology ?? "按买点、风险和数据可靠性筛选，再做分散约束，不做收益承诺。"}
@@ -3443,13 +3451,42 @@ function ShortTermClient() {
                 ? ` 单只 ETF 上限 ${formatPercent((observationPortfolio.data.single_weight_cap ?? 0) * 100)}，目标 ETF 资金投入 ${formatPercent((observationPortfolio.data.target_invested_weight ?? 1) * 100)}。`
                 : ""}
             </p>
-            {observationPortfolio.data?.unavailable_reason ? (
+            <div className="mt-4 grid gap-3 md:grid-cols-3">
+              <div className="rounded-[10px] border border-ink/10 bg-white px-4 py-3">
+                <p className="text-xs text-ink/45">进攻仓位</p>
+                <p className="mt-1 text-lg font-semibold text-ink">
+                  {formatPercent((observationPortfolio.data?.risk_exposure_weight ?? observationPortfolio.data?.weight_sum ?? 0) * 100)}
+                </p>
+              </div>
+              <div className="rounded-[10px] border border-ink/10 bg-white px-4 py-3">
+                <p className="text-xs text-ink/45">防守仓位</p>
+                <p className="mt-1 text-lg font-semibold text-ink">
+                  {formatPercent((observationPortfolio.data?.defensive_weight ?? 0) * 100)}
+                </p>
+              </div>
+              <div className="rounded-[10px] border border-ink/10 bg-white px-4 py-3">
+                <p className="text-xs text-ink/45">等待资金</p>
+                <p className="mt-1 text-lg font-semibold text-ink">
+                  {formatPercent((observationPortfolio.data?.cash_weight ?? 0) * 100)}
+                </p>
+              </div>
+            </div>
+            {observationPortfolio.data?.portfolio_mode === "defensive" ? (
+              <p className="mt-4 rounded-[10px] border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-800">
+                当前市场不适合全仓进攻，优先使用防守 ETF 做资金配置参考；这不是保本承诺，也不是自动交易。
+              </p>
+            ) : null}
+            {observationPortfolio.data?.portfolio_mode === "cash_wait" ? (
+              <p className="mt-4 rounded-[10px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                {observationPortfolio.data.cash_reason ?? observationPortfolio.data.unavailable_reason ?? "当前没有满足条件的进攻/防守 ETF，建议等待，不给买入权重。"}
+              </p>
+            ) : observationPortfolio.data?.unavailable_reason ? (
               <p className="mt-4 rounded-[10px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
                 {observationPortfolio.data.unavailable_reason}
               </p>
             ) : null}
             <div className="mt-5 flex items-center justify-between gap-3">
-              <p className="text-sm font-semibold text-ink">主组合权重</p>
+              <p className="text-sm font-semibold text-ink">进攻仓位</p>
               <span className="rounded-full bg-ink px-3 py-1 text-xs font-semibold text-white">
                 {observationPortfolio.data?.items.length ?? 0} 只
               </span>
@@ -3475,8 +3512,37 @@ function ShortTermClient() {
             </div>
             {!observationPortfolio.isLoading && !(observationPortfolio.data?.items ?? []).length ? (
               <p className="mt-4 rounded-[10px] bg-paper px-4 py-3 text-sm text-ink/55">
-                暂无可用全仓组合。当前高分 ETF 可能偏高位、买点不合适、候选不足 4 只，或数据不足；先继续观察，不给权重。
+                暂无进攻仓位。当前高分 ETF 可能偏高位、买点不合适、候选不足，或数据不足。
               </p>
+            ) : null}
+            {(observationPortfolio.data?.defensive_items ?? []).length ? (
+              <>
+                <div className="mt-6 flex items-center justify-between gap-3">
+                  <p className="text-sm font-semibold text-ink">防守仓位</p>
+                  <span className="rounded-full bg-sky-50 px-3 py-1 text-xs font-semibold text-sky-700">
+                    {observationPortfolio.data?.defensive_items?.length ?? 0} 只
+                  </span>
+                </div>
+                <div className="mt-3 grid gap-3 lg:grid-cols-3">
+                  {(observationPortfolio.data?.defensive_items ?? []).map((item) => (
+                    <div key={`defensive-${item.code}`} className="rounded-[10px] border border-sky-100 bg-sky-50/50 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-semibold text-ink">{item.name}</p>
+                          <p className="mt-1 text-xs text-ink/45">{item.code} · {formatDate(item.data_date)}</p>
+                        </div>
+                        <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-sky-700">
+                          {formatPercent(item.target_weight * 100)}
+                        </span>
+                      </div>
+                      <p className="mt-3 text-sm text-ink/65">综合分 {item.score.toFixed(1)} · {item.conclusion}</p>
+                      <p className="mt-3 rounded-[8px] bg-white/70 px-3 py-2 text-xs leading-5 text-ink/55">
+                        {item.weight_explanation ?? `防守原因：${item.risk_reasons.slice(0, 3).join("；")}`}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </>
             ) : null}
             {(observationPortfolio.data?.watch_only_items ?? []).length ? (
               <>

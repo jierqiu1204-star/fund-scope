@@ -641,11 +641,17 @@ export type ShortResearchObservationPortfolio = {
   as_of_date: string;
   asset_type: "etf";
   items: ShortResearchObservationPortfolioItem[];
+  defensive_items?: ShortResearchObservationPortfolioItem[];
   watch_only_items: ShortResearchObservationPortfolioItem[];
   excluded_items: ShortResearchObservationPortfolioItem[];
   cash_weight: number;
   target_invested_weight?: number;
   weight_sum?: number;
+  portfolio_mode?: "risk_on" | "defensive" | "cash_wait" | string;
+  market_regime?: "risk_on" | "defensive" | "cash_wait" | string;
+  risk_exposure_weight?: number;
+  defensive_weight?: number;
+  cash_reason?: string | null;
   single_weight_cap: number | null;
   total_exposure_cap: number | null;
   constraint_summary: Record<string, unknown>;

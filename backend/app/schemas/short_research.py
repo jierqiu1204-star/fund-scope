@@ -188,11 +188,17 @@ class ShortResearchObservationPortfolioOut(BaseModel):
     as_of_date: date
     asset_type: str
     items: list[ShortResearchObservationPortfolioItemOut]
+    defensive_items: list[ShortResearchObservationPortfolioItemOut] = Field(default_factory=list)
     watch_only_items: list[ShortResearchObservationPortfolioItemOut] = Field(default_factory=list)
     excluded_items: list[ShortResearchObservationPortfolioItemOut] = Field(default_factory=list)
     cash_weight: float
     target_invested_weight: float = 1.0
     weight_sum: float = 0.0
+    portfolio_mode: str = "risk_on"
+    market_regime: str = "risk_on"
+    risk_exposure_weight: float = 0.0
+    defensive_weight: float = 0.0
+    cash_reason: str | None = None
     single_weight_cap: float | None = None
     total_exposure_cap: float | None = None
     constraint_summary: dict[str, Any] = Field(default_factory=dict)

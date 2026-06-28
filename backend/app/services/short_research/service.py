@@ -97,6 +97,12 @@ _PORTFOLIO_RISK_FLAGS_REDUCE_WEIGHT = (
     "高波动",
     "回撤较大",
 )
+PORTFOLIO_MODE_RISK_ON = "risk_on"
+PORTFOLIO_MODE_DEFENSIVE = "defensive"
+PORTFOLIO_MODE_CASH_WAIT = "cash_wait"
+MARKET_REGIME_RISK_ON = "risk_on"
+MARKET_REGIME_DEFENSIVE = "defensive"
+MARKET_REGIME_CASH_WAIT = "cash_wait"
 
 
 @dataclass(frozen=True)
@@ -2155,6 +2161,48 @@ def _portfolio_fill_priority(asset: ComputedAsset) -> int:
     return 9
 
 
+def _portfolio_defensive_priority(asset: ComputedAsset) -> int:
+    tags = set(asset.metadata.theme_tags)
+    name = asset.metadata.name
+    asset_class = asset.metadata.category or ""
+    if asset_class in {"cash", "money"} or any(key in name for key in ("货币", "现金", "短融")):
+        return 0
+    if asset_class == "bond" or "债券" in tags or any(key in name for key in ("国债", "政金债", "债券", "债ETF", "可转债")):
+        return 1
+    if asset_class == "commodity" or "黄金" in tags or "黄金" in name:
+        return 2
+    if "红利" in tags or "红利" in name:
+        return 3
+    if asset_class == "broad" or "宽基" in tags or "宽基" in name:
+        volatility = float(asset.metrics.get("volatility_20d") or 1.0)
+        drawdown = float(asset.metrics.get("max_drawdown_60d") or -1.0)
+        if volatility <= 0.018 and drawdown >= -0.08:
+            return 4
+    return 99
+
+
+def _portfolio_defensive_reason(asset: ComputedAsset, original_reason: str | None) -> str | None:
+    if not asset.metrics.get("default_display_eligible", True):
+        return None
+    if asset.conclusion in {CONCLUSION_REJECT, CONCLUSION_INSUFFICIENT}:
+        return None
+    if any(flag in asset.risk_flags for flag in _PORTFOLIO_RISK_FLAGS_FORBIDDEN):
+        return None
+    if _portfolio_defensive_priority(asset) >= 99:
+        return None
+    if asset.entry_timing_label in {ENTRY_TIMING_VOLUME_WEAKENING, ENTRY_TIMING_INSUFFICIENT}:
+        return None
+    if asset.entry_timing_label == ENTRY_TIMING_BREAK_WAIT:
+        today_return = float(asset.metrics.get("today_return_pct") or 0.0)
+        drawdown = float(asset.metrics.get("max_drawdown_60d") or 0.0)
+        if today_return <= -0.025 or drawdown <= -0.12:
+            return None
+    base = "进攻候选不足；该 ETF 属于货币/债券/黄金/红利/低波动宽基等防守候选，用于降低风险暴露。"
+    if original_reason:
+        return f"{base}原分组原因：{original_reason}"
+    return base
+
+
 def _portfolio_fill_reason(asset: ComputedAsset, original_reason: str | None) -> str | None:
     if not asset.metrics.get("default_display_eligible", True):
         return None
@@ -2421,8 +2469,10 @@ def _json_time(value: Any) -> Any:
     return value
 
 
-def _observation_snapshot_is_full_exposure(snapshot: EtfObservationPortfolioSnapshot) -> bool:
+def _observation_snapshot_is_usable(snapshot: EtfObservationPortfolioSnapshot) -> bool:
     summary = dict(snapshot.summary_json or {})
+    if summary.get("portfolio_mode") == PORTFOLIO_MODE_CASH_WAIT:
+        return True
     try:
         cash_weight = float(summary.get("cash_weight", 1.0))
         target_weight = float(summary.get("target_invested_weight", 0.0))
@@ -2444,21 +2494,28 @@ async def observation_portfolio_from_snapshot(
         )
     ).all()
     primary = [_snapshot_item_out(row) for row in rows if row.item_type == "primary"]
+    defensive = [_snapshot_item_out(row) for row in rows if row.item_type == "defensive"]
     watch_only = [_snapshot_item_out(row) for row in rows if row.item_type == "watch_only"]
     excluded = [_snapshot_item_out(row) for row in rows if row.item_type == "excluded"]
     summary = dict(snapshot.summary_json or {})
-    weight_sum = round(sum(float(item.get("target_weight") or 0.0) for item in primary), 4)
+    weight_sum = round(sum(float(item.get("target_weight") or 0.0) for item in [*primary, *defensive]), 4)
     return {
         "snapshot_id": snapshot.id,
         "generated_at": snapshot.created_at,
         "as_of_date": snapshot.as_of_date,
         "asset_type": snapshot.asset_type,
         "items": primary,
+        "defensive_items": defensive,
         "watch_only_items": watch_only,
         "excluded_items": excluded,
         "cash_weight": float(summary.get("cash_weight", round(max(0.0, 1.0 - weight_sum), 4))),
         "target_invested_weight": float(summary.get("target_invested_weight", _PORTFOLIO_TOTAL_EXPOSURE_CAP)),
         "weight_sum": float(summary.get("weight_sum", weight_sum)),
+        "portfolio_mode": summary.get("portfolio_mode", PORTFOLIO_MODE_RISK_ON),
+        "market_regime": summary.get("market_regime", MARKET_REGIME_RISK_ON),
+        "risk_exposure_weight": float(summary.get("risk_exposure_weight", round(sum(float(item.get("target_weight") or 0.0) for item in primary), 4))),
+        "defensive_weight": float(summary.get("defensive_weight", round(sum(float(item.get("target_weight") or 0.0) for item in defensive), 4))),
+        "cash_reason": summary.get("cash_reason"),
         "single_weight_cap": summary.get("single_weight_cap", _PORTFOLIO_SINGLE_WEIGHT_CAP),
         "total_exposure_cap": summary.get("total_exposure_cap", _PORTFOLIO_TOTAL_EXPOSURE_CAP),
         "constraint_summary": summary.get("constraint_summary", {}),
@@ -2489,6 +2546,11 @@ async def persist_observation_portfolio_snapshot(
         "cash_weight": portfolio.get("cash_weight", 0.0),
         "target_invested_weight": portfolio.get("target_invested_weight", _PORTFOLIO_TOTAL_EXPOSURE_CAP),
         "weight_sum": portfolio.get("weight_sum", 0.0),
+        "portfolio_mode": portfolio.get("portfolio_mode", PORTFOLIO_MODE_RISK_ON),
+        "market_regime": portfolio.get("market_regime", MARKET_REGIME_RISK_ON),
+        "risk_exposure_weight": portfolio.get("risk_exposure_weight", 0.0),
+        "defensive_weight": portfolio.get("defensive_weight", 0.0),
+        "cash_reason": portfolio.get("cash_reason"),
         "single_weight_cap": portfolio.get("single_weight_cap"),
         "total_exposure_cap": portfolio.get("total_exposure_cap"),
         "constraint_summary": portfolio.get("constraint_summary", {}),
@@ -2522,6 +2584,7 @@ async def persist_observation_portfolio_snapshot(
     await session.flush()
     for item_type, key in (
         ("primary", "items"),
+        ("defensive", "defensive_items"),
         ("watch_only", "watch_only_items"),
         ("excluded", "excluded_items"),
     ):
@@ -2576,7 +2639,7 @@ async def etf_observation_portfolio(
 ) -> dict[str, Any]:
     if use_snapshot and universe == UNIVERSE_DEFAULT:
         snapshot = await latest_observation_portfolio_snapshot(session)
-        if snapshot is not None and _observation_snapshot_is_full_exposure(snapshot):
+        if snapshot is not None and _observation_snapshot_is_usable(snapshot):
             return await observation_portfolio_from_snapshot(session, snapshot)
     run = await latest_signal_run(session, asset_type=ASSET_TYPE_ETF)
     if run is None:
@@ -2584,11 +2647,17 @@ async def etf_observation_portfolio(
             "as_of_date": as_of_date or await latest_data_date(session) or date.today(),
             "asset_type": ASSET_TYPE_ETF,
             "items": [],
+            "defensive_items": [],
             "watch_only_items": [],
             "excluded_items": [],
-            "cash_weight": 0.0,
+            "cash_weight": 1.0,
             "target_invested_weight": _PORTFOLIO_TOTAL_EXPOSURE_CAP,
             "weight_sum": 0.0,
+            "portfolio_mode": PORTFOLIO_MODE_CASH_WAIT,
+            "market_regime": MARKET_REGIME_CASH_WAIT,
+            "risk_exposure_weight": 0.0,
+            "defensive_weight": 0.0,
+            "cash_reason": "暂无 ETF 排序快照，先生成短线排序后再查看资金配置。",
             "single_weight_cap": _PORTFOLIO_SINGLE_WEIGHT_CAP,
             "total_exposure_cap": _PORTFOLIO_TOTAL_EXPOSURE_CAP,
             "constraint_summary": {
@@ -2623,6 +2692,7 @@ async def etf_observation_portfolio(
     if validation_by_label:
         assets = [_asset_with_validation_evidence(asset, validation_by_label) for asset in assets]
     primary_candidates: list[ComputedAsset] = []
+    defensive_candidates: list[tuple[ComputedAsset, str | None]] = []
     watch_only_candidates: list[tuple[ComputedAsset, str | None]] = []
     watch_only_items: list[dict[str, Any]] = []
     excluded_items: list[dict[str, Any]] = []
@@ -2630,6 +2700,10 @@ async def etf_observation_portfolio(
         group, reason = _portfolio_candidate_group(asset)
         if group == "primary":
             primary_candidates.append(asset)
+            continue
+        defensive_reason = _portfolio_defensive_reason(asset, reason)
+        if defensive_reason is not None:
+            defensive_candidates.append((asset, defensive_reason))
         elif group == "watch_only":
             watch_only_candidates.append((asset, reason))
         else:
@@ -2637,12 +2711,17 @@ async def etf_observation_portfolio(
 
     return_maps = await _portfolio_return_maps(
         session,
-        [*primary_candidates, *[asset for asset, _reason in watch_only_candidates]],
+        [
+            *primary_candidates,
+            *[asset for asset, _reason in defensive_candidates],
+            *[asset for asset, _reason in watch_only_candidates],
+        ],
         run.as_of_date,
     )
     selected_assets: list[ComputedAsset] = []
     selected_return_maps: dict[str, dict[date, float]] = {}
     selected_fill_reasons: dict[str, str] = {}
+    selected_item_types: dict[str, str] = {}
     theme_counts: dict[str, int] = {}
     selected_limit = max(4, min(limit, 10))
     for asset in primary_candidates:
@@ -2663,19 +2742,20 @@ async def etf_observation_portfolio(
             watch_only_items.append(_portfolio_item(asset, target_weight=0.0, reason=selection_reason))
             continue
         selected_assets.append(asset)
+        selected_item_types[asset.metadata.code] = "primary"
         for theme in asset_themes:
             theme_counts[theme] = theme_counts.get(theme, 0) + 1
         if asset_returns:
             selected_return_maps[asset.metadata.code] = asset_returns
 
     for asset, original_reason in sorted(
-        watch_only_candidates,
-        key=lambda row: (_portfolio_fill_priority(row[0]), -float(row[0].total_score or 0.0)),
+        defensive_candidates,
+        key=lambda row: (_portfolio_defensive_priority(row[0]), -float(row[0].total_score or 0.0)),
     ):
         if len(selected_assets) >= 4:
             watch_only_items.append(_portfolio_item(asset, target_weight=0.0, reason=original_reason))
             continue
-        fill_reason = _portfolio_fill_reason(asset, original_reason)
+        fill_reason = _portfolio_defensive_reason(asset, original_reason)
         if fill_reason is None:
             watch_only_items.append(_portfolio_item(asset, target_weight=0.0, reason=original_reason))
             continue
@@ -2695,24 +2775,34 @@ async def etf_observation_portfolio(
             continue
         selected_assets.append(asset)
         selected_fill_reasons[asset.metadata.code] = fill_reason
+        selected_item_types[asset.metadata.code] = "defensive"
         for theme in asset_themes:
             theme_counts[theme] = theme_counts.get(theme, 0) + 1
         if asset_returns:
             selected_return_maps[asset.metadata.code] = asset_returns
+
+    for asset, original_reason in watch_only_candidates:
+        watch_only_items.append(_portfolio_item(asset, target_weight=0.0, reason=original_reason))
+
     raw_weight_rows = [_portfolio_raw_weight(asset) for asset in selected_assets]
     normalized_weights = _cap_normalized_weights(
         [row[0] for row in raw_weight_rows],
         _PORTFOLIO_SINGLE_WEIGHT_CAP,
     )
     items: list[dict[str, Any]] = []
+    defensive_items: list[dict[str, Any]] = []
     unavailable_reason: str | None = None
+    cash_reason: str | None = None
     if len(selected_assets) < 4:
-        unavailable_reason = "满足数据可靠性、买点和分散约束的 ETF 少于 4 只；单只 30% 上限下不能凑满 100%。"
+        unavailable_reason = "进攻和防守候选都少于 4 只；单只 30% 上限下不能凑满 ETF 资金 100%。"
+        cash_reason = "当前没有足够满足数据可靠性、流动性和风险约束的进攻/防守 ETF，建议等待。"
     elif normalized_weights is None:
         unavailable_reason = "组合约束不可行：单只 30% 上限和候选数量不足以归一到 100%。"
+        cash_reason = "组合约束不可行，建议等待下一次数据更新。"
     else:
         for asset, target, raw_row in zip(selected_assets, normalized_weights, raw_weight_rows, strict=True):
             weight_reason = dict(raw_row[1])
+            item_type = selected_item_types.get(asset.metadata.code, "primary")
             weight_reason.update(
                 {
                     "final_weight": round(target, 4),
@@ -2720,15 +2810,33 @@ async def etf_observation_portfolio(
                     "theme_tags": list(asset.metadata.theme_tags[:2]),
                     "correlation_policy": "高相关候选转入观察组，主组合只保留分散后的候选。",
                     "target_invested_weight": _PORTFOLIO_TOTAL_EXPOSURE_CAP,
+                    "portfolio_item_type": item_type,
                 }
             )
             fill_reason = selected_fill_reasons.get(asset.metadata.code)
             if fill_reason:
                 weight_reason["weight_fill_reason"] = fill_reason
-            items.append(_portfolio_item(asset, target_weight=target, weight_reason=weight_reason))
+            portfolio_item = _portfolio_item(asset, target_weight=target, weight_reason=weight_reason)
+            if item_type == "defensive":
+                defensive_items.append(portfolio_item)
+            else:
+                items.append(portfolio_item)
 
-    weight_sum = round(sum(float(item["target_weight"]) for item in items), 4)
+    weight_sum = round(sum(float(item["target_weight"]) for item in [*items, *defensive_items]), 4)
     rounding_residual = 0.0 if items and abs(1.0 - weight_sum) <= 0.01 else (round(max(0.0, 1.0 - weight_sum), 4) if items else 0.0)
+    if defensive_items:
+        portfolio_mode = PORTFOLIO_MODE_DEFENSIVE
+        market_regime = MARKET_REGIME_DEFENSIVE
+    elif items:
+        portfolio_mode = PORTFOLIO_MODE_RISK_ON
+        market_regime = MARKET_REGIME_RISK_ON
+    else:
+        portfolio_mode = PORTFOLIO_MODE_CASH_WAIT
+        market_regime = MARKET_REGIME_CASH_WAIT
+        rounding_residual = 1.0
+        cash_reason = cash_reason or "当前没有可用于配置的 ETF，建议等待。"
+    risk_exposure_weight = round(sum(float(item["target_weight"]) for item in items), 4)
+    defensive_weight = round(sum(float(item["target_weight"]) for item in defensive_items), 4)
     constraints_used = {
         "target_invested_weight": _PORTFOLIO_TOTAL_EXPOSURE_CAP,
         "single_weight_cap": _PORTFOLIO_SINGLE_WEIGHT_CAP,
@@ -2739,25 +2847,32 @@ async def etf_observation_portfolio(
     }
     risk_summary = {
         "primary_count": len(items),
+        "defensive_count": len(defensive_items),
         "watch_only_count": len(watch_only_items),
         "excluded_count": len(excluded_items),
-        "high_volatility_count": sum(1 for item in items if "高波动" in item.get("risk_reasons", [])),
-        "max_single_weight": max((float(item["target_weight"]) for item in items), default=0.0),
+        "high_volatility_count": sum(1 for item in [*items, *defensive_items] if "高波动" in item.get("risk_reasons", [])),
+        "max_single_weight": max((float(item["target_weight"]) for item in [*items, *defensive_items]), default=0.0),
     }
     data_reliability_summary = {
         "eligible_candidates": len(primary_candidates),
         "selected_candidates": len(items),
+        "selected_defensive_candidates": len(defensive_items),
         "watch_only_candidates": len(watch_only_items),
         "excluded_candidates": len(excluded_items),
         "weightable_candidates": len(selected_assets),
         "decision_reliability": "verified_or_alternate_provider",
     }
-    note = "观察组合按你放进证券账户 ETF 的资金 100% 做权重参考，不代表你的总资产全仓。"
+    note = "ETF 资金配置按你放进证券账户 ETF 的资金 100% 做研究参考，不代表你的总资产全仓。"
     if unavailable_reason:
-        note = f"暂不能生成全仓 ETF 观察组合：{unavailable_reason}"
+        note = f"当前不建议动用 ETF 资金：{unavailable_reason}"
         items = []
+        defensive_items = []
         weight_sum = 0.0
-        rounding_residual = 0.0
+        risk_exposure_weight = 0.0
+        defensive_weight = 0.0
+        rounding_residual = 1.0
+    elif defensive_items:
+        note = "当前市场不适合全仓进攻，优先用防守 ETF 做资金配置参考。"
     elif watch_only_items or excluded_items:
         note = "高位/追高/数据不足资产会分到观察或等待分组，不进入主组合权重。" + note
     quote_time = await session.scalar(select(func.max(EtfIntradayLatestQuote.quote_time)))
@@ -2771,16 +2886,23 @@ async def etf_observation_portfolio(
         "portfolio_generated_at": portfolio_generated_at,
         "asset_type": ASSET_TYPE_ETF,
         "items": items,
+        "defensive_items": defensive_items,
         "watch_only_items": watch_only_items[:10],
         "excluded_items": excluded_items[:10],
         "cash_weight": rounding_residual,
         "target_invested_weight": _PORTFOLIO_TOTAL_EXPOSURE_CAP,
         "weight_sum": weight_sum,
+        "portfolio_mode": portfolio_mode,
+        "market_regime": market_regime,
+        "risk_exposure_weight": risk_exposure_weight,
+        "defensive_weight": defensive_weight,
+        "cash_reason": cash_reason,
         "single_weight_cap": _PORTFOLIO_SINGLE_WEIGHT_CAP,
         "total_exposure_cap": _PORTFOLIO_TOTAL_EXPOSURE_CAP,
         "constraint_summary": {
             **constraints_used,
             "primary_count": len(items),
+            "defensive_count": len(defensive_items),
             "watch_only_count": len(watch_only_items),
             "excluded_count": len(excluded_items),
         },
@@ -2792,7 +2914,7 @@ async def etf_observation_portfolio(
         "no_trade_instruction": True,
         "note": note,
         "methodology": (
-            "先过滤短线观察且买点为健康回踩/趋势延续、数据可靠的 ETF，再按单只30%上限、"
-            "主题集中度、近60日相关性、波动率、回撤和成交额做简化组合约束；这是研究权重，不是交易指令。"
+            "先生成进攻候选；进攻不足时再用货币、债券、黄金、红利或低波动宽基 ETF 做防守候选；"
+            "若进攻和防守都不足，则保留现金等待。这是研究权重，不是交易指令。"
         ),
     }

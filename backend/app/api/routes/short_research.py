@@ -108,6 +108,7 @@ def _portfolio_contexts(portfolio: dict[str, Any]) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for section, status in (
         ("items", "included"),
+        ("defensive_items", "defensive"),
         ("watch_only_items", "watch_only"),
         ("excluded_items", "excluded"),
     ):

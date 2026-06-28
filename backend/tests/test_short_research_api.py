@@ -498,6 +498,11 @@ async def test_short_research_observation_portfolio_filters_out_high_watch_and_b
     assert body["asset_type"] == "etf"
     assert body["cash_weight"] == 0.0
     assert body["weight_sum"] == 1.0
+    assert body["portfolio_mode"] == "risk_on"
+    assert body["market_regime"] == "risk_on"
+    assert body["risk_exposure_weight"] == 1.0
+    assert body["defensive_weight"] == 0.0
+    assert body["defensive_items"] == []
     assert body["target_invested_weight"] == 1.0
     assert body["single_weight_cap"] == 0.3
     assert body["total_exposure_cap"] == 1.0
@@ -517,6 +522,76 @@ async def test_short_research_observation_portfolio_filters_out_high_watch_and_b
         "高位/追高/数据不足资产会分到观察或等待分组，不进入主组合权重。"
         in (body["note"] or "")
     )
+
+
+@pytest.mark.asyncio
+async def test_short_research_observation_portfolio_uses_defensive_layer_when_attack_candidates_are_insufficient(
+    client,
+    app,
+) -> None:
+    await _seed_observation_portfolio_signal_run(
+        app,
+        items=[
+            {
+                "code": "560931",
+                "total_score": 94.0,
+                "conclusion": "短线观察",
+                "entry_timing_label": "健康回踩",
+                "entry_timing_reason": "唯一进攻候选。",
+                "theme_tags": ["科技"],
+            },
+            {
+                "code": "560932",
+                "total_score": 91.0,
+                "conclusion": "谨慎观察",
+                "entry_timing_label": "跌破等待",
+                "entry_timing_reason": "债券候选轻微等待，用作防守层测试。",
+                "theme_tags": ["债券"],
+            },
+            {
+                "code": "560933",
+                "total_score": 90.0,
+                "conclusion": "谨慎观察",
+                "entry_timing_label": "冲高别追",
+                "entry_timing_reason": "黄金候选偏热，只能作为防守参考。",
+                "theme_tags": ["黄金"],
+            },
+            {
+                "code": "560934",
+                "total_score": 89.0,
+                "conclusion": "谨慎观察",
+                "entry_timing_label": "趋势延续",
+                "entry_timing_reason": "红利候选用于防守补位。",
+                "theme_tags": ["红利"],
+            },
+            {
+                "code": "560935",
+                "total_score": 88.0,
+                "conclusion": "谨慎观察",
+                "entry_timing_label": "趋势延续",
+                "entry_timing_reason": "低波动宽基候选用于防守补位。",
+                "theme_tags": ["宽基"],
+                "volatility_20d": 0.012,
+                "max_drawdown_60d": -0.03,
+            },
+        ],
+    )
+
+    response = await client.get("/api/short-research/observation-portfolio?limit=4")
+    assert response.status_code == 200
+
+    body = response.json()
+    assert body["portfolio_mode"] == "defensive"
+    assert body["market_regime"] == "defensive"
+    assert body["cash_weight"] == 0.0
+    assert body["weight_sum"] == 1.0
+    assert body["risk_exposure_weight"] > 0
+    assert body["defensive_weight"] > 0
+    assert len(body["items"]) == 1
+    assert len(body["defensive_items"]) == 3
+    assert all(item["target_weight"] <= 0.3 for item in [*body["items"], *body["defensive_items"]])
+    assert {item["code"] for item in body["defensive_items"]}.issubset({"560932", "560933", "560934", "560935"})
+    assert "防守" in body["note"]
 
 
 @pytest.mark.asyncio
@@ -613,10 +688,14 @@ async def test_short_research_observation_portfolio_no_match_returns_full_cash(c
     assert body["items"] == []
     assert body["watch_only_items"]
     assert body["excluded_items"] == []
-    assert body["cash_weight"] == 0.0
+    assert body["defensive_items"] == []
+    assert body["cash_weight"] == 1.0
     assert body["weight_sum"] == 0.0
+    assert body["portfolio_mode"] == "cash_wait"
+    assert body["market_regime"] == "cash_wait"
+    assert body["cash_reason"]
     assert body["unavailable_reason"]
-    assert body["note"].startswith("暂不能生成全仓 ETF 观察组合")
+    assert body["note"].startswith("当前不建议动用 ETF 资金")
 
 
 @pytest.mark.asyncio
