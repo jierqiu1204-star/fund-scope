@@ -44,7 +44,11 @@ async def test_daily_etf_universe_job_reports_refresh_counts(monkeypatch) -> Non
             "failures": [],
         }
 
+    async def fake_refresh_etf_theme_profiles(_session: object) -> dict[str, Any]:
+        return {"total": 3, "classified": 3, "unknown": 0, "low_confidence": 0, "inserted": 3, "updated": 0}
+
     monkeypatch.setattr(jobs_module, "refresh_etf_universe", fake_refresh_etf_universe)
+    monkeypatch.setattr(jobs_module, "refresh_etf_theme_profiles", fake_refresh_etf_theme_profiles)
 
     result = await jobs_module.daily_etf_universe_job(object())  # type: ignore[arg-type]
 
@@ -53,6 +57,7 @@ async def test_daily_etf_universe_job_reports_refresh_counts(monkeypatch) -> Non
     assert result["updated"] == 1
     assert result["excluded"] == 1
     assert result["default_display"] == 2
+    assert result["taxonomy"]["classified"] == 3
 
 
 @pytest.mark.asyncio

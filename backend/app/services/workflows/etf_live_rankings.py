@@ -93,6 +93,19 @@ def _daily_entry_timing(signal_item: ShortResearchSignalItem | None) -> tuple[st
     )
 
 
+def _signal_item_theme_values(signal_item: ShortResearchSignalItem | None) -> set[str]:
+    if signal_item is None:
+        return set()
+    metrics = dict(signal_item.metrics_json or {})
+    profile = dict(metrics.get("theme_profile") or {})
+    values = {
+        str(profile.get("theme_group") or ""),
+        str(profile.get("primary_theme") or ""),
+    }
+    values.update(str(item) for item in profile.get("secondary_themes") or [])
+    return {item for item in values if item}
+
+
 async def _build_research_watchlist(session: AsyncSession) -> WatchlistResult:
     watchlist = await build_watchlist(session)
     watch_map = {item.etf_code: item for item in watchlist.items}
@@ -148,6 +161,7 @@ async def live_rankings(
     limit: int = LIVE_RANKING_LIMIT_DEFAULT,
     offset: int = 0,
     q: str | None = None,
+    theme: str | None = None,
 ) -> EtfLiveRankingListOut:
     safe_limit, safe_offset = _to_pagination(limit, offset)
     state = intraday_quotes.current_market_state()
@@ -185,6 +199,9 @@ async def live_rankings(
             )
         )
         signal_items_by_code = {item.asset_code: item for item in signal_rows.all()}
+    selected_theme = theme.strip() if theme else None
+    if selected_theme in {"", "all", "全部"}:
+        selected_theme = None
 
     scored_rows: list[dict[str, Any]] = []
     for watch_item in watchlist.items:
@@ -192,6 +209,8 @@ async def live_rankings(
         if keyword and keyword not in watch_item.etf_code.lower() and keyword not in (name or "").lower():
             continue
         signal_item = signal_items_by_code.get(watch_item.etf_code)
+        if selected_theme and selected_theme not in _signal_item_theme_values(signal_item):
+            continue
         base_score = _float_or_none(signal_item.total_score) if signal_item is not None else None
         base_rank = watch_item.rank
         conclusion = signal_item.conclusion if signal_item is not None else None

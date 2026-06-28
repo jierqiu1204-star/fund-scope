@@ -399,13 +399,14 @@ async def test_etf_observation_portfolio_fills_to_full_exposure_with_defensive_c
     assert body["target_invested_weight"] == 1.0
     assert body["weight_sum"] == 1.0
     assert body["cash_weight"] == 0.0
-    assert len(body["items"]) == 4
-    assert any(item["code"] == "562104" for item in body["items"])
-    assert all(item["target_weight"] <= 0.3 for item in body["items"])
+    assert len(body["items"]) == 3
+    assert len(body["defensive_items"]) == 1
+    assert any(item["code"] == "562104" for item in body["defensive_items"])
+    assert all(item["target_weight"] <= 0.3 for item in [*body["items"], *body["defensive_items"]])
     assert body["data_as_of_time"] is not None
     assert body["daily_signal_date"] == "2026-06-15"
     assert body["portfolio_generated_at"] is not None
-    assert any(item["weight_reason_json"].get("weight_fill_reason") for item in body["items"])
+    assert any(item["weight_reason_json"].get("weight_fill_reason") for item in body["defensive_items"])
 
 
 @pytest.mark.asyncio

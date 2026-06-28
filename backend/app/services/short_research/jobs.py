@@ -16,6 +16,7 @@ from app.services.short_research.service import (
     run_etf_signal_validation,
     run_signal_generation,
 )
+from app.services.short_research.theme_taxonomy import refresh_etf_theme_profiles
 from app.services.short_research.universe import refresh_etf_universe
 from app.services.workflows.short_research_data import (
     sync_short_research_data_with_tracking_priority as sync_short_research_data,
@@ -117,7 +118,13 @@ async def post_close_etf_data_job(session: AsyncSession) -> dict[str, Any]:
 
 
 async def daily_etf_universe_job(session: AsyncSession) -> dict[str, Any]:
-    return await refresh_etf_universe(session)
+    universe = await refresh_etf_universe(session)
+    taxonomy = await refresh_etf_theme_profiles(session)
+    return {**universe, "universe": universe, "taxonomy": taxonomy}
+
+
+async def daily_etf_taxonomy_job(session: AsyncSession) -> dict[str, Any]:
+    return await refresh_etf_theme_profiles(session)
 
 
 async def daily_short_research_signals_job(session: AsyncSession) -> dict[str, Any]:

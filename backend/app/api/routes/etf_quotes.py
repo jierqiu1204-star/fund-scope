@@ -23,8 +23,9 @@ async def get_live_rankings(
     limit: int = 50,
     offset: int = 0,
     q: str | None = None,
+    theme: str | None = None,
     session: AsyncSession = Depends(get_db_session),
 ) -> EtfLiveRankingListOut:
     safe_limit = max(1, limit)
     safe_offset = max(0, offset)
-    return await live_rankings(session, limit=safe_limit, offset=safe_offset, q=q)
+    return await live_rankings(session, limit=safe_limit, offset=safe_offset, q=q, theme=theme)

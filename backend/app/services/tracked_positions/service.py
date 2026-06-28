@@ -111,11 +111,16 @@ from app.services.short_research.advisor import (
     conservative_action_for_item,
     latest_reports_by_asset,
 )
+from app.services.short_research.dynamic_thresholds import (
+    ThresholdPricePoint,
+    dynamic_threshold_context,
+)
 from app.services.short_research.service import (
     ensure_short_research_universe,
     latest_signal_run,
     list_signal_items,
 )
+from app.services.short_research.theme_taxonomy import classify_etf_theme
 
 ACTIVE_STATUS = "active"
 ORDER_BEFORE_15 = "before_15"
@@ -452,7 +457,7 @@ async def dynamic_thresholds_for_position(
             select(EtfPriceHistory)
             .where(EtfPriceHistory.etf_code == position.asset_code)
             .order_by(EtfPriceHistory.trade_date.desc())
-            .limit(25)
+            .limit(90)
         )
     ).all()
     ordered = list(reversed(rows))
@@ -462,30 +467,76 @@ async def dynamic_thresholds_for_position(
         for index in range(1, len(closes))
         if closes[index - 1]
     ][-20:]
-    realized_vol_pct = pstdev(returns) * 100 if len(returns) >= 8 else None
-    atr_values: list[float] = []
-    for index, row in enumerate(ordered):
-        previous_close = ordered[index - 1].close if index > 0 else row.close
-        if not previous_close:
-            continue
-        true_range = max(row.high - row.low, abs(row.high - previous_close), abs(row.low - previous_close))
-        atr_values.append(true_range / previous_close * 100)
-    atr_pct = _mean_or_none(atr_values[-20:]) if len(atr_values) >= 8 else None
-    volatility_unit_pct = max(
-        value
-        for value in [realized_vol_pct, atr_pct, 2.0]
-        if value is not None
+    realized_vol = pstdev(returns) if len(returns) >= 8 else None
+    return_5d = closes[-1] / closes[-6] - 1.0 if len(closes) >= 6 and closes[-6] else None
+    return_20d = closes[-1] / closes[-21] - 1.0 if len(closes) >= 21 and closes[-21] else None
+    return_60d = closes[-1] / closes[-61] - 1.0 if len(closes) >= 61 and closes[-61] else None
+    max_drawdown_60d = None
+    recent_60 = closes[-60:]
+    if recent_60:
+        peak = recent_60[0]
+        drawdown = 0.0
+        for close in recent_60:
+            peak = max(peak, close)
+            if peak:
+                drawdown = min(drawdown, close / peak - 1.0)
+        max_drawdown_60d = drawdown
+    etf = await session.scalar(select(TradableEtf).where(TradableEtf.code == position.asset_code))
+    theme_profile = classify_etf_theme(
+        code=position.asset_code,
+        name=etf.name if etf is not None else position.asset_code,
+        asset_class=etf.asset_class if etf is not None else None,
+        theme_tags=list(etf.theme_tags_json or []) if etf is not None else [],
     )
-    hard_stop_pct = -_clamp(1.5 * volatility_unit_pct, 1.2, 4.5)
-    profit_start_pct = _clamp(
-        ETF_TRAILING_PROFIT_START_VOL_MULTIPLIER * volatility_unit_pct,
-        ETF_TRAILING_PROFIT_START_MIN_PCT,
-        ETF_TRAILING_PROFIT_START_MAX_PCT,
+    threshold_context = dynamic_threshold_context(
+        asset_bucket=theme_profile.asset_bucket,
+        theme_group=theme_profile.theme_group,
+        points=[
+            ThresholdPricePoint(
+                value=row.close,
+                high=row.high,
+                low=row.low,
+                pct_change=row.pct_change / 100,
+            )
+            for row in ordered
+            if row.close
+        ],
+        today_return=ordered[-1].pct_change / 100 if ordered else None,
+        return_5d=return_5d,
+        return_20d=return_20d,
+        return_60d=return_60d,
+        volatility_20d=realized_vol,
+        max_drawdown_60d=max_drawdown_60d,
+        distance_to_ma5=None,
+        premium_discount_pct=intraday_snapshot.premium_discount_pct if intraday_snapshot else None,
+        holding_state={
+            "position_id": position.id,
+            "asset_code": position.asset_code,
+            "tracking_start_date": tracking_start_date(position).isoformat() if tracking_start_date(position) else None,
+        },
     )
-    trailing_giveback_pct = _clamp(
-        ETF_TRAILING_GIVEBACK_VOL_MULTIPLIER * volatility_unit_pct,
-        ETF_TRAILING_GIVEBACK_MIN_PCT,
-        ETF_TRAILING_GIVEBACK_MAX_PCT,
+    thresholds = dict(threshold_context.get("thresholds") or {})
+    volatility_unit_pct = float(threshold_context.get("volatility_unit_pct") or 2.0)
+    hard_stop_pct = float(thresholds.get("hard_stop_pct", -_clamp(1.5 * volatility_unit_pct, 1.2, 4.5)))
+    profit_start_pct = float(
+        thresholds.get(
+            "profit_start_pct",
+            _clamp(
+                ETF_TRAILING_PROFIT_START_VOL_MULTIPLIER * volatility_unit_pct,
+                ETF_TRAILING_PROFIT_START_MIN_PCT,
+                ETF_TRAILING_PROFIT_START_MAX_PCT,
+            ),
+        )
+    )
+    trailing_giveback_pct = float(
+        thresholds.get(
+            "trailing_giveback_pct",
+            _clamp(
+                ETF_TRAILING_GIVEBACK_VOL_MULTIPLIER * volatility_unit_pct,
+                ETF_TRAILING_GIVEBACK_MIN_PCT,
+                ETF_TRAILING_GIVEBACK_MAX_PCT,
+            ),
+        )
     )
 
     prices = [point.price for point in chart]
@@ -528,11 +579,14 @@ async def dynamic_thresholds_for_position(
             structure_warnings.append("暂无 IOPV，无法判断盘中价格相对净值是否偏贵。")
 
     return DynamicExitThresholdsOut(
+        threshold_source="rule_dynamic",
+        rule_version=str(threshold_context.get("rule_version") or "dynamic_exit_v2"),
         volatility_unit_pct=_round_or_none(volatility_unit_pct),
         hard_stop_pct=_round_or_none(hard_stop_pct),
         profit_start_pct=_round_or_none(profit_start_pct),
         trailing_giveback_pct=_round_or_none(trailing_giveback_pct),
         trend_weakening=trend_weakening,
+        explanation=[str(threshold_context.get("reason") or "")],
         liquidity_warnings=liquidity_warnings,
         structure_warnings=structure_warnings,
     )

@@ -34,6 +34,7 @@ from app.models.entities import (
     FundNavHistory,
     ShortResearchSignalItem,
     ShortResearchSignalRun,
+    TrackedPosition,
     TradableEtf,
     utcnow,
 )
@@ -54,6 +55,16 @@ from app.services.portfolio_allocation import (
     PORTFOLIO_TOTAL_EXPOSURE_CAP,
 )
 from app.services.short_etf.data import sync_etf_price_history
+from app.services.short_research.dynamic_thresholds import (
+    ThresholdPricePoint,
+    dynamic_threshold_context,
+)
+from app.services.short_research.theme_taxonomy import (
+    UNKNOWN_GROUP,
+    UNKNOWN_THEME,
+    classify_etf_theme,
+    theme_coverage_summary,
+)
 from app.services.short_research.universe import refresh_etf_universe
 
 RUN_STATUS_SUCCESS = "success"
@@ -229,7 +240,24 @@ def _metadata(asset_type: str, code: str, name: str | None = None) -> ShortResea
 
 
 def _metadata_from_etf_row(row: TradableEtf) -> ShortResearchAsset:
-    tags = tuple(row.theme_tags_json or ["ETF"])
+    profile = classify_etf_theme(
+        code=row.code,
+        name=row.name,
+        asset_class=row.asset_class,
+        theme_tags=list(row.theme_tags_json or []),
+    )
+    tags = tuple(
+        dict.fromkeys(
+            [
+                *(row.theme_tags_json or ["ETF"]),
+                profile.primary_theme,
+                profile.theme_group,
+                profile.asset_bucket,
+                *profile.secondary_themes,
+            ]
+        )
+    )
+    tags = tuple(item for item in tags if item and item not in {UNKNOWN_GROUP})
     direction = "交易所 ETF"
     if row.asset_class == "broad_index":
         direction = "宽基指数 ETF"
@@ -668,6 +696,7 @@ def _entry_timing_metrics(
     return_20d: float | None,
     return_60d: float | None,
     average_turnover_20d: float | None,
+    dynamic_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     latest = series[-1] if series else None
     latest_value = latest.value if latest else None
@@ -695,6 +724,7 @@ def _entry_timing_metrics(
         "pullback_from_5d_high_pct": pullback_5d,
         "pullback_from_20d_high_pct": pullback_20d,
         "volume_ratio_20d": volume_ratio_20d,
+        "dynamic_threshold_context": dynamic_context or {},
     }
     if latest is None or len(series) < 20:
         reason = "公开历史不足 20 个可用交易日，今天不做买点判断。"
@@ -707,6 +737,16 @@ def _entry_timing_metrics(
         return {**base, "entry_timing_label": ENTRY_TIMING_INSUFFICIENT, "entry_timing_reason": reason}
 
     positive_trend = (return_5d or 0.0) > 0 and (return_20d or 0.0) > 0 and (return_60d or 0.0) > 0
+    thresholds = dict((dynamic_context or {}).get("thresholds") or {})
+    drop_wait = float(thresholds.get("drop_wait", -0.025))
+    healthy_pullback_min = float(thresholds.get("healthy_pullback_min", -0.015))
+    healthy_pullback_max = float(thresholds.get("healthy_pullback_max", -0.002))
+    chase_daily = float(thresholds.get("chase_daily", 0.025))
+    ma_overextension = float(thresholds.get("ma_overextension", 0.035))
+    return_20_chase = float(thresholds.get("return_20_chase", 0.10))
+    return_60_chase = float(thresholds.get("return_60_chase", 0.25))
+    premium_state = str((dynamic_context or {}).get("premium_state") or "unavailable")
+    threshold_note = str((dynamic_context or {}).get("reason") or "使用固定保守阈值。")
     heavy_volume = volume_ratio_20d is not None and volume_ratio_20d >= 1.5
     below_ma5_ma10 = (
         latest_value is not None
@@ -718,34 +758,42 @@ def _entry_timing_metrics(
     below_ma20 = distance_to_ma20 is not None and distance_to_ma20 < 0
     near_or_above_ma10 = distance_to_ma10 is not None and distance_to_ma10 >= -0.005
 
+    if premium_state in {"high", "extreme"}:
+        reason = f"折溢价状态为 {premium_state}，结构风险偏高；{threshold_note}"
+        return {**base, "entry_timing_label": ENTRY_TIMING_CHASE_RISK, "entry_timing_reason": reason}
     if today_return < 0 and (heavy_volume or below_ma20):
         reason = (
             f"今天 {_format_percent(today_return)}，价格已低于20日线或成交额明显放大，"
-            "短线结构转弱，先等待新信号。"
+            f"短线结构转弱，先等待新信号。{threshold_note}"
         )
         return {**base, "entry_timing_label": ENTRY_TIMING_VOLUME_WEAKENING, "entry_timing_reason": reason}
-    if today_return <= -0.025 or below_ma5_ma10 or ((return_5d or 0.0) < 0 and not near_or_above_ma10):
+    if today_return <= drop_wait or below_ma5_ma10 or ((return_5d or 0.0) < 0 and not near_or_above_ma10):
         reason = (
-            f"今天 {_format_percent(today_return)}，最新价已跌破5日线和10日线附近，"
-            "短线趋势开始变弱，适合先等待。"
+            f"今天 {_format_percent(today_return)}，已触及动态等待线 {_format_percent(drop_wait)} "
+            f"或跌破5/10日线附近，短线趋势开始变弱，适合先等待。{threshold_note}"
         )
         return {**base, "entry_timing_label": ENTRY_TIMING_BREAK_WAIT, "entry_timing_reason": reason}
-    if today_return >= 0.025 and ((return_20d or 0.0) >= 0.10 or (return_60d or 0.0) >= 0.25 or (distance_to_ma5 or 0.0) >= 0.035):
+    if today_return >= chase_daily and (
+        (return_20d or 0.0) >= return_20_chase
+        or (return_60d or 0.0) >= return_60_chase
+        or (distance_to_ma5 or 0.0) >= ma_overextension
+    ):
         reason = (
-            f"今天 {_format_percent(today_return)}，且近20日 {_format_percent(return_20d)}、"
-            f"近60日 {_format_percent(return_60d)} 已经不低，追高风险上升。"
+            f"今天 {_format_percent(today_return)} 已高于动态冲高线 {_format_percent(chase_daily)}，"
+            f"近20日 {_format_percent(return_20d)}、近60日 {_format_percent(return_60d)} 处于偏热区间。{threshold_note}"
         )
         return {**base, "entry_timing_label": ENTRY_TIMING_CHASE_RISK, "entry_timing_reason": reason}
-    if positive_trend and -0.015 <= today_return <= -0.002 and near_or_above_ma10 and not heavy_volume:
+    if positive_trend and healthy_pullback_min <= today_return <= healthy_pullback_max and near_or_above_ma10 and not heavy_volume:
         reason = (
             f"近5/20/60日仍为正，今天 {_format_percent(today_return)}，"
-            f"仍在10日线附近或上方，属于健康回踩，适合继续观察。"
+            f"处在动态健康回踩区间 {_format_percent(healthy_pullback_min)} 到 {_format_percent(healthy_pullback_max)}，"
+            f"仍在10日线附近或上方，适合继续观察。{threshold_note}"
         )
         return {**base, "entry_timing_label": ENTRY_TIMING_HEALTHY_PULLBACK, "entry_timing_reason": reason}
-    if positive_trend and today_return > -0.015 and near_or_above_ma10:
+    if positive_trend and today_return > healthy_pullback_min and near_or_above_ma10:
         reason = (
             f"近5/20/60日仍为正，今天 {_format_percent(today_return)}，"
-            "价格仍在10日线附近或上方，趋势暂未破坏。"
+            f"未跌破动态等待线 {_format_percent(drop_wait)}，价格仍在10日线附近或上方。{threshold_note}"
         )
         return {**base, "entry_timing_label": ENTRY_TIMING_TREND_CONTINUATION, "entry_timing_reason": reason}
 
@@ -790,6 +838,37 @@ def _score_metrics(metadata: ShortResearchAsset, series: list[PricePoint], as_of
     if metadata.asset_type == ASSET_TYPE_ETF:
         turnovers = [item.turnover for item in last_20 if item.turnover is not None]
         average_turnover_20d = mean(turnovers) if turnovers else None
+    theme_profile = classify_etf_theme(
+        code=metadata.code,
+        name=metadata.name,
+        asset_class=metadata.category,
+        theme_tags=list(metadata.theme_tags),
+    )
+    ma5 = _mean_value(series[-5:])
+    distance_to_ma5 = _distance_to_average(latest_value, ma5)
+    threshold_points = [
+        ThresholdPricePoint(value=item.value, pct_change=item.pct_change)
+        for item in series
+        if item.value > 0
+    ]
+    dynamic_context = dynamic_threshold_context(
+        asset_bucket=theme_profile.asset_bucket,
+        theme_group=theme_profile.theme_group,
+        points=threshold_points,
+        today_return=_latest_day_return(series),
+        return_5d=return_5d,
+        return_20d=return_20d,
+        return_60d=return_60d,
+        volatility_20d=volatility_20d,
+        max_drawdown_60d=max_drawdown_60d,
+        distance_to_ma5=distance_to_ma5,
+    )
+    dynamic_thresholds = dict(dynamic_context.get("thresholds") or {})
+    return_5_surge = float(dynamic_thresholds.get("return_5_surge", SURGE_RETURN_5D))
+    return_20_chase = float(dynamic_thresholds.get("return_20_chase", CHASE_RETURN_20D))
+    return_60_chase = float(dynamic_thresholds.get("return_60_chase", CHASE_RETURN_60D))
+    high_volatility = float(dynamic_thresholds.get("high_volatility", HIGH_DAILY_VOLATILITY_20D))
+    large_drawdown = float(dynamic_thresholds.get("large_drawdown", LARGE_DRAWDOWN_60D))
 
     risk_flags: list[str] = []
     if usable_days < 20:
@@ -800,13 +879,13 @@ def _score_metrics(metadata: ShortResearchAsset, series: list[PricePoint], as_of
         risk_flags.append("短样本")
     if latest_date is None or (as_of_date - latest_date).days > STALE_DATA_DAYS:
         risk_flags.append("数据滞后")
-    if (return_20d or 0.0) > CHASE_RETURN_20D or (return_60d or 0.0) > CHASE_RETURN_60D:
+    if (return_20d or 0.0) > return_20_chase or (return_60d or 0.0) > return_60_chase:
         risk_flags.append("追高风险")
-    if (return_5d or 0.0) > SURGE_RETURN_5D:
+    if (return_5d or 0.0) > return_5_surge:
         risk_flags.append("连续大涨")
-    if volatility_20d is not None and volatility_20d > HIGH_DAILY_VOLATILITY_20D:
+    if volatility_20d is not None and volatility_20d > high_volatility:
         risk_flags.append("高波动")
-    if max_drawdown_60d is not None and max_drawdown_60d < LARGE_DRAWDOWN_60D:
+    if max_drawdown_60d is not None and max_drawdown_60d < large_drawdown:
         risk_flags.append("回撤较大")
     if metadata.asset_type == ASSET_TYPE_ETF and (
         average_turnover_20d is None or average_turnover_20d < MIN_AVERAGE_TURNOVER
@@ -858,6 +937,7 @@ def _score_metrics(metadata: ShortResearchAsset, series: list[PricePoint], as_of
         return_20d=return_20d,
         return_60d=return_60d,
         average_turnover_20d=average_turnover_20d,
+        dynamic_context=dynamic_context,
     )
 
     return {
@@ -871,6 +951,8 @@ def _score_metrics(metadata: ShortResearchAsset, series: list[PricePoint], as_of
         "volatility_20d": volatility_20d,
         "max_drawdown_60d": max_drawdown_60d,
         "average_turnover_20d": average_turnover_20d,
+        "theme_profile": theme_profile.as_dict(),
+        "dynamic_threshold_context": dynamic_context,
         "trend_score": trend_score,
         "risk_score": risk_score,
         "liquidity_score": liquidity_score,
@@ -1868,6 +1950,8 @@ def _rationale(metadata: ShortResearchAsset, metrics: dict[str, Any], conclusion
         "risk_evidence": risk_evidence,
         "risk_explanation": _risk_text(list(metrics["risk_flags"])),
         "investment_direction": metadata.investment_direction,
+        "theme_profile": metrics.get("theme_profile") or {},
+        "dynamic_threshold_context": metrics.get("dynamic_threshold_context") or {},
         "opposing_view": opposing_view,
         "sample_note": sample_level,
         "label_meaning": label_meanings[conclusion],
@@ -1982,6 +2066,8 @@ async def compute_asset(
                 "volume_ratio_20d",
                 "entry_timing_label",
                 "entry_timing_reason",
+                "theme_profile",
+                "dynamic_threshold_context",
             )
         },
     }
@@ -2015,6 +2101,8 @@ async def compute_asset(
                 "volume_ratio_20d",
                 "entry_timing_label",
                 "entry_timing_reason",
+                "theme_profile",
+                "dynamic_threshold_context",
             )
         },
         score_breakdown=score_breakdown,
@@ -2319,9 +2407,11 @@ async def status_summary(session: AsyncSession, *, include_health: bool = False)
             label_validation_generated_at = datetime.fromisoformat(str(label_validation["generated_at"]))
         except ValueError:
             label_validation_generated_at = None
+    theme_coverage = await theme_coverage_summary(session)
     return {
         "latest_data_date": latest,
         "signal_date": latest_run.as_of_date if latest_run else None,
+        "theme_coverage": theme_coverage,
         "label_validation": label_validation if isinstance(label_validation, dict) else {},
         "label_validation_generated_at": label_validation_generated_at,
         "asset_count": len(DEFAULT_SHORT_RESEARCH_ASSETS),
@@ -2423,8 +2513,21 @@ async def _prioritize_etf_sync_codes(
         )
     )
     watchlist = list(dict.fromkeys(str(code) for code in watchlist_rows.all()))
-    remaining = sorted(code_set - set(priority) - set(watchlist))
-    return [*priority, *(code for code in watchlist if code not in priority), *remaining]
+    tracked_rows = await session.scalars(
+        select(TrackedPosition.asset_code).where(
+            TrackedPosition.asset_type == ASSET_TYPE_ETF,
+            TrackedPosition.status == "active",
+            TrackedPosition.asset_code.in_(codes),
+        )
+    )
+    tracked = list(dict.fromkeys(str(code) for code in tracked_rows.all()))
+    prioritized = [*priority, *(code for code in tracked if code not in priority)]
+    remaining = sorted(code_set - set(prioritized) - set(watchlist))
+    return [
+        *prioritized,
+        *(code for code in watchlist if code not in prioritized),
+        *remaining,
+    ]
 
 
 async def sync_short_research_data(
@@ -2597,9 +2700,29 @@ def _portfolio_defensive_priority(asset: ComputedAsset) -> int:
     if asset_class == "broad" or "宽基" in tags or "宽基" in name:
         volatility = float(asset.metrics.get("volatility_20d") or 1.0)
         drawdown = float(asset.metrics.get("max_drawdown_60d") or -1.0)
-        if volatility <= 0.018 and drawdown >= -0.08:
+        if volatility <= 0.025 and drawdown >= -0.10:
             return 4
     return 99
+
+
+def _portfolio_theme_keys(asset: ComputedAsset) -> list[str]:
+    profile = dict(asset.metrics.get("theme_profile") or asset.rationale.get("theme_profile") or {})
+    keys = [
+        str(profile.get("theme_group") or "").strip(),
+        str(profile.get("primary_theme") or "").strip(),
+    ]
+    filtered = [
+        item
+        for item in dict.fromkeys(keys)
+        if item and item not in {UNKNOWN_GROUP, UNKNOWN_THEME}
+    ]
+    if filtered:
+        return filtered
+    return [
+        item
+        for item in dict.fromkeys(asset.metadata.theme_tags[:2])
+        if item and item not in {UNKNOWN_GROUP, UNKNOWN_THEME}
+    ]
 
 
 def _portfolio_defensive_reason(asset: ComputedAsset, original_reason: str | None) -> str | None:
@@ -2719,8 +2842,10 @@ def _portfolio_item(
         reason=reason,
         weight_reason=weight_reason,
     )
+    theme_profile = dict(asset.metrics.get("theme_profile") or asset.rationale.get("theme_profile") or {})
     metrics = {
         **asset.metrics,
+        "portfolio_theme_keys": _portfolio_theme_keys(asset),
         "portfolio_weight_explanation": weight_explanation,
         "portfolio_exclusion_explanation": exclusion_explanation,
         "portfolio_decision_factors": decision_factors,
@@ -2734,6 +2859,8 @@ def _portfolio_item(
         "score": round(asset.total_score, 2),
         "conclusion": asset.conclusion,
         "entry_timing_label": asset.entry_timing_label,
+        "primary_theme": theme_profile.get("primary_theme"),
+        "theme_group": theme_profile.get("theme_group"),
         "data_date": asset.latest_date,
         "evidence": [
             f"综合分 {asset.total_score:.1f}",
@@ -3149,7 +3276,7 @@ async def etf_observation_portfolio(
         if len(selected_assets) >= selected_limit:
             break
         selection_reason: str | None = None
-        asset_themes = list(asset.metadata.theme_tags[:2]) or ["ETF"]
+        asset_themes = _portfolio_theme_keys(asset) or ["ETF"]
         if any(theme_counts.get(theme, 0) >= 2 for theme in asset_themes):
             selection_reason = "同主题 ETF 已有足够候选，按主题上限转入观察。"
         asset_returns = return_maps.get(asset.metadata.code)
@@ -3181,7 +3308,7 @@ async def etf_observation_portfolio(
             watch_only_items.append(_portfolio_item(asset, target_weight=0.0, reason=original_reason))
             continue
         selection_reason = None
-        asset_themes = list(asset.metadata.theme_tags[:2]) or ["ETF"]
+        asset_themes = _portfolio_theme_keys(asset) or ["ETF"]
         if any(theme_counts.get(theme, 0) >= 2 for theme in asset_themes):
             selection_reason = "补位候选同主题已有足够权重，继续留在观察组。"
         asset_returns = return_maps.get(asset.metadata.code)
@@ -3228,7 +3355,7 @@ async def etf_observation_portfolio(
                 {
                     "final_weight": round(target, 4),
                     "single_cap_applied": target >= _PORTFOLIO_SINGLE_WEIGHT_CAP - 0.0001,
-                    "theme_tags": list(asset.metadata.theme_tags[:2]),
+                    "theme_tags": _portfolio_theme_keys(asset) or list(asset.metadata.theme_tags[:2]),
                     "correlation_policy": "高相关候选转入观察组，主组合只保留分散后的候选。",
                     "target_invested_weight": _PORTFOLIO_TOTAL_EXPOSURE_CAP,
                     "portfolio_item_type": item_type,

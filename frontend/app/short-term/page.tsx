@@ -1253,6 +1253,9 @@ function ShortTermClient() {
         const params = new URLSearchParams();
         params.set("limit", String(ASSET_PAGE_SIZE));
         params.set("offset", String(assetOffset));
+        if (theme !== "all") {
+          params.set("theme", theme);
+        }
         if (keyword.trim()) {
           params.set("q", keyword.trim());
         }
@@ -1280,6 +1283,17 @@ function ShortTermClient() {
   const etfLiveData = isLiveRankingResponse(assets.data) ? assets.data : null;
   const isEtfLiveRanking = etfLiveData !== null && assetType === "etf";
   const shortAssetData = isEtfLiveRanking ? null : (assets.data as ShortResearchAssetList | undefined);
+  const etfThemeSource = useQuery({
+    queryKey: ["short-research", "etf-theme-heat"],
+    enabled: assetType === "etf",
+    queryFn: async () =>
+      (
+        await api.get<ShortResearchAssetList>(
+          "/api/short-research/assets?asset_type=etf&universe=all&sort=score&limit=1&offset=0"
+        )
+      ).data,
+    staleTime: 5 * 60_000
+  });
   const shouldRefreshIntradayQueries =
     isEtfTradingPollWindow && isEtfLiveRanking && etfLiveData?.market_status === "open";
 
@@ -1351,7 +1365,11 @@ function ShortTermClient() {
 
   const themes = useMemo(() => {
     if (assetType === "etf") {
-      return ["all"];
+      const seen = new Set<string>(fallbackThemes);
+      for (const item of etfThemeSource.data?.theme_heat ?? []) {
+        seen.add(item.theme);
+      }
+      return ["all", ...Array.from(seen).sort((left, right) => left.localeCompare(right, "zh-CN"))];
     }
     const seen = new Set<string>(fallbackThemes);
     for (const item of assets.data?.items ?? []) {
@@ -1360,7 +1378,7 @@ function ShortTermClient() {
       }
     }
     return ["all", ...Array.from(seen).sort((left, right) => left.localeCompare(right, "zh-CN"))];
-  }, [assetType, assets.data]);
+  }, [assetType, assets.data, etfThemeSource.data]);
 
   const syncData = useMutation({
     mutationFn: async () =>
@@ -1730,6 +1748,20 @@ function ShortTermClient() {
         : selectedAsset.latest_value === null
         ? "暂无"
         : selectedAsset.latest_value.toFixed(4);
+    const themeProfile = (selectedAsset.theme_profile ?? selectedAssetMetrics.theme_profile ?? {}) as Record<string, unknown>;
+    const themeText = (value: unknown, fallback = "暂无") =>
+      typeof value === "string" && value.trim().length > 0 ? value : fallback;
+    const secondaryThemes = Array.isArray(themeProfile.secondary_themes)
+      ? themeProfile.secondary_themes.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+      : [];
+    const dynamicContext = (selectedAssetMetrics.dynamic_threshold_context ?? selectedAsset.rationale.dynamic_threshold_context ?? {}) as Record<string, unknown>;
+    const dynamicThresholdMap = (dynamicContext.thresholds ?? {}) as Record<string, unknown>;
+    const dynamicNumber = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : null);
+    const dynamicPercent = (key: string) => {
+      const value = dynamicNumber(dynamicThresholdMap[key]);
+      return value === null ? "暂无" : formatPercent(value);
+    };
+    const volatilityUnit = dynamicNumber(dynamicContext.volatility_unit_pct);
 
     return (
       <div className="mt-5 rounded-[10px] border border-ink/10 bg-white p-4">
@@ -1806,6 +1838,46 @@ function ShortTermClient() {
           <span>数据来源：{selectedAssetSource}</span>
           <span>持仓状态：{selectedHoldingStatus}</span>
         </div>
+        {assetType === "etf" ? (
+          <div className="mt-3 grid gap-3 md:grid-cols-2">
+            <div className="rounded-[8px] border border-ink/10 bg-paper p-3">
+              <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-xs font-semibold text-accent">主题归类</p>
+                <span className="w-fit rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-ink/60">
+                  {themeText(themeProfile.classification_confidence, "未知置信度")}
+                </span>
+              </div>
+              <div className="mt-2 grid gap-2 text-sm text-ink/70 sm:grid-cols-2">
+                <span>主主题：{themeText(themeProfile.primary_theme ?? selectedAsset.primary_theme, "未分类")}</span>
+                <span>主题组：{themeText(themeProfile.theme_group ?? selectedAsset.theme_group, "unknown")}</span>
+                <span>来源：{themeText(themeProfile.classification_source ?? selectedAsset.classification_source, "规则未命中")}</span>
+                <span>副主题：{secondaryThemes.length ? secondaryThemes.join(" / ") : "暂无"}</span>
+              </div>
+              <p className="mt-2 text-sm leading-6 text-ink/55">
+                {themeText(themeProfile.classification_reason ?? selectedAsset.classification_reason, "未找到足够明确的行业/主题证据，组合层会保守处理。")}
+              </p>
+            </div>
+            <div className="rounded-[8px] border border-ink/10 bg-paper p-3">
+              <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-xs font-semibold text-accent">动态阈值依据</p>
+                <span className="w-fit rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-ink/60">
+                  {themeText(dynamicContext.rule_version, "规则版本未知")}
+                </span>
+              </div>
+              <div className="mt-2 grid gap-2 text-sm text-ink/70 sm:grid-cols-2">
+                <span>阈值模式：{themeText(dynamicContext.threshold_mode, "暂无")}</span>
+                <span>波动单位：{volatilityUnit === null ? "暂无" : formatPercent(volatilityUnit)}</span>
+                <span>追高线：{dynamicPercent("chase_daily")}</span>
+                <span>跌破等待线：{dynamicPercent("drop_wait")}</span>
+                <span>移动止盈启动：{dynamicPercent("profit_start_pct")}</span>
+                <span>高点回吐线：{dynamicPercent("trailing_giveback_pct")}</span>
+              </div>
+              <p className="mt-2 text-sm leading-6 text-ink/55">
+                {themeText(dynamicContext.reason, "样本不足时使用保守默认线；这些阈值只用于研究和提醒解释，不是自动交易指令。")}
+              </p>
+            </div>
+          </div>
+        ) : null}
         {assetType === "etf" ? (
           <div className="mt-3 rounded-[8px] bg-paper px-3 py-3 text-xs leading-5 text-ink/60">
             <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
@@ -1937,6 +2009,30 @@ function ShortTermClient() {
             ))}
           </select>
         </div>
+        {assetType === "etf" && (etfThemeSource.data?.theme_heat?.length ?? 0) > 0 ? (
+          <div className="mt-4 rounded-[8px] border border-border bg-white p-3">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">主题热度</p>
+              <span className="text-xs text-ink/45">按最新短线排序缓存统计</span>
+            </div>
+            <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
+              {etfThemeSource.data?.theme_heat?.slice(0, 8).map((item) => (
+                <button
+                  key={item.theme}
+                  type="button"
+                  className={`shrink-0 rounded-full border px-3 py-1.5 text-xs transition ${
+                    theme === item.theme
+                      ? "border-ink bg-ink text-white"
+                      : "border-border bg-paper text-ink/70 hover:border-accent"
+                  }`}
+                  onClick={() => setTheme(item.theme)}
+                >
+                  {item.theme} · {item.count}只 · {item.avg_score.toFixed(1)}分
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
         <div className="mt-5">
           <AssetPaginationBar
             total={totalAssetCount}

@@ -77,6 +77,11 @@ def _asset_out(
     validation_evidence: dict[str, Any] | None = None,
     observation_portfolio: dict[str, Any] | None = None,
 ) -> ShortResearchAssetOut:
+    theme_profile = dict(
+        asset.metrics.get("theme_profile")
+        or asset.rationale.get("theme_profile")
+        or {}
+    )
     return ShortResearchAssetOut(
         asset_type=asset.metadata.asset_type,
         code=asset.metadata.code,
@@ -87,6 +92,13 @@ def _asset_out(
         entry_timing_label=asset.entry_timing_label,
         entry_timing_reason=asset.entry_timing_reason,
         theme_tags=list(asset.metadata.theme_tags),
+        theme_group=theme_profile.get("theme_group"),
+        primary_theme=theme_profile.get("primary_theme"),
+        secondary_themes=list(theme_profile.get("secondary_themes") or []),
+        classification_source=theme_profile.get("classification_source"),
+        classification_confidence=theme_profile.get("classification_confidence"),
+        classification_reason=theme_profile.get("classification_reason"),
+        theme_profile=theme_profile,
         investment_direction=asset.metadata.investment_direction,
         trading_rule_label=asset.metadata.trading_rule_label,
         latest_date=asset.latest_date,
@@ -102,6 +114,53 @@ def _asset_out(
         validation_evidence=validation_evidence or {},
         observation_portfolio=observation_portfolio or {},
     )
+
+
+def _theme_heat_summary(assets: list[ComputedAsset]) -> list[dict[str, Any]]:
+    groups: dict[str, dict[str, Any]] = {}
+    for asset in assets:
+        if asset.metadata.asset_type != "etf":
+            continue
+        profile = dict(asset.metrics.get("theme_profile") or asset.rationale.get("theme_profile") or {})
+        primary_theme = str(profile.get("primary_theme") or "").strip() or "未分类"
+        if primary_theme == "未分类":
+            primary_theme = str(profile.get("theme_group") or "未分类")
+        bucket = groups.setdefault(
+            primary_theme,
+            {
+                "theme": primary_theme,
+                "count": 0,
+                "score_sum": 0.0,
+                "change_sum": 0.0,
+                "change_count": 0,
+                "top_asset": None,
+                "top_score": 0.0,
+            },
+        )
+        bucket["count"] += 1
+        bucket["score_sum"] += float(asset.total_score)
+        today_return = asset.metrics.get("today_return_pct")
+        if isinstance(today_return, (int, float)):
+            bucket["change_sum"] += float(today_return)
+            bucket["change_count"] += 1
+        if float(asset.total_score) >= float(bucket["top_score"]):
+            bucket["top_score"] = round(float(asset.total_score), 2)
+            bucket["top_asset"] = {"code": asset.metadata.code, "name": asset.metadata.name}
+    result: list[dict[str, Any]] = []
+    for item in groups.values():
+        count = max(int(item["count"]), 1)
+        change_count = int(item["change_count"])
+        result.append(
+            {
+                "theme": item["theme"],
+                "count": count,
+                "avg_score": round(float(item["score_sum"]) / count, 2),
+                "avg_today_return": round(float(item["change_sum"]) / change_count, 4) if change_count else None,
+                "top_score": item["top_score"],
+                "top_asset": item["top_asset"],
+            }
+        )
+    return sorted(result, key=lambda item: (item["avg_score"], item["count"]), reverse=True)[:12]
 
 
 def _validation_for_asset(asset: ComputedAsset, evidence_by_label: dict[tuple[str, str], dict[str, Any]]) -> dict[str, Any]:
@@ -265,6 +324,18 @@ async def list_short_research_assets(
     advisor_reports = await latest_reports_by_asset(session, run.id) if run is not None else {}
     validation_by_label = await latest_validation_evidence_by_label(session) if asset_type in {None, "etf"} else {}
     portfolio_context_by_code = _portfolio_contexts(await etf_observation_portfolio(session)) if asset_type in {None, "etf"} else {}
+    theme_heat: list[dict[str, Any]] = []
+    if asset_type in {None, "etf"}:
+        heat_assets, _heat_total = await cached_signal_assets(
+            session,
+            run,
+            asset_type="etf",
+            sort=sort,
+            universe=universe,
+            limit=2000,
+            offset=0,
+        )
+        theme_heat = _theme_heat_summary(heat_assets)
     return ShortResearchAssetListOut(
         items=[
             _asset_out(
@@ -278,6 +349,7 @@ async def list_short_research_assets(
         total=total,
         generated_at=run.finished_at or run.started_at,
         as_of_date=run.as_of_date,
+        theme_heat=theme_heat,
     )
 
 

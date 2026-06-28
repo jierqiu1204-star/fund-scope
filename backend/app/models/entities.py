@@ -284,6 +284,25 @@ class EtfThemeExposure(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class EtfThemeProfile(Base):
+    __tablename__ = "etf_theme_profiles"
+    __table_args__ = (
+        SaIndex("ix_etf_theme_profiles_theme_group", "theme_group"),
+        SaIndex("ix_etf_theme_profiles_primary_theme", "primary_theme"),
+    )
+
+    etf_code: Mapped[str] = mapped_column(ForeignKey("tradable_etfs.code", ondelete="CASCADE"), primary_key=True)
+    asset_bucket: Mapped[str] = mapped_column(String(64), default="unknown")
+    theme_group: Mapped[str] = mapped_column(String(64), default="unknown")
+    primary_theme: Mapped[str] = mapped_column(String(64), default="未分类")
+    secondary_themes_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    classification_source: Mapped[str] = mapped_column(String(64), default="unknown")
+    classification_confidence: Mapped[str] = mapped_column(String(32), default="unknown")
+    classification_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class EtfDataHealth(Base):
     __tablename__ = "etf_data_health"
 

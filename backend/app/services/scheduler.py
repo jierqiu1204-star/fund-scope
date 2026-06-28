@@ -23,6 +23,7 @@ from app.services.llm import LLMClient
 from app.services.short_research.jobs import (
     daily_etf_observation_portfolio_job,
     daily_etf_signal_validation_job,
+    daily_etf_taxonomy_job,
     daily_short_research_advisor_job,
     daily_short_research_data_job,
     daily_short_research_signals_job,
@@ -151,6 +152,16 @@ def register_default_jobs(
         hour=15,
         minute=5,
         id="post_close_etf_data",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_tracked_job,
+        "cron",
+        args=[db, "daily_etf_taxonomy", daily_etf_taxonomy_job],
+        day_of_week="mon-fri",
+        hour=15,
+        minute=8,
+        id="daily_etf_taxonomy",
         replace_existing=True,
     )
     scheduler.add_job(

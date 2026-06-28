@@ -37,6 +37,7 @@ class ShortResearchStatusOut(BaseModel):
     data_health: list[ShortResearchDataHealthOut] = Field(default_factory=list)
     label_validation: dict[str, Any] = Field(default_factory=dict)
     label_validation_generated_at: datetime | None = None
+    theme_coverage: dict[str, Any] = Field(default_factory=dict)
 
 
 class EtfSignalValidationItemOut(BaseModel):
@@ -123,6 +124,13 @@ class ShortResearchAssetOut(BaseModel):
     entry_timing_label: str
     entry_timing_reason: str
     theme_tags: list[str]
+    theme_group: str | None = None
+    primary_theme: str | None = None
+    secondary_themes: list[str] = Field(default_factory=list)
+    classification_source: str | None = None
+    classification_confidence: str | None = None
+    classification_reason: str | None = None
+    theme_profile: dict[str, Any] = Field(default_factory=dict)
     investment_direction: str
     trading_rule_label: str
     latest_date: date | None = None
@@ -144,6 +152,7 @@ class ShortResearchAssetListOut(BaseModel):
     total: int
     generated_at: datetime | None = None
     as_of_date: date | None = None
+    theme_heat: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ShortResearchAssetDetailOut(BaseModel):
@@ -173,6 +182,8 @@ class ShortResearchObservationPortfolioItemOut(BaseModel):
     score: float
     conclusion: str
     data_date: date | None = None
+    primary_theme: str | None = None
+    theme_group: str | None = None
     evidence: list[str]
     risk_reasons: list[str]
     entry_timing_label: str | None = None

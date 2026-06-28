@@ -560,6 +560,13 @@ export type ShortResearchAsset = {
   entry_timing_label: string;
   entry_timing_reason: string;
   theme_tags: string[];
+  theme_group?: string | null;
+  primary_theme?: string | null;
+  secondary_themes?: string[];
+  classification_source?: string | null;
+  classification_confidence?: string | null;
+  classification_reason?: string | null;
+  theme_profile?: Record<string, unknown>;
   investment_direction: string;
   trading_rule_label: string;
   latest_date: string | null;
@@ -598,6 +605,14 @@ export type ShortResearchAssetList = {
   total: number;
   generated_at: string | null;
   as_of_date: string | null;
+  theme_heat?: {
+    theme: string;
+    count: number;
+    avg_score: number;
+    avg_today_return: number | null;
+    top_score: number;
+    top_asset: { code: string; name: string } | null;
+  }[];
 };
 
 export type ShortResearchAssetDetail = {
@@ -627,6 +642,8 @@ export type ShortResearchObservationPortfolioItem = {
   score: number;
   conclusion: string;
   data_date: string | null;
+  primary_theme?: string | null;
+  theme_group?: string | null;
   evidence: string[];
   risk_reasons: string[];
   inclusion_reasons?: string[];
