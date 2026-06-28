@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,6 +35,7 @@ from app.services.short_research.jobs import (
     daily_short_research_advisor_job,
     daily_short_research_data_job,
     daily_short_research_signals_job,
+    etf_label_historical_replay_job,
     post_close_etf_data_job,
     post_close_etf_label_outcome_review_job,
     post_close_etf_observation_portfolio_job,
@@ -139,6 +140,8 @@ async def list_job_runs(session: AsyncSession = Depends(get_db_session)) -> list
 async def run_job_by_name(
     job_name: str,
     request: Request,
+    days: int = Query(default=180, ge=30, le=730),
+    max_assets: int = Query(default=300, ge=1, le=2000),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, object]:
     llm_client = LLMClient(request.app.state.settings)
@@ -186,6 +189,16 @@ async def run_job_by_name(
         return await run_job(request.app.state.db.session, job_name, daily_short_research_signals_job)
     if job_name == "daily_etf_signal_validation":
         return await run_job(request.app.state.db.session, job_name, daily_etf_signal_validation_job)
+    if job_name == "etf_label_historical_replay":
+        return await run_job(
+            request.app.state.db.session,
+            job_name,
+            lambda tracked_session: etf_label_historical_replay_job(
+                tracked_session,
+                days=days,
+                max_assets=max_assets,
+            ),
+        )
     if job_name == "daily_etf_label_outcome_review":
         return await run_job(request.app.state.db.session, job_name, daily_etf_label_outcome_review_job)
     if job_name == "daily_etf_observation_portfolio":

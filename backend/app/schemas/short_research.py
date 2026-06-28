@@ -58,6 +58,7 @@ class EtfSignalValidationRunOut(BaseModel):
     status: str
     as_of_date: date
     source_signal_run_id: int | None = None
+    validation_mode: str = "forward_live"
     rule_version: str
     summary: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime

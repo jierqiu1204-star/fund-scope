@@ -23,6 +23,7 @@ from app.models.entities import (
     EtfDataHealth,
     EtfIntradayLatestQuote,
     EtfLabelOutcome,
+    EtfLabelReplaySample,
     EtfObservationPortfolioItem,
     EtfObservationPortfolioSnapshot,
     EtfPriceHistory,
@@ -899,6 +900,12 @@ _LABEL_VALIDATION_WINDOWS = (1, 3, 5, 10)
 _LABEL_VALIDATION_MAX_ASSETS = 120
 _LABEL_VALIDATION_MIN_SAMPLES = 10
 _LABEL_VALIDATION_RULE_VERSION = "label_validation_v1"
+VALIDATION_MODE_FORWARD_LIVE = "forward_live"
+VALIDATION_MODE_HISTORICAL_REPLAY = "historical_replay"
+_LABEL_REPLAY_DEFAULT_DAYS = 180
+_LABEL_REPLAY_MIN_SAMPLES = 30
+_LABEL_REPLAY_SUFFICIENT_SAMPLES = 100
+_LABEL_REPLAY_MAX_ASSETS = 300
 
 
 def _forward_drawdown(series: list[PricePoint]) -> float | None:
@@ -926,6 +933,22 @@ def _validation_confidence_label(confidence: str) -> str:
     }.get(confidence, "样本不足")
 
 
+def _replay_validation_confidence(
+    sample_count: int,
+    *,
+    coverage: float,
+    recent_median: float | None = None,
+    all_median: float | None = None,
+) -> str:
+    if sample_count < _LABEL_REPLAY_MIN_SAMPLES or coverage < 0.6:
+        return "insufficient"
+    if recent_median is not None and all_median is not None and recent_median < min(0.0, all_median - 0.01):
+        return "recent_weakening"
+    if sample_count >= _LABEL_REPLAY_SUFFICIENT_SAMPLES and coverage >= 0.8:
+        return "sufficient"
+    return "limited"
+
+
 def _outcome_entry_timing(item: ShortResearchSignalItem) -> str:
     metrics = dict(item.metrics_json or {})
     rationale = dict(item.rationale_json or {})
@@ -944,6 +967,22 @@ def _signal_item_decision_eligible(item: ShortResearchSignalItem) -> tuple[bool,
     return True, None
 
 
+async def _etf_price_rows_until(
+    session: AsyncSession,
+    code: str,
+    *,
+    from_date: date | None = None,
+    to_date: date | None = None,
+) -> list[EtfPriceHistory]:
+    query = select(EtfPriceHistory).where(EtfPriceHistory.etf_code == code)
+    if from_date is not None:
+        query = query.where(EtfPriceHistory.trade_date >= from_date)
+    if to_date is not None:
+        query = query.where(EtfPriceHistory.trade_date <= to_date)
+    rows = await session.scalars(query.order_by(EtfPriceHistory.trade_date.asc()))
+    return list(rows.all())
+
+
 async def _etf_price_rows_from(
     session: AsyncSession,
     code: str,
@@ -958,6 +997,20 @@ async def _etf_price_rows_from(
             )
         ).all()
     )
+
+
+def _price_points_from_rows(rows: list[EtfPriceHistory]) -> list[PricePoint]:
+    return [
+        PricePoint(
+            point_date=row.trade_date,
+            value=row.close,
+            close=row.close,
+            turnover=row.turnover,
+            pct_change=row.pct_change / 100,
+        )
+        for row in rows
+        if row.close > 0
+    ]
 
 
 def _completed_outcome_payload(
@@ -1167,6 +1220,306 @@ async def _label_validation_summary(
     return await _label_outcome_summary(session, as_of_date)
 
 
+def _summarize_replay_bucket(
+    rows: list[EtfLabelReplaySample],
+    total_rows: int,
+) -> dict[str, Any]:
+    completed_rows = [item for item in rows if item.status == "completed" and item.forward_return is not None]
+    excluded_count = sum(1 for item in rows if item.status == "excluded")
+    if not completed_rows:
+        return {
+            "sample_count": 0,
+            "excluded_count": excluded_count,
+            "pending_count": 0,
+            "coverage": 0.0,
+            "avg_return": None,
+            "median_return": None,
+            "worst_forward_drawdown": None,
+            "favorable_excursion_median": None,
+            "win_rate": None,
+            "confidence": "insufficient",
+            "confidence_label": "样本不足",
+            "insufficient_sample": True,
+            "validation_mode": VALIDATION_MODE_HISTORICAL_REPLAY,
+        }
+    returns = [float(item.forward_return or 0.0) for item in completed_rows]
+    drawdowns = [float(item.adverse_drawdown or 0.0) for item in completed_rows]
+    excursions = [float(item.favorable_excursion or 0.0) for item in completed_rows]
+    latest_rows = sorted(completed_rows, key=lambda item: item.replay_date, reverse=True)
+    recent_returns = [float(item.forward_return or 0.0) for item in latest_rows[: min(30, len(latest_rows))]]
+    all_median = median(returns)
+    recent_median = median(recent_returns) if recent_returns else None
+    coverage = len(completed_rows) / total_rows if total_rows else 0.0
+    confidence = _replay_validation_confidence(
+        len(completed_rows),
+        coverage=coverage,
+        recent_median=recent_median,
+        all_median=all_median,
+    )
+    exclusion_reasons: dict[str, int] = {}
+    for item in rows:
+        if item.exclusion_reason:
+            exclusion_reasons[item.exclusion_reason] = exclusion_reasons.get(item.exclusion_reason, 0) + 1
+    return {
+        "sample_count": len(completed_rows),
+        "excluded_count": excluded_count,
+        "pending_count": 0,
+        "coverage": round(coverage, 4),
+        "avg_return": round(mean(returns), 6),
+        "median_return": round(all_median, 6),
+        "worst_forward_drawdown": round(min(drawdowns), 6),
+        "favorable_excursion_median": round(median(excursions), 6),
+        "win_rate": round(sum(1 for item in returns if item > 0) / len(returns), 4),
+        "confidence": confidence,
+        "confidence_label": _validation_confidence_label(confidence),
+        "insufficient_sample": confidence == "insufficient",
+        "recent_median_return": round(recent_median, 6) if recent_median is not None else None,
+        "exclusion_reasons": exclusion_reasons,
+        "validation_mode": VALIDATION_MODE_HISTORICAL_REPLAY,
+        "price_source": "verified_daily_close",
+    }
+
+
+def _replay_sample(
+    *,
+    validation_run_id: int,
+    metadata: ShortResearchAsset,
+    metrics: dict[str, Any],
+    label: str,
+    replay_row: EtfPriceHistory,
+    horizon: int,
+    future_rows: list[EtfPriceHistory],
+    status: str,
+    exclusion_reason: str | None = None,
+) -> EtfLabelReplaySample:
+    entry_price = float(replay_row.close or 0.0) if replay_row.close else None
+    forward_return: float | None = None
+    adverse_drawdown: float | None = None
+    favorable_excursion: float | None = None
+    horizon_end_date: date | None = None
+    if status == "completed" and entry_price and entry_price > 0:
+        end_row = future_rows[-1]
+        horizon_end_date = end_row.trade_date
+        path_returns = [float(row.close or 0.0) / entry_price - 1.0 for row in future_rows if row.close and row.close > 0]
+        if len(path_returns) == horizon:
+            forward_return = path_returns[-1]
+            adverse_drawdown = min(path_returns)
+            favorable_excursion = max(path_returns)
+        else:
+            status = "excluded"
+            exclusion_reason = "invalid_future_window_price"
+    return EtfLabelReplaySample(
+        validation_run_id=validation_run_id,
+        asset_type=ASSET_TYPE_ETF,
+        asset_code=metadata.code,
+        asset_name=metadata.name,
+        label=label,
+        entry_timing_label=str(metrics.get("entry_timing_label") or ENTRY_TIMING_INSUFFICIENT),
+        rule_version=_LABEL_VALIDATION_RULE_VERSION,
+        replay_date=replay_row.trade_date,
+        entry_price=entry_price,
+        horizon_days=horizon,
+        horizon_end_date=horizon_end_date,
+        forward_return=forward_return,
+        adverse_drawdown=adverse_drawdown,
+        favorable_excursion=favorable_excursion,
+        status=status,
+        exclusion_reason=exclusion_reason,
+        metrics_json={
+            "score": metrics.get("total_score"),
+            "score_breakdown": {
+                "trend_score": metrics.get("trend_score"),
+                "risk_score": metrics.get("risk_score"),
+                "liquidity_score": metrics.get("liquidity_score"),
+            },
+            "risk_flags": list(metrics.get("risk_flags") or []),
+            "entry_timing_reason": metrics.get("entry_timing_reason"),
+            "data_reliability": metrics.get("data_reliability", "verified"),
+            "price_source": "verified_daily_close",
+            "no_lookahead_cutoff": replay_row.trade_date.isoformat(),
+        },
+    )
+
+
+async def run_etf_label_historical_replay(
+    session: AsyncSession,
+    *,
+    days: int = _LABEL_REPLAY_DEFAULT_DAYS,
+    max_assets: int = _LABEL_REPLAY_MAX_ASSETS,
+) -> EtfSignalValidationRun:
+    started_at = utcnow()
+    horizons = list(_LABEL_VALIDATION_WINDOWS)
+    run = EtfSignalValidationRun(
+        status=RUN_STATUS_RUNNING,
+        started_at=started_at,
+        as_of_date=date.today(),
+        asset_type=ASSET_TYPE_ETF,
+        validation_mode=VALIDATION_MODE_HISTORICAL_REPLAY,
+        rule_version=_LABEL_VALIDATION_RULE_VERSION,
+        config_json={
+            "validation_mode": VALIDATION_MODE_HISTORICAL_REPLAY,
+            "windows": horizons,
+            "days": days,
+            "max_assets": max_assets,
+            "price_source": "verified_daily_close",
+            "research_only": True,
+        },
+        summary_json={},
+    )
+    session.add(run)
+    await session.flush()
+
+    etfs = list(
+        (
+            await session.scalars(
+                select(TradableEtf)
+                .where(TradableEtf.is_short_term_eligible.is_(True))
+                .order_by(TradableEtf.code.asc())
+                .limit(max_assets)
+            )
+        ).all()
+    )
+    buckets: dict[tuple[str, str, int], list[EtfLabelReplaySample]] = {}
+    completed_samples = 0
+    excluded_samples = 0
+    evaluated_assets = 0
+    replay_start: date | None = None
+    replay_end: date | None = None
+    exclusion_reasons: dict[str, int] = {}
+
+    for etf in etfs:
+        rows = await _etf_price_rows_until(
+            session,
+            etf.code,
+            from_date=date.today() - timedelta(days=max(days * 2 + 180, 540)),
+        )
+        rows = [row for row in rows if row.close and row.close > 0]
+        if not rows:
+            continue
+        evaluated_assets += 1
+        metadata = _metadata_from_etf_row(etf)
+        replay_indices = range(max(0, len(rows) - days), len(rows))
+        for index in replay_indices:
+            replay_row = rows[index]
+            replay_start = replay_row.trade_date if replay_start is None else min(replay_start, replay_row.trade_date)
+            replay_end = replay_row.trade_date if replay_end is None else max(replay_end, replay_row.trade_date)
+            series = _price_points_from_rows(rows[: index + 1])
+            if len(series) < 20:
+                metrics = {
+                    "entry_timing_label": ENTRY_TIMING_INSUFFICIENT,
+                    "entry_timing_reason": "回放日之前可用日线不足，不能生成无未来函数标签。",
+                    "risk_flags": ["数据不足"],
+                    "total_score": 0.0,
+                }
+                label = CONCLUSION_INSUFFICIENT
+                eligible = False
+                base_exclusion = "no_lookahead_insufficient_history"
+            else:
+                metrics = _score_metrics(metadata, series, replay_row.trade_date)
+                label = _conclusion(metrics)
+                eligible = label not in {CONCLUSION_INSUFFICIENT, CONCLUSION_REJECT}
+                base_exclusion = None if eligible else "unqualified_replay_label"
+            for horizon in horizons:
+                if not eligible:
+                    status = "excluded"
+                    future_rows: list[EtfPriceHistory] = []
+                    exclusion_reason = base_exclusion
+                elif index + horizon >= len(rows):
+                    status = "excluded"
+                    future_rows = []
+                    exclusion_reason = "missing_future_price"
+                else:
+                    future_rows = rows[index + 1 : index + horizon + 1]
+                    status = "completed"
+                    exclusion_reason = None
+                sample = _replay_sample(
+                    validation_run_id=run.id,
+                    metadata=metadata,
+                    metrics=metrics,
+                    label=label,
+                    replay_row=replay_row,
+                    horizon=horizon,
+                    future_rows=future_rows,
+                    status=status,
+                    exclusion_reason=exclusion_reason,
+                )
+                if sample.status == "completed":
+                    completed_samples += 1
+                else:
+                    excluded_samples += 1
+                    if sample.exclusion_reason:
+                        exclusion_reasons[sample.exclusion_reason] = exclusion_reasons.get(sample.exclusion_reason, 0) + 1
+                buckets.setdefault((sample.label, sample.entry_timing_label, horizon), []).append(sample)
+                session.add(sample)
+
+    groups: list[dict[str, Any]] = []
+    by_label: dict[tuple[str, str], dict[int, list[EtfLabelReplaySample]]] = {}
+    for (label, entry_label, horizon), samples in buckets.items():
+        by_label.setdefault((label, entry_label), {})[horizon] = samples
+    for (label, entry_label), windows in sorted(by_label.items()):
+        groups.append(
+            {
+                "label": label,
+                "entry_timing_label": entry_label,
+                "key": f"{label} / {entry_label}",
+                "windows": {
+                    str(window): _summarize_replay_bucket(windows.get(window, []), len(windows.get(window, [])))
+                    for window in horizons
+                },
+            }
+        )
+    summary = {
+        "validation_mode": VALIDATION_MODE_HISTORICAL_REPLAY,
+        "generated_at": utcnow().isoformat(),
+        "as_of_date": (replay_end or date.today()).isoformat(),
+        "replay_start_date": replay_start.isoformat() if replay_start else None,
+        "replay_end_date": replay_end.isoformat() if replay_end else None,
+        "asset_type": ASSET_TYPE_ETF,
+        "rule_version": _LABEL_VALIDATION_RULE_VERSION,
+        "outcome_source": VALIDATION_MODE_HISTORICAL_REPLAY,
+        "price_source": "verified_daily_close",
+        "asset_count": len(etfs),
+        "evaluated_asset_count": evaluated_assets,
+        "universe_source": "current_tradable_etfs_short_term_eligible",
+        "universe_bias_note": "历史回放基于当前仍可用的 ETF 池，可能存在幸存者偏差。",
+        "completed_samples": completed_samples,
+        "excluded_samples": excluded_samples,
+        "exclusion_reasons": exclusion_reasons,
+        "windows": horizons,
+        "min_sample_count": _LABEL_REPLAY_MIN_SAMPLES,
+        "sufficient_sample_count": _LABEL_REPLAY_SUFFICIENT_SAMPLES,
+        "sample_policy": (
+            "历史回放只使用回放日及以前的 ETF 日线收盘价重建标签；"
+            "后续收益为 close-to-close 统计，不代表可成交收益，不参与实时排序、组合或邮件提醒。"
+        ),
+        "groups": groups,
+    }
+    run.status = RUN_STATUS_SUCCESS
+    run.finished_at = utcnow()
+    run.as_of_date = replay_end or date.today()
+    run.summary_json = summary
+    for item in _validation_items_from_summary(summary):
+        session.add(
+            EtfSignalValidationItem(
+                run_id=run.id,
+                label=item["label"],
+                entry_timing_label=item["entry_timing_label"],
+                horizon_days=item["horizon_days"],
+                sample_count=item["sample_count"],
+                excluded_count=item["excluded_count"],
+                avg_return=item["avg_return"],
+                median_return=item["median_return"],
+                win_rate=item["win_rate"],
+                worst_forward_drawdown=item["worst_forward_drawdown"],
+                confidence=item["confidence"],
+                metrics_json=item["metrics"],
+            )
+        )
+    await session.commit()
+    await session.refresh(run)
+    return run
+
+
 def _validation_items_from_summary(summary: dict[str, Any]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for group in summary.get("groups", []):
@@ -1196,13 +1549,18 @@ def _validation_items_from_summary(summary: dict[str, Any]) -> list[dict[str, An
     return items
 
 
-async def latest_signal_validation_run(session: AsyncSession) -> EtfSignalValidationRun | None:
+async def latest_signal_validation_run(
+    session: AsyncSession,
+    *,
+    validation_mode: str | None = None,
+) -> EtfSignalValidationRun | None:
+    query = select(EtfSignalValidationRun).where(EtfSignalValidationRun.asset_type == ASSET_TYPE_ETF)
+    if validation_mode is not None:
+        query = query.where(EtfSignalValidationRun.validation_mode == validation_mode)
     return cast(
         EtfSignalValidationRun | None,
         await session.scalar(
-            select(EtfSignalValidationRun)
-            .where(EtfSignalValidationRun.asset_type == ASSET_TYPE_ETF)
-            .order_by(EtfSignalValidationRun.as_of_date.desc(), EtfSignalValidationRun.id.desc())
+            query.order_by(EtfSignalValidationRun.as_of_date.desc(), EtfSignalValidationRun.id.desc())
         ),
     )
 
@@ -1237,8 +1595,12 @@ async def _recent_outcome_examples(session: AsyncSession) -> dict[tuple[str, str
     return grouped
 
 
-async def latest_validation_evidence_by_label(session: AsyncSession) -> dict[tuple[str, str], dict[str, Any]]:
-    run = await latest_signal_validation_run(session)
+async def _validation_evidence_for_run(
+    session: AsyncSession,
+    run: EtfSignalValidationRun | None,
+    *,
+    examples_by_label: dict[tuple[str, str], list[dict[str, Any]]] | None = None,
+) -> dict[tuple[str, str], dict[str, Any]]:
     if run is None:
         return {}
     rows = (
@@ -1246,21 +1608,24 @@ async def latest_validation_evidence_by_label(session: AsyncSession) -> dict[tup
             select(EtfSignalValidationItem).where(EtfSignalValidationItem.run_id == run.id)
         )
     ).all()
-    examples_by_label = await _recent_outcome_examples(session)
+    examples_by_label = examples_by_label or {}
     grouped: dict[tuple[str, str], dict[str, Any]] = {}
     for row in rows:
         key = (row.label, row.entry_timing_label)
+        validation_mode = run.validation_mode or VALIDATION_MODE_FORWARD_LIVE
+        outcome_source = validation_mode
         evidence = grouped.setdefault(
             key,
             {
                 "run_id": run.id,
                 "as_of_date": run.as_of_date.isoformat(),
                 "rule_version": run.rule_version,
-                "outcome_source": "stored_signal_items",
+                "validation_mode": validation_mode,
+                "outcome_source": outcome_source,
                 "confidence": "insufficient",
                 "confidence_label": "样本不足",
                 "horizons": {},
-                "recent_examples": examples_by_label.get(key, []),
+                "recent_examples": examples_by_label.get(key, []) if validation_mode == VALIDATION_MODE_FORWARD_LIVE else [],
             },
         )
         metrics = dict(row.metrics_json or {})
@@ -1329,6 +1694,7 @@ async def latest_validation_evidence_by_label(session: AsyncSession) -> dict[tup
             "as_of_date": run.as_of_date.isoformat(),
             "generated_at": run.created_at.isoformat(),
             "rule_version": run.rule_version,
+            "validation_mode": run.validation_mode or VALIDATION_MODE_FORWARD_LIVE,
         }
         evidence["sample_quality"] = {
             "sample_count_total": sample_total,
@@ -1338,6 +1704,67 @@ async def latest_validation_evidence_by_label(session: AsyncSession) -> dict[tup
         }
         evidence["degradation_warning"] = degradation_warning
     return grouped
+
+
+async def latest_validation_evidence_by_label(session: AsyncSession) -> dict[tuple[str, str], dict[str, Any]]:
+    historical_run = await latest_signal_validation_run(session, validation_mode=VALIDATION_MODE_HISTORICAL_REPLAY)
+    forward_run = await latest_signal_validation_run(session, validation_mode=VALIDATION_MODE_FORWARD_LIVE)
+    examples_by_label = await _recent_outcome_examples(session) if forward_run is not None else {}
+    historical = await _validation_evidence_for_run(session, historical_run)
+    forward = await _validation_evidence_for_run(session, forward_run, examples_by_label=examples_by_label)
+    keys = set(historical) | set(forward)
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    for key in keys:
+        primary = dict(historical.get(key) or forward.get(key) or {})
+        tracks: dict[str, Any] = {}
+        if key in historical:
+            tracks[VALIDATION_MODE_HISTORICAL_REPLAY] = historical[key]
+        if key in forward:
+            tracks[VALIDATION_MODE_FORWARD_LIVE] = forward[key]
+        primary["evidence_tracks"] = tracks
+        primary["historical_replay"] = tracks.get(VALIDATION_MODE_HISTORICAL_REPLAY)
+        primary["forward_live"] = tracks.get(VALIDATION_MODE_FORWARD_LIVE)
+        if VALIDATION_MODE_HISTORICAL_REPLAY in tracks and VALIDATION_MODE_FORWARD_LIVE not in tracks:
+            primary["degradation_warning"] = (
+                primary.get("degradation_warning")
+                or "真实前瞻样本仍在积累，历史回放只能作为研究参考。"
+            )
+        merged[key] = primary
+    return merged
+
+
+async def latest_forward_validation_evidence_by_label(session: AsyncSession) -> dict[tuple[str, str], dict[str, Any]]:
+    forward_run = await latest_signal_validation_run(session, validation_mode=VALIDATION_MODE_FORWARD_LIVE)
+    examples_by_label = await _recent_outcome_examples(session) if forward_run is not None else {}
+    return await _validation_evidence_for_run(session, forward_run, examples_by_label=examples_by_label)
+
+
+async def latest_label_validation_summary(session: AsyncSession) -> dict[str, Any]:
+    historical_run = await latest_signal_validation_run(session, validation_mode=VALIDATION_MODE_HISTORICAL_REPLAY)
+    forward_run = await latest_signal_validation_run(session, validation_mode=VALIDATION_MODE_FORWARD_LIVE)
+    if historical_run is None and forward_run is None:
+        return {}
+    primary = historical_run or forward_run
+    assert primary is not None
+    summary = dict(primary.summary_json or {})
+    summary["primary_validation_mode"] = primary.validation_mode or VALIDATION_MODE_FORWARD_LIVE
+    tracks: dict[str, Any] = {}
+    if historical_run is not None:
+        tracks[VALIDATION_MODE_HISTORICAL_REPLAY] = {
+            "run_id": historical_run.id,
+            "as_of_date": historical_run.as_of_date.isoformat(),
+            "generated_at": historical_run.created_at.isoformat(),
+            "summary": dict(historical_run.summary_json or {}),
+        }
+    if forward_run is not None:
+        tracks[VALIDATION_MODE_FORWARD_LIVE] = {
+            "run_id": forward_run.id,
+            "as_of_date": forward_run.as_of_date.isoformat(),
+            "generated_at": forward_run.created_at.isoformat(),
+            "summary": dict(forward_run.summary_json or {}),
+        }
+    summary["evidence_tracks"] = tracks
+    return summary
 
 
 async def run_etf_signal_validation(session: AsyncSession) -> EtfSignalValidationRun:
@@ -1350,6 +1777,7 @@ async def run_etf_signal_validation(session: AsyncSession) -> EtfSignalValidatio
             finished_at=utcnow(),
             as_of_date=date.today(),
             asset_type=ASSET_TYPE_ETF,
+            validation_mode=VALIDATION_MODE_FORWARD_LIVE,
             rule_version=_LABEL_VALIDATION_RULE_VERSION,
             config_json={"windows": list(_LABEL_VALIDATION_WINDOWS)},
             summary_json={},
@@ -1369,11 +1797,13 @@ async def run_etf_signal_validation(session: AsyncSession) -> EtfSignalValidatio
         as_of_date=source_run.as_of_date,
         source_signal_run_id=source_run.id,
         asset_type=ASSET_TYPE_ETF,
+        validation_mode=VALIDATION_MODE_FORWARD_LIVE,
         rule_version=_LABEL_VALIDATION_RULE_VERSION,
         config_json={
             "windows": list(_LABEL_VALIDATION_WINDOWS),
             "max_signal_items": 2000,
             "min_sample_count": _LABEL_VALIDATION_MIN_SAMPLES,
+            "validation_mode": VALIDATION_MODE_FORWARD_LIVE,
             "outcome_source": "stored_signal_items",
         },
         summary_json=summary,
@@ -1882,7 +2312,7 @@ async def status_summary(session: AsyncSession, *, include_health: bool = False)
     else:
         priced_asset_count = fund_priced_count + etf_priced_count
         data_issue_count = etf_data_stale_count + etf_failed
-    label_validation = (latest_etf_run.summary_json or {}).get("label_validation") if latest_etf_run else {}
+    label_validation = await latest_label_validation_summary(session)
     label_validation_generated_at = None
     if isinstance(label_validation, dict) and label_validation.get("generated_at"):
         try:
@@ -2610,7 +3040,7 @@ async def run_etf_observation_portfolio_optimization(
     limit: int = 5,
 ) -> EtfObservationPortfolioSnapshot:
     signal_run = await latest_signal_run(session, asset_type=ASSET_TYPE_ETF)
-    validation_run = await latest_signal_validation_run(session)
+    validation_run = await latest_signal_validation_run(session, validation_mode=VALIDATION_MODE_FORWARD_LIVE)
     portfolio = await etf_observation_portfolio(session, limit=limit, universe=UNIVERSE_DEFAULT, use_snapshot=False)
     return await persist_observation_portfolio_snapshot(
         session,
@@ -2679,7 +3109,7 @@ async def etf_observation_portfolio(
         universe=universe,
         limit=max(50, min(limit * 10, 200)),
     )
-    validation_by_label = await latest_validation_evidence_by_label(session)
+    validation_by_label = await latest_forward_validation_evidence_by_label(session)
     if validation_by_label:
         assets = [_asset_with_validation_evidence(asset, validation_by_label) for asset in assets]
     primary_candidates: list[ComputedAsset] = []

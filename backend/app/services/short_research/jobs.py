@@ -11,6 +11,7 @@ from app.services.llm import LLMClient
 from app.services.short_etf.data import sync_etf_price_history_from_intraday_snapshot
 from app.services.short_research.advisor import run_advisor_generation
 from app.services.short_research.service import (
+    run_etf_label_historical_replay,
     run_etf_observation_portfolio_optimization,
     run_etf_signal_validation,
     run_signal_generation,
@@ -179,6 +180,32 @@ async def daily_etf_signal_validation_job(session: AsyncSession) -> dict[str, An
         "outcome_source": summary.get("outcome_source"),
         "pending_outcomes": summary.get("pending_count", 0),
         "excluded_outcomes": summary.get("excluded_count", 0),
+    }
+
+
+async def etf_label_historical_replay_job(
+    session: AsyncSession,
+    *,
+    days: int = 180,
+    max_assets: int = 300,
+) -> dict[str, Any]:
+    run = await run_etf_label_historical_replay(session, days=days, max_assets=max_assets)
+    summary = dict(run.summary_json or {})
+    return {
+        "run_id": run.id,
+        "status": run.status,
+        "validation_mode": run.validation_mode,
+        "as_of_date": run.as_of_date.isoformat(),
+        "rule_version": run.rule_version,
+        "days": days,
+        "max_assets": max_assets,
+        "replay_start_date": summary.get("replay_start_date"),
+        "replay_end_date": summary.get("replay_end_date"),
+        "processed_etfs": summary.get("asset_count", 0),
+        "evaluated_etfs": summary.get("evaluated_asset_count", 0),
+        "completed_samples": summary.get("completed_samples", 0),
+        "excluded_samples": summary.get("excluded_samples", 0),
+        "groups": len(summary.get("groups", [])),
     }
 
 

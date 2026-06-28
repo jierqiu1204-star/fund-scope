@@ -30,12 +30,16 @@ from app.schemas.short_research import (
 )
 from app.services.short_research.advisor import latest_reports_by_asset, run_advisor_generation
 from app.services.short_research.service import (
+    VALIDATION_MODE_FORWARD_LIVE,
+    VALIDATION_MODE_HISTORICAL_REPLAY,
     ComputedAsset,
     cached_signal_assets,
     etf_observation_portfolio,
     get_asset_detail,
     latest_signal_run,
+    latest_signal_validation_run,
     latest_validation_evidence_by_label,
+    run_etf_label_historical_replay,
     run_etf_signal_validation,
     run_signal_generation,
     status_summary,
@@ -151,6 +155,7 @@ async def _validation_run_out(session: AsyncSession, run: EtfSignalValidationRun
         status=run.status,
         as_of_date=run.as_of_date,
         source_signal_run_id=run.source_signal_run_id,
+        validation_mode=run.validation_mode or VALIDATION_MODE_FORWARD_LIVE,
         rule_version=run.rule_version,
         summary=dict(run.summary_json or {}),
         created_at=run.created_at,
@@ -290,22 +295,46 @@ async def get_short_research_observation_portfolio(
 
 @router.post("/validation/run", response_model=EtfSignalValidationRunOut)
 async def run_short_research_validation(
+    validation_mode: str = Query(default=VALIDATION_MODE_FORWARD_LIVE),
+    days: int = Query(default=180, ge=30, le=730),
+    max_assets: int = Query(default=300, ge=1, le=2000),
     session: AsyncSession = Depends(get_db_session),
 ) -> EtfSignalValidationRunOut:
-    run = await run_etf_signal_validation(session)
+    if validation_mode == VALIDATION_MODE_HISTORICAL_REPLAY:
+        run = await run_etf_label_historical_replay(session, days=days, max_assets=max_assets)
+    elif validation_mode == VALIDATION_MODE_FORWARD_LIVE:
+        run = await run_etf_signal_validation(session)
+    else:
+        raise HTTPException(status_code=400, detail="validation_mode 只支持 forward_live 或 historical_replay")
+    return await _validation_run_out(session, run)
+
+
+@router.post("/validation/historical-replay/run", response_model=EtfSignalValidationRunOut)
+async def run_short_research_historical_replay(
+    days: int = Query(default=180, ge=30, le=730),
+    max_assets: int = Query(default=300, ge=1, le=2000),
+    session: AsyncSession = Depends(get_db_session),
+) -> EtfSignalValidationRunOut:
+    run = await run_etf_label_historical_replay(session, days=days, max_assets=max_assets)
     return await _validation_run_out(session, run)
 
 
 @router.get("/validation/latest", response_model=EtfSignalValidationRunOut | None)
 async def get_latest_short_research_validation(
+    validation_mode: str | None = Query(default=None),
     session: AsyncSession = Depends(get_db_session),
 ) -> EtfSignalValidationRunOut | None:
-    run = await session.scalar(
-        select(EtfSignalValidationRun).order_by(
-            EtfSignalValidationRun.as_of_date.desc(),
-            EtfSignalValidationRun.id.desc(),
-        )
-    )
+    run = await latest_signal_validation_run(session, validation_mode=validation_mode)
+    if run is None:
+        return None
+    return await _validation_run_out(session, run)
+
+
+@router.get("/validation/historical-replay/latest", response_model=EtfSignalValidationRunOut | None)
+async def get_latest_short_research_historical_replay(
+    session: AsyncSession = Depends(get_db_session),
+) -> EtfSignalValidationRunOut | None:
+    run = await latest_signal_validation_run(session, validation_mode=VALIDATION_MODE_HISTORICAL_REPLAY)
     if run is None:
         return None
     return await _validation_run_out(session, run)
@@ -314,12 +343,15 @@ async def get_latest_short_research_validation(
 @router.get("/validation", response_model=list[EtfSignalValidationRunOut])
 async def list_short_research_validations(
     limit: int = Query(default=10, ge=1, le=50),
+    validation_mode: str | None = Query(default=None),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[EtfSignalValidationRunOut]:
+    query = select(EtfSignalValidationRun)
+    if validation_mode is not None:
+        query = query.where(EtfSignalValidationRun.validation_mode == validation_mode)
     runs = (
         await session.scalars(
-            select(EtfSignalValidationRun)
-            .order_by(EtfSignalValidationRun.as_of_date.desc(), EtfSignalValidationRun.id.desc())
+            query.order_by(EtfSignalValidationRun.as_of_date.desc(), EtfSignalValidationRun.id.desc())
             .limit(limit)
         )
     ).all()

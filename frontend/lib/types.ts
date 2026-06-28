@@ -491,6 +491,8 @@ export type ValidationEvidence = {
   run_id?: number;
   as_of_date?: string;
   rule_version?: string;
+  validation_mode?: string;
+  outcome_source?: string;
   sample_count?: number;
   win_rate?: number | null;
   median_return?: number | null;
@@ -504,6 +506,7 @@ export type ValidationEvidence = {
     as_of_date?: string | null;
     generated_at?: string | null;
     rule_version?: string | null;
+    validation_mode?: string | null;
   } | null;
   degradation_warning?: string | null;
   freshness_days?: number | null;
@@ -514,13 +517,20 @@ export type ValidationEvidence = {
   horizons?: Record<string, {
     sample_count?: number;
     excluded_count?: number;
+    pending_count?: number;
+    coverage?: number | null;
     exclusion_reasons?: string[];
     avg_return?: number | null;
     median_return?: number | null;
     win_rate?: number | null;
     worst_forward_drawdown?: number | null;
+    favorable_excursion_median?: number | null;
     confidence?: string;
+    confidence_label?: string;
   }>;
+  historical_replay?: ValidationEvidence | null;
+  forward_live?: ValidationEvidence | null;
+  evidence_tracks?: Record<string, ValidationEvidence>;
 };
 
 export type ObservationPortfolioContext = {

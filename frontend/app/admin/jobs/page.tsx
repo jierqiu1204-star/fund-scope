@@ -97,6 +97,12 @@ const jobGroups: Array<{ title: string; description: string; actions: JobAction[
         endpoint: "/api/admin/jobs/daily_short_research_signals/run"
       },
       {
+        key: "etf_label_historical_replay",
+        label: "运行标签历史回放",
+        description: "用当前 ETF 标签规则回放过去 180 天日线，生成历史样本证据；不改变排名、组合或邮件提醒。",
+        endpoint: "/api/admin/jobs/etf_label_historical_replay/run?days=180"
+      },
+      {
         key: "intraday_etf_watch",
         label: "运行 ETF 盘中盯盘",
         description: "手动刷新前 20 ETF 和已追踪 ETF 的公开盘中行情，并检查是否需要发卖出/减仓提醒。",

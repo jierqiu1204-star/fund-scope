@@ -573,6 +573,7 @@ class EtfSignalValidationRun(Base):
         ForeignKey("short_research_signal_runs.id", ondelete="SET NULL"), nullable=True
     )
     asset_type: Mapped[str] = mapped_column(String(16), default="etf")
+    validation_mode: Mapped[str] = mapped_column(String(32), default="forward_live")
     rule_version: Mapped[str] = mapped_column(String(64), default="label_validation_v1")
     config_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     summary_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -637,6 +638,43 @@ class EtfLabelOutcome(Base):
     metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class EtfLabelReplaySample(Base):
+    __tablename__ = "etf_label_replay_samples"
+    __table_args__ = (
+        UniqueConstraint(
+            "validation_run_id",
+            "asset_code",
+            "replay_date",
+            "horizon_days",
+            name="uq_etf_label_replay_sample",
+        ),
+        SaIndex("ix_etf_label_replay_sample_group", "label", "entry_timing_label", "horizon_days", "status"),
+        SaIndex("ix_etf_label_replay_sample_asset_date", "asset_code", "replay_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    validation_run_id: Mapped[int] = mapped_column(
+        ForeignKey("etf_signal_validation_runs.id", ondelete="CASCADE")
+    )
+    asset_type: Mapped[str] = mapped_column(String(16), default="etf")
+    asset_code: Mapped[str] = mapped_column(String(32))
+    asset_name: Mapped[str] = mapped_column(String(255))
+    label: Mapped[str] = mapped_column(String(64))
+    entry_timing_label: Mapped[str] = mapped_column(String(64))
+    rule_version: Mapped[str] = mapped_column(String(64), default="label_validation_v1")
+    replay_date: Mapped[date] = mapped_column(Date)
+    entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    horizon_days: Mapped[int] = mapped_column(Integer)
+    horizon_end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    forward_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    adverse_drawdown: Mapped[float | None] = mapped_column(Float, nullable=True)
+    favorable_excursion: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="completed")
+    exclusion_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class EtfObservationPortfolioSnapshot(Base):

@@ -3,6 +3,7 @@
 from app.models.entities import (
     EtfDataHealth,
     EtfLabelOutcome,
+    EtfLabelReplaySample,
     EtfMetric,
     EtfPriceHistory,
     EtfThemeExposure,
@@ -51,6 +52,7 @@ from app.models.entities import (
 __all__ = [
     "EtfDataHealth",
     "EtfLabelOutcome",
+    "EtfLabelReplaySample",
     "EtfMetric",
     "EtfPriceHistory",
     "EtfThemeExposure",

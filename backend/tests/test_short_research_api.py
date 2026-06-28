@@ -5,12 +5,16 @@ from datetime import date, timedelta
 from typing import Any
 
 import pytest
+from sqlalchemy import func, select
 
 from app.models.entities import (
+    EtfLabelReplaySample,
     EtfPriceHistory,
     FundNavHistory,
+    NotificationLog,
     ShortResearchSignalItem,
     ShortResearchSignalRun,
+    TrackedPositionAlert,
     TradableEtf,
 )
 from app.services.short_research.service import (
@@ -376,6 +380,120 @@ async def test_etf_signal_validation_marks_insufficient_samples(client, app) -> 
     items = response.json()["items"]
     assert items
     assert any(item["confidence"] == "insufficient" for item in items)
+
+
+@pytest.mark.asyncio
+async def test_etf_label_historical_replay_uses_only_past_data(client, app) -> None:
+    latest_date = date(2026, 7, 20)
+    start = latest_date - timedelta(days=89)
+    replay_date = start + timedelta(days=69)
+    base_closes = [round(1.0 + offset * 0.01, 6) for offset in range(70)]
+    future_up = [round(base_closes[-1] * (1.01 ** offset), 6) for offset in range(1, 21)]
+    future_down = [round(base_closes[-1] * (0.97 ** offset), 6) for offset in range(1, 21)]
+    async with app.state.db.session() as session:
+        for code, suffix in (("588991", "上涨未来"), ("588992", "下跌未来")):
+            session.add(
+                TradableEtf(
+                    code=code,
+                    name=f"历史回放{suffix}",
+                    exchange="SH",
+                    theme_tags_json=["历史回放"],
+                    trading_rule_label="证券账户 T+1 ETF",
+                    asset_class="sector",
+                    is_short_term_eligible=True,
+                    is_watchlist=True,
+                )
+            )
+        await session.flush()
+        for code, closes in (
+            ("588991", [*base_closes, *future_up]),
+            ("588992", [*base_closes, *future_down]),
+        ):
+            for offset, close in enumerate(closes):
+                previous = closes[offset - 1] if offset > 0 else close
+                session.add(
+                    EtfPriceHistory(
+                        etf_code=code,
+                        trade_date=start + timedelta(days=offset),
+                        open=close * 0.995,
+                        high=close * 1.01,
+                        low=close * 0.99,
+                        close=close,
+                        volume=2_000_000,
+                        turnover=180_000_000,
+                        pct_change=0.0 if offset == 0 else (close / previous - 1.0) * 100,
+                    )
+                )
+        await session.commit()
+
+    response = await client.post("/api/short-research/validation/historical-replay/run?days=40&max_assets=2")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["validation_mode"] == "historical_replay"
+    assert body["summary"]["outcome_source"] == "historical_replay"
+    assert body["summary"]["completed_samples"] > 0
+
+    async with app.state.db.session() as session:
+        rows = (
+            await session.scalars(
+                select(EtfLabelReplaySample)
+                .where(
+                    EtfLabelReplaySample.replay_date == replay_date,
+                    EtfLabelReplaySample.horizon_days == 5,
+                    EtfLabelReplaySample.asset_code.in_(["588991", "588992"]),
+                )
+                .order_by(EtfLabelReplaySample.asset_code.asc())
+            )
+        ).all()
+    assert len(rows) == 2
+    assert rows[0].label == rows[1].label
+    assert rows[0].entry_timing_label == rows[1].entry_timing_label
+    assert rows[0].metrics_json["score"] == rows[1].metrics_json["score"]
+    assert rows[0].forward_return != rows[1].forward_return
+    assert rows[0].metrics_json["no_lookahead_cutoff"] == replay_date.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_etf_label_historical_replay_api_separates_tracks_and_does_not_notify(client, app) -> None:
+    await _seed_observation_portfolio_signal_run(
+        app,
+        items=[
+            {
+                "code": "588993",
+                "total_score": 88.0,
+                "conclusion": "短线观察",
+                "entry_timing_label": "趋势延续",
+                "entry_timing_reason": "前瞻验证测试。",
+            }
+        ],
+    )
+    await _seed_observation_price_series(app, code="588993", days=130, latest_date=date(2026, 7, 20))
+
+    forward = await client.post("/api/short-research/validation/run")
+    replay = await client.post("/api/short-research/validation/run?validation_mode=historical_replay&days=45&max_assets=1")
+    assert forward.status_code == 200
+    assert replay.status_code == 200
+    assert forward.json()["validation_mode"] == "forward_live"
+    assert replay.json()["validation_mode"] == "historical_replay"
+
+    latest_forward = await client.get("/api/short-research/validation/latest?validation_mode=forward_live")
+    latest_replay = await client.get("/api/short-research/validation/latest?validation_mode=historical_replay")
+    assert latest_forward.status_code == 200
+    assert latest_replay.status_code == 200
+    assert latest_forward.json()["validation_mode"] == "forward_live"
+    assert latest_replay.json()["validation_mode"] == "historical_replay"
+
+    assets = await client.get("/api/short-research/assets?asset_type=etf&limit=1")
+    assert assets.status_code == 200
+    evidence = assets.json()["items"][0]["validation_evidence"]
+    assert "historical_replay" in evidence["evidence_tracks"]
+    assert "forward_live" in evidence["evidence_tracks"]
+
+    async with app.state.db.session() as session:
+        notification_count = await session.scalar(select(func.count()).select_from(NotificationLog))
+        alert_count = await session.scalar(select(func.count()).select_from(TrackedPositionAlert))
+    assert notification_count == 0
+    assert alert_count == 0
 
 
 @pytest.mark.asyncio

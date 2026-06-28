@@ -173,8 +173,12 @@ function percentMetric(metrics: Record<string, unknown>, key: string) {
 type LabelValidationWindow = {
   sample_count?: number;
   avg_return?: number | null;
+  median_return?: number | null;
+  worst_forward_drawdown?: number | null;
   max_drawdown?: number | null;
   win_rate?: number | null;
+  coverage?: number | null;
+  confidence?: string;
   insufficient_sample?: boolean;
 };
 
@@ -195,15 +199,16 @@ function labelValidationLine(group: LabelValidationGroup | undefined, window: "5
   if (!item || !item.sample_count) {
     return `${window}日：样本不足`;
   }
-  const avg = item.avg_return === null || item.avg_return === undefined ? "暂无" : formatPercent(item.avg_return * 100);
-  const drawdown = item.max_drawdown === null || item.max_drawdown === undefined ? "暂无" : formatPercent(item.max_drawdown * 100);
+  const median = item.median_return === null || item.median_return === undefined ? "暂无" : formatPercent(item.median_return * 100);
+  const drawdownValue = item.worst_forward_drawdown ?? item.max_drawdown;
+  const drawdown = drawdownValue === null || drawdownValue === undefined ? "暂无" : formatPercent(drawdownValue * 100);
   const winRate = item.win_rate === null || item.win_rate === undefined ? "暂无" : formatPercent(item.win_rate * 100);
-  return `${window}日：样本 ${item.sample_count}，均值 ${avg}，胜率 ${winRate}，最大回撤 ${drawdown}`;
+  return `${window}日：样本 ${item.sample_count}，中位收益 ${median}，胜率 ${winRate}，最差回撤 ${drawdown}`;
 }
 
 function validationConfidenceLabel(confidence: string | undefined) {
   if (confidence === "sufficient") {
-    return "证据较足";
+    return "样本较足";
   }
   if (confidence === "limited") {
     return "样本有限";
@@ -217,15 +222,99 @@ function sampleQualityLabel(evidence: ShortResearchAsset["validation_evidence"] 
     return "无样本质量说明";
   }
   const excluded = sampleQuality.excluded_count_total ?? 0;
-  const reasons = sampleQuality.exclusion_reasons ?? [];
+  const rawReasons = sampleQuality.exclusion_reasons;
+  const reasons = Array.isArray(rawReasons) ? rawReasons : Object.keys(rawReasons ?? {});
   if (excluded > 0 && reasons.length) {
     return `排除 ${excluded} 条不可决策样本：${reasons.slice(0, 2).join("、")}`;
   }
   return `可用样本 ${sampleQuality.sample_count_total ?? evidence?.sample_count ?? 0}`;
 }
 
+function evidenceTrack(asset: ShortResearchAsset | null | undefined, key: "historical_replay" | "forward_live") {
+  const evidence = asset?.validation_evidence;
+  return evidence?.evidence_tracks?.[key] ?? evidence?.[key] ?? null;
+}
+
+function evidenceHorizon(evidence: ShortResearchAsset["validation_evidence"] | null | undefined, window = "5") {
+  if (!evidence?.horizons) {
+    return null;
+  }
+  return evidence.horizons[window] ?? null;
+}
+
+function validationTrackText(
+  evidence: ShortResearchAsset["validation_evidence"] | null | undefined,
+  label: string,
+  options: { replay?: boolean } = {}
+) {
+  const replay = options.replay ?? false;
+  if (!evidence) {
+    return replay ? `${label}：还没运行历史回放。` : `${label}：真实前瞻样本正在积累。`;
+  }
+  const horizon = evidenceHorizon(evidence, "5");
+  const sampleCount = horizon?.sample_count ?? evidence.sample_count ?? 0;
+  if (!sampleCount) {
+    return replay ? `${label}：样本不足，先运行历史回放。` : `${label}：真实前瞻样本不足，继续积累。`;
+  }
+  const medianReturn =
+    (horizon?.median_return ?? evidence.median_return) === null || (horizon?.median_return ?? evidence.median_return) === undefined
+      ? "暂无"
+      : formatPercent((horizon?.median_return ?? evidence.median_return ?? 0) * 100);
+  const winRate =
+    (horizon?.win_rate ?? evidence.win_rate) === null || (horizon?.win_rate ?? evidence.win_rate) === undefined
+      ? "暂无"
+      : formatPercent((horizon?.win_rate ?? evidence.win_rate ?? 0) * 100);
+  const drawdown =
+    horizon?.worst_forward_drawdown === null || horizon?.worst_forward_drawdown === undefined
+      ? "暂无"
+      : formatPercent(horizon.worst_forward_drawdown * 100);
+  const coverage =
+    horizon?.coverage === null || horizon?.coverage === undefined ? "暂无" : formatPercent(horizon.coverage * 100);
+  return `${label}：${validationConfidenceLabel(horizon?.confidence ?? evidence.confidence)}，5日样本 ${sampleCount}，中位收益 ${medianReturn}，胜率 ${winRate}，最差回撤 ${drawdown}，覆盖率 ${coverage}`;
+}
+
+function validationTrackSummary(evidence: ShortResearchAsset["validation_evidence"] | null | undefined, replay = false) {
+  const horizon = evidenceHorizon(evidence, "5");
+  const sampleCount = horizon?.sample_count ?? evidence?.sample_count ?? 0;
+  if (!evidence || !sampleCount) {
+    return {
+      status: replay ? "未运行或样本不足" : "正在积累",
+      sampleCount: "0",
+      medianReturn: "暂无",
+      winRate: "暂无",
+      drawdown: "暂无",
+      coverage: replay ? "暂无" : "前瞻等待",
+      asOfDate: evidence?.freshness?.as_of_date ? formatDate(evidence.freshness.as_of_date) : "暂无"
+    };
+  }
+  return {
+    status: validationConfidenceLabel(horizon?.confidence ?? evidence.confidence),
+    sampleCount: `${sampleCount}`,
+    medianReturn:
+      (horizon?.median_return ?? evidence.median_return) === null || (horizon?.median_return ?? evidence.median_return) === undefined
+        ? "暂无"
+        : formatPercent((horizon?.median_return ?? evidence.median_return ?? 0) * 100),
+    winRate:
+      (horizon?.win_rate ?? evidence.win_rate) === null || (horizon?.win_rate ?? evidence.win_rate) === undefined
+        ? "暂无"
+        : formatPercent((horizon?.win_rate ?? evidence.win_rate ?? 0) * 100),
+    drawdown:
+      horizon?.worst_forward_drawdown === null || horizon?.worst_forward_drawdown === undefined
+        ? "暂无"
+        : formatPercent(horizon.worst_forward_drawdown * 100),
+    coverage:
+      horizon?.coverage === null || horizon?.coverage === undefined ? "暂无" : formatPercent(horizon.coverage * 100),
+    asOfDate: evidence.freshness?.as_of_date ? formatDate(evidence.freshness.as_of_date) : evidence.as_of_date ? formatDate(evidence.as_of_date) : "暂无"
+  };
+}
+
 function validationEvidenceText(asset: ShortResearchAsset | null | undefined) {
   const evidence = asset?.validation_evidence;
+  const replay = evidenceTrack(asset, "historical_replay");
+  const forward = evidenceTrack(asset, "forward_live");
+  if (replay || forward) {
+    return `${validationTrackText(replay, "历史回放", { replay: true })}；${validationTrackText(forward, "真实前瞻")}`;
+  }
   if (!evidence || !evidence.sample_count) {
     return "标签验证：样本不足";
   }
@@ -1531,6 +1620,10 @@ function ShortTermClient() {
         (item) => item.label === selectedAsset.conclusion && item.entry_timing_label === selectedValidationEntryLabel
       )
     : undefined;
+  const selectedHistoricalEvidence = evidenceTrack(selectedAsset, "historical_replay");
+  const selectedForwardEvidence = evidenceTrack(selectedAsset, "forward_live");
+  const selectedHistoricalSummary = validationTrackSummary(selectedHistoricalEvidence, true);
+  const selectedForwardSummary = validationTrackSummary(selectedForwardEvidence);
   const selectedAssetTrendScore = numericMetric(selectedAssetMetrics, "trend_score");
   const selectedAssetSource = selectedAsset?.source_note ?? "暂无";
   const selectedHoldingStatus = primaryTracked?.current_snapshot.current_label ?? "未持仓";
@@ -1714,10 +1807,37 @@ function ShortTermClient() {
           <span>持仓状态：{selectedHoldingStatus}</span>
         </div>
         {assetType === "etf" ? (
-          <div className="mt-3 rounded-[8px] bg-paper px-3 py-2 text-xs leading-5 text-ink/60">
-            <p className="font-semibold text-ink">标签验证</p>
-            <p>{validationEvidenceText(selectedAsset)}</p>
-            <p>{selectedValidationGroup ? labelValidationLine(selectedValidationGroup, "10") : "样本不足时只能继续观察，不能把标签当成买入结论。"}</p>
+          <div className="mt-3 rounded-[8px] bg-paper px-3 py-3 text-xs leading-5 text-ink/60">
+            <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+              <p className="font-semibold text-ink">标签验证</p>
+              <span className="text-ink/45">研究证据，不是买入指令</span>
+            </div>
+            <div className="mt-2 grid gap-2 md:grid-cols-2">
+              {[
+                ["历史回放", selectedHistoricalSummary, "用当前规则回放过去日线，样本多但有幸存者偏差。"],
+                ["真实前瞻", selectedForwardSummary, "系统上线后真实记录标签，再等未来结果，样本会慢慢积累。"]
+              ].map(([title, summary, note]) => {
+                const track = summary as ReturnType<typeof validationTrackSummary>;
+                return (
+                  <div key={title as string} className="rounded-[8px] border border-ink/10 bg-white p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="font-semibold text-ink">{title as string}</p>
+                      <span className="rounded-full bg-paper px-2 py-0.5 text-[11px] font-semibold text-ink/65">{track.status}</span>
+                    </div>
+                    <div className="mt-2 grid grid-cols-2 gap-1 text-ink/65">
+                      <span>5日样本：{track.sampleCount}</span>
+                      <span>胜率：{track.winRate}</span>
+                      <span>中位收益：{track.medianReturn}</span>
+                      <span>最差回撤：{track.drawdown}</span>
+                      <span>覆盖率：{track.coverage}</span>
+                      <span>截至：{track.asOfDate}</span>
+                    </div>
+                    <p className="mt-2 text-ink/45">{note as string}</p>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="mt-2">{selectedValidationGroup ? labelValidationLine(selectedValidationGroup, "10") : "样本不足时只能继续观察，不能把标签当成买入结论。"}</p>
             <p>{observationPortfolioText(selectedAsset)}</p>
           </div>
         ) : null}
