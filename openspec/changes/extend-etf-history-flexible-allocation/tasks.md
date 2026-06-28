@@ -43,12 +43,12 @@
 ## 6. 提交、推送与服务器部署
 
 - [x] 6.1 确认 `.tmp/`、密钥、`.env`、本地缓存没有被 staged。
-- [ ] 6.2 提交代码，中文简洁 message：`扩展ETF历史与弹性仓位`。
-- [ ] 6.3 推送 `codex-strategy-lab` 到 Gitee `origin`。
-- [ ] 6.4 推送 `codex-strategy-lab` 到 GitHub `github`。
-- [ ] 6.5 SSH 到 `110.42.222.9`，更新 `/srv/fundscope` 到最新提交。
-- [ ] 6.6 执行 `docker compose -f deploy/docker-compose.ip.yml up -d --build`。
-- [ ] 6.7 执行数据库迁移：`docker compose -f deploy/docker-compose.ip.yml exec -T backend alembic upgrade head`。
-- [ ] 6.8 手动运行 ETF `730` 天历史回填。
-- [ ] 6.9 手动运行 ETF 短线排序、ETF 观察组合、ETF 组合回测。
-- [ ] 6.10 验证 `/short-term`、`/admin/jobs`、最新 ETF 回测结果。
+- [x] 6.2 提交代码，中文简洁 message：`扩展ETF历史与弹性仓位`。
+- [x] 6.3 推送 `codex-strategy-lab` 到 Gitee `origin`。
+- [x] 6.4 推送 `codex-strategy-lab` 到 GitHub `github`。
+- [x] 6.5 SSH 到 `110.42.222.9`，更新 `/srv/fundscope` 到最新提交。
+- [x] 6.6 执行 `docker compose -f deploy/docker-compose.ip.yml up -d --build`。
+- [x] 6.7 执行数据库迁移：`docker compose -f deploy/docker-compose.ip.yml exec -T backend alembic upgrade head`。
+- [x] 6.8 手动运行 ETF `730` 天历史回填。
+- [x] 6.9 手动运行 ETF 短线排序、ETF 观察组合、ETF 组合回测。
+- [x] 6.10 验证 `/short-term`、`/admin/jobs`、最新 ETF 回测结果。
