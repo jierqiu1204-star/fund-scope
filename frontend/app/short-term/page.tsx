@@ -28,6 +28,8 @@ import type {
   ShortResearchObservationPortfolio,
   ShortResearchSignalRun,
   ShortResearchStatus,
+  EtfPortfolioBacktestDetail,
+  EtfPortfolioBacktestList,
   IntradayEtfLiveRankingItem,
   IntradayEtfLiveRankingList,
   TrackedPosition,
@@ -1308,6 +1310,20 @@ function ShortTermClient() {
       ).data
   });
 
+  const etfBacktests = useQuery({
+    queryKey: ["short-research", "etf-backtests"],
+    enabled: assetType === "etf",
+    queryFn: async () => (await api.get<EtfPortfolioBacktestList>("/api/short-research/etf-backtests?limit=1")).data
+  });
+
+  const latestBacktestId = etfBacktests.data?.items[0]?.id ?? null;
+  const etfBacktestDetail = useQuery({
+    queryKey: ["short-research", "etf-backtests", latestBacktestId],
+    enabled: assetType === "etf" && latestBacktestId !== null,
+    queryFn: async () =>
+      (await api.get<EtfPortfolioBacktestDetail>(`/api/short-research/etf-backtests/${latestBacktestId}`)).data
+  });
+
   const selectedDetail = useQuery({
     queryKey: ["short-research", "detail", selected?.asset_type, selected?.code],
     enabled: selected !== null,
@@ -1412,6 +1428,20 @@ function ShortTermClient() {
         conclusion_counts: result.summary.conclusion_counts
       });
       await queryClient.invalidateQueries({ queryKey: ["short-research"] });
+    }
+  });
+
+  const runEtfBacktest = useMutation({
+    mutationFn: async () =>
+      (
+        await api.post<EtfPortfolioBacktestDetail>("/api/short-research/etf-backtests", {
+          days: 180,
+          fee_rate: 0.001,
+          max_assets: 180
+        })
+      ).data,
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["short-research", "etf-backtests"] });
     }
   });
 
@@ -3641,6 +3671,151 @@ function ShortTermClient() {
 
       <div className="hidden lg:block">
 
+
+      {assetType === "etf" ? (
+        <Panel className="rounded-[12px] bg-white/70">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">历史日线回测</p>
+              <h2 className="mt-1 text-xl font-semibold text-ink">ETF 工作台策略证据</h2>
+              <p className="mt-2 max-w-3xl text-sm leading-6 text-ink/60">
+                按历史每天重新生成 ETF 资金配置参考，再用日线收盘价模拟调仓和风控。它验证的是当前页面规则，不是旧策略实验室模拟盘；不包含分钟级盘中提醒。
+              </p>
+            </div>
+            <button
+              className="rounded-[6px] bg-ink px-4 py-2 text-sm font-semibold text-white transition hover:bg-ink/85 disabled:opacity-60"
+              disabled={runEtfBacktest.isPending}
+              onClick={() => runEtfBacktest.mutate()}
+            >
+              {runEtfBacktest.isPending ? "正在回测..." : "运行近 180 天回测"}
+            </button>
+          </div>
+          {runEtfBacktest.isError ? (
+            <p className="mt-3 rounded-[8px] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+              {errorText(runEtfBacktest.error)}
+            </p>
+          ) : null}
+          {etfBacktestDetail.data ? (
+            <>
+              <div className="mt-5 grid gap-3 md:grid-cols-4">
+                <div className="rounded-[10px] border border-ink/10 bg-white px-4 py-3">
+                  <p className="text-xs text-ink/45">历史收益</p>
+                  <p className="mt-1 text-lg font-semibold text-ink">
+                    {typeof etfBacktestDetail.data.metrics.cumulative_return === "number"
+                      ? formatPercent(etfBacktestDetail.data.metrics.cumulative_return * 100)
+                      : "暂无"}
+                  </p>
+                </div>
+                <div className="rounded-[10px] border border-ink/10 bg-white px-4 py-3">
+                  <p className="text-xs text-ink/45">最大回撤</p>
+                  <p className="mt-1 text-lg font-semibold text-ink">
+                    {typeof etfBacktestDetail.data.metrics.max_drawdown === "number"
+                      ? formatPercent(etfBacktestDetail.data.metrics.max_drawdown * 100)
+                      : "暂无"}
+                  </p>
+                </div>
+                <div className="rounded-[10px] border border-ink/10 bg-white px-4 py-3">
+                  <p className="text-xs text-ink/45">胜率</p>
+                  <p className="mt-1 text-lg font-semibold text-ink">
+                    {typeof etfBacktestDetail.data.metrics.win_rate === "number"
+                      ? formatPercent(etfBacktestDetail.data.metrics.win_rate * 100)
+                      : "样本不足"}
+                  </p>
+                </div>
+                <div className="rounded-[10px] border border-ink/10 bg-white px-4 py-3">
+                  <p className="text-xs text-ink/45">交易次数</p>
+                  <p className="mt-1 text-lg font-semibold text-ink">
+                    {String(etfBacktestDetail.data.metrics.trade_count ?? 0)}
+                  </p>
+                </div>
+              </div>
+              <div className="mt-5 grid gap-4 lg:grid-cols-[1.4fr_1fr]">
+                <div className="rounded-[10px] border border-ink/10 bg-white p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="font-semibold text-ink">策略曲线 vs 对照</p>
+                    <span className="text-xs text-ink/45">
+                      {formatDate(etfBacktestDetail.data.start_date)} - {formatDate(etfBacktestDetail.data.end_date)}
+                    </span>
+                  </div>
+                  <div className="mt-4 h-56">
+                    {etfBacktestDetail.data.equity_curve.length ? (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={etfBacktestDetail.data.equity_curve.map((point) => ({
+                          label: formatDate(point.date),
+                          equity: point.equity,
+                          benchmark: point.benchmark_equity
+                        }))}>
+                          <CartesianGrid stroke="#e6e6e6" vertical={false} />
+                          <XAxis dataKey="label" tickLine={false} axisLine={false} minTickGap={28} />
+                          <YAxis tickLine={false} axisLine={false} width={64} />
+                          <Tooltip formatter={(value) => formatCurrency(Number(value))} />
+                          <Line type="monotone" dataKey="equity" name="策略权益" stroke="#111" dot={false} strokeWidth={2} />
+                          <Line type="monotone" dataKey="benchmark" name="宽基对照" stroke="#888" dot={false} strokeWidth={2} />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <div className="flex h-full items-center justify-center rounded-[8px] bg-paper text-sm text-ink/45">
+                        等待回测曲线。
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div className="rounded-[10px] border border-ink/10 bg-white p-4">
+                  <p className="font-semibold text-ink">标签事后表现</p>
+                  <div className="mt-3 grid gap-2">
+                    {etfBacktestDetail.data.label_summaries.slice(0, 4).map((item) => (
+                      <div key={`${item.label}-${item.entry_timing_label}-${item.horizon_days}`} className="rounded-[8px] bg-paper px-3 py-2 text-xs leading-5 text-ink/60">
+                        <p className="font-semibold text-ink">
+                          {item.label} / {item.entry_timing_label} / {item.horizon_days}日
+                        </p>
+                        <p>
+                          样本 {item.sample_count}，中位收益 {item.median_return === null ? "暂无" : formatPercent(item.median_return * 100)}，
+                          胜率 {item.win_rate === null ? "暂无" : formatPercent(item.win_rate * 100)}
+                        </p>
+                      </div>
+                    ))}
+                    {!etfBacktestDetail.data.label_summaries.length ? (
+                      <p className="rounded-[8px] bg-paper px-3 py-2 text-xs text-ink/55">
+                        暂无足够标签样本。样本不足时不能证明标签可靠。
+                      </p>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+              <div className="mt-4 grid gap-3 lg:grid-cols-2">
+                <div className="rounded-[10px] border border-ink/10 bg-white p-4">
+                  <p className="font-semibold text-ink">最近模拟交易</p>
+                  <div className="mt-3 grid gap-2 text-xs text-ink/60">
+                    {etfBacktestDetail.data.trades.slice(0, 5).map((trade) => (
+                      <p key={trade.id} className="rounded-[8px] bg-paper px-3 py-2">
+                        {formatDate(trade.trade_date)} · {trade.side === "buy" ? "买入" : "卖出"} {trade.etf_name}
+                        {" "}{formatCurrency(trade.amount)} · {trade.reason}
+                      </p>
+                    ))}
+                    {!etfBacktestDetail.data.trades.length ? <p>暂无模拟交易。</p> : null}
+                  </div>
+                </div>
+                <div className="rounded-[10px] border border-ink/10 bg-white p-4">
+                  <p className="font-semibold text-ink">限制说明</p>
+                  <div className="mt-3 grid gap-2 text-xs leading-5 text-ink/60">
+                    {etfBacktestDetail.data.caveats.map((item) => (
+                      <p key={item} className="rounded-[8px] bg-paper px-3 py-2">{item}</p>
+                    ))}
+                    <p className="rounded-[8px] bg-paper px-3 py-2">
+                      数据覆盖：{String(etfBacktestDetail.data.data_coverage.trading_days ?? 0)} 个交易日，
+                      {String(etfBacktestDetail.data.data_coverage.priced_asset_count ?? 0)} 只 ETF 有价格数据。
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </>
+          ) : (
+            <p className="mt-5 rounded-[10px] border border-dashed border-ink/20 bg-white px-4 py-5 text-sm leading-6 text-ink/55">
+              当前 ETF 工作台策略还没有历史回测结果。点击按钮会用近 180 天日线数据逐日回放；结果只代表历史模拟，不保证未来收益。
+            </p>
+          )}
+        </Panel>
+      ) : null}
 
       {assetType === "etf" ? (
         <Panel className="rounded-[12px] bg-white/70">

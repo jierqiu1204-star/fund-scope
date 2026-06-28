@@ -737,6 +737,123 @@ class EtfObservationPortfolioItem(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class EtfPortfolioBacktestRun(Base):
+    __tablename__ = "etf_portfolio_backtest_runs"
+    __table_args__ = (
+        SaIndex("ix_etf_portfolio_backtest_runs_status", "status"),
+        SaIndex("ix_etf_portfolio_backtest_runs_finished_at", "finished_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="running")
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    start_date: Mapped[date] = mapped_column(Date)
+    end_date: Mapped[date] = mapped_column(Date)
+    asset_type: Mapped[str] = mapped_column(String(16), default="etf")
+    rule_version: Mapped[str] = mapped_column(String(64), default="etf_portfolio_backtest_v1")
+    ranking_version: Mapped[str] = mapped_column(String(64), default="short_research_v1")
+    allocation_version: Mapped[str] = mapped_column(String(64), default="portfolio_allocation_v1")
+    exit_rule_version: Mapped[str] = mapped_column(String(64), default="risk_alerts_v1")
+    initial_cash: Mapped[float] = mapped_column(Float, default=10000.0)
+    fee_rate: Mapped[float] = mapped_column(Float, default=0.001)
+    config_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    benchmark_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    data_coverage_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    caveats_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class EtfPortfolioBacktestEquityCurve(Base):
+    __tablename__ = "etf_portfolio_backtest_equity_curve"
+    __table_args__ = (
+        UniqueConstraint("run_id", "curve_date", name="uq_etf_portfolio_backtest_equity_curve"),
+        SaIndex("ix_etf_portfolio_backtest_equity_run_date", "run_id", "curve_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("etf_portfolio_backtest_runs.id", ondelete="CASCADE"))
+    curve_date: Mapped[date] = mapped_column(Date)
+    equity: Mapped[float] = mapped_column(Float)
+    cash: Mapped[float] = mapped_column(Float)
+    drawdown: Mapped[float] = mapped_column(Float)
+    benchmark_equity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    portfolio_mode: Mapped[str] = mapped_column(String(32), default="cash_wait")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class EtfPortfolioBacktestTrade(Base):
+    __tablename__ = "etf_portfolio_backtest_trades"
+    __table_args__ = (SaIndex("ix_etf_portfolio_backtest_trades_run_date", "run_id", "trade_date"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("etf_portfolio_backtest_runs.id", ondelete="CASCADE"))
+    trade_date: Mapped[date] = mapped_column(Date)
+    etf_code: Mapped[str] = mapped_column(String(32))
+    etf_name: Mapped[str] = mapped_column(String(255))
+    side: Mapped[str] = mapped_column(String(16))
+    reason: Mapped[str] = mapped_column(String(255))
+    amount: Mapped[float] = mapped_column(Float)
+    shares: Mapped[float] = mapped_column(Float)
+    price: Mapped[float] = mapped_column(Float)
+    fee: Mapped[float] = mapped_column(Float, default=0.0)
+    realized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class EtfPortfolioBacktestPosition(Base):
+    __tablename__ = "etf_portfolio_backtest_positions"
+    __table_args__ = (
+        UniqueConstraint("run_id", "snapshot_date", "etf_code", name="uq_etf_portfolio_backtest_position"),
+        SaIndex("ix_etf_portfolio_backtest_positions_run_date", "run_id", "snapshot_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("etf_portfolio_backtest_runs.id", ondelete="CASCADE"))
+    snapshot_date: Mapped[date] = mapped_column(Date)
+    etf_code: Mapped[str] = mapped_column(String(32))
+    etf_name: Mapped[str] = mapped_column(String(255))
+    shares: Mapped[float] = mapped_column(Float)
+    price: Mapped[float] = mapped_column(Float)
+    market_value: Mapped[float] = mapped_column(Float)
+    weight: Mapped[float] = mapped_column(Float)
+    cost_basis: Mapped[float | None] = mapped_column(Float, nullable=True)
+    unrealized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class EtfPortfolioBacktestLabelSummary(Base):
+    __tablename__ = "etf_portfolio_backtest_label_summaries"
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id",
+            "label",
+            "entry_timing_label",
+            "horizon_days",
+            name="uq_etf_portfolio_backtest_label_summary",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("etf_portfolio_backtest_runs.id", ondelete="CASCADE"))
+    label: Mapped[str] = mapped_column(String(64))
+    entry_timing_label: Mapped[str] = mapped_column(String(64))
+    horizon_days: Mapped[int] = mapped_column(Integer)
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    avg_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    median_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    win_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    worst_forward_drawdown: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confidence: Mapped[str] = mapped_column(String(32), default="insufficient")
+    metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class ShortResearchAdvisorReport(Base):
     __tablename__ = "short_research_advisor_reports"
     __table_args__ = (

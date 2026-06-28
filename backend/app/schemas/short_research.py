@@ -229,3 +229,89 @@ class ShortResearchObservationPortfolioOut(BaseModel):
     daily_signal_date: date | None = None
     portfolio_generated_at: datetime | None = None
     weight_fill_reason: str | None = None
+
+
+class EtfPortfolioBacktestRequest(BaseModel):
+    start_date: date | None = None
+    end_date: date | None = None
+    days: int = Field(default=180, ge=60, le=1000)
+    initial_cash: float | None = Field(default=None, gt=0)
+    fee_rate: float = Field(default=0.001, ge=0, le=0.02)
+    max_assets: int = Field(default=180, ge=20, le=500)
+
+
+class EtfPortfolioBacktestRunSummaryOut(BaseModel):
+    id: int
+    status: str
+    started_at: datetime
+    finished_at: datetime | None = None
+    start_date: date
+    end_date: date
+    initial_cash: float
+    fee_rate: float
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    benchmark: dict[str, Any] = Field(default_factory=dict)
+    data_coverage: dict[str, Any] = Field(default_factory=dict)
+    caveats: list[str] = Field(default_factory=list)
+    error_message: str | None = None
+
+
+class EtfPortfolioBacktestCurvePointOut(BaseModel):
+    date: date
+    equity: float
+    cash: float
+    drawdown: float
+    benchmark_equity: float | None = None
+    portfolio_mode: str
+
+
+class EtfPortfolioBacktestTradeOut(BaseModel):
+    id: int
+    trade_date: date
+    etf_code: str
+    etf_name: str
+    side: str
+    reason: str
+    amount: float
+    shares: float
+    price: float
+    fee: float
+    realized_pnl: float | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class EtfPortfolioBacktestPositionOut(BaseModel):
+    snapshot_date: date
+    etf_code: str
+    etf_name: str
+    shares: float
+    price: float
+    market_value: float
+    weight: float
+    cost_basis: float | None = None
+    unrealized_pnl: float | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class EtfPortfolioBacktestLabelSummaryOut(BaseModel):
+    label: str
+    entry_timing_label: str
+    horizon_days: int
+    sample_count: int
+    avg_return: float | None = None
+    median_return: float | None = None
+    win_rate: float | None = None
+    worst_forward_drawdown: float | None = None
+    confidence: str
+    metrics: dict[str, Any] = Field(default_factory=dict)
+
+
+class EtfPortfolioBacktestDetailOut(EtfPortfolioBacktestRunSummaryOut):
+    equity_curve: list[EtfPortfolioBacktestCurvePointOut] = Field(default_factory=list)
+    trades: list[EtfPortfolioBacktestTradeOut] = Field(default_factory=list)
+    latest_positions: list[EtfPortfolioBacktestPositionOut] = Field(default_factory=list)
+    label_summaries: list[EtfPortfolioBacktestLabelSummaryOut] = Field(default_factory=list)
+
+
+class EtfPortfolioBacktestListOut(BaseModel):
+    items: list[EtfPortfolioBacktestRunSummaryOut] = Field(default_factory=list)

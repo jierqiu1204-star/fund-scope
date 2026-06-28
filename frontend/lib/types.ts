@@ -692,6 +692,81 @@ export type ShortResearchObservationPortfolio = {
   methodology: string;
 };
 
+export type EtfPortfolioBacktestRunSummary = {
+  id: number;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+  start_date: string;
+  end_date: string;
+  initial_cash: number;
+  fee_rate: number;
+  metrics: Record<string, unknown>;
+  benchmark: Record<string, unknown>;
+  data_coverage: Record<string, unknown>;
+  caveats: string[];
+  error_message: string | null;
+};
+
+export type EtfPortfolioBacktestCurvePoint = {
+  date: string;
+  equity: number;
+  cash: number;
+  drawdown: number;
+  benchmark_equity: number | null;
+  portfolio_mode: string;
+};
+
+export type EtfPortfolioBacktestTrade = {
+  id: number;
+  trade_date: string;
+  etf_code: string;
+  etf_name: string;
+  side: string;
+  reason: string;
+  amount: number;
+  shares: number;
+  price: number;
+  fee: number;
+  realized_pnl: number | null;
+  metadata: Record<string, unknown>;
+};
+
+export type EtfPortfolioBacktestLabelSummary = {
+  label: string;
+  entry_timing_label: string;
+  horizon_days: number;
+  sample_count: number;
+  avg_return: number | null;
+  median_return: number | null;
+  win_rate: number | null;
+  worst_forward_drawdown: number | null;
+  confidence: string;
+  metrics: Record<string, unknown>;
+};
+
+export type EtfPortfolioBacktestDetail = EtfPortfolioBacktestRunSummary & {
+  equity_curve: EtfPortfolioBacktestCurvePoint[];
+  trades: EtfPortfolioBacktestTrade[];
+  latest_positions: Array<{
+    snapshot_date: string;
+    etf_code: string;
+    etf_name: string;
+    shares: number;
+    price: number;
+    market_value: number;
+    weight: number;
+    cost_basis: number | null;
+    unrealized_pnl: number | null;
+    metadata: Record<string, unknown>;
+  }>;
+  label_summaries: EtfPortfolioBacktestLabelSummary[];
+};
+
+export type EtfPortfolioBacktestList = {
+  items: EtfPortfolioBacktestRunSummary[];
+};
+
 export type TrackedPositionSnapshot = {
   current_price: number | null;
   current_price_date: string | null;

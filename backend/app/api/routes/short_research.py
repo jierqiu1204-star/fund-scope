@@ -7,13 +7,18 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import require_approved_user
 from app.core.db import get_db_session
 from app.models.entities import (
     EtfSignalValidationItem,
     EtfSignalValidationRun,
     ShortResearchSignalRun,
+    User,
 )
 from app.schemas.short_research import (
+    EtfPortfolioBacktestDetailOut,
+    EtfPortfolioBacktestListOut,
+    EtfPortfolioBacktestRequest,
     EtfSignalValidationItemOut,
     EtfSignalValidationRunOut,
     ShortResearchAdvisorReportOut,
@@ -29,6 +34,13 @@ from app.schemas.short_research import (
     ShortResearchStatusOut,
 )
 from app.services.short_research.advisor import latest_reports_by_asset, run_advisor_generation
+from app.services.short_research.backtest import (
+    backtest_detail_payload,
+    backtest_summary_payload,
+    get_backtest_run,
+    list_backtest_runs,
+    run_etf_portfolio_backtest,
+)
 from app.services.short_research.service import (
     VALIDATION_MODE_FORWARD_LIVE,
     VALIDATION_MODE_HISTORICAL_REPLAY,
@@ -363,6 +375,48 @@ async def get_short_research_observation_portfolio(
     if asset_type != "etf":
         raise HTTPException(status_code=400, detail="观察组合第一版只支持场内 ETF")
     return await etf_observation_portfolio(session, limit=limit, universe=universe)
+
+
+@router.post("/etf-backtests", response_model=EtfPortfolioBacktestDetailOut)
+async def start_etf_portfolio_backtest(
+    payload: EtfPortfolioBacktestRequest | None = Body(default=None),
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(require_approved_user),
+) -> dict[str, Any]:
+    payload = payload or EtfPortfolioBacktestRequest()
+    run = await run_etf_portfolio_backtest(
+        session,
+        user=user,
+        start_date=payload.start_date,
+        end_date=payload.end_date,
+        days=payload.days,
+        initial_cash=payload.initial_cash,
+        fee_rate=payload.fee_rate,
+        max_assets=payload.max_assets,
+    )
+    return await backtest_detail_payload(session, run)
+
+
+@router.get("/etf-backtests", response_model=EtfPortfolioBacktestListOut)
+async def list_etf_portfolio_backtests(
+    limit: int = Query(default=10, ge=1, le=50),
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = Depends(require_approved_user),
+) -> dict[str, Any]:
+    runs = await list_backtest_runs(session, limit=limit)
+    return {"items": [backtest_summary_payload(run) for run in runs]}
+
+
+@router.get("/etf-backtests/{run_id}", response_model=EtfPortfolioBacktestDetailOut)
+async def get_etf_portfolio_backtest(
+    run_id: int,
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = Depends(require_approved_user),
+) -> dict[str, Any]:
+    run = await get_backtest_run(session, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="未找到 ETF 组合回测记录")
+    return await backtest_detail_payload(session, run)
 
 
 @router.post("/validation/run", response_model=EtfSignalValidationRunOut)

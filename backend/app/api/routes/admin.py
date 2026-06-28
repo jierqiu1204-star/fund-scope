@@ -37,6 +37,7 @@ from app.services.short_research.jobs import (
     daily_short_research_data_job,
     daily_short_research_signals_job,
     etf_label_historical_replay_job,
+    etf_portfolio_backtest_job,
     post_close_etf_data_job,
     post_close_etf_label_outcome_review_job,
     post_close_etf_observation_portfolio_job,
@@ -200,6 +201,16 @@ async def run_job_by_name(
                 tracked_session,
                 days=days,
                 max_assets=max_assets,
+            ),
+        )
+    if job_name == "etf_portfolio_backtest":
+        return await run_job(
+            request.app.state.db.session,
+            job_name,
+            lambda tracked_session: etf_portfolio_backtest_job(
+                tracked_session,
+                days=days,
+                max_assets=min(max_assets, 500),
             ),
         )
     if job_name == "daily_etf_label_outcome_review":

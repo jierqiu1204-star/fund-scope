@@ -2115,6 +2115,93 @@ async def compute_asset(
     return await _with_quality_metrics(session, computed, effective_date)
 
 
+def compute_asset_for_replay_from_series(
+    metadata: ShortResearchAsset,
+    *,
+    series: list[PricePoint],
+    as_of_date: date,
+    rank: int | None = None,
+) -> ComputedAsset:
+    metrics = _score_metrics(metadata, series, as_of_date)
+    conclusion = _conclusion(metrics)
+    source_note = "历史 ETF 日线数据" if metadata.asset_type == ASSET_TYPE_ETF else "历史基金净值数据"
+    metric_keys = (
+        "return_5d",
+        "return_10d",
+        "return_20d",
+        "return_60d",
+        "volatility_20d",
+        "max_drawdown_60d",
+        "average_turnover_20d",
+        "today_return_pct",
+        "ma5",
+        "ma10",
+        "ma20",
+        "distance_to_ma5_pct",
+        "distance_to_ma10_pct",
+        "pullback_from_5d_high_pct",
+        "pullback_from_20d_high_pct",
+        "volume_ratio_20d",
+        "entry_timing_label",
+        "entry_timing_reason",
+        "theme_profile",
+        "dynamic_threshold_context",
+    )
+    replay_metrics = {key: metrics[key] for key in metric_keys}
+    replay_metrics.update(
+        {
+            "data_quality_score": 100.0,
+            "default_display_eligible": not any(
+                flag in metrics["risk_flags"] for flag in ("数据不足", "数据滞后", "流动性不足")
+            ),
+            "default_exclusion_reasons": [
+                flag for flag in metrics["risk_flags"] if flag in {"数据不足", "数据滞后", "流动性不足"}
+            ],
+            "replay_as_of_date": as_of_date,
+        }
+    )
+    score_breakdown = {
+        "trend": {"score": metrics["trend_score"], "weight": 0.55},
+        "risk": {"score": metrics["risk_score"], "weight": 0.30},
+        "liquidity": {"score": metrics["liquidity_score"], "weight": 0.15},
+        "data_quality": {"score": 100.0, "weight": 0.0},
+        "metrics": replay_metrics,
+    }
+    return ComputedAsset(
+        metadata=metadata,
+        rank=rank,
+        total_score=float(metrics["total_score"]),
+        conclusion=conclusion,
+        latest_date=cast(date | None, metrics["latest_date"]),
+        latest_value=cast(float | None, metrics["latest_value"]),
+        usable_days=int(metrics["usable_days"]),
+        sample_level=_sample_level(int(metrics["usable_days"])),
+        metrics=replay_metrics,
+        score_breakdown=score_breakdown,
+        risk_flags=list(metrics["risk_flags"]),
+        rationale=_rationale(metadata, metrics, conclusion),
+        source_note=source_note,
+        entry_timing_label=str(metrics["entry_timing_label"]),
+        entry_timing_reason=str(metrics["entry_timing_reason"]),
+    )
+
+
+async def compute_asset_for_replay(
+    session: AsyncSession,
+    metadata: ShortResearchAsset,
+    *,
+    as_of_date: date,
+    rank: int | None = None,
+) -> ComputedAsset:
+    series = await _series_for_asset(session, metadata, as_of_date)
+    return compute_asset_for_replay_from_series(
+        metadata,
+        series=series,
+        as_of_date=as_of_date,
+        rank=rank,
+    )
+
+
 def _matches_filters(
     metadata: ShortResearchAsset,
     *,

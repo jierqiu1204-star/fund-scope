@@ -10,6 +10,7 @@ from app.defaults.short_research import ASSET_TYPE_ETF, ASSET_TYPE_FUND
 from app.services.llm import LLMClient
 from app.services.short_etf.data import sync_etf_price_history_from_intraday_snapshot
 from app.services.short_research.advisor import run_advisor_generation
+from app.services.short_research.backtest import run_etf_portfolio_backtest
 from app.services.short_research.service import (
     run_etf_label_historical_replay,
     run_etf_observation_portfolio_optimization,
@@ -213,6 +214,24 @@ async def etf_label_historical_replay_job(
         "completed_samples": summary.get("completed_samples", 0),
         "excluded_samples": summary.get("excluded_samples", 0),
         "groups": len(summary.get("groups", [])),
+    }
+
+
+async def etf_portfolio_backtest_job(
+    session: AsyncSession,
+    *,
+    days: int = 180,
+    max_assets: int = 180,
+) -> dict[str, Any]:
+    run = await run_etf_portfolio_backtest(session, days=days, max_assets=max_assets)
+    return {
+        "run_id": run.id,
+        "status": run.status,
+        "start_date": run.start_date.isoformat(),
+        "end_date": run.end_date.isoformat(),
+        "metrics": dict(run.metrics_json or {}),
+        "data_coverage": dict(run.data_coverage_json or {}),
+        "error_message": run.error_message,
     }
 
 
