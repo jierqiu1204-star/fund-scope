@@ -51,7 +51,7 @@
 
 ## 7. Deployment And Validation
 
-- [ ] 7.1 Deploy migration and code to the server.
-- [ ] 7.2 Run one short ETF portfolio backtest on the server using available historical ETF daily data.
-- [ ] 7.3 Verify `/short-term` shows the completed backtest and does not show old strategy simulation as current ETF proof.
-- [ ] 7.4 Verify backtest metrics, curves, benchmark, trades, and caveats are readable and internally consistent.
+- [x] 7.1 Deploy migration and code to the server.
+- [x] 7.2 Run one short ETF portfolio backtest on the server using available historical ETF daily data.
+- [x] 7.3 Verify `/short-term` shows the completed backtest and does not show old strategy simulation as current ETF proof.
+- [x] 7.4 Verify backtest metrics, curves, benchmark, trades, and caveats are readable and internally consistent.
