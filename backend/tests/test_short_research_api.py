@@ -835,6 +835,50 @@ async def test_short_research_observation_portfolio_no_match_returns_full_cash(c
 
 
 @pytest.mark.asyncio
+async def test_short_research_observation_portfolio_allows_partial_allocation(client, app) -> None:
+    await _seed_observation_portfolio_signal_run(
+        app,
+        items=[
+            {
+                "code": "560941",
+                "total_score": 94.0,
+                "conclusion": "短线观察",
+                "entry_timing_label": "健康回踩",
+                "entry_timing_reason": "第一只合格 ETF。",
+                "theme_tags": ["科技"],
+            },
+            {
+                "code": "560942",
+                "total_score": 92.0,
+                "conclusion": "短线观察",
+                "entry_timing_label": "趋势延续",
+                "entry_timing_reason": "第二只合格 ETF。",
+                "theme_tags": ["红利"],
+            },
+            {
+                "code": "560943",
+                "total_score": 91.0,
+                "conclusion": "高位观察",
+                "entry_timing_label": "冲高别追",
+                "entry_timing_reason": "高位不追。",
+            },
+        ],
+    )
+
+    response = await client.get("/api/short-research/observation-portfolio?limit=4")
+    assert response.status_code == 200
+
+    body = response.json()
+    assert body["portfolio_mode"] == "risk_on"
+    assert body["weight_sum"] == 0.6
+    assert body["cash_weight"] == 0.4
+    assert len(body["items"]) == 2
+    assert all(item["target_weight"] <= 0.3 for item in body["items"])
+    assert body["cash_reason"]
+    assert "等待" in body["cash_reason"]
+
+
+@pytest.mark.asyncio
 async def test_short_research_observation_portfolio_reduces_theme_and_correlation_overlap(client, app) -> None:
     await _seed_observation_portfolio_signal_run(
         app,

@@ -201,6 +201,36 @@ async def test_post_close_etf_data_job_falls_back_to_history_provider(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_etf_history_backfill_job_syncs_all_etfs(monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def fake_sync_short_research_data(_session: object, **kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {"asset_count": 8, "failed": 0, "asset_type": kwargs["asset_type"]}
+
+    async def fake_coverage(_session: object) -> dict[str, Any]:
+        return {
+            "rows": 1200,
+            "etfs": 8,
+            "earliest_trade_date": "2024-06-01",
+            "latest_trade_date": "2026-06-26",
+        }
+
+    monkeypatch.setattr(jobs_module, "sync_short_research_data", fake_sync_short_research_data)
+    monkeypatch.setattr(jobs_module, "_etf_price_history_coverage", fake_coverage)
+
+    result = await jobs_module.etf_history_backfill_job(object(), days=730)  # type: ignore[arg-type]
+
+    assert len(calls) == 1
+    assert calls[0]["asset_type"] == ASSET_TYPE_ETF
+    assert calls[0]["sync_all_etfs"] is True
+    assert result["days"] == 730
+    assert result["asset_count"] == 8
+    assert result["coverage"]["etfs"] == 8
+    assert result["source"] == "history_provider_long_backfill"
+
+
+@pytest.mark.asyncio
 async def test_post_close_etf_signals_job_generates_only_etf_run(monkeypatch) -> None:
     calls: list[str] = []
 

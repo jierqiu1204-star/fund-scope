@@ -185,12 +185,27 @@ async def test_etf_portfolio_backtest_api_create_list_and_detail(client, app) ->
     assert detail_body["label_summaries"]
 
 
-def test_backtest_portfolio_cash_wait_when_candidates_are_insufficient() -> None:
+def test_backtest_portfolio_partially_allocates_when_candidates_are_insufficient() -> None:
     weights, mode, context = _generate_target_weights([_computed_asset("510300"), _computed_asset("512880")])
+
+    assert weights
+    assert mode == "risk_on"
+    assert round(sum(weights.values()), 4) == 0.6
+    assert context["cash_weight"] == 0.4
+    assert "候选" in context["cash_reason"]
+
+
+def test_backtest_portfolio_cash_wait_when_no_candidate_passes_filters() -> None:
+    weights, mode, context = _generate_target_weights(
+        [
+            _computed_asset("510300", conclusion="高位观察", entry="冲高别追"),
+            _computed_asset("512880", conclusion="短线观察", entry="数据不足", flags=["数据滞后"]),
+        ]
+    )
 
     assert weights == {}
     assert mode == "cash_wait"
-    assert "候选" in context["cash_reason"]
+    assert context["cash_weight"] == 1.0
 
 
 def test_backtest_trailing_take_profit_daily_action() -> None:

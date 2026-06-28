@@ -91,6 +91,24 @@ const jobGroups: Array<{ title: string; description: string; actions: JobAction[
         primary: true
       },
       {
+        key: "etf_history_backfill_365",
+        label: "回填 365 天 ETF 日线",
+        description: "补齐场内 ETF 近一年日线，用于短线标签和组合回测。",
+        endpoint: "/api/admin/jobs/etf_history_backfill/run?days=365"
+      },
+      {
+        key: "etf_history_backfill_730",
+        label: "回填 730 天 ETF 日线",
+        description: "推荐回填口径，补齐约两年 ETF 日线，提升回测和标签验证可信度。",
+        endpoint: "/api/admin/jobs/etf_history_backfill/run?days=730"
+      },
+      {
+        key: "etf_history_backfill_1095",
+        label: "回填 1095 天 ETF 日线",
+        description: "补齐约三年 ETF 日线；耗时更长，适合服务器空闲时运行。",
+        endpoint: "/api/admin/jobs/etf_history_backfill/run?days=1095"
+      },
+      {
         key: "daily_short_research_signals",
         label: "生成短线排序",
         description: "按趋势、回撤、波动和数据质量生成保守观察标签。",
@@ -151,6 +169,9 @@ const jobGroups: Array<{ title: string; description: string; actions: JobAction[
 function jobLabel(jobName: string) {
   if (jobName === "fund_nav_backfill") {
     return "历史净值回填";
+  }
+  if (jobName === "etf_history_backfill") {
+    return "ETF 长历史日线回填";
   }
   const legacyLabels: Record<string, string> = {
     daily_short_etf_data: "同步 ETF 行情（旧）",

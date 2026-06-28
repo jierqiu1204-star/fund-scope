@@ -1435,9 +1435,9 @@ function ShortTermClient() {
     mutationFn: async () =>
       (
         await api.post<EtfPortfolioBacktestDetail>("/api/short-research/etf-backtests", {
-          days: 180,
+          days: 730,
           fee_rate: 0.001,
-          max_assets: 180
+          max_assets: 500
         })
       ).data,
     onSuccess: async () => {
@@ -3687,7 +3687,7 @@ function ShortTermClient() {
               disabled={runEtfBacktest.isPending}
               onClick={() => runEtfBacktest.mutate()}
             >
-              {runEtfBacktest.isPending ? "正在回测..." : "运行近 180 天回测"}
+              {runEtfBacktest.isPending ? "正在回测..." : "运行近 730 天回测"}
             </button>
           </div>
           {runEtfBacktest.isError ? (
@@ -3726,6 +3726,38 @@ function ShortTermClient() {
                   <p className="text-xs text-ink/45">交易次数</p>
                   <p className="mt-1 text-lg font-semibold text-ink">
                     {String(etfBacktestDetail.data.metrics.trade_count ?? 0)}
+                  </p>
+                </div>
+              </div>
+              <div className="mt-4 grid gap-3 md:grid-cols-4">
+                <div className="rounded-[10px] border border-ink/10 bg-paper px-4 py-3">
+                  <p className="text-xs text-ink/45">请求区间</p>
+                  <p className="mt-1 text-sm font-semibold text-ink">
+                    {formatDate(String(etfBacktestDetail.data.data_coverage.requested_start_date ?? etfBacktestDetail.data.start_date))}
+                    {" - "}
+                    {formatDate(String(etfBacktestDetail.data.data_coverage.requested_end_date ?? etfBacktestDetail.data.end_date))}
+                  </p>
+                </div>
+                <div className="rounded-[10px] border border-ink/10 bg-paper px-4 py-3">
+                  <p className="text-xs text-ink/45">有效数据区间</p>
+                  <p className="mt-1 text-sm font-semibold text-ink">
+                    {formatDate(String(etfBacktestDetail.data.data_coverage.effective_start_date ?? etfBacktestDetail.data.data_coverage.start_date ?? etfBacktestDetail.data.start_date))}
+                    {" - "}
+                    {formatDate(String(etfBacktestDetail.data.data_coverage.effective_end_date ?? etfBacktestDetail.data.data_coverage.end_date ?? etfBacktestDetail.data.end_date))}
+                  </p>
+                </div>
+                <div className="rounded-[10px] border border-ink/10 bg-paper px-4 py-3">
+                  <p className="text-xs text-ink/45">首个配置日</p>
+                  <p className="mt-1 text-sm font-semibold text-ink">
+                    {formatDate(String(etfBacktestDetail.data.data_coverage.first_signal_date ?? ""))}
+                  </p>
+                </div>
+                <div className="rounded-[10px] border border-ink/10 bg-paper px-4 py-3">
+                  <p className="text-xs text-ink/45">平均 ETF 仓位</p>
+                  <p className="mt-1 text-sm font-semibold text-ink">
+                    {typeof etfBacktestDetail.data.metrics.average_target_exposure === "number"
+                      ? formatPercent(etfBacktestDetail.data.metrics.average_target_exposure * 100)
+                      : "暂无"}
                   </p>
                 </div>
               </div>
@@ -3805,13 +3837,18 @@ function ShortTermClient() {
                       数据覆盖：{String(etfBacktestDetail.data.data_coverage.trading_days ?? 0)} 个交易日，
                       {String(etfBacktestDetail.data.data_coverage.priced_asset_count ?? 0)} 只 ETF 有价格数据。
                     </p>
+                    <p className="rounded-[8px] bg-paper px-3 py-2">
+                      等待资金：全现金 {String(etfBacktestDetail.data.data_coverage.full_cash_days ?? 0)} 天，
+                      部分仓位 {String(etfBacktestDetail.data.data_coverage.partial_allocation_days ?? 0)} 天；
+                      原因 {JSON.stringify(etfBacktestDetail.data.data_coverage.cash_wait_reason_counts ?? {})}
+                    </p>
                   </div>
                 </div>
               </div>
             </>
           ) : (
             <p className="mt-5 rounded-[10px] border border-dashed border-ink/20 bg-white px-4 py-5 text-sm leading-6 text-ink/55">
-              当前 ETF 工作台策略还没有历史回测结果。点击按钮会用近 180 天日线数据逐日回放；结果只代表历史模拟，不保证未来收益。
+              当前 ETF 工作台策略还没有历史回测结果。点击按钮会用近 730 天日线数据逐日回放；结果只代表历史模拟，不保证未来收益。
             </p>
           )}
         </Panel>
@@ -3834,12 +3871,12 @@ function ShortTermClient() {
               </span>
             </summary>
             <p className="mt-2 text-sm leading-6 text-ink/60">
-              这里的 100% 只指你放进证券账户、准备买 ETF 的这部分资金，不代表你的全部资产。系统会先找进攻仓位；大趋势不好时转向防守仓位；进攻和防守都不合格时保留等待资金。
+              这里的 100% 只指你放进证券账户、准备买 ETF 的这部分资金上限，不代表必须时时满仓。系统会先找进攻仓位；大趋势不好时转向防守仓位；合格标的不够时保留等待资金。
             </p>
             <p className="mt-3 rounded-[8px] bg-paper px-4 py-3 text-xs leading-5 text-ink/55">
               {observationPortfolio.data?.methodology ?? "按买点、风险和数据可靠性筛选，再做分散约束，不做收益承诺。"}
               {observationPortfolio.data
-                ? ` 单只 ETF 上限 ${formatPercent((observationPortfolio.data.single_weight_cap ?? 0) * 100)}，目标 ETF 资金投入 ${formatPercent((observationPortfolio.data.target_invested_weight ?? 1) * 100)}。`
+                ? ` 单只 ETF 上限 ${formatPercent((observationPortfolio.data.single_weight_cap ?? 0) * 100)}，ETF 资金最高投入 ${formatPercent((observationPortfolio.data.target_invested_weight ?? 1) * 100)}。`
                 : ""}
             </p>
             <div className="mt-4 grid gap-3 md:grid-cols-3">
@@ -3865,6 +3902,11 @@ function ShortTermClient() {
             {observationPortfolio.data?.portfolio_mode === "defensive" ? (
               <p className="mt-4 rounded-[10px] border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-800">
                 当前市场不适合全仓进攻，优先使用防守 ETF 做资金配置参考；这不是保本承诺，也不是自动交易。
+              </p>
+            ) : null}
+            {(observationPortfolio.data?.cash_weight ?? 0) > 0 && observationPortfolio.data?.portfolio_mode !== "cash_wait" ? (
+              <p className="mt-4 rounded-[10px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                {observationPortfolio.data?.cash_reason ?? "合格 ETF 不足以用满资金，剩余资金等待，不硬凑标的。"}
               </p>
             ) : null}
             {observationPortfolio.data?.portfolio_mode === "cash_wait" ? (

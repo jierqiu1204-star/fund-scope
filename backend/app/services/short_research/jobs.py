@@ -3,10 +3,12 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
 from app.defaults.short_research import ASSET_TYPE_ETF, ASSET_TYPE_FUND
+from app.models.entities import EtfPriceHistory
 from app.services.llm import LLMClient
 from app.services.short_etf.data import sync_etf_price_history_from_intraday_snapshot
 from app.services.short_research.advisor import run_advisor_generation
@@ -24,6 +26,7 @@ from app.services.workflows.short_research_data import (
 )
 
 SHORT_RESEARCH_DAILY_ASSET_TYPES = [ASSET_TYPE_FUND, ASSET_TYPE_ETF]
+ETF_HISTORY_BACKFILL_ALLOWED_DAYS = (365, 730, 1095)
 
 
 def _count(value: Any, key: str) -> int:
@@ -115,6 +118,49 @@ async def post_close_etf_data_job(session: AsyncSession) -> dict[str, Any]:
         "asset_count": _count(result, "asset_count"),
         "failed": _count(result, "failed"),
         "source": "history_provider",
+    }
+
+
+async def _etf_price_history_coverage(session: AsyncSession) -> dict[str, Any]:
+    row = (
+        await session.execute(
+            select(
+                func.count(EtfPriceHistory.id),
+                func.count(func.distinct(EtfPriceHistory.etf_code)),
+                func.min(EtfPriceHistory.trade_date),
+                func.max(EtfPriceHistory.trade_date),
+            )
+        )
+    ).one()
+    return {
+        "rows": int(row[0] or 0),
+        "etfs": int(row[1] or 0),
+        "earliest_trade_date": row[2].isoformat() if row[2] else None,
+        "latest_trade_date": row[3].isoformat() if row[3] else None,
+    }
+
+
+async def etf_history_backfill_job(session: AsyncSession, *, days: int = 730) -> dict[str, Any]:
+    backfill_days = days if days in ETF_HISTORY_BACKFILL_ALLOWED_DAYS else 730
+    today = date.today()
+    from_date = today - timedelta(days=backfill_days)
+    result = await sync_short_research_data(
+        session,
+        from_date=from_date,
+        to_date=today,
+        asset_type=ASSET_TYPE_ETF,
+        sync_all_etfs=True,
+    )
+    return {
+        "from_date": from_date.isoformat(),
+        "to_date": today.isoformat(),
+        "days": backfill_days,
+        "asset_type": ASSET_TYPE_ETF,
+        "etf": result,
+        "asset_count": _count(result, "asset_count"),
+        "failed": _count(result, "failed"),
+        "coverage": await _etf_price_history_coverage(session),
+        "source": "history_provider_long_backfill",
     }
 
 

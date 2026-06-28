@@ -57,7 +57,7 @@ from app.services.short_research.service import (
 
 BACKTEST_RULE_VERSION = "etf_portfolio_backtest_v1"
 BACKTEST_RANKING_VERSION = "short_research_daily_replay_v1"
-BACKTEST_ALLOCATION_VERSION = "etf_portfolio_allocation_v1"
+BACKTEST_ALLOCATION_VERSION = "etf_portfolio_allocation_v2_partial_cash"
 BACKTEST_EXIT_RULE_VERSION = "risk_alerts_daily_v1"
 DEFAULT_BACKTEST_DAYS = 180
 DEFAULT_BACKTEST_FEE_RATE = 0.001
@@ -126,7 +126,8 @@ async def _create_backtest_run(
         config_json={
             "max_assets": max_assets,
             "single_weight_cap": PORTFOLIO_SINGLE_WEIGHT_CAP,
-            "min_weightable_holdings": MIN_WEIGHTABLE_HOLDINGS,
+            "min_holdings_for_full_exposure": MIN_WEIGHTABLE_HOLDINGS,
+            "partial_allocation_allowed": True,
             "execution": "daily_close",
             "no_intraday_fill": True,
         },
@@ -304,21 +305,28 @@ def _generate_target_weights(assets: list[ComputedAsset]) -> tuple[dict[str, flo
             if len(selected) >= MIN_WEIGHTABLE_HOLDINGS:
                 break
 
-    if len(selected) < MIN_WEIGHTABLE_HOLDINGS:
+    if not selected:
         return (
             {},
             PORTFOLIO_MODE_CASH_WAIT,
             {
-                "cash_reason": "进攻和防守候选都不足，按现金等待处理。",
+                "cash_reason": "没有满足进攻或防守约束的 ETF，按现金等待处理。",
                 "primary_count": len(primary),
                 "defensive_count": len(defensive),
                 "watch_only_count": watch_only,
                 "excluded_count": excluded,
+                "target_exposure": 0.0,
+                "cash_weight": 1.0,
             },
         )
 
     raw_rows = [_portfolio_raw_weight(asset) for asset in selected]
-    normalized = _cap_normalized_weights([row[0] for row in raw_rows], PORTFOLIO_SINGLE_WEIGHT_CAP)
+    target_exposure = min(1.0, len(selected) * PORTFOLIO_SINGLE_WEIGHT_CAP)
+    normalized = _cap_normalized_weights(
+        [row[0] for row in raw_rows],
+        PORTFOLIO_SINGLE_WEIGHT_CAP,
+        target_total=target_exposure,
+    )
     if normalized is None:
         return (
             {},
@@ -327,6 +335,8 @@ def _generate_target_weights(assets: list[ComputedAsset]) -> tuple[dict[str, flo
                 "cash_reason": "单只 30% 上限和候选数量约束不可行，按现金等待处理。",
                 "primary_count": len(primary),
                 "defensive_count": len(defensive),
+                "target_exposure": 0.0,
+                "cash_weight": 1.0,
             },
         )
     weights = {asset.metadata.code: weight for asset, weight in zip(selected, normalized, strict=True)}
@@ -341,8 +351,24 @@ def _generate_target_weights(assets: list[ComputedAsset]) -> tuple[dict[str, flo
             "excluded_count": excluded,
             "selected_codes": list(weights),
             "selected_item_types": item_types,
+            "target_exposure": round(sum(weights.values()), 4),
+            "cash_weight": round(max(0.0, 1.0 - sum(weights.values())), 4),
+            "cash_reason": "合格候选不足以用满资金，剩余现金等待。" if sum(weights.values()) < 0.999 else None,
         },
     )
+
+
+def _cash_wait_reason_key(portfolio_context: dict[str, Any], assets: list[ComputedAsset]) -> str:
+    if not assets:
+        return "no_price_data"
+    max_usable_days = max((asset.usable_days for asset in assets), default=0)
+    if max_usable_days < 60:
+        return "data_warmup"
+    primary_count = int(portfolio_context.get("primary_count") or 0)
+    defensive_count = int(portfolio_context.get("defensive_count") or 0)
+    if primary_count + defensive_count == 0:
+        return "risk_filters"
+    return "qualified_candidate_shortage"
 
 
 def _trend_weakening(metrics: dict[str, Any]) -> bool:
@@ -607,12 +633,30 @@ async def run_etf_portfolio_backtest(
         label_samples: dict[tuple[str, str, int], list[tuple[float, float]]] = defaultdict(list)
         latest_assets: list[ComputedAsset] = []
         benchmark = _benchmark(series_by_code, trading_dates, capital)
+        first_signal_date: date | None = None
+        cash_wait_reason_counts: dict[str, int] = defaultdict(int)
+        portfolio_mode_counts: dict[str, int] = defaultdict(int)
+        target_exposure_sum = 0.0
+        last_target_exposure = 0.0
+        partial_allocation_days = 0
+        full_cash_days = 0
 
         for date_index, trade_date in enumerate(trading_dates):
             assets = _build_daily_assets(metadata_by_code, series_by_code, trade_date)
             latest_assets = assets
             asset_by_code = {asset.metadata.code: asset for asset in assets}
             target_weights, portfolio_mode, portfolio_context = _generate_target_weights(assets)
+            target_exposure = round(sum(float(weight) for weight in target_weights.values()), 4)
+            last_target_exposure = target_exposure
+            target_exposure_sum += target_exposure
+            portfolio_mode_counts[portfolio_mode] += 1
+            if target_exposure > 0 and first_signal_date is None:
+                first_signal_date = trade_date
+            if target_exposure < 0.999:
+                partial_allocation_days += 1
+            if target_exposure <= 0:
+                full_cash_days += 1
+                cash_wait_reason_counts[_cash_wait_reason_key(portfolio_context, assets)] += 1
             prices = {
                 code: price
                 for code, series in series_by_code.items()
@@ -818,6 +862,8 @@ async def run_etf_portfolio_backtest(
                 )
             )
         final_equity = _equity(cash, positions, {code: _price_on(series, trading_dates[-1]) or 0.0 for code, series in series_by_code.items()})
+        first_trade_date = min((row.trade_date for row in trade_rows), default=None)
+        average_target_exposure = target_exposure_sum / len(trading_dates) if trading_dates else 0.0
         metrics = {
             "cumulative_return": round(final_equity / capital - 1.0, 4),
             "max_drawdown": round(
@@ -844,6 +890,10 @@ async def run_etf_portfolio_backtest(
             "average_holding_days": round(mean([(trading_dates[-1] - item.entry_date).days for item in positions.values()]), 2)
             if positions
             else None,
+            "average_target_exposure": round(average_target_exposure, 4),
+            "last_target_exposure": round(last_target_exposure, 4),
+            "partial_allocation_days": partial_allocation_days,
+            "full_cash_days": full_cash_days,
             "portfolio_rule": "逐日重放 ETF 资金配置参考 + 日线风控",
         }
         caveats = [
@@ -853,14 +903,29 @@ async def run_etf_portfolio_backtest(
         ]
         if len(trading_dates) < 120:
             caveats.append("样本交易日少于 120 天，只能观察，不能下结论。")
+            caveats.append("如需更长历史，请先在后台任务运行 ETF 长历史日线回填，再重新生成回测。")
         data_coverage = {
+            "requested_start_date": effective_start.isoformat(),
+            "requested_end_date": effective_end.isoformat(),
+            "lookback_start_date": lookback_start.isoformat(),
             "asset_count": len(metadata),
             "priced_asset_count": len(series_by_code),
             "trading_days": len(trading_dates),
             "start_date": trading_dates[0].isoformat(),
             "end_date": trading_dates[-1].isoformat(),
+            "effective_start_date": trading_dates[0].isoformat(),
+            "effective_end_date": trading_dates[-1].isoformat(),
             "latest_replay_asset_count": len(latest_assets),
             "sample_insufficient": len(trading_dates) < 120,
+            "warmup_days": (first_signal_date - trading_dates[0]).days if first_signal_date else len(trading_dates),
+            "first_signal_date": first_signal_date.isoformat() if first_signal_date else None,
+            "first_trade_date": first_trade_date.isoformat() if first_trade_date else None,
+            "cash_wait_reason_counts": dict(cash_wait_reason_counts),
+            "portfolio_mode_counts": dict(portfolio_mode_counts),
+            "partial_allocation_days": partial_allocation_days,
+            "full_cash_days": full_cash_days,
+            "average_target_exposure": round(average_target_exposure, 4),
+            "last_target_exposure": round(last_target_exposure, 4),
         }
         run.status = "success"
         run.finished_at = utcnow()

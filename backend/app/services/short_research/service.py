@@ -2884,10 +2884,17 @@ def _portfolio_weight_explanation(
     sample_count = int(asset.metrics.get("validation_sample_count") or 0)
     turnover = float(asset.metrics.get("average_turnover_20d") or 0.0) / 100_000_000
     cap_note = "，触及单只30%上限" if weight_reason and weight_reason.get("single_cap_applied") else ""
+    target_total = float((weight_reason or {}).get("portfolio_target_weight") or _PORTFOLIO_TOTAL_EXPOSURE_CAP)
+    cash_wait = float((weight_reason or {}).get("cash_wait_weight") or 0.0)
+    exposure_note = (
+        f"归一到当前合格 ETF 权重 {target_total * 100:.0f}%，剩余资金 {cash_wait * 100:.0f}% 等待"
+        if cash_wait > 0.0001
+        else "归一到 ETF 账户资金 100%"
+    )
     return (
         f"给 {target_weight * 100:.0f}% 观察权重：综合分 {asset.total_score:.1f}，"
         f"标签验证 {confidence}（样本 {sample_count}），20日成交额约 {turnover:.2f} 亿元；"
-        f"按分数倾斜、波动率、回撤、成交额、主题和相关性约束归一到 ETF 账户资金 100%{cap_note}。"
+        f"按分数倾斜、波动率、回撤、成交额、主题和相关性约束{exposure_note}{cap_note}。"
     )
 
 
@@ -2983,12 +2990,22 @@ def _portfolio_raw_weight(asset: ComputedAsset) -> tuple[float, dict[str, Any]]:
     }
 
 
-def _cap_normalized_weights(raw_weights: list[float], cap: float) -> list[float] | None:
-    if not raw_weights or cap * len(raw_weights) < 1.0:
+def _cap_normalized_weights(
+    raw_weights: list[float],
+    cap: float,
+    *,
+    target_total: float = 1.0,
+) -> list[float] | None:
+    if not raw_weights:
+        return None
+    target = min(max(target_total, 0.0), 1.0)
+    if target <= 0:
+        return [0.0 for _item in raw_weights]
+    if cap * len(raw_weights) + 1e-9 < target:
         return None
     remaining_indices = set(range(len(raw_weights)))
     weights = [0.0 for _item in raw_weights]
-    remaining_weight = 1.0
+    remaining_weight = target
     while remaining_indices:
         raw_total = sum(raw_weights[index] for index in remaining_indices)
         if raw_total <= 0:
@@ -3012,7 +3029,10 @@ def _cap_normalized_weights(raw_weights: list[float], cap: float) -> list[float]
     total = sum(weights)
     if total <= 0:
         return None
-    return [round(weight / total, 4) for weight in weights]
+    if abs(total - target) > 0.0001:
+        scale = target / total
+        weights = [weight * scale for weight in weights]
+    return [round(weight, 4) for weight in weights]
 
 def _series_return_by_date(series: list[PricePoint], window: int = 60) -> dict[date, float]:
     recent = series[-(window + 1) :]
@@ -3420,19 +3440,24 @@ async def etf_observation_portfolio(
         watch_only_items.append(_portfolio_item(asset, target_weight=0.0, reason=original_reason))
 
     raw_weight_rows = [_portfolio_raw_weight(asset) for asset in selected_assets]
+    target_exposure = min(
+        _PORTFOLIO_TOTAL_EXPOSURE_CAP,
+        len(selected_assets) * _PORTFOLIO_SINGLE_WEIGHT_CAP,
+    )
     normalized_weights = _cap_normalized_weights(
         [row[0] for row in raw_weight_rows],
         _PORTFOLIO_SINGLE_WEIGHT_CAP,
+        target_total=target_exposure,
     )
     items: list[dict[str, Any]] = []
     defensive_items: list[dict[str, Any]] = []
     unavailable_reason: str | None = None
     cash_reason: str | None = None
-    if len(selected_assets) < 4:
-        unavailable_reason = "进攻和防守候选都少于 4 只；单只 30% 上限下不能凑满 ETF 资金 100%。"
-        cash_reason = "当前没有足够满足数据可靠性、流动性和风险约束的进攻/防守 ETF，建议等待。"
+    if not selected_assets:
+        unavailable_reason = "当前没有满足数据可靠性、流动性和风险约束的进攻/防守 ETF。"
+        cash_reason = "当前没有足够满足条件的 ETF，建议等待，不硬凑标的。"
     elif normalized_weights is None:
-        unavailable_reason = "组合约束不可行：单只 30% 上限和候选数量不足以归一到 100%。"
+        unavailable_reason = "组合约束不可行：单只 30% 上限和候选数量无法形成有效仓位。"
         cash_reason = "组合约束不可行，建议等待下一次数据更新。"
     else:
         for asset, target, raw_row in zip(selected_assets, normalized_weights, raw_weight_rows, strict=True):
@@ -3445,6 +3470,8 @@ async def etf_observation_portfolio(
                     "theme_tags": _portfolio_theme_keys(asset) or list(asset.metadata.theme_tags[:2]),
                     "correlation_policy": "高相关候选转入观察组，主组合只保留分散后的候选。",
                     "target_invested_weight": _PORTFOLIO_TOTAL_EXPOSURE_CAP,
+                    "portfolio_target_weight": round(target_exposure, 4),
+                    "cash_wait_weight": round(max(0.0, _PORTFOLIO_TOTAL_EXPOSURE_CAP - target_exposure), 4),
                     "portfolio_item_type": item_type,
                 }
             )
@@ -3458,7 +3485,7 @@ async def etf_observation_portfolio(
                 items.append(portfolio_item)
 
     weight_sum = round(sum(float(item["target_weight"]) for item in [*items, *defensive_items]), 4)
-    rounding_residual = 0.0 if items and abs(1.0 - weight_sum) <= 0.01 else (round(max(0.0, 1.0 - weight_sum), 4) if items else 0.0)
+    rounding_residual = round(max(0.0, 1.0 - weight_sum), 4) if items or defensive_items else 0.0
     if defensive_items:
         portfolio_mode = PORTFOLIO_MODE_DEFENSIVE
         market_regime = MARKET_REGIME_DEFENSIVE
@@ -3470,6 +3497,8 @@ async def etf_observation_portfolio(
         market_regime = MARKET_REGIME_CASH_WAIT
         rounding_residual = 1.0
         cash_reason = cash_reason or "当前没有可用于配置的 ETF，建议等待。"
+    if rounding_residual > 0.0001 and portfolio_mode != PORTFOLIO_MODE_CASH_WAIT:
+        cash_reason = cash_reason or "满足条件的 ETF 不足以用满账户资金；剩余资金等待，不硬凑标的。"
     risk_exposure_weight = round(sum(float(item["target_weight"]) for item in items), 4)
     defensive_weight = round(sum(float(item["target_weight"]) for item in defensive_items), 4)
     constraints_used = {
@@ -3477,7 +3506,8 @@ async def etf_observation_portfolio(
         "single_weight_cap": _PORTFOLIO_SINGLE_WEIGHT_CAP,
         "theme_exposure_cap": _PORTFOLIO_THEME_EXPOSURE_CAP,
         "high_correlation_threshold": _PORTFOLIO_HIGH_CORRELATION,
-        "minimum_primary_count": 4,
+        "minimum_full_exposure_holdings": 4,
+        "partial_allocation_allowed": True,
         "weight_model": "score_tilted_inverse_volatility",
     }
     risk_summary = {
@@ -3497,7 +3527,7 @@ async def etf_observation_portfolio(
         "weightable_candidates": len(selected_assets),
         "decision_reliability": "verified_or_alternate_provider",
     }
-    note = "ETF 资金配置按你放进证券账户 ETF 的资金 100% 做研究参考，不代表你的总资产全仓。"
+    note = "ETF 资金配置按你放进证券账户 ETF 的资金最多 100% 做研究参考，不代表必须时时满仓。"
     if unavailable_reason:
         note = f"当前不建议动用 ETF 资金：{unavailable_reason}"
         items = []
@@ -3507,9 +3537,11 @@ async def etf_observation_portfolio(
         defensive_weight = 0.0
         rounding_residual = 1.0
     elif defensive_items:
-        note = "当前市场不适合全仓进攻，优先用防守 ETF 做资金配置参考。"
+        note = "当前市场不适合全仓进攻，优先用防守 ETF 做资金配置参考；未用满的资金继续等待。"
     elif watch_only_items or excluded_items:
         note = "高位/追高/数据不足资产会分到观察或等待分组，不进入主组合权重。" + note
+    elif rounding_residual > 0.0001:
+        note = "当前只给满足条件 ETF 分配部分仓位；剩余资金等待，不硬凑标的。"
     quote_time = await session.scalar(select(func.max(EtfIntradayLatestQuote.quote_time)))
     portfolio_generated_at = utcnow()
     data_as_of_time = quote_time or portfolio_generated_at
@@ -3560,6 +3592,6 @@ async def etf_observation_portfolio(
         "note": note,
         "methodology": (
             "先生成进攻候选；进攻不足时再用货币、债券、黄金、红利或低波动宽基 ETF 做防守候选；"
-            "若进攻和防守都不足，则保留现金等待。这是研究权重，不是交易指令。"
+            "若候选不足以用满资金，则部分配置、剩余现金等待；进攻和防守都不足时才全现金等待。这是研究权重，不是交易指令。"
         ),
     }
