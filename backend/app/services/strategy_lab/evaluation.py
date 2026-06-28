@@ -316,12 +316,29 @@ def _item_from_result(
 def _metrics_with_trades(result: SimulationResult) -> dict[str, Any]:
     metrics = dict(result.metrics)
     if result.orders:
-        metrics["trade_count"] = len(result.orders)
-        metrics["total_fees"] = round(sum(order.fee for order in result.orders), 2)
+        trade_count = len(result.orders)
+        total_fees = round(sum(order.fee for order in result.orders), 2)
     else:
-        metrics.setdefault("trade_count", 0)
-        metrics.setdefault("total_fees", 0.0)
+        trade_count = int(metrics.get("trade_count") or 0)
+        total_fees = float(metrics.get("total_fees") or 0.0)
+    gross_traded_amount = round(sum(abs(order.amount) for order in result.orders), 2)
+    average_equity = (
+        sum(point.equity for point in result.equity_curve) / len(result.equity_curve)
+        if result.equity_curve
+        else float(metrics.get("starting_equity") or 0.0)
+    )
+    starting_equity = float(metrics.get("starting_equity") or average_equity or 0.0)
+    metrics["trade_count"] = trade_count
+    metrics["total_fees"] = total_fees
     metrics["equity_points"] = len(result.equity_curve)
+    metrics["gross_traded_amount"] = gross_traded_amount
+    metrics["turnover_rate"] = round(gross_traded_amount / average_equity, 6) if average_equity > 0 else 0.0
+    metrics["fee_drag"] = round(total_fees / starting_equity, 6) if starting_equity > 0 else 0.0
+    if len(result.equity_curve) >= 2:
+        days = max((result.equity_curve[-1].curve_date - result.equity_curve[0].curve_date).days, 1)
+        metrics["annualized_trade_count"] = round(trade_count / (days / 365.25), 2)
+    else:
+        metrics["annualized_trade_count"] = 0.0
     return metrics
 
 
@@ -541,10 +558,15 @@ def _summarize_evaluation(
     return_median = median(returns) if returns else 0.0
     default_out = float(default_item.out_of_sample_metrics.get("total_return", 0.0))
     default_in = float(default_item.in_sample_metrics.get("total_return", 0.0))
+    best_out = float(best_item.out_of_sample_metrics.get("total_return", 0.0))
+    best_in = float(best_item.in_sample_metrics.get("total_return", 0.0))
+    parameter_turnovers = [float(item.metrics.get("turnover_rate", 0.0)) for item in parameter_items]
+    benchmark_names = ["默认策略", "等权买入持有", "定投对照"]
+    overfit_warning = default_out + 0.05 < default_in or best_out + 0.05 < best_in
     risk_flags: list[str] = []
     if not bool(coverage["is_sample_sufficient"]):
         risk_flags.append("样本不足")
-    if default_out + 0.05 < default_in:
+    if overfit_warning:
         risk_flags.append("疑似过拟合")
     if positive_ratio < 0.4 or abs(float(best_item.metrics.get("total_return", 0.0)) - return_median) > 0.2:
         risk_flags.append("参数不稳定")
@@ -560,13 +582,33 @@ def _summarize_evaluation(
         conclusion = "不建议采用"
     summary = {
         "parameter_grid_count": len(parameter_items),
-        "baseline_names": ["默认策略", "等权买入持有", "定投对照"],
+        "baseline_names": benchmark_names,
+        "benchmark_names": benchmark_names,
+        "execution_assumptions": {
+            "fee_rate": round(float(default_item.parameters.get("fee_rate") or 0.0), 6),
+            "slippage_rate": 0.0,
+            "slippage_model": "not_applied",
+        },
         "best_parameter_label": best_item.label,
         "best_parameter_score": best_item.score,
+        "best_parameter_out_of_sample_return": best_out,
         "positive_parameter_ratio": round(positive_ratio, 4),
         "median_parameter_return": round(return_median, 6),
         "default_metrics": default_item.metrics,
         "default_in_sample_return": default_in,
         "default_out_of_sample_return": default_out,
+        "turnover_summary": {
+            "default_trade_count": int(default_item.metrics.get("trade_count") or 0),
+            "default_turnover_rate": float(default_item.metrics.get("turnover_rate") or 0.0),
+            "median_parameter_turnover_rate": round(median(parameter_turnovers), 6) if parameter_turnovers else 0.0,
+            "max_parameter_turnover_rate": round(max(parameter_turnovers), 6) if parameter_turnovers else 0.0,
+        },
+        "out_of_sample_comparison": {
+            "default_return": default_out,
+            "best_parameter_label": best_item.label,
+            "best_parameter_return": best_out,
+            "spread_vs_default": round(best_out - default_out, 6),
+            "overfit_warning": overfit_warning,
+        },
     }
     return summary, conclusion, risk_flags

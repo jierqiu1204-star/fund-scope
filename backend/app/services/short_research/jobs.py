@@ -14,9 +14,11 @@ from app.services.short_research.service import (
     run_etf_observation_portfolio_optimization,
     run_etf_signal_validation,
     run_signal_generation,
-    sync_short_research_data,
 )
 from app.services.short_research.universe import refresh_etf_universe
+from app.services.workflows.short_research_data import (
+    sync_short_research_data_with_tracking_priority as sync_short_research_data,
+)
 
 SHORT_RESEARCH_DAILY_ASSET_TYPES = [ASSET_TYPE_FUND, ASSET_TYPE_ETF]
 

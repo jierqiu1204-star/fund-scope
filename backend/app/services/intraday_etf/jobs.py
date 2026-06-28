@@ -3,12 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import Settings, get_settings
-from app.defaults.short_research import ASSET_TYPE_ETF
-from app.models.entities import IntradayEtfWatchRun, TrackedPosition, utcnow
+from app.core.config import Settings
+from app.models.entities import IntradayEtfWatchRun, utcnow
 from app.services.intraday_etf.service import (
     ASIA_SHANGHAI,
     build_watchlist,
@@ -24,11 +22,6 @@ from app.services.intraday_etf.service import (
     quote_price_diff_pct,
     quote_provider_count,
     summarize_and_cleanup_intraday_quotes,
-)
-from app.services.tracked_positions.service import (
-    ACTIVE_STATUS,
-    create_alert_if_needed,
-    refresh_entry_if_waiting,
 )
 
 
@@ -96,13 +89,9 @@ async def intraday_etf_watch_job(
         local_now = datetime.now(ASIA_SHANGHAI).replace(tzinfo=None)
         quote_audit = _quote_audit_for_watchlist(watch_codes, latest_quotes, local_now)
         stale = sum(1 for item in quote_audit.values() if item["quote_freshness"] == "stale")
-        alert_result = await _check_tracked_etf_alerts(session, settings or get_settings())
         run.status = "degraded" if provider_error else "success"
         run.updated_quote_count = updated
         run.stale_quote_count = stale
-        run.alert_count = alert_result["alerts_created"]
-        run.email_sent_count = alert_result["emails_sent"]
-        run.suppressed_count = alert_result["suppressed"]
         run.error_message = provider_error
         run.finished_at = utcnow()
         run.details_json = {
@@ -118,7 +107,6 @@ async def intraday_etf_watch_job(
             "provider_error": provider_error,
             "quote_audit": _sample_mapping(quote_audit),
             "quote_audit_count": len(quote_audit),
-            "alert_result": alert_result,
         }
         await session.commit()
         return _result(run)
@@ -188,54 +176,6 @@ def _sample_mapping(values: dict[str, Any], *, limit: int = 50) -> dict[str, Any
         return values
     return {key: values[key] for key in sorted(values)[:limit]}
 
-
-async def _check_tracked_etf_alerts(session: AsyncSession, settings: Settings) -> dict[str, int]:
-    rows = (
-        await session.scalars(
-            select(TrackedPosition).where(
-                TrackedPosition.asset_type == ASSET_TYPE_ETF,
-                TrackedPosition.status == ACTIVE_STATUS,
-            )
-        )
-    ).all()
-    result = {
-        "positions_checked": len(rows),
-        "alerts_created": 0,
-        "emails_sent": 0,
-        "emails_failed": 0,
-        "emails_skipped": 0,
-        "web_only": 0,
-        "deduplicated": 0,
-        "suppressed": 0,
-        "data_ineligible": 0,
-        "no_signal": 0,
-    }
-    for position in rows:
-        await refresh_entry_if_waiting(session, position)
-        alert, status = await create_alert_if_needed(session, position, settings, evaluation_mode="intraday")
-        if status == "deduplicated":
-            result["deduplicated"] += 1
-            continue
-        if status == "suppressed":
-            result["suppressed"] += 1
-            continue
-        if status == "no_signal":
-            result["no_signal"] += 1
-            continue
-        if status == "data_ineligible":
-            result["data_ineligible"] += 1
-            continue
-        if alert is not None:
-            result["alerts_created"] += 1
-        if status == "email_sent":
-            result["emails_sent"] += 1
-        elif status == "email_failed":
-            result["emails_failed"] += 1
-        elif status == "email_skipped":
-            result["emails_skipped"] += 1
-        elif status == "web_only":
-            result["web_only"] += 1
-    return result
 
 async def intraday_etf_cleanup_job(
     session: AsyncSession,

@@ -9,7 +9,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.db import DatabaseManager
-from app.services.intraday_etf.jobs import intraday_etf_watch_job
 from app.services.job_runner import run_job
 from app.services.jobs import (
     daily_asset_recommendations_job,
@@ -34,6 +33,7 @@ from app.services.short_research.jobs import (
 )
 from app.services.strategy_lab.jobs import daily_strategy_paper_job
 from app.services.tracked_positions.jobs import daily_tracked_position_alerts_job
+from app.services.workflows.intraday_etf import intraday_etf_watch_with_alerts_job
 
 
 async def _run_tracked_job(
@@ -68,7 +68,7 @@ def register_default_jobs(
         return await daily_tracked_position_alerts_job(session, settings)
 
     async def intraday_etf_watch_tracked(session: AsyncSession) -> dict[str, Any]:
-        return await intraday_etf_watch_job(session, settings=settings, run_type="scheduled")
+        return await intraday_etf_watch_with_alerts_job(session, settings=settings, run_type="scheduled")
 
     scheduler.add_job(
         _run_tracked_job,

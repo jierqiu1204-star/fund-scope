@@ -195,7 +195,7 @@ async def test_scheduled_intraday_watch_skips_closed_market_without_fetching(app
 
 
 @pytest.mark.asyncio
-async def test_watchlist_uses_all_eligible_etfs_and_marks_signal_sources(app) -> None:
+async def test_watchlist_uses_all_eligible_etfs_without_research_or_tracking_sources(app) -> None:
     conclusions = [CONCLUSION_WATCH] * 22
     conclusions[20] = CONCLUSION_HIGH_WATCH
     conclusions[21] = CONCLUSION_WATCH
@@ -221,24 +221,18 @@ async def test_watchlist_uses_all_eligible_etfs_and_marks_signal_sources(app) ->
 
         watchlist = await build_watchlist(session)
 
-    assert watchlist.message == "使用全部可交易 ETF 盘中行情；实时榜单优先显示最新评分前 20、短线观察、高位观察和已追踪 ETF。"
+    assert watchlist.message == "使用全部可交易 ETF 盘中行情；研究筛选和用户持仓由上层服务编排。"
     assert len(watchlist.items) == 24
-    assert [item.etf_code for item in watchlist.items[:3]] == ["510000", "510001", "510002"]
-    assert watchlist.items[0].rank == 1
-    assert watchlist.items[0].sources == {"all_etf", "top20_signal", "short_watch"}
-    assert watchlist.items[19].rank == 20
-    assert watchlist.items[20].etf_code == "510020"
-    assert watchlist.items[20].rank == 21
-    assert watchlist.items[20].sources == {"all_etf", "high_watch"}
-    assert watchlist.items[21].etf_code == "510021"
-    assert watchlist.items[21].sources == {"all_etf", "short_watch"}
+    assert [item.etf_code for item in watchlist.items[:3]] == ["159998", "159999", "510000"]
+    assert watchlist.items[0].rank is None
+    assert watchlist.items[0].sources == {"all_etf"}
     eligible = next(item for item in watchlist.items if item.etf_code == "159998")
     assert eligible.rank is None
     assert eligible.sources == {"all_etf"}
     tracked = next(item for item in watchlist.items if item.etf_code == "159999")
     assert tracked.rank is None
-    assert tracked.sources == {"all_etf", "tracked_position"}
-    assert watchlist.signal_status == "ready"
+    assert tracked.sources == {"all_etf"}
+    assert watchlist.signal_status == "all_etf"
 
 
 @pytest.mark.asyncio
@@ -387,7 +381,7 @@ async def test_live_rankings_marks_data_insufficient_without_faking_quote(client
 
 @pytest.mark.asyncio
 async def test_quote_normalization_stale_handling_and_persist_all_eligible_etfs(app) -> None:
-    run_id = await _seed_signal_run(app, count=1)
+    await _seed_signal_run(app, count=1)
     quote_time = datetime.now().replace(microsecond=0)
     quote = normalize_spot_record(
         {
@@ -439,7 +433,8 @@ async def test_quote_normalization_stale_handling_and_persist_all_eligible_etfs(
         result = await intraday_etf_watch_job(session, run_type="manual", force=True, fetcher=fake_fetcher)
         rows = (await session.scalars(select(EtfIntradayQuote).order_by(EtfIntradayQuote.etf_code))).all()
 
-    assert result["details"]["signal_run_id"] == run_id
+    assert result["details"]["signal_run_id"] is None
+    assert result["details"]["signal_status"] == "all_etf"
     assert result["updated_quote_count"] == 2
     assert [row.etf_code for row in rows] == ["510000", "510999"]
     assert rows[0].raw_json["provider_timestamp"] == quote_time.isoformat()

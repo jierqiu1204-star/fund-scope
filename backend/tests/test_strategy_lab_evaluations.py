@@ -112,6 +112,18 @@ async def test_strategy_evaluation_persists_research_results_without_strategy_ru
     }
     assert payload["summary"]["parameter_grid_count"] == 36
     assert "默认策略" in payload["summary"]["baseline_names"]
+    assert payload["summary"]["execution_assumptions"] == {
+        "fee_rate": 0.001,
+        "slippage_rate": 0.0,
+        "slippage_model": "not_applied",
+    }
+    assert payload["summary"]["benchmark_names"] == ["默认策略", "等权买入持有", "定投对照"]
+    assert payload["summary"]["turnover_summary"]["default_trade_count"] > 0
+    assert payload["summary"]["turnover_summary"]["median_parameter_turnover_rate"] >= 0
+    assert payload["summary"]["out_of_sample_comparison"]["best_parameter_label"]
+    assert "overfit_warning" in payload["summary"]["out_of_sample_comparison"]
+    assert all("turnover_rate" in item["metrics"] for item in payload["items"])
+    assert all("fee_drag" in item["metrics"] for item in payload["items"])
 
     async with app.state.db.session() as session:
         assert await session.scalar(select(func.count()).select_from(StrategyRun)) == 0

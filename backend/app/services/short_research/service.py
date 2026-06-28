@@ -33,11 +33,25 @@ from app.models.entities import (
     FundNavHistory,
     ShortResearchSignalItem,
     ShortResearchSignalRun,
-    TrackedPosition,
     TradableEtf,
     utcnow,
 )
 from app.services.jobs import sync_fund_nav_history
+from app.services.portfolio_allocation import (
+    PORTFOLIO_CORRELATION_MIN_POINTS,
+    PORTFOLIO_ENTRY_TIMING_FORBIDDEN,
+    PORTFOLIO_ENTRY_TIMING_OK,
+    PORTFOLIO_HIGH_CORRELATION,
+    PORTFOLIO_MODE_CASH_WAIT,
+    PORTFOLIO_MODE_DEFENSIVE,
+    PORTFOLIO_MODE_RISK_ON,
+    PORTFOLIO_RISK_FLAGS_FORBIDDEN,
+    PORTFOLIO_RISK_FLAGS_REDUCE_WEIGHT,
+    PORTFOLIO_RISK_FLAGS_WATCH_ONLY,
+    PORTFOLIO_SINGLE_WEIGHT_CAP,
+    PORTFOLIO_THEME_EXPOSURE_CAP,
+    PORTFOLIO_TOTAL_EXPOSURE_CAP,
+)
 from app.services.short_etf.data import sync_etf_price_history
 from app.services.short_research.universe import refresh_etf_universe
 
@@ -69,37 +83,16 @@ CHASE_RETURN_60D = 0.45
 SURGE_RETURN_5D = 0.08
 HIGH_DAILY_VOLATILITY_20D = 0.035
 LARGE_DRAWDOWN_60D = -0.18
-_PORTFOLIO_SINGLE_WEIGHT_CAP = 0.30
-_PORTFOLIO_TOTAL_EXPOSURE_CAP = 1.00
-_PORTFOLIO_THEME_EXPOSURE_CAP = 0.60
-_PORTFOLIO_HIGH_CORRELATION = 0.85
-_PORTFOLIO_CORRELATION_MIN_POINTS = 40
-_PORTFOLIO_ENTRY_TIMING_OK = (
-    ENTRY_TIMING_HEALTHY_PULLBACK,
-    ENTRY_TIMING_TREND_CONTINUATION,
-)
-_PORTFOLIO_ENTRY_TIMING_FORBIDDEN = (
-    ENTRY_TIMING_CHASE_RISK,
-    ENTRY_TIMING_BREAK_WAIT,
-    ENTRY_TIMING_VOLUME_WEAKENING,
-    ENTRY_TIMING_INSUFFICIENT,
-)
-_PORTFOLIO_RISK_FLAGS_FORBIDDEN = (
-    "数据不足",
-    "数据滞后",
-    "流动性不足",
-)
-_PORTFOLIO_RISK_FLAGS_WATCH_ONLY = (
-    "追高风险",
-    "连续大涨",
-)
-_PORTFOLIO_RISK_FLAGS_REDUCE_WEIGHT = (
-    "高波动",
-    "回撤较大",
-)
-PORTFOLIO_MODE_RISK_ON = "risk_on"
-PORTFOLIO_MODE_DEFENSIVE = "defensive"
-PORTFOLIO_MODE_CASH_WAIT = "cash_wait"
+_PORTFOLIO_SINGLE_WEIGHT_CAP = PORTFOLIO_SINGLE_WEIGHT_CAP
+_PORTFOLIO_TOTAL_EXPOSURE_CAP = PORTFOLIO_TOTAL_EXPOSURE_CAP
+_PORTFOLIO_THEME_EXPOSURE_CAP = PORTFOLIO_THEME_EXPOSURE_CAP
+_PORTFOLIO_HIGH_CORRELATION = PORTFOLIO_HIGH_CORRELATION
+_PORTFOLIO_CORRELATION_MIN_POINTS = PORTFOLIO_CORRELATION_MIN_POINTS
+_PORTFOLIO_ENTRY_TIMING_OK = PORTFOLIO_ENTRY_TIMING_OK
+_PORTFOLIO_ENTRY_TIMING_FORBIDDEN = PORTFOLIO_ENTRY_TIMING_FORBIDDEN
+_PORTFOLIO_RISK_FLAGS_FORBIDDEN = PORTFOLIO_RISK_FLAGS_FORBIDDEN
+_PORTFOLIO_RISK_FLAGS_WATCH_ONLY = PORTFOLIO_RISK_FLAGS_WATCH_ONLY
+_PORTFOLIO_RISK_FLAGS_REDUCE_WEIGHT = PORTFOLIO_RISK_FLAGS_REDUCE_WEIGHT
 MARKET_REGIME_RISK_ON = "risk_on"
 MARKET_REGIME_DEFENSIVE = "defensive"
 MARKET_REGIME_CASH_WAIT = "cash_wait"
@@ -1984,18 +1977,15 @@ async def _dynamic_etf_codes(session: AsyncSession, codes: list[str] | None = No
     return [row.code for row in rows.all()]
 
 
-async def _prioritize_etf_sync_codes(session: AsyncSession, codes: list[str]) -> list[str]:
+async def _prioritize_etf_sync_codes(
+    session: AsyncSession,
+    codes: list[str],
+    priority_codes: list[str] | None = None,
+) -> list[str]:
     if not codes:
         return []
     code_set = set(codes)
-    tracked_rows = await session.scalars(
-        select(TrackedPosition.asset_code).where(
-            TrackedPosition.asset_type == ASSET_TYPE_ETF,
-            TrackedPosition.status == "active",
-            TrackedPosition.asset_code.in_(codes),
-        )
-    )
-    tracked = list(dict.fromkeys(str(code) for code in tracked_rows.all()))
+    priority = list(dict.fromkeys(str(code) for code in (priority_codes or []) if str(code) in code_set))
     watchlist_rows = await session.scalars(
         select(TradableEtf.code).where(
             TradableEtf.code.in_(codes),
@@ -2003,8 +1993,8 @@ async def _prioritize_etf_sync_codes(session: AsyncSession, codes: list[str]) ->
         )
     )
     watchlist = list(dict.fromkeys(str(code) for code in watchlist_rows.all()))
-    remaining = sorted(code_set - set(tracked) - set(watchlist))
-    return [*tracked, *(code for code in watchlist if code not in tracked), *remaining]
+    remaining = sorted(code_set - set(priority) - set(watchlist))
+    return [*priority, *(code for code in watchlist if code not in priority), *remaining]
 
 
 async def sync_short_research_data(
@@ -2015,6 +2005,7 @@ async def sync_short_research_data(
     asset_type: str | None = None,
     codes: list[str] | None = None,
     sync_all_etfs: bool = False,
+    priority_etf_codes: list[str] | None = None,
 ) -> dict[str, Any]:
     await ensure_short_research_universe(session)
     fund_codes = [
@@ -2025,7 +2016,7 @@ async def sync_short_research_data(
         and is_short_term_eligible_name(item.name)
     ]
     etf_codes = await _dynamic_etf_codes(session, codes) if asset_type in (None, ASSET_TYPE_ETF) else []
-    etf_codes = await _prioritize_etf_sync_codes(session, etf_codes)
+    etf_codes = await _prioritize_etf_sync_codes(session, etf_codes, priority_etf_codes)
     fund_result = {"funds": 0, "rows_inserted": 0, "rows_updated": 0, "failed": 0, "failures": []}
     etf_result: dict[str, Any] = {
         "etfs": 0,
@@ -2907,8 +2898,18 @@ async def etf_observation_portfolio(
             "excluded_count": len(excluded_items),
         },
         "constraints_used": constraints_used,
-        "risk_summary": risk_summary,
-        "data_reliability_summary": data_reliability_summary,
+        "risk_summary": {
+            **risk_summary,
+            "single_weight_cap": _PORTFOLIO_SINGLE_WEIGHT_CAP,
+            "total_exposure_cap": _PORTFOLIO_TOTAL_EXPOSURE_CAP,
+        },
+        "data_reliability_summary": {
+            **data_reliability_summary,
+            "item_count": len(items),
+            "defensive_item_count": len(defensive_items),
+            "watch_only_item_count": len(watch_only_items[:10]),
+            "excluded_item_count": len(excluded_items[:10]),
+        },
         "unavailable_reason": unavailable_reason,
         "research_only": True,
         "no_trade_instruction": True,

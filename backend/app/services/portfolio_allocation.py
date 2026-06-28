@@ -1,0 +1,33 @@
+from __future__ import annotations
+
+PORTFOLIO_SINGLE_WEIGHT_CAP = 0.30
+PORTFOLIO_TOTAL_EXPOSURE_CAP = 1.00
+PORTFOLIO_THEME_EXPOSURE_CAP = 0.60
+PORTFOLIO_HIGH_CORRELATION = 0.85
+PORTFOLIO_CORRELATION_MIN_POINTS = 40
+PORTFOLIO_ENTRY_TIMING_OK = (
+    "趋势延续",
+    "健康回踩",
+)
+PORTFOLIO_ENTRY_TIMING_FORBIDDEN = (
+    "冲高别追",
+    "跌破等待",
+    "放量转弱",
+    "数据不足",
+)
+PORTFOLIO_RISK_FLAGS_FORBIDDEN = (
+    "流动性不足",
+    "数据滞后",
+    "样本不足",
+)
+PORTFOLIO_RISK_FLAGS_WATCH_ONLY = (
+    "追高风险",
+    "高波动",
+)
+PORTFOLIO_RISK_FLAGS_REDUCE_WEIGHT = (
+    "高波动",
+    "短样本",
+)
+PORTFOLIO_MODE_RISK_ON = "risk_on"
+PORTFOLIO_MODE_DEFENSIVE = "defensive"
+PORTFOLIO_MODE_CASH_WAIT = "cash_wait"

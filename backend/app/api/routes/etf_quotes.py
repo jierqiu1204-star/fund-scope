@@ -5,7 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db_session
 from app.schemas.etf_quotes import EtfLiveRankingListOut, IntradayEtfWatchStatusOut
-from app.services.intraday_etf.service import live_rankings, watch_status
+from app.services.intraday_etf.service import watch_status
+from app.services.workflows.etf_live_rankings import live_rankings
 
 router = APIRouter(prefix="/api/etf-quotes", tags=["etf-quotes"])
 

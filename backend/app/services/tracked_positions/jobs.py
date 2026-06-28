@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
+from app.defaults.short_research import ASSET_TYPE_ETF
 from app.models.entities import TrackedPosition
 from app.services.tracked_positions.service import (
     ACTIVE_STATUS,
@@ -44,6 +45,59 @@ async def daily_tracked_position_alerts_job(
             continue
         if status == "no_signal":
             result["no_signal"] += 1
+            continue
+        if alert is not None:
+            result["alerts_created"] += 1
+        if status == "email_sent":
+            result["emails_sent"] += 1
+        elif status == "email_failed":
+            result["emails_failed"] += 1
+        elif status == "email_skipped":
+            result["emails_skipped"] += 1
+        elif status == "web_only":
+            result["web_only"] += 1
+    return result
+
+
+async def intraday_tracked_position_alerts_job(
+    session: AsyncSession,
+    settings: Settings | None = None,
+) -> dict[str, int]:
+    rows = (
+        await session.scalars(
+            select(TrackedPosition).where(
+                TrackedPosition.asset_type == ASSET_TYPE_ETF,
+                TrackedPosition.status == ACTIVE_STATUS,
+            )
+        )
+    ).all()
+    result = {
+        "positions_checked": len(rows),
+        "alerts_created": 0,
+        "emails_sent": 0,
+        "emails_failed": 0,
+        "emails_skipped": 0,
+        "web_only": 0,
+        "deduplicated": 0,
+        "suppressed": 0,
+        "data_ineligible": 0,
+        "no_signal": 0,
+    }
+    effective_settings = settings or get_settings()
+    for position in rows:
+        await refresh_entry_if_waiting(session, position)
+        alert, status = await create_alert_if_needed(session, position, effective_settings, evaluation_mode="intraday")
+        if status == "deduplicated":
+            result["deduplicated"] += 1
+            continue
+        if status == "suppressed":
+            result["suppressed"] += 1
+            continue
+        if status == "no_signal":
+            result["no_signal"] += 1
+            continue
+        if status == "data_ineligible":
+            result["data_ineligible"] += 1
             continue
         if alert is not None:
             result["alerts_created"] += 1

@@ -339,6 +339,16 @@ async def test_etf_signal_validation_run_records_forward_outcomes(client, app) -
     assert body["summary"]["outcome_source"] == "stored_signal_items"
     assert body["summary"]["evaluated_asset_count"] == 1
 
+    assets_response = await client.get("/api/short-research/assets?asset_type=etf&limit=1")
+    assert assets_response.status_code == 200
+    asset = assets_response.json()["items"][0]
+    evidence = asset["validation_evidence"]
+    assert set(evidence["horizons"]) >= {"1", "3", "5", "10"}
+    assert evidence["sample_count"] > 0
+    assert evidence["sample_quality"]["sample_count_total"] >= evidence["sample_count"]
+    assert evidence["freshness"]["rule_version"] == "label_validation_v1"
+    assert evidence["recent_examples"]
+
     latest = await client.get("/api/short-research/validation/latest")
     assert latest.status_code == 200
     assert latest.json()["id"] == body["id"]
@@ -649,6 +659,14 @@ async def test_short_research_observation_portfolio_persists_snapshot(client, ap
     assert body["constraint_summary"]["target_invested_weight"] == 1.0
     assert body["total_exposure_cap"] == 1.0
     assert body["weight_sum"] == 1.0
+    first_item = body["items"][0]
+    assert first_item["weight_explanation"]
+    assert "观察权重" in first_item["weight_explanation"]
+    assert first_item["decision_factors"]["target_weight"] == first_item["target_weight"]
+    assert first_item["weight_reason_json"]["final_weight"] == first_item["target_weight"]
+    assert first_item["metrics"]["portfolio_weight_explanation"] == first_item["weight_explanation"]
+    assert body["risk_summary"]["single_weight_cap"] == 0.3
+    assert body["data_reliability_summary"]["item_count"] == len(body["items"])
 
 
 @pytest.mark.asyncio

@@ -868,6 +868,10 @@ function StrategyLabClient() {
   const bestParameterItems = sortedParameterItems(currentEvaluation).slice(0, 12);
   const defaultEvaluation = defaultEvaluationItem(currentEvaluation);
   const evaluationCoverage = currentEvaluation?.data_coverage ?? null;
+  const evaluationSummary = currentEvaluation?.summary ?? null;
+  const evaluationAssumptions = metricRecord(evaluationSummary, "execution_assumptions");
+  const evaluationTurnoverSummary = metricRecord(evaluationSummary, "turnover_summary");
+  const evaluationOutOfSampleComparison = metricRecord(evaluationSummary, "out_of_sample_comparison");
   const isSampleSufficient = metricBoolean(evaluationCoverage, "is_sample_sufficient");
   const evaluationParameterChart = evaluationReturnChart(bestParameterItems);
   const evaluationBaselineChart = evaluationReturnChart(baselineItems(currentEvaluation));
@@ -1232,6 +1236,14 @@ function StrategyLabClient() {
                   <StatPill label="交易次数" value={metricText(defaultEvaluation.metrics, "trade_count", "number")} />
                 </div>
               ) : null}
+
+              <div className="grid gap-4 md:grid-cols-5">
+                <StatPill label="手续费假设" value={formatPercent(metricNumber(evaluationAssumptions, "fee_rate") * 100)} tone="bg-white text-ink" />
+                <StatPill label="滑点假设" value={formatPercent(metricNumber(evaluationAssumptions, "slippage_rate") * 100)} />
+                <StatPill label="默认换手" value={formatPercent(metricNumber(evaluationTurnoverSummary, "default_turnover_rate") * 100)} tone="bg-accentSoft text-ink" />
+                <StatPill label="参数中位换手" value={formatPercent(metricNumber(evaluationTurnoverSummary, "median_parameter_turnover_rate") * 100)} />
+                <StatPill label="样本外差额" value={metricText(evaluationOutOfSampleComparison, "spread_vs_default", "percent")} tone={metricBoolean(evaluationOutOfSampleComparison, "overfit_warning") ? "bg-blush text-ink" : "bg-white text-ink"} />
+              </div>
 
               <div className="grid gap-6 xl:grid-cols-2">
                 <div className="rounded-[22px] border border-ink/10 bg-white p-5">
