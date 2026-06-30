@@ -111,9 +111,13 @@ async def intraday_etf_watch_job(
         await session.commit()
         return _result(run)
     except Exception as exc:  # noqa: BLE001
-        run.status = "failed"
-        run.error_message = str(exc)
-        run.finished_at = utcnow()
+        await session.rollback()
+        failed_run = await session.get(IntradayEtfWatchRun, run.id)
+        if failed_run is None:
+            raise
+        failed_run.status = "failed"
+        failed_run.error_message = str(exc)
+        failed_run.finished_at = utcnow()
         await session.commit()
         raise
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta
 
 import httpx
@@ -33,6 +34,7 @@ from app.services.intraday_etf.service import (
     WatchItem,
     WatchlistResult,
     _fetch_eastmoney_provider,
+    _postgres_quote_record,
     build_watchlist,
     current_market_state,
     is_quote_stale,
@@ -368,6 +370,7 @@ async def test_live_rankings_filters_labels_before_pagination_and_keeps_daily_en
         conclusions=[CONCLUSION_WATCH, CONCLUSION_HIGH_WATCH, CONCLUSION_WATCH],
         total_scores=[100.0, 99.0, 98.0],
     )
+
     now = datetime(2026, 6, 12, 16, 0, 0)
     monkeypatch.setattr(
         "app.services.intraday_etf.service.current_market_state",
@@ -405,6 +408,24 @@ async def test_live_rankings_filters_labels_before_pagination_and_keeps_daily_en
     assert entry_body["items"][0]["etf_code"] == "510002"
     assert entry_body["items"][0]["live_entry_timing_label"] == "数据不足"
     assert entry_body["items"][0]["daily_entry_timing_label"] == "健康回踩"
+
+
+def test_postgres_quote_record_serializes_raw_json_as_valid_json_text() -> None:
+    record = {
+        "etf_code": "510001",
+        "quote_time": datetime(2026, 6, 30, 14, 59),
+        "raw_json": {
+            "consensus_status": CONSENSUS_SINGLE_PROVIDER,
+            "provider_quotes": [{"provider": "akshare", "latest_price": 1.23}],
+            "decision_eligible": True,
+        },
+    }
+
+    serialized = _postgres_quote_record(record)
+
+    assert isinstance(serialized["raw_json"], str)
+    assert json.loads(serialized["raw_json"]) == record["raw_json"]
+    assert "'consensus_status'" not in serialized["raw_json"]
 
 
 @pytest.mark.asyncio

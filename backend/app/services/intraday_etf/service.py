@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from math import isfinite
@@ -819,8 +820,8 @@ def _apply_quote_record(row: EtfIntradayQuote | EtfIntradayLatestQuote, record: 
 
 async def _persist_quotes_postgresql(session: AsyncSession, records: list[dict[str, Any]]) -> None:
     now = utcnow()
-    history_rows = [{**record, "created_at": now} for record in records]
-    latest_rows = [{**record, "created_at": now, "updated_at": now} for record in records]
+    history_rows = [{**_postgres_quote_record(record), "created_at": now} for record in records]
+    latest_rows = [{**_postgres_quote_record(record), "created_at": now, "updated_at": now} for record in records]
 
     history_insert = pg_insert(EtfIntradayQuote).values(history_rows)
     history_update = {
@@ -849,6 +850,13 @@ async def _persist_quotes_postgresql(session: AsyncSession, records: list[dict[s
             where=latest_insert.excluded.quote_time >= EtfIntradayLatestQuote.quote_time,
         )
     )
+
+
+def _postgres_quote_record(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **record,
+        "raw_json": json.dumps(record["raw_json"], ensure_ascii=False, separators=(",", ":")),
+    }
 
 
 async def _persist_quotes_row_by_row(session: AsyncSession, records: list[dict[str, Any]]) -> None:
