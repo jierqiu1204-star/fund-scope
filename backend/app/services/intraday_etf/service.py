@@ -205,7 +205,16 @@ def _parse_quote_time(record: dict[str, Any], fallback: datetime | None = None) 
 
 
 def _quote_raw(quote: QuoteRow | None) -> dict[str, Any]:
-    return dict(quote.raw_json or {}) if quote is not None else {}
+    if quote is None:
+        return {}
+    raw = quote.raw_json or {}
+    if isinstance(raw, str):
+        try:
+            loaded = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return dict(loaded) if isinstance(loaded, dict) else {}
+    return dict(raw) if isinstance(raw, dict) else {}
 
 
 def is_quote_time_fallback(quote: QuoteRow | None) -> bool:

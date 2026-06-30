@@ -428,6 +428,19 @@ def test_postgres_quote_record_serializes_raw_json_as_valid_json_text() -> None:
     assert "'consensus_status'" not in serialized["raw_json"]
 
 
+def test_quote_raw_accepts_json_text_from_postgresql_bulk_insert() -> None:
+    quote = EtfIntradayLatestQuote(
+        etf_code="510001",
+        quote_time=datetime(2026, 6, 30, 14, 59),
+        trade_date=date(2026, 6, 30),
+        latest_price=1.23,
+        source="akshare",
+        raw_json=json.dumps({"consensus_status": CONSENSUS_SINGLE_PROVIDER}),
+    )
+
+    assert intraday_service.quote_consensus_status(quote) == CONSENSUS_SINGLE_PROVIDER
+
+
 @pytest.mark.asyncio
 async def test_live_rankings_marks_data_insufficient_without_faking_quote(client, app) -> None:
     await _seed_signal_run(app, count=1)

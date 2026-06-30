@@ -52,6 +52,7 @@ async def intraday_etf_watch_job(
     )
     session.add(run)
     await session.commit()
+    run_id = run.id
     try:
         if market_state.status != "open" and not force:
             run.status = "skipped"
@@ -112,7 +113,7 @@ async def intraday_etf_watch_job(
         return _result(run)
     except Exception as exc:  # noqa: BLE001
         await session.rollback()
-        failed_run = await session.get(IntradayEtfWatchRun, run.id)
+        failed_run = await session.get(IntradayEtfWatchRun, run_id)
         if failed_run is None:
             raise
         failed_run.status = "failed"
