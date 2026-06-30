@@ -34,6 +34,8 @@ QUOTE_SOURCE_AKSHARE = "akshare"
 QUOTE_SOURCE_EASTMONEY = "eastmoney"
 QUOTE_FRESH_SECONDS = 180
 QUOTE_PROVIDER_TIMEOUT_SECONDS = 4.0
+AKSHARE_PROVIDER_TIMEOUT_SECONDS = 30.0
+EASTMONEY_PROVIDER_TIMEOUT_SECONDS = 8.0
 QUOTE_PRICE_DIFF_PCT_TOLERANCE = 0.003
 QUOTE_PRICE_DIFF_ABS_TOLERANCE = 0.003
 EASTMONEY_PAGE_SIZE = 5000
@@ -472,15 +474,16 @@ async def _fetch_akshare_provider(fetcher: Any | None = None) -> ProviderQuoteRe
         _PROVIDER_BACKOFF_UNTIL = None
     effective_fetcher = fetcher or ak.fund_etf_spot_em
     try:
-        frame = await asyncio.wait_for(asyncio.to_thread(effective_fetcher), timeout=QUOTE_PROVIDER_TIMEOUT_SECONDS)
+        frame = await asyncio.wait_for(asyncio.to_thread(effective_fetcher), timeout=AKSHARE_PROVIDER_TIMEOUT_SECONDS)
     except Exception as exc:  # noqa: BLE001
+        error_detail = str(exc) or exc.__class__.__name__
         if use_default_provider:
             _PROVIDER_FAILURE_COUNT += 1
             backoff_seconds = min(300, 30 * (2 ** min(_PROVIDER_FAILURE_COUNT - 1, 4)))
             _PROVIDER_BACKOFF_UNTIL = now + timedelta(seconds=backoff_seconds)
-            error = f"AKShare ETF 行情源请求失败，已退避 {backoff_seconds} 秒。原始错误：{exc}"
+            error = f"AKShare ETF 行情源请求失败，已退避 {backoff_seconds} 秒。原始错误：{error_detail}"
         else:
-            error = f"AKShare ETF 行情源请求失败：{exc}"
+            error = f"AKShare ETF 行情源请求失败：{error_detail}"
         return ProviderQuoteResult(QUOTE_SOURCE_AKSHARE, {}, error, _elapsed_ms(started))
     if use_default_provider:
         _PROVIDER_FAILURE_COUNT = 0
@@ -518,7 +521,7 @@ async def _fetch_eastmoney_provider() -> ProviderQuoteResult:
     rows: list[dict[str, Any]] = []
     total: int | None = None
     try:
-        timeout = httpx.Timeout(QUOTE_PROVIDER_TIMEOUT_SECONDS * 2, connect=QUOTE_PROVIDER_TIMEOUT_SECONDS)
+        timeout = httpx.Timeout(EASTMONEY_PROVIDER_TIMEOUT_SECONDS, connect=QUOTE_PROVIDER_TIMEOUT_SECONDS)
         async with httpx.AsyncClient(
             timeout=timeout,
             headers=EASTMONEY_REQUEST_HEADERS,

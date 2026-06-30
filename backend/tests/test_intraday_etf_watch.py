@@ -661,6 +661,17 @@ async def test_akshare_provider_clears_expired_backoff(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_akshare_provider_reports_blank_exception_type() -> None:
+    def broken_fetcher() -> pd.DataFrame:
+        raise TimeoutError()
+
+    result = await intraday_service._fetch_akshare_provider(broken_fetcher)
+
+    assert result.error is not None
+    assert "TimeoutError" in result.error
+
+
+@pytest.mark.asyncio
 async def test_intraday_watch_reports_watch_codes_missing_from_provider(app) -> None:
     await _seed_signal_run(app, count=2)
     quote_time = datetime.now().replace(microsecond=0)
