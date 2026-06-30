@@ -714,6 +714,7 @@ export type EtfPortfolioBacktestRunSummary = {
   benchmark: Record<string, unknown>;
   data_coverage: Record<string, unknown>;
   caveats: string[];
+  execution_model?: string | null;
   replay_contract?: Record<string, unknown>;
   evidence_status?: string;
   evidence_summary?: Record<string, unknown>;

@@ -47,6 +47,7 @@ from app.services.short_research.backtest import (
     get_backtest_run,
     latest_strategy_comparison_run,
     list_backtest_runs,
+    run_etf_intraday_alert_backtest,
     run_etf_portfolio_backtest,
     run_etf_strategy_comparison_backtest,
     strategy_comparison_payload,
@@ -444,7 +445,8 @@ async def start_etf_portfolio_backtest(
     user: User = Depends(require_approved_user),
 ) -> dict[str, Any]:
     payload = payload or EtfPortfolioBacktestRequest()
-    run = await run_etf_portfolio_backtest(
+    run_factory = run_etf_intraday_alert_backtest if payload.execution_model == "intraday_alert" else run_etf_portfolio_backtest
+    run = await run_factory(
         session,
         user=user,
         start_date=payload.start_date,

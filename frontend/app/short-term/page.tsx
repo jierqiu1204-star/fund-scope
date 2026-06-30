@@ -373,6 +373,26 @@ function evidenceContractText(status: string | null | undefined, summary?: Recor
   }
 }
 
+function backtestExecutionModel(run: EtfPortfolioBacktestDetail | null | undefined) {
+  const direct = run?.execution_model;
+  const contractModel = typeof run?.replay_contract?.execution_model === "string" ? run.replay_contract.execution_model : null;
+  return direct ?? contractModel ?? "daily_close_v1";
+}
+
+function backtestExecutionLabel(run: EtfPortfolioBacktestDetail | null | undefined) {
+  return backtestExecutionModel(run) === "intraday_alert_v1" ? "盘中提醒执行回测" : "日线收盘模拟";
+}
+
+function metadataString(metadata: Record<string, unknown>, key: string) {
+  const value = metadata[key];
+  return typeof value === "string" ? value : null;
+}
+
+function metadataNumber(metadata: Record<string, unknown>, key: string) {
+  const value = metadata[key];
+  return typeof value === "number" ? value : null;
+}
+
 function observationPortfolioText(asset: ShortResearchAsset | null | undefined) {
   const context = asset?.observation_portfolio;
   if (!context || !context.status) {
@@ -1539,12 +1559,13 @@ function ShortTermClient() {
   });
 
   const runEtfBacktest = useMutation({
-    mutationFn: async () =>
+    mutationFn: async (executionModel: "daily_close" | "intraday_alert") =>
       (
         await api.post<EtfPortfolioBacktestDetail>("/api/short-research/etf-backtests", {
           days: 730,
           fee_rate: 0.001,
-          max_assets: 500
+          max_assets: 500,
+          execution_model: executionModel
         })
       ).data,
     onSuccess: async () => {
@@ -1565,6 +1586,9 @@ function ShortTermClient() {
       await queryClient.invalidateQueries({ queryKey: ["short-research", "etf-strategy-comparison"] });
     }
   });
+
+  const currentBacktestExecutionModel = backtestExecutionModel(etfBacktestDetail.data);
+  const isIntradayBacktest = currentBacktestExecutionModel === "intraday_alert_v1";
 
   const runAdvisor = useMutation({
     mutationFn: async () =>
@@ -3949,19 +3973,28 @@ function ShortTermClient() {
         <Panel className="rounded-[12px] bg-white/70">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">历史日线回测</p>
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">历史回测证据</p>
               <h2 className="mt-1 text-xl font-semibold text-ink">ETF 工作台策略证据</h2>
               <p className="mt-2 max-w-3xl text-sm leading-6 text-ink/60">
-                按历史每天重新生成 ETF 资金配置参考，再用日线收盘价模拟调仓和风控。它验证的是当前页面规则，不是旧策略实验室模拟盘；不包含分钟级盘中提醒。
+                日线收盘模拟只看每天收盘价，适合看大方向；盘中提醒执行回测会复盘历史盘中提醒、3 分钟后手动成交和减仓/清仓动作，更接近邮件提醒链路。
               </p>
             </div>
-            <button
-              className="rounded-[6px] bg-ink px-4 py-2 text-sm font-semibold text-white transition hover:bg-ink/85 disabled:opacity-60"
-              disabled={runEtfBacktest.isPending}
-              onClick={() => runEtfBacktest.mutate()}
-            >
-              {runEtfBacktest.isPending ? "正在回测..." : "运行近 730 天回测"}
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                className="rounded-[6px] border border-ink/15 bg-white px-4 py-2 text-sm font-semibold text-ink transition hover:border-ink/30 disabled:opacity-60"
+                disabled={runEtfBacktest.isPending}
+                onClick={() => runEtfBacktest.mutate("daily_close")}
+              >
+                {runEtfBacktest.isPending ? "正在回测..." : "运行日线收盘模拟"}
+              </button>
+              <button
+                className="rounded-[6px] bg-ink px-4 py-2 text-sm font-semibold text-white transition hover:bg-ink/85 disabled:opacity-60"
+                disabled={runEtfBacktest.isPending}
+                onClick={() => runEtfBacktest.mutate("intraday_alert")}
+              >
+                {runEtfBacktest.isPending ? "正在回测..." : "运行盘中提醒回测"}
+              </button>
+            </div>
           </div>
           {runEtfBacktest.isError ? (
             <p className="mt-3 rounded-[8px] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
@@ -3971,9 +4004,14 @@ function ShortTermClient() {
           <div className="mt-4 rounded-[8px] border border-ink/10 bg-white px-4 py-3 text-xs leading-5 text-ink/60">
             <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
               <p className="font-semibold text-ink">回测证据契约</p>
-              <span className="w-fit rounded-full bg-paper px-2.5 py-1 text-[11px] font-semibold text-ink/65">
-                {etfBacktestDetail.data?.evidence_status ?? "等待验证"}
-              </span>
+              <div className="flex flex-wrap gap-2">
+                <span className="w-fit rounded-full bg-paper px-2.5 py-1 text-[11px] font-semibold text-ink/65">
+                  {backtestExecutionLabel(etfBacktestDetail.data)}
+                </span>
+                <span className="w-fit rounded-full bg-paper px-2.5 py-1 text-[11px] font-semibold text-ink/65">
+                  {etfBacktestDetail.data?.evidence_status ?? "等待验证"}
+                </span>
+              </div>
             </div>
             <p className="mt-2">
               {evidenceContractText(etfBacktestDetail.data?.evidence_status, etfBacktestDetail.data?.evidence_summary)}
@@ -4116,6 +4154,22 @@ function ShortTermClient() {
                       : "暂无"}
                   </p>
                 </div>
+                {isIntradayBacktest ? (
+                  <>
+                    <div className="rounded-[10px] border border-ink/10 bg-paper px-4 py-3">
+                      <p className="text-xs text-ink/45">盘中覆盖</p>
+                      <p className="mt-1 text-sm font-semibold text-ink">
+                        {String(etfBacktestDetail.data.data_coverage.intraday_trade_days ?? 0)} 天 / {String(etfBacktestDetail.data.data_coverage.intraday_quote_count ?? 0)} 条
+                      </p>
+                    </div>
+                    <div className="rounded-[10px] border border-ink/10 bg-paper px-4 py-3">
+                      <p className="text-xs text-ink/45">未成交提醒</p>
+                      <p className="mt-1 text-sm font-semibold text-ink">
+                        {String(etfBacktestDetail.data.metrics.unfilled_alert_count ?? 0)}
+                      </p>
+                    </div>
+                  </>
+                ) : null}
               </div>
               <div className="mt-5 grid gap-4 lg:grid-cols-[1.4fr_1fr]">
                 <div className="rounded-[10px] border border-ink/10 bg-white p-4">
@@ -4174,12 +4228,31 @@ function ShortTermClient() {
                 <div className="rounded-[10px] border border-ink/10 bg-white p-4">
                   <p className="font-semibold text-ink">最近模拟交易</p>
                   <div className="mt-3 grid gap-2 text-xs text-ink/60">
-                    {etfBacktestDetail.data.trades.slice(0, 5).map((trade) => (
-                      <p key={trade.id} className="rounded-[8px] bg-paper px-3 py-2">
-                        {formatDate(trade.trade_date)} · {trade.side === "buy" ? "买入" : "卖出"} {trade.etf_name}
-                        {" "}{formatCurrency(trade.amount)} · {trade.reason}
-                      </p>
-                    ))}
+                    {etfBacktestDetail.data.trades.slice(0, 5).map((trade) => {
+                      const signalTime = metadataString(trade.metadata, "signal_time");
+                      const executionTime = metadataString(trade.metadata, "execution_time");
+                      const signalPrice = metadataNumber(trade.metadata, "signal_price");
+                      const executionPrice = metadataNumber(trade.metadata, "execution_price");
+                      const delay = metadataNumber(trade.metadata, "execution_delay_minutes");
+                      return (
+                        <div key={trade.id} className="rounded-[8px] bg-paper px-3 py-2">
+                          <p>
+                            {formatDate(trade.trade_date)} · {trade.side === "buy" ? "买入" : "卖出"} {trade.etf_name}
+                            {" "}{formatCurrency(trade.amount)} · {trade.reason}
+                          </p>
+                          {isIntradayBacktest && signalTime ? (
+                            <p className="mt-1 text-ink/45">
+                              提醒 {formatDateTime(signalTime)}
+                              {signalPrice === null ? "" : ` @ ${signalPrice.toFixed(4)}`}
+                              {" → "}
+                              成交 {formatDateTime(executionTime)}
+                              {executionPrice === null ? "" : ` @ ${executionPrice.toFixed(4)}`}
+                              {delay === null ? "" : `，延迟 ${delay} 分钟`}
+                            </p>
+                          ) : null}
+                        </div>
+                      );
+                    })}
                     {!etfBacktestDetail.data.trades.length ? <p>暂无模拟交易。</p> : null}
                   </div>
                 </div>
@@ -4190,7 +4263,7 @@ function ShortTermClient() {
                       <p key={item} className="rounded-[8px] bg-paper px-3 py-2">{item}</p>
                     ))}
                     <p className="rounded-[8px] bg-paper px-3 py-2">
-                      数据覆盖：{String(etfBacktestDetail.data.data_coverage.trading_days ?? 0)} 个交易日，
+                      数据覆盖：{String(etfBacktestDetail.data.data_coverage.trading_days ?? etfBacktestDetail.data.data_coverage.intraday_trade_days ?? 0)} 个交易日，
                       {String(etfBacktestDetail.data.data_coverage.priced_asset_count ?? 0)} 只 ETF 有价格数据。
                     </p>
                     <p className="rounded-[8px] bg-paper px-3 py-2">
@@ -4204,7 +4277,7 @@ function ShortTermClient() {
             </>
           ) : (
             <p className="mt-5 rounded-[10px] border border-dashed border-ink/20 bg-white px-4 py-5 text-sm leading-6 text-ink/55">
-              当前 ETF 工作台策略还没有历史回测结果。点击按钮会用近 730 天日线数据逐日回放；结果只代表历史模拟，不保证未来收益。
+              当前 ETF 工作台策略还没有历史回测结果。可以先跑日线收盘模拟看大方向，再跑盘中提醒执行回测验证邮件提醒后的手动成交链路；结果都只代表历史模拟，不保证未来收益。
             </p>
           )}
         </Panel>

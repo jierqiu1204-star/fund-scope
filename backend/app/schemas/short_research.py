@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -247,6 +247,7 @@ class EtfPortfolioBacktestRequest(BaseModel):
     initial_cash: float | None = Field(default=None, gt=0)
     fee_rate: float = Field(default=0.001, ge=0, le=0.02)
     max_assets: int = Field(default=180, ge=20, le=500)
+    execution_model: Literal["daily_close", "intraday_alert"] = "daily_close"
 
 
 class EtfPortfolioBacktestRunSummaryOut(BaseModel):
@@ -262,6 +263,7 @@ class EtfPortfolioBacktestRunSummaryOut(BaseModel):
     benchmark: dict[str, Any] = Field(default_factory=dict)
     data_coverage: dict[str, Any] = Field(default_factory=dict)
     caveats: list[str] = Field(default_factory=list)
+    execution_model: str | None = None
     replay_contract: dict[str, Any] = Field(default_factory=dict)
     evidence_status: str = "等待验证"
     evidence_summary: dict[str, Any] = Field(default_factory=dict)

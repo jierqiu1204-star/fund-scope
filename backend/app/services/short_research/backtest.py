@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, replace
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from statistics import mean, median, pstdev
 from typing import Any
 
@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.defaults.short_research import ASSET_TYPE_ETF, ShortResearchAsset
 from app.models.entities import (
+    EtfIntradayQuote,
     EtfPortfolioBacktestEquityCurve,
     EtfPortfolioBacktestLabelSummary,
     EtfPortfolioBacktestPosition,
@@ -26,6 +27,7 @@ from app.services.etf_research_evidence import (
     EVIDENCE_STATUS_SAME_CONTRACT,
     EVIDENCE_STATUS_WAITING,
     EXECUTION_MODEL_DAILY_CLOSE,
+    EXECUTION_MODEL_INTRADAY_ALERT,
     FEE_MODEL_SIMPLE_RATE,
     build_evidence_summary,
     build_replay_contract,
@@ -76,10 +78,12 @@ BACKTEST_RULE_VERSION = "etf_portfolio_backtest_v1"
 BACKTEST_RANKING_VERSION = "short_research_daily_replay_v1"
 BACKTEST_ALLOCATION_VERSION = "etf_portfolio_allocation_v3_layered"
 BACKTEST_EXIT_RULE_VERSION = "risk_alerts_daily_v1"
+INTRADAY_BACKTEST_EXIT_RULE_VERSION = "risk_alerts_intraday_v1"
 STRATEGY_COMPARISON_RULE_VERSION = "etf_strategy_comparison_v1"
 DEFAULT_BACKTEST_DAYS = 180
 DEFAULT_BACKTEST_FEE_RATE = 0.001
 DEFAULT_BACKTEST_INITIAL_CASH = 10000.0
+DEFAULT_INTRADAY_EXECUTION_DELAY_MINUTES = 3
 MAX_BACKTEST_HOLDINGS = 6
 MIN_WEIGHTABLE_HOLDINGS = 4
 LABEL_HORIZONS = (1, 3, 5, 10)
@@ -128,7 +132,22 @@ async def _create_backtest_run(
     initial_cash: float,
     fee_rate: float,
     max_assets: int,
+    execution_model: str = EXECUTION_MODEL_DAILY_CLOSE,
+    execution_label: str = "daily_close",
+    exit_rule_version: str = BACKTEST_EXIT_RULE_VERSION,
+    execution_delay_minutes: int | None = None,
 ) -> EtfPortfolioBacktestRun:
+    config: dict[str, Any] = {
+        "max_assets": max_assets,
+        "single_weight_cap": PORTFOLIO_SINGLE_WEIGHT_CAP,
+        "min_holdings_for_full_exposure": MIN_WEIGHTABLE_HOLDINGS,
+        "partial_allocation_allowed": True,
+        "execution": execution_label,
+    }
+    if execution_model == EXECUTION_MODEL_DAILY_CLOSE:
+        config["no_intraday_fill"] = True
+    if execution_delay_minutes is not None:
+        config["execution_delay_minutes"] = execution_delay_minutes
     run = EtfPortfolioBacktestRun(
         user_id=user_id,
         status="running",
@@ -138,17 +157,10 @@ async def _create_backtest_run(
         rule_version=BACKTEST_RULE_VERSION,
         ranking_version=BACKTEST_RANKING_VERSION,
         allocation_version=BACKTEST_ALLOCATION_VERSION,
-        exit_rule_version=BACKTEST_EXIT_RULE_VERSION,
+        exit_rule_version=exit_rule_version,
         initial_cash=initial_cash,
         fee_rate=fee_rate,
-        config_json={
-            "max_assets": max_assets,
-            "single_weight_cap": PORTFOLIO_SINGLE_WEIGHT_CAP,
-            "min_holdings_for_full_exposure": MIN_WEIGHTABLE_HOLDINGS,
-            "partial_allocation_allowed": True,
-            "execution": "daily_close",
-            "no_intraday_fill": True,
-        },
+        config_json=config,
         metrics_json={},
         benchmark_json={},
         data_coverage_json={},
@@ -160,7 +172,7 @@ async def _create_backtest_run(
         replay_run_id=run.id,
         signal_rule_version=BACKTEST_RANKING_VERSION,
         allocation_version=BACKTEST_ALLOCATION_VERSION,
-        execution_model=EXECUTION_MODEL_DAILY_CLOSE,
+        execution_model=execution_model,
         fee_model=FEE_MODEL_SIMPLE_RATE,
         start_date=start_date,
         end_date=end_date,
@@ -263,6 +275,46 @@ async def _load_price_series(
     return dict(series)
 
 
+async def _load_intraday_quotes(
+    session: AsyncSession,
+    *,
+    codes: list[str],
+    from_date: date,
+    to_date: date,
+) -> dict[str, dict[date, list[EtfIntradayQuote]]]:
+    rows = (
+        await session.scalars(
+            select(EtfIntradayQuote)
+            .where(
+                EtfIntradayQuote.etf_code.in_(codes),
+                EtfIntradayQuote.trade_date >= from_date,
+                EtfIntradayQuote.trade_date <= to_date,
+                EtfIntradayQuote.latest_price > 0,
+            )
+            .order_by(EtfIntradayQuote.etf_code.asc(), EtfIntradayQuote.trade_date.asc(), EtfIntradayQuote.quote_time.asc())
+        )
+    ).all()
+    grouped: dict[str, dict[date, list[EtfIntradayQuote]]] = defaultdict(lambda: defaultdict(list))
+    for row in rows:
+        if row.quote_time is None or row.trade_date is None:
+            continue
+        grouped[row.etf_code][row.trade_date].append(row)
+    return {code: dict(by_date) for code, by_date in grouped.items()}
+
+
+def _first_execution_quote_after(
+    quotes: list[EtfIntradayQuote],
+    signal_time: datetime,
+    *,
+    delay_minutes: int = DEFAULT_INTRADAY_EXECUTION_DELAY_MINUTES,
+) -> EtfIntradayQuote | None:
+    earliest_execution_time = signal_time + timedelta(minutes=delay_minutes)
+    for quote in sorted(quotes, key=lambda item: item.quote_time or datetime.max):
+        if quote.quote_time is not None and quote.quote_time >= earliest_execution_time and quote.latest_price > 0:
+            return quote
+    return None
+
+
 def _slice_until(series: list[PricePoint], as_of_date: date) -> list[PricePoint]:
     return [item for item in series if item.point_date <= as_of_date]
 
@@ -284,6 +336,15 @@ def _trading_dates(series_by_code: dict[str, list[PricePoint]], start_date: date
         if start_date <= item.point_date <= end_date
     }
     return sorted(dates)
+
+
+def _previous_date(dates: list[date], current_date: date) -> date | None:
+    previous: date | None = None
+    for item in dates:
+        if item >= current_date:
+            return previous
+        previous = item
+    return previous
 
 
 def _build_daily_assets(
@@ -1005,6 +1066,478 @@ async def run_etf_portfolio_backtest(
         return await mark_backtest_failed(session, run, message)
 
 
+async def run_etf_intraday_alert_backtest(
+    session: AsyncSession,
+    *,
+    user: User | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    days: int = DEFAULT_BACKTEST_DAYS,
+    initial_cash: float | None = None,
+    fee_rate: float = DEFAULT_BACKTEST_FEE_RATE,
+    max_assets: int = 180,
+    execution_delay_minutes: int = DEFAULT_INTRADAY_EXECUTION_DELAY_MINUTES,
+) -> EtfPortfolioBacktestRun:
+    latest_intraday_date = await session.scalar(select(func.max(EtfIntradayQuote.trade_date)))
+    effective_end = end_date or latest_intraday_date or date.today()
+    effective_start = start_date or (effective_end - timedelta(days=days))
+    if effective_start >= effective_end:
+        raise ValueError("回测开始日期必须早于结束日期")
+    capital = float(initial_cash or (user.etf_trading_capital if user else DEFAULT_BACKTEST_INITIAL_CASH) or DEFAULT_BACKTEST_INITIAL_CASH)
+    run = await _create_backtest_run(
+        session,
+        user_id=user.id if user else None,
+        start_date=effective_start,
+        end_date=effective_end,
+        initial_cash=capital,
+        fee_rate=fee_rate,
+        max_assets=max_assets,
+        execution_model=EXECUTION_MODEL_INTRADAY_ALERT,
+        execution_label="intraday_alert",
+        exit_rule_version=INTRADAY_BACKTEST_EXIT_RULE_VERSION,
+        execution_delay_minutes=execution_delay_minutes,
+    )
+    await session.commit()
+    try:
+        metadata = await _load_etf_universe(session, max_assets=max_assets)
+        if len(metadata) < 20:
+            raise ValueError("ETF 历史池太小，无法做有意义的盘中提醒回测")
+        metadata_by_code = {item.code: item for item in metadata}
+        lookback_start = effective_start - timedelta(days=260)
+        series_by_code = await _load_price_series(
+            session,
+            codes=list(metadata_by_code),
+            from_date=lookback_start,
+            to_date=effective_end,
+        )
+        daily_dates = _trading_dates(series_by_code, lookback_start, effective_end)
+        intraday_by_code = await _load_intraday_quotes(
+            session,
+            codes=list(metadata_by_code),
+            from_date=effective_start,
+            to_date=effective_end,
+        )
+        quote_days = sorted(
+            {
+                trade_date
+                for by_date in intraday_by_code.values()
+                for trade_date, quotes in by_date.items()
+                if quotes and effective_start <= trade_date <= effective_end
+            }
+        )
+        trading_dates = [item for item in quote_days if _previous_date(daily_dates, item) is not None]
+        if not trading_dates:
+            raise ValueError("盘中历史不足，无法生成盘中提醒执行回测")
+        benchmark_dates = [item for item in daily_dates if trading_dates[0] <= item <= trading_dates[-1]]
+
+        cash = capital
+        positions: dict[str, ReplayPosition] = {}
+        high_watermark = capital
+        total_fees = 0.0
+        turnover = 0.0
+        realized_trades = 0
+        winning_trades = 0
+        unfilled_alert_count = 0
+        trade_rows: list[EtfPortfolioBacktestTrade] = []
+        benchmark = _benchmark(series_by_code, benchmark_dates or trading_dates, capital)
+        portfolio_mode_counts: dict[str, int] = defaultdict(int)
+        cash_wait_reason_counts: dict[str, int] = defaultdict(int)
+        target_exposure_sum = 0.0
+        partial_allocation_days = 0
+        full_cash_days = 0
+        first_signal_date: date | None = None
+        first_trade_date: date | None = None
+        last_target_exposure = 0.0
+        last_intraday_prices: dict[str, float] = {}
+        latest_assets: list[ComputedAsset] = []
+
+        for trade_date in trading_dates:
+            signal_date = _previous_date(daily_dates, trade_date)
+            if signal_date is None:
+                continue
+            assets = _build_daily_assets(metadata_by_code, series_by_code, signal_date)
+            latest_assets = assets
+            asset_by_code = {asset.metadata.code: asset for asset in assets}
+            target_weights, portfolio_mode, portfolio_context = _generate_target_weights(assets)
+            target_exposure = round(sum(float(weight) for weight in target_weights.values()), 4)
+            last_target_exposure = target_exposure
+            target_exposure_sum += target_exposure
+            portfolio_mode_counts[portfolio_mode] += 1
+            if target_exposure > 0 and first_signal_date is None:
+                first_signal_date = signal_date
+            if target_exposure < 0.999:
+                partial_allocation_days += 1
+            if target_exposure <= 0:
+                full_cash_days += 1
+                cash_wait_reason_counts[_cash_wait_reason_key(portfolio_context, assets)] += 1
+
+            day_quotes_by_code = {
+                code: intraday_by_code.get(code, {}).get(trade_date, [])
+                for code in metadata_by_code
+                if intraday_by_code.get(code, {}).get(trade_date)
+            }
+            opening_prices = {code: quotes[0].latest_price for code, quotes in day_quotes_by_code.items() if quotes}
+            last_intraday_prices.update(opening_prices)
+            current_equity = _equity(cash, positions, last_intraday_prices)
+
+            for code in list(positions):
+                if code in target_weights:
+                    continue
+                price = opening_prices.get(code)
+                if price is None:
+                    continue
+                trade, cash_delta = _sell_position(
+                    positions,
+                    code,
+                    price=price,
+                    fraction=1.0,
+                    trade_date=trade_date,
+                    reason="target_rebalance",
+                    fee_rate=fee_rate,
+                )
+                if trade is None:
+                    continue
+                cash += cash_delta
+                total_fees += trade.fee
+                turnover += trade.amount
+                realized_trades += 1
+                winning_trades += 1 if (trade.realized_pnl or 0.0) > 0 else 0
+                quote = day_quotes_by_code[code][0]
+                trade.metadata.update(
+                    {
+                        "execution_model": "intraday_alert",
+                        "execution_time": quote.quote_time.isoformat() if quote.quote_time else None,
+                        "execution_price": price,
+                        "execution_delay_minutes": 0,
+                        "signal_date": signal_date.isoformat(),
+                        "source": quote.source,
+                    }
+                )
+                first_trade_date = first_trade_date or trade_date
+                trade_rows.append(
+                    EtfPortfolioBacktestTrade(
+                        run_id=run.id,
+                        trade_date=trade.trade_date,
+                        etf_code=trade.code,
+                        etf_name=trade.name,
+                        side=trade.side,
+                        reason=trade.reason,
+                        amount=trade.amount,
+                        shares=trade.shares,
+                        price=trade.price,
+                        fee=trade.fee,
+                        realized_pnl=trade.realized_pnl,
+                        metadata_json=trade.metadata,
+                    )
+                )
+
+            current_equity = _equity(cash, positions, last_intraday_prices)
+            for code, target_weight in sorted(target_weights.items(), key=lambda item: item[1], reverse=True):
+                asset = asset_by_code.get(code)
+                price = opening_prices.get(code)
+                quotes = day_quotes_by_code.get(code) or []
+                if asset is None or price is None or not quotes:
+                    continue
+                target_value = current_equity * target_weight
+                current_position = positions.get(code)
+                current_value = (current_position.shares * price) if current_position else 0.0
+                delta = target_value - current_value
+                if delta < -max(100.0, current_equity * 0.01):
+                    fraction = min(1.0, abs(delta) / current_value) if current_value > 0 else 0.0
+                    trade, cash_delta = _sell_position(
+                        positions,
+                        code,
+                        price=price,
+                        fraction=fraction,
+                        trade_date=trade_date,
+                        reason="target_rebalance",
+                        fee_rate=fee_rate,
+                    )
+                    if trade is None:
+                        continue
+                    cash += cash_delta
+                    total_fees += trade.fee
+                    turnover += trade.amount
+                    if trade.realized_pnl is not None:
+                        realized_trades += 1
+                        winning_trades += 1 if trade.realized_pnl > 0 else 0
+                    trade.metadata.update(
+                        {
+                            "execution_model": "intraday_alert",
+                            "execution_time": quotes[0].quote_time.isoformat() if quotes[0].quote_time else None,
+                            "execution_price": price,
+                            "execution_delay_minutes": 0,
+                            "signal_date": signal_date.isoformat(),
+                            "source": quotes[0].source,
+                        }
+                    )
+                elif delta > max(100.0, current_equity * 0.01) and cash > 100:
+                    buy_amount = min(delta, cash / (1 + fee_rate))
+                    trade, cash_used = _buy_position(
+                        positions,
+                        asset.metadata,
+                        price=price,
+                        amount=buy_amount,
+                        trade_date=trade_date,
+                        reason="target_rebalance",
+                        fee_rate=fee_rate,
+                    )
+                    if trade is None:
+                        continue
+                    cash -= cash_used
+                    total_fees += trade.fee
+                    turnover += trade.amount
+                    trade.metadata.update(
+                        {
+                            "execution_model": "intraday_alert",
+                            "execution_time": quotes[0].quote_time.isoformat() if quotes[0].quote_time else None,
+                            "execution_price": price,
+                            "execution_delay_minutes": 0,
+                            "signal_date": signal_date.isoformat(),
+                            "source": quotes[0].source,
+                        }
+                    )
+                else:
+                    continue
+                first_trade_date = first_trade_date or trade_date
+                trade_rows.append(
+                    EtfPortfolioBacktestTrade(
+                        run_id=run.id,
+                        trade_date=trade.trade_date,
+                        etf_code=trade.code,
+                        etf_name=trade.name,
+                        side=trade.side,
+                        reason=trade.reason,
+                        amount=trade.amount,
+                        shares=trade.shares,
+                        price=trade.price,
+                        fee=trade.fee,
+                        realized_pnl=trade.realized_pnl,
+                        metadata_json=trade.metadata,
+                    )
+                )
+
+            attempted_alerts: set[tuple[str, str]] = set()
+            day_events = sorted(
+                (
+                    (quote.quote_time, code, quote)
+                    for code, quotes in day_quotes_by_code.items()
+                    for quote in quotes
+                    if quote.quote_time is not None
+                ),
+                key=lambda item: item[0],
+            )
+            for signal_time, code, quote in day_events:
+                last_intraday_prices[code] = quote.latest_price
+                position = positions.get(code)
+                asset = asset_by_code.get(code)
+                if position is None or asset is None:
+                    continue
+                alert_type, fraction, context = _risk_action(position, asset, quote.latest_price)
+                if alert_type is None:
+                    continue
+                alert_key = (code, alert_type)
+                if alert_key in attempted_alerts:
+                    continue
+                attempted_alerts.add(alert_key)
+                execution_quote = _first_execution_quote_after(
+                    day_quotes_by_code.get(code, []),
+                    signal_time,
+                    delay_minutes=execution_delay_minutes,
+                )
+                if execution_quote is None:
+                    unfilled_alert_count += 1
+                    continue
+                trade, cash_delta = _sell_position(
+                    positions,
+                    code,
+                    price=execution_quote.latest_price,
+                    fraction=fraction,
+                    trade_date=trade_date,
+                    reason=alert_type,
+                    fee_rate=fee_rate,
+                )
+                if trade is None:
+                    continue
+                last_intraday_prices[code] = execution_quote.latest_price
+                cash += cash_delta
+                total_fees += trade.fee
+                turnover += trade.amount
+                realized_trades += 1
+                winning_trades += 1 if (trade.realized_pnl or 0.0) > 0 else 0
+                delay = (
+                    (execution_quote.quote_time - signal_time).total_seconds() / 60
+                    if execution_quote.quote_time is not None
+                    else None
+                )
+                trade.metadata.update(
+                    {
+                        **context,
+                        "execution_model": "intraday_alert",
+                        "signal_time": signal_time.isoformat(),
+                        "signal_price": quote.latest_price,
+                        "execution_time": execution_quote.quote_time.isoformat() if execution_quote.quote_time else None,
+                        "execution_price": execution_quote.latest_price,
+                        "execution_delay_minutes": round(delay, 2) if delay is not None else None,
+                        "configured_execution_delay_minutes": execution_delay_minutes,
+                        "quote_source": quote.source,
+                    }
+                )
+                first_trade_date = first_trade_date or trade_date
+                trade_rows.append(
+                    EtfPortfolioBacktestTrade(
+                        run_id=run.id,
+                        trade_date=trade.trade_date,
+                        etf_code=trade.code,
+                        etf_name=trade.name,
+                        side=trade.side,
+                        reason=trade.reason,
+                        amount=trade.amount,
+                        shares=trade.shares,
+                        price=trade.price,
+                        fee=trade.fee,
+                        realized_pnl=trade.realized_pnl,
+                        metadata_json=trade.metadata,
+                    )
+                )
+                target_weights.pop(code, None)
+
+            final_equity = _equity(cash, positions, last_intraday_prices)
+            high_watermark = max(high_watermark, final_equity)
+            drawdown = final_equity / high_watermark - 1.0 if high_watermark > 0 else 0.0
+            session.add(
+                EtfPortfolioBacktestEquityCurve(
+                    run_id=run.id,
+                    curve_date=trade_date,
+                    equity=_round_money(final_equity),
+                    cash=_round_money(cash),
+                    drawdown=round(drawdown, 4),
+                    benchmark_equity=_benchmark_equity(
+                        benchmark,
+                        series_by_code,
+                        (benchmark_dates or trading_dates)[0],
+                        signal_date,
+                        capital,
+                    ),
+                    portfolio_mode=portfolio_mode,
+                )
+            )
+            for code, position in positions.items():
+                price = last_intraday_prices.get(code)
+                if price is None:
+                    continue
+                market_value = position.shares * price
+                session.add(
+                    EtfPortfolioBacktestPosition(
+                        run_id=run.id,
+                        snapshot_date=trade_date,
+                        etf_code=code,
+                        etf_name=position.name,
+                        shares=round(position.shares, 4),
+                        price=price,
+                        market_value=_round_money(market_value),
+                        weight=round(market_value / final_equity, 4) if final_equity > 0 else 0.0,
+                        cost_basis=round(position.avg_cost, 4),
+                        unrealized_pnl=_round_money(position.shares * (price - position.avg_cost)),
+                        metadata_json={
+                            "entry_date": position.entry_date.isoformat(),
+                            "max_profit_pct": round(position.max_profit_pct, 4),
+                            "execution_model": "intraday_alert",
+                        },
+                    )
+                )
+
+            if len(trade_rows) % 40 == 0:
+                await session.flush()
+
+        session.add_all(trade_rows)
+        final_equity = _equity(cash, positions, last_intraday_prices)
+        curve_rows = (
+            await session.scalars(
+                select(EtfPortfolioBacktestEquityCurve).where(EtfPortfolioBacktestEquityCurve.run_id == run.id)
+            )
+        ).all()
+        average_target_exposure = target_exposure_sum / len(trading_dates) if trading_dates else 0.0
+        quote_count = sum(len(quotes) for by_date in intraday_by_code.values() for quotes in by_date.values())
+        quote_times = [
+            quote.quote_time
+            for by_date in intraday_by_code.values()
+            for quotes in by_date.values()
+            for quote in quotes
+            if quote.quote_time is not None
+        ]
+        metrics = {
+            "execution_model": "intraday_alert",
+            "cumulative_return": round(final_equity / capital - 1.0, 4),
+            "max_drawdown": round(min((row.drawdown for row in curve_rows), default=0.0), 4),
+            "trade_count": len(trade_rows),
+            "sell_count": realized_trades,
+            "win_rate": round(winning_trades / realized_trades, 4) if realized_trades else None,
+            "turnover": round(turnover / capital, 4),
+            "total_fees": _round_money(total_fees),
+            "unfilled_alert_count": unfilled_alert_count,
+            "average_target_exposure": round(average_target_exposure, 4),
+            "last_target_exposure": round(last_target_exposure, 4),
+            "partial_allocation_days": partial_allocation_days,
+            "full_cash_days": full_cash_days,
+            "portfolio_rule": "上一交易日 ETF 资金配置参考 + 次日盘中成交 + 盘中提醒执行",
+        }
+        data_limitation_notes = [
+            "盘中提醒回测只覆盖系统已保存的 ETF 盘中行情历史。",
+            "没有触发后 3 分钟以上后续行情时，提醒标记为未成交，不使用收盘价兜底。",
+        ]
+        data_coverage = {
+            "requested_start_date": effective_start.isoformat(),
+            "requested_end_date": effective_end.isoformat(),
+            "lookback_start_date": lookback_start.isoformat(),
+            "asset_count": len(metadata),
+            "priced_asset_count": len(series_by_code),
+            "intraday_asset_count": len(intraday_by_code),
+            "intraday_quote_count": quote_count,
+            "intraday_trade_days": len(trading_dates),
+            "intraday_coverage": {
+                "quote_count": quote_count,
+                "trade_days": len(trading_dates),
+                "first_quote_time": min(quote_times).isoformat() if quote_times else None,
+                "latest_quote_time": max(quote_times).isoformat() if quote_times else None,
+            },
+            "start_date": trading_dates[0].isoformat(),
+            "end_date": trading_dates[-1].isoformat(),
+            "effective_start_date": trading_dates[0].isoformat(),
+            "effective_end_date": trading_dates[-1].isoformat(),
+            "latest_replay_asset_count": len(latest_assets),
+            "first_signal_date": first_signal_date.isoformat() if first_signal_date else None,
+            "first_trade_date": first_trade_date.isoformat() if first_trade_date else None,
+            "cash_wait_reason_counts": dict(cash_wait_reason_counts),
+            "portfolio_mode_counts": dict(portfolio_mode_counts),
+            "partial_allocation_days": partial_allocation_days,
+            "full_cash_days": full_cash_days,
+            "average_target_exposure": round(average_target_exposure, 4),
+            "last_target_exposure": round(last_target_exposure, 4),
+            "execution_delay_minutes": execution_delay_minutes,
+            "unfilled_alert_count": unfilled_alert_count,
+            "data_limitation_notes": data_limitation_notes,
+        }
+        caveats = [
+            "这是盘中提醒执行回测，更接近邮件提醒后手动操作的链路，但仍不代表未来收益。",
+            "回测不会写真实提醒表，不会发送邮件，也不会连接券商。",
+            "盘中历史不足的日期不会回退为日线收盘模拟。",
+            *data_limitation_notes,
+        ]
+        run.status = "success"
+        run.finished_at = utcnow()
+        run.metrics_json = metrics
+        run.benchmark_json = benchmark
+        run.data_coverage_json = data_coverage
+        run.caveats_json = caveats
+        await session.commit()
+        await session.refresh(run)
+        return run
+    except Exception as exc:
+        message = str(exc) or "ETF 盘中提醒执行回测失败，请检查盘中行情历史"
+        return await mark_backtest_failed(session, run, message)
+
+
 async def backtest_detail_payload(session: AsyncSession, run: EtfPortfolioBacktestRun) -> dict[str, Any]:
     curve = (
         await session.scalars(
@@ -1114,6 +1647,7 @@ async def backtest_detail_payload(session: AsyncSession, run: EtfPortfolioBackte
 
 def backtest_summary_payload(run: EtfPortfolioBacktestRun) -> dict[str, Any]:
     replay_contract = dict((run.config_json or {}).get("replay_contract") or {})
+    execution_model = replay_contract.get("execution_model") or (run.config_json or {}).get("execution")
     evidence_status = (
         EVIDENCE_STATUS_SAME_CONTRACT
         if replay_contract and run.status == "success"
@@ -1146,6 +1680,7 @@ def backtest_summary_payload(run: EtfPortfolioBacktestRun) -> dict[str, Any]:
         "benchmark": dict(run.benchmark_json or {}),
         "data_coverage": dict(run.data_coverage_json or {}),
         "caveats": list(run.caveats_json or []),
+        "execution_model": str(execution_model) if execution_model else None,
         "replay_contract": replay_contract,
         "evidence_status": evidence_status,
         "evidence_summary": evidence_summary,

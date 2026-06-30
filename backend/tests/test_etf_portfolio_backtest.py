@@ -1,18 +1,20 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select
 
 from app.defaults.short_research import ASSET_TYPE_ETF, ShortResearchAsset
 from app.models.entities import (
+    EtfIntradayQuote,
     EtfPriceHistory,
     TrackedPosition,
     TradableEtf,
 )
 from app.services.short_research.backtest import (
     ReplayPosition,
+    _first_execution_quote_after,
     _generate_target_weights,
     _risk_action,
     run_etf_portfolio_backtest,
@@ -127,6 +129,31 @@ async def _seed_backtest_etfs(app, *, codes: list[str], days: int = 120, future_
         await session.commit()
 
 
+async def _seed_intraday_quotes(app, *, codes: list[str], start_date: date, days: int = 20) -> None:
+    async with app.state.db.session() as session:
+        for index, code in enumerate(codes):
+            base = 1.0 + index * 0.02
+            for offset in range(days):
+                current = start_date + timedelta(days=offset)
+                day_price = base * (1 + offset * 0.001)
+                for minute, price_multiplier in ((31, 1.0), (34, 0.995), (38, 0.99)):
+                    quote_time = datetime(current.year, current.month, current.day, 9, minute, 0)
+                    session.add(
+                        EtfIntradayQuote(
+                            etf_code=code,
+                            trade_date=current,
+                            quote_time=quote_time,
+                            latest_price=day_price * price_multiplier,
+                            change_percent=(price_multiplier - 1) * 100,
+                            volume=1_000_000,
+                            turnover=80_000_000,
+                            source="test_intraday",
+                            freshness_status="historical_replay",
+                        )
+                    )
+        await session.commit()
+
+
 @pytest.mark.asyncio
 async def test_etf_portfolio_backtest_writes_only_backtest_tables(app) -> None:
     codes = [f"51{index:04d}" for index in range(20)]
@@ -187,6 +214,33 @@ async def test_etf_portfolio_backtest_api_create_list_and_detail(client, app) ->
     assert detail_body["label_summaries"]
 
 
+@pytest.mark.asyncio
+async def test_etf_intraday_alert_backtest_api_uses_intraday_execution_model(client, app) -> None:
+    codes = [f"53{index:04d}" for index in range(20)]
+    await _seed_backtest_etfs(app, codes=codes, days=150)
+    await _seed_intraday_quotes(app, codes=codes, start_date=date(2026, 3, 1), days=25)
+
+    created = await client.post(
+        "/api/short-research/etf-backtests",
+        json={
+            "start_date": "2026-03-01",
+            "end_date": "2026-03-25",
+            "days": 90,
+            "max_assets": 20,
+            "fee_rate": 0.001,
+            "execution_model": "intraday_alert",
+        },
+    )
+
+    assert created.status_code == 200
+    body = created.json()
+    assert body["status"] == "success"
+    assert body["execution_model"] == "intraday_alert_v1"
+    assert body["replay_contract"]["execution_model"] == "intraday_alert_v1"
+    assert body["data_coverage"]["intraday_coverage"]["quote_count"] > 0
+    assert "盘中" in " ".join(body["caveats"])
+
+
 def test_backtest_portfolio_partially_allocates_when_candidates_are_insufficient() -> None:
     weights, mode, context = _generate_target_weights([_computed_asset("510300"), _computed_asset("512880")])
 
@@ -226,6 +280,39 @@ def test_backtest_trailing_take_profit_daily_action() -> None:
     assert alert_type == "trailing_take_profit"
     assert fraction == 0.5
     assert context["profit_giveback_pct"] > context["trailing_giveback_pct"]
+
+
+def test_intraday_alert_execution_uses_first_quote_after_delay() -> None:
+    signal_time = datetime(2026, 6, 30, 10, 0, 0)
+    quotes = [
+        EtfIntradayQuote(etf_code="513520", quote_time=signal_time, trade_date=signal_time.date(), latest_price=2.50),
+        EtfIntradayQuote(
+            etf_code="513520",
+            quote_time=signal_time + timedelta(minutes=2),
+            trade_date=signal_time.date(),
+            latest_price=2.48,
+        ),
+        EtfIntradayQuote(
+            etf_code="513520",
+            quote_time=signal_time + timedelta(minutes=4),
+            trade_date=signal_time.date(),
+            latest_price=2.46,
+        ),
+    ]
+
+    execution_quote = _first_execution_quote_after(quotes, signal_time, delay_minutes=3)
+
+    assert execution_quote is quotes[2]
+    assert execution_quote.latest_price == 2.46
+
+
+def test_intraday_alert_execution_does_not_fallback_without_later_quote() -> None:
+    signal_time = datetime(2026, 6, 30, 14, 58, 0)
+    quotes = [
+        EtfIntradayQuote(etf_code="513520", quote_time=signal_time, trade_date=signal_time.date(), latest_price=2.50),
+    ]
+
+    assert _first_execution_quote_after(quotes, signal_time, delay_minutes=3) is None
 
 
 def test_replay_compute_uses_supplied_date_slice_not_future_price() -> None:

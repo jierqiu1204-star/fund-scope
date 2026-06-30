@@ -11,6 +11,7 @@ SIGNAL_CONTRACT_VERSION = "short_research_signal_v1"
 ALLOCATION_CONTRACT_VERSION = "etf_portfolio_allocation_contract_v1"
 REPLAY_CONTRACT_VERSION = "etf_replay_contract_v1"
 EXECUTION_MODEL_DAILY_CLOSE = "daily_close_v1"
+EXECUTION_MODEL_INTRADAY_ALERT = "intraday_alert_v1"
 FEE_MODEL_SIMPLE_RATE = "simple_fee_rate_v1"
 
 EVIDENCE_STATUS_SAME_CONTRACT = "同源已验证"
