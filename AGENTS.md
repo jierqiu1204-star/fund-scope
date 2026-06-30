@@ -38,6 +38,7 @@ Strategy Lab 只复用数据和研究结果，不反向影响日常短线链路
 - `app.services.risk_alerts`：只负责硬止损、移动止盈、趋势转弱、止盈观察、退出观察和仓位 sizing 纯规则。
 - `app.services.notifier`：只负责 SMTP、邮件模板和发送记录，不判断该不该买卖。
 - `app.services.workflows`：负责跨领域编排，例如“拉行情 -> 更新实时榜单 -> 检查追踪持仓 -> 生成提醒 -> 发送通知”。
+- `app.services.etf_research_evidence`：只负责 ETF 研究证据契约、版本、hash 和证据状态，不读取数据库，不调用业务服务。
 
 ### 禁止依赖
 - 行情层不得 import `short_research`、`tracked_positions`、`notifier`。
@@ -45,6 +46,11 @@ Strategy Lab 只复用数据和研究结果，不反向影响日常短线链路
 - 组合层不得 import 用户持仓或通知。
 - 通知层不得 import 行情、研究、持仓。
 - 需要串联多个领域时，放到 `scheduler`、`admin` 或 `workflows`，不要塞回底层服务。
+
+### ETF 研究证据链
+- `/short-term` 展示的标签、组合、回测和标签验证必须通过证据契约说明是否同源。
+- 没有 contract hash 的旧模拟盘、旧回测、旧验证结果只能显示为“旧口径结果”，不能当作当前 ETF 工作台策略证明。
+- 回测和验证只产出研究证据，不得自动修改实时排序、组合权重、追踪持仓或邮件阈值。
 
 ### 验证要求
 - 改动后优先跑相关测试；涉及领域边界时必须跑：

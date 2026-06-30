@@ -709,8 +709,8 @@ async def test_short_research_observation_portfolio_uses_defensive_layer_when_at
     assert response.status_code == 200
 
     body = response.json()
-    assert body["portfolio_mode"] == "defensive"
-    assert body["market_regime"] == "defensive"
+    assert body["portfolio_mode"] == "neutral"
+    assert body["market_regime"] == "neutral"
     assert body["cash_weight"] == 0.0
     assert body["weight_sum"] == 1.0
     assert body["risk_exposure_weight"] > 0
@@ -822,16 +822,17 @@ async def test_short_research_observation_portfolio_no_match_returns_full_cash(c
 
     body = response.json()
     assert body["items"] == []
+    assert len(body["satellite_items"]) == 1
+    assert body["satellite_items"][0]["code"] == "560907"
     assert body["watch_only_items"]
     assert body["excluded_items"] == []
     assert body["defensive_items"] == []
-    assert body["cash_weight"] == 1.0
-    assert body["weight_sum"] == 0.0
-    assert body["portfolio_mode"] == "cash_wait"
-    assert body["market_regime"] == "cash_wait"
-    assert body["cash_reason"]
-    assert body["unavailable_reason"]
-    assert body["note"].startswith("当前不建议动用 ETF 资金")
+    assert body["cash_weight"] == pytest.approx(0.85)
+    assert body["weight_sum"] == pytest.approx(0.15)
+    assert body["portfolio_mode"] == "neutral"
+    assert body["market_regime"] == "neutral"
+    assert body["satellite_weight"] == pytest.approx(0.15)
+    assert "小仓" in body["note"]
 
 
 @pytest.mark.asyncio

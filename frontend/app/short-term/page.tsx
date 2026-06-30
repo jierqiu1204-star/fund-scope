@@ -30,6 +30,7 @@ import type {
   ShortResearchStatus,
   EtfPortfolioBacktestDetail,
   EtfPortfolioBacktestList,
+  EtfStrategyComparison,
   IntradayEtfLiveRankingItem,
   IntradayEtfLiveRankingList,
   TrackedPosition,
@@ -45,6 +46,8 @@ type MobileTab = "ranking" | "detail" | "tracking" | "explanation";
 type RankedAssetItem = ShortResearchAsset | IntradayEtfLiveRankingItem;
 type RankedAssetResponse = ShortResearchAssetList | IntradayEtfLiveRankingList;
 type FreshIntradayQuote = NonNullable<IntradayEtfLiveRankingItem["quote"]> & { change_percent: number };
+type LabelFilterKey = "observation" | "entry" | "tracking";
+type LabelFilterState = Record<LabelFilterKey, string[]>;
 type TrackedPositionPatchPayload = {
   buy_amount?: number;
   buy_date?: string;
@@ -56,6 +59,7 @@ type TrackedPositionPatchPayload = {
 };
 
 const ASSET_PAGE_SIZE = 12;
+const emptyLabelFilters: LabelFilterState = { observation: [], entry: [], tracking: [] };
 
 const baseSortOptions: Array<{ key: SortKey; label: string }> = [
   { key: "score", label: "综合排序" },
@@ -67,6 +71,16 @@ const baseSortOptions: Array<{ key: SortKey; label: string }> = [
 
 const etfSortOptions: Array<{ key: SortKey; label: string }> = [
   { key: "score", label: "实时综合排序" }
+];
+
+const labelFilterGroups: Array<{
+  key: LabelFilterKey;
+  title: string;
+  options: string[];
+}> = [
+  { key: "observation", title: "买入观察", options: ["短线观察", "高位观察", "谨慎观察", "不适合短线", "数据不足"] },
+  { key: "entry", title: "今日买点", options: ["健康回踩", "趋势延续", "冲高别追", "跌破等待", "放量转弱", "休市", "行情滞后", "数据不足"] },
+  { key: "tracking", title: "持仓状态", options: ["我已持仓", "触发提醒", "仅网页提示"] }
 ];
 
 const assetModes: Record<
@@ -330,17 +344,50 @@ function validationEvidenceText(asset: ShortResearchAsset | null | undefined) {
   return `标签验证：${validationConfidenceLabel(evidence.confidence)}，样本 ${evidence.sample_count}，5日中位收益 ${medianReturn}，胜率 ${winRate}，${sampleQualityLabel(evidence)}${freshness}${warning}`;
 }
 
+function evidenceContractText(status: string | null | undefined, summary?: Record<string, unknown> | null) {
+  const sampleCount = typeof summary?.sample_count === "number" ? summary.sample_count : 0;
+  switch (status) {
+    case "同源已验证":
+      return `当前结果已有同源历史证据，样本 ${sampleCount}；它只代表历史复盘，不保证未来。`;
+    case "样本不足":
+      return `当前规则已有契约记录，但样本只有 ${sampleCount}，还不能下可靠结论。`;
+    case "版本不一致":
+      return "现有证据来自不同规则版本或不同数据口径，只能参考，不能证明当前标签。";
+    case "旧口径结果":
+      return "这是旧模拟盘或旧回测口径，不等于当前 ETF 工作台策略证据。";
+    case "等待验证":
+    default:
+      return "当前标签或组合正在等待同源验证；页面可以观察，但不要把它当成已证明有效。";
+  }
+}
+
 function observationPortfolioText(asset: ShortResearchAsset | null | undefined) {
   const context = asset?.observation_portfolio;
   if (!context || !context.status) {
     return "ETF 资金配置：暂无权重快照";
   }
-  if (context.status === "included" || context.status === "defensive") {
-    const label = context.status === "defensive" ? "防守仓位" : "进攻仓位";
+  if (context.status === "included" || context.status === "defensive" || context.status === "satellite") {
+    const label =
+      context.status === "defensive" ? "防守仓位" : context.status === "satellite" ? "小仓观察" : "进攻仓位";
     return context.weight_explanation ?? `ETF 资金配置：${label}参考权重 ${formatPercent((context.target_weight ?? 0) * 100)}，仅作研究参考`;
   }
   const reason = context.exclusion_explanation || context.exclusion_reason || context.risk_reasons?.[0] || "未进入主观察组合";
   return `ETF 资金配置：${context.status === "watch_only" ? "只观察不配权" : "未配权"}，${reason}`;
+}
+
+function comparisonMetricPercent(metrics: Record<string, unknown>, key: string) {
+  const value = metrics[key];
+  return typeof value === "number" ? formatPercent(value * 100) : "暂无";
+}
+
+function comparisonMetricNumber(metrics: Record<string, unknown>, key: string) {
+  const value = metrics[key];
+  return typeof value === "number" ? value.toFixed(1) : "暂无";
+}
+
+function comparisonMetricInteger(metrics: Record<string, unknown>, key: string) {
+  const value = metrics[key];
+  return typeof value === "number" ? String(Math.round(value)) : "暂无";
 }
 
 function auditOutcomeLabel(outcome: string) {
@@ -601,6 +648,45 @@ function itemEntryTimingDisplay(item: RankedAssetItem, marketStatus?: string | n
   };
 }
 
+function labelFilterKeyForItem(item: RankedAssetItem) {
+  return `${getItemAssetType(item)}-${toEtfItemCode(item)}`;
+}
+
+function trackedFilterStates(position: TrackedPosition | undefined): string[] {
+  if (!position) {
+    return [];
+  }
+  const states = ["我已持仓"];
+  if (position.exit_signal.alert_type) {
+    states.push("触发提醒");
+  }
+  if (position.current_snapshot.display_only_reason || position.exit_signal.email_eligible === false) {
+    states.push("仅网页提示");
+  }
+  return states;
+}
+
+function assetMatchesLabelFilters(
+  item: RankedAssetItem,
+  filters: LabelFilterState,
+  trackedByAsset: Map<string, TrackedPosition>,
+  marketStatus?: string | null,
+) {
+  if (filters.observation.length && !filters.observation.includes(itemConclusion(item))) {
+    return false;
+  }
+  if (filters.entry.length && !filters.entry.includes(itemEntryTimingDisplay(item, marketStatus).label)) {
+    return false;
+  }
+  if (filters.tracking.length) {
+    const states = trackedFilterStates(trackedByAsset.get(labelFilterKeyForItem(item)));
+    if (!filters.tracking.some((filter) => states.includes(filter))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function shortResearchThemeTags(item: RankedAssetItem): string[] {
   return isLiveRankingItem(item) ? [] : item.theme_tags;
 }
@@ -660,6 +746,13 @@ function previewAssetFromRankedItem(item: RankedAssetItem, marketStatus?: string
       status: "watch_only",
       exclusion_reason: "完整详情加载中",
       exclusion_explanation: "正在读取完整详情，暂不显示组合权重。"
+    },
+    research_signal_contract: {},
+    evidence_status: "等待验证",
+    evidence_summary: {
+      evidence_status: "等待验证",
+      sample_count: 0,
+      caveats: ["盘中榜单预览等待完整详情和同源历史验证。"]
     }
   };
 }
@@ -1217,6 +1310,7 @@ function ShortTermClient() {
   const [theme, setTheme] = useState("all");
   const [sort, setSort] = useState<SortKey>("score");
   const [keyword, setKeyword] = useState("");
+  const [labelFilters, setLabelFilters] = useState<LabelFilterState>(emptyLabelFilters);
   const [assetOffset, setAssetOffset] = useState(0);
   const [selected, setSelected] = useState<{ asset_type: "fund" | "etf"; code: string } | null>(null);
   const [mobileTab, setMobileTab] = useState<MobileTab>("ranking");
@@ -1324,6 +1418,13 @@ function ShortTermClient() {
       (await api.get<EtfPortfolioBacktestDetail>(`/api/short-research/etf-backtests/${latestBacktestId}`)).data
   });
 
+  const etfStrategyComparison = useQuery({
+    queryKey: ["short-research", "etf-strategy-comparison", "latest"],
+    enabled: assetType === "etf",
+    queryFn: async () =>
+      (await api.get<EtfStrategyComparison | null>("/api/short-research/etf-strategy-comparisons/latest")).data
+  });
+
   const selectedDetail = useQuery({
     queryKey: ["short-research", "detail", selected?.asset_type, selected?.code],
     enabled: selected !== null,
@@ -1340,6 +1441,36 @@ function ShortTermClient() {
     queryFn: async () => (await api.get<TrackedPositionList>("/api/tracked-positions")).data,
     refetchInterval: shouldRefreshIntradayQueries ? 30_000 : false
   });
+
+  const rawAssets = useMemo(() => (assets.data?.items ?? []) as RankedAssetItem[], [assets.data?.items]);
+  const activeTracked = useMemo(
+    () => (trackedPositions.data?.items ?? []).filter((item) => item.status === "active"),
+    [trackedPositions.data?.items],
+  );
+  const trackedByAsset = useMemo(() => {
+    const map = new Map<string, TrackedPosition>();
+    for (const item of activeTracked) {
+      map.set(`${item.asset_type}-${item.asset_code}`, item);
+    }
+    return map;
+  }, [activeTracked]);
+  const labelFilterSignature = useMemo(() => JSON.stringify(labelFilters), [labelFilters]);
+  const activeLabelFilterCount = labelFilters.observation.length + labelFilters.entry.length + labelFilters.tracking.length;
+  const selectedLabelChips = useMemo(
+    () =>
+      labelFilterGroups.flatMap((group) =>
+        labelFilters[group.key].map((value) => ({
+          groupKey: group.key,
+          groupTitle: group.title,
+          value,
+        })),
+      ),
+    [labelFilters],
+  );
+  const visibleAssets = useMemo(
+    () => rawAssets.filter((item) => assetMatchesLabelFilters(item, labelFilters, trackedByAsset, etfLiveData?.market_status)),
+    [rawAssets, labelFilters, trackedByAsset, etfLiveData?.market_status],
+  );
 
   useEffect(() => {
     const timer = window.setInterval(() => setPollClock(Date.now()), 60_000);
@@ -1359,19 +1490,21 @@ function ShortTermClient() {
 
   useEffect(() => {
     setAssetOffset(0);
-  }, [assetType, theme, sort, keyword]);
+  }, [assetType, theme, sort, keyword, labelFilterSignature]);
 
   useEffect(() => {
-    const items = assets.data?.items ?? [];
-    const first = items[0];
+    const first = visibleAssets[0];
     if (!first) {
       setSelected(null);
       return;
     }
-    if (!selected || !items.some((item) => getItemAssetType(item) === selected.asset_type && toEtfItemCode(item) === selected.code)) {
+    if (
+      !selected ||
+      !visibleAssets.some((item) => getItemAssetType(item) === selected.asset_type && toEtfItemCode(item) === selected.code)
+    ) {
       setSelected({ asset_type: getItemAssetType(first), code: toEtfItemCode(first) });
     }
-  }, [assets.data, selected]);
+  }, [selected, visibleAssets]);
 
   useEffect(() => {
     if (assetType === "fund" && sort === "liquidity") {
@@ -1442,6 +1575,20 @@ function ShortTermClient() {
       ).data,
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["short-research", "etf-backtests"] });
+    }
+  });
+
+  const runEtfStrategyComparison = useMutation({
+    mutationFn: async () =>
+      (
+        await api.post<EtfStrategyComparison>("/api/short-research/etf-strategy-comparisons", {
+          days: 730,
+          fee_rate: 0.001,
+          max_assets: 500,
+        })
+      ).data,
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["short-research", "etf-strategy-comparison"] });
     }
   });
 
@@ -1595,7 +1742,6 @@ function ShortTermClient() {
     assetType === "etf"
       ? (statusData?.etf_data_stale_count ?? 0) + (statusData?.etf_failed_count ?? 0)
       : statusData?.data_issue_count ?? 0;
-  const visibleAssets = useMemo(() => (assets.data?.items ?? []) as RankedAssetItem[], [assets.data?.items]);
   const selectedKey = selected ? `${selected.asset_type}-${selected.code}` : null;
   const selectedListItem = selected
     ? visibleAssets.find((item) => getItemAssetType(item) === selected.asset_type && toEtfItemCode(item) === selected.code)
@@ -1626,14 +1772,6 @@ function ShortTermClient() {
     statusData?.data_health
       .filter((item) => item.asset_type === assetType && (item.status !== "success" || item.is_stale))
       .slice(0, 6) ?? [];
-  const activeTracked = (trackedPositions.data?.items ?? []).filter((item) => item.status === "active");
-  const trackedByAsset = useMemo(() => {
-    const map = new Map<string, TrackedPosition>();
-    for (const item of activeTracked) {
-      map.set(`${item.asset_type}-${item.asset_code}`, item);
-    }
-    return map;
-  }, [activeTracked]);
   const selectedTracked = activeTracked.filter(
     (item) => selectedAsset && item.asset_type === selectedAsset.asset_type && item.asset_code === selectedAsset.code
   );
@@ -1910,6 +2048,17 @@ function ShortTermClient() {
         ) : null}
         {assetType === "etf" ? (
           <div className="mt-3 rounded-[8px] bg-paper px-3 py-3 text-xs leading-5 text-ink/60">
+            <div className="mb-3 rounded-[8px] border border-ink/10 bg-white p-3">
+              <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                <p className="font-semibold text-ink">证据契约</p>
+                <span className="w-fit rounded-full bg-paper px-2 py-0.5 text-[11px] font-semibold text-ink/65">
+                  {selectedAsset.evidence_status ?? "等待验证"}
+                </span>
+              </div>
+              <p className="mt-2 text-ink/55">
+                {evidenceContractText(selectedAsset.evidence_status, selectedAsset.evidence_summary)}
+              </p>
+            </div>
             <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
               <p className="font-semibold text-ink">标签验证</p>
               <span className="text-ink/45">研究证据，不是买入指令</span>
@@ -1991,7 +2140,122 @@ function ShortTermClient() {
     }
   }, [visibleAssets.length]);
 
+  const setQuickLabelFilter = (preset: "safe" | "high" | "tracked" | "clear") => {
+    if (preset === "clear") {
+      setLabelFilters(emptyLabelFilters);
+      return;
+    }
+    if (preset === "tracked") {
+      setLabelFilters({ observation: [], entry: [], tracking: ["我已持仓"] });
+      return;
+    }
+    if (preset === "high") {
+      setLabelFilters({ observation: ["高位观察"], entry: ["健康回踩", "趋势延续"], tracking: [] });
+      return;
+    }
+    setLabelFilters({ observation: ["短线观察"], entry: ["健康回踩", "趋势延续"], tracking: [] });
+  };
+
+  const toggleLabelFilter = (groupKey: LabelFilterKey, value: string) => {
+    setLabelFilters((current) => {
+      const currentValues = current[groupKey];
+      const nextValues = currentValues.includes(value)
+        ? currentValues.filter((item) => item !== value)
+        : [...currentValues, value];
+      return { ...current, [groupKey]: nextValues };
+    });
+  };
+
+  const removeLabelFilter = (groupKey: LabelFilterKey, value: string) => {
+    setLabelFilters((current) => ({
+      ...current,
+      [groupKey]: current[groupKey].filter((item) => item !== value),
+    }));
+  };
+
   const mobileTrackingButtonLabel = trackingOpen ? "收起" : "我已买入，开始追踪";
+  const labelFilterPanel = (
+    <div className="mt-4 rounded-[8px] border border-border bg-white p-3">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">标签筛选</p>
+          <p className="mt-1 text-xs text-ink/50">
+            筛选决定看哪些 ETF，排序决定这些 ETF 怎么排；标签不是交易指令。
+          </p>
+        </div>
+        <span className="w-fit rounded-full bg-paper px-3 py-1 text-xs font-semibold text-ink/60">
+          已选 {activeLabelFilterCount} 项
+        </span>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button
+          type="button"
+          className="rounded-full border border-border bg-paper px-3 py-1.5 text-xs font-semibold text-ink transition hover:border-ink focus:outline-none focus:ring-2 focus:ring-accent/20"
+          onClick={() => setQuickLabelFilter("safe")}
+        >
+          稳妥观察
+        </button>
+        <button
+          type="button"
+          className="rounded-full border border-border bg-paper px-3 py-1.5 text-xs font-semibold text-ink transition hover:border-ink focus:outline-none focus:ring-2 focus:ring-accent/20"
+          onClick={() => setQuickLabelFilter("high")}
+        >
+          高位谨慎
+        </button>
+        <button
+          type="button"
+          className="rounded-full border border-border bg-paper px-3 py-1.5 text-xs font-semibold text-ink transition hover:border-ink focus:outline-none focus:ring-2 focus:ring-accent/20"
+          onClick={() => setQuickLabelFilter("tracked")}
+        >
+          只看持仓
+        </button>
+        <button
+          type="button"
+          className="rounded-full border border-border bg-white px-3 py-1.5 text-xs font-semibold text-ink/60 transition hover:border-ink focus:outline-none focus:ring-2 focus:ring-accent/20"
+          onClick={() => setQuickLabelFilter("clear")}
+        >
+          清空
+        </button>
+      </div>
+      <div className="mt-4 grid gap-3 md:grid-cols-3">
+        {labelFilterGroups.map((group) => (
+          <fieldset key={group.key} className="rounded-[8px] border border-border bg-paper/50 p-3">
+            <legend className="px-1 text-xs font-semibold text-ink">{group.title}</legend>
+            <div className="mt-2 grid gap-2">
+              {group.options.map((option) => {
+                const checked = labelFilters[group.key].includes(option);
+                return (
+                  <label key={option} className="flex cursor-pointer items-center gap-2 text-xs text-ink/70">
+                    <input
+                      type="checkbox"
+                      className="h-3.5 w-3.5 rounded border-border text-ink focus:ring-2 focus:ring-accent/20"
+                      checked={checked}
+                      onChange={() => toggleLabelFilter(group.key, option)}
+                    />
+                    <span className={checked ? "font-semibold text-ink" : ""}>{option}</span>
+                  </label>
+                );
+              })}
+            </div>
+          </fieldset>
+        ))}
+      </div>
+      {selectedLabelChips.length ? (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {selectedLabelChips.map((chip) => (
+            <button
+              key={`${chip.groupKey}-${chip.value}`}
+              type="button"
+              className="rounded-full border border-ink/10 bg-white px-3 py-1.5 text-xs font-semibold text-ink transition hover:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20"
+              onClick={() => removeLabelFilter(chip.groupKey, chip.value)}
+            >
+              {chip.groupTitle}：{chip.value} ×
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
   const rankingPanelContent = ({ compact }: { compact: boolean }) => {
     const cardPadding = compact ? "p-3" : "p-4";
     const cardGap = compact ? "gap-2" : "gap-3";
@@ -2039,6 +2303,7 @@ function ShortTermClient() {
             ))}
           </select>
         </div>
+        {assetType === "etf" ? labelFilterPanel : null}
         {assetType === "etf" && (etfThemeSource.data?.theme_heat?.length ?? 0) > 0 ? (
           <div className="mt-4 rounded-[8px] border border-border bg-white p-3">
             <div className="flex items-center justify-between gap-3">
@@ -2198,7 +2463,19 @@ function ShortTermClient() {
               </button>
             );
           })}
-          {!assets.isLoading && (assets.data?.items ?? []).length === 0 ? (
+          {!assets.isLoading && rawAssets.length > 0 && visibleAssets.length === 0 ? (
+            <div className="rounded-[10px] border border-dashed border-ink/20 p-6 text-sm leading-6 text-ink/55">
+              当前页没有匹配这些标签的 ETF。可以清空标签筛选、换一页，或调整主题/搜索条件。
+              <button
+                type="button"
+                className="ml-2 font-semibold text-accent underline underline-offset-2"
+                onClick={() => setQuickLabelFilter("clear")}
+              >
+                清空筛选
+              </button>
+            </div>
+          ) : null}
+          {!assets.isLoading && rawAssets.length === 0 ? (
             <div className="rounded-[10px] border border-dashed border-ink/20 p-6 text-sm leading-6 text-ink/55">
               {mode.noResults}
             </div>
@@ -3061,6 +3338,7 @@ function ShortTermClient() {
                 ))}
               </select>
             </div>
+            {assetType === "etf" ? labelFilterPanel : null}
 
             <div className="mt-5">
               <AssetPaginationBar
@@ -3182,7 +3460,19 @@ function ShortTermClient() {
                 </button>
               );
             })}
-            {!assets.isLoading && (assets.data?.items ?? []).length === 0 ? (
+            {!assets.isLoading && rawAssets.length > 0 && visibleAssets.length === 0 ? (
+              <div className="rounded-[10px] border border-dashed border-ink/20 bg-white p-6 text-sm leading-6 text-ink/55">
+                当前页没有匹配这些标签的 ETF。可以清空标签筛选、换一页，或调整方向/搜索条件。
+                <button
+                  type="button"
+                  className="ml-2 font-semibold text-accent underline underline-offset-2"
+                  onClick={() => setQuickLabelFilter("clear")}
+                >
+                  清空筛选
+                </button>
+              </div>
+            ) : null}
+            {!assets.isLoading && rawAssets.length === 0 ? (
               <div className="rounded-[10px] border border-dashed border-ink/20 p-6 text-sm leading-6 text-ink/55">
                 {mode.noResults}
               </div>
@@ -3695,6 +3985,89 @@ function ShortTermClient() {
               {errorText(runEtfBacktest.error)}
             </p>
           ) : null}
+          <div className="mt-4 rounded-[8px] border border-ink/10 bg-white px-4 py-3 text-xs leading-5 text-ink/60">
+            <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+              <p className="font-semibold text-ink">回测证据契约</p>
+              <span className="w-fit rounded-full bg-paper px-2.5 py-1 text-[11px] font-semibold text-ink/65">
+                {etfBacktestDetail.data?.evidence_status ?? "等待验证"}
+              </span>
+            </div>
+            <p className="mt-2">
+              {evidenceContractText(etfBacktestDetail.data?.evidence_status, etfBacktestDetail.data?.evidence_summary)}
+            </p>
+          </div>
+          <div className="mt-4 rounded-[10px] border border-ink/10 bg-white p-4">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <p className="font-semibold text-ink">策略对照证据</p>
+                <p className="mt-2 text-xs leading-5 text-ink/55">
+                  用同一段 ETF 日线历史比较当前工作台、动量、波动率降权、趋势过滤和等权基准。它是历史模拟，不验证分钟级盘中提醒，也不会自动替换当前规则。
+                </p>
+              </div>
+              <button
+                type="button"
+                className="w-fit rounded-[6px] border border-ink bg-ink px-3 py-2 text-xs font-semibold text-white transition hover:bg-ink/85 disabled:opacity-60"
+                disabled={runEtfStrategyComparison.isPending}
+                onClick={() => runEtfStrategyComparison.mutate()}
+              >
+                {runEtfStrategyComparison.isPending ? "正在对照..." : "运行策略对照"}
+              </button>
+            </div>
+            {runEtfStrategyComparison.isError ? (
+              <p className="mt-3 rounded-[8px] border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                {errorText(runEtfStrategyComparison.error)}
+              </p>
+            ) : null}
+            {etfStrategyComparison.data ? (
+              <>
+                <div className="mt-4 flex flex-wrap gap-2 text-xs text-ink/55">
+                  <span className="rounded-full bg-paper px-3 py-1">
+                    区间：{formatDate(etfStrategyComparison.data.start_date)} - {formatDate(etfStrategyComparison.data.end_date)}
+                  </span>
+                  <span className="rounded-full bg-paper px-3 py-1">
+                    初始资金：{formatCurrency(etfStrategyComparison.data.initial_cash)}
+                  </span>
+                  <span className="rounded-full bg-paper px-3 py-1">
+                    最优历史项：{etfStrategyComparison.data.best_strategy ?? "暂无"}
+                  </span>
+                </div>
+                <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                  {etfStrategyComparison.data.strategies.map((strategy) => (
+                    <div key={strategy.strategy_key} className="rounded-[8px] border border-border bg-paper/40 p-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <p className="text-sm font-semibold text-ink">{strategy.strategy_label}</p>
+                        <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-ink/55">
+                          {strategy.strategy_key}
+                        </span>
+                      </div>
+                      <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-ink/60">
+                        <span>累计收益：{comparisonMetricPercent(strategy.metrics, "cumulative_return")}</span>
+                        <span>最大回撤：{comparisonMetricPercent(strategy.metrics, "max_drawdown")}</span>
+                        <span>波动率：{comparisonMetricPercent(strategy.metrics, "volatility")}</span>
+                        <span>收益/回撤：{comparisonMetricNumber(strategy.metrics, "return_drawdown_ratio")}</span>
+                        <span>交易次数：{comparisonMetricInteger(strategy.metrics, "trade_count")}</span>
+                        <span>等待天数：{comparisonMetricInteger(strategy.metrics, "cash_wait_days")}</span>
+                      </div>
+                      {strategy.caveats.length ? (
+                        <p className="mt-3 rounded-[6px] bg-white px-2.5 py-2 text-xs leading-5 text-ink/50">
+                          {strategy.caveats.slice(0, 2).join("；")}
+                        </p>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+                {etfStrategyComparison.data.caveats.length ? (
+                  <p className="mt-3 rounded-[8px] bg-paper px-3 py-2 text-xs leading-5 text-ink/55">
+                    限制：{etfStrategyComparison.data.caveats.join("；")}
+                  </p>
+                ) : null}
+              </>
+            ) : (
+              <p className="mt-3 rounded-[8px] border border-dashed border-ink/20 bg-paper px-3 py-3 text-xs leading-5 text-ink/55">
+                暂无策略对照结果。没有对照结果时，当前标签只能作为观察状态，不能证明长期有效。
+              </p>
+            )}
+          </div>
           {etfBacktestDetail.data ? (
             <>
               <div className="mt-5 grid gap-3 md:grid-cols-4">
@@ -3867,7 +4240,9 @@ function ShortTermClient() {
                   ? "防守优先"
                   : observationPortfolio.data?.portfolio_mode === "cash_wait"
                     ? "等待现金"
-                    : "进攻配置"}
+                    : observationPortfolio.data?.portfolio_mode === "neutral"
+                      ? "混合配置"
+                      : "进攻配置"}
               </span>
             </summary>
             <p className="mt-2 text-sm leading-6 text-ink/60">
@@ -3879,11 +4254,28 @@ function ShortTermClient() {
                 ? ` 单只 ETF 上限 ${formatPercent((observationPortfolio.data.single_weight_cap ?? 0) * 100)}，ETF 资金最高投入 ${formatPercent((observationPortfolio.data.target_invested_weight ?? 1) * 100)}。`
                 : ""}
             </p>
-            <div className="mt-4 grid gap-3 md:grid-cols-3">
+            <div className="mt-3 rounded-[8px] border border-ink/10 bg-white px-4 py-3 text-xs leading-5 text-ink/60">
+              <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                <p className="font-semibold text-ink">组合证据契约</p>
+                <span className="w-fit rounded-full bg-paper px-2.5 py-1 text-[11px] font-semibold text-ink/65">
+                  {observationPortfolio.data?.evidence_status ?? "等待验证"}
+                </span>
+              </div>
+              <p className="mt-2">
+                {evidenceContractText(observationPortfolio.data?.evidence_status, observationPortfolio.data?.evidence_summary)}
+              </p>
+            </div>
+            <div className="mt-4 grid gap-3 md:grid-cols-4">
               <div className="rounded-[10px] border border-ink/10 bg-white px-4 py-3">
-                <p className="text-xs text-ink/45">进攻仓位</p>
+                <p className="text-xs text-ink/45">主配置</p>
                 <p className="mt-1 text-lg font-semibold text-ink">
-                  {formatPercent((observationPortfolio.data?.risk_exposure_weight ?? observationPortfolio.data?.weight_sum ?? 0) * 100)}
+                  {formatPercent((observationPortfolio.data?.primary_weight ?? observationPortfolio.data?.risk_exposure_weight ?? 0) * 100)}
+                </p>
+              </div>
+              <div className="rounded-[10px] border border-ink/10 bg-white px-4 py-3">
+                <p className="text-xs text-ink/45">小仓观察</p>
+                <p className="mt-1 text-lg font-semibold text-ink">
+                  {formatPercent((observationPortfolio.data?.satellite_weight ?? 0) * 100)}
                 </p>
               </div>
               <div className="rounded-[10px] border border-ink/10 bg-white px-4 py-3">
@@ -3919,7 +4311,7 @@ function ShortTermClient() {
               </p>
             ) : null}
             <div className="mt-5 flex items-center justify-between gap-3">
-              <p className="text-sm font-semibold text-ink">进攻仓位</p>
+              <p className="text-sm font-semibold text-ink">主配置</p>
               <span className="rounded-full bg-ink px-3 py-1 text-xs font-semibold text-white">
                 {observationPortfolio.data?.items.length ?? 0} 只
               </span>
@@ -3947,6 +4339,38 @@ function ShortTermClient() {
               <p className="mt-4 rounded-[10px] bg-paper px-4 py-3 text-sm text-ink/55">
                 暂无进攻仓位。当前高分 ETF 可能偏高位、买点不合适、候选不足，或数据不足。
               </p>
+            ) : null}
+            {(observationPortfolio.data?.satellite_items ?? []).length ? (
+              <>
+                <div className="mt-6 flex items-center justify-between gap-3">
+                  <p className="text-sm font-semibold text-ink">小仓观察</p>
+                  <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700">
+                    {observationPortfolio.data?.satellite_items?.length ?? 0} 只
+                  </span>
+                </div>
+                <p className="mt-2 text-xs leading-5 text-ink/55">
+                  小仓观察通常来自高位但买点尚未明显转弱的 ETF，权重上限更低，只作观察参考。
+                </p>
+                <div className="mt-3 grid gap-3 lg:grid-cols-3">
+                  {(observationPortfolio.data?.satellite_items ?? []).map((item) => (
+                    <div key={`satellite-${item.code}`} className="rounded-[10px] border border-amber-100 bg-amber-50/50 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-semibold text-ink">{item.name}</p>
+                          <p className="mt-1 text-xs text-ink/45">{item.code} · {formatDate(item.data_date)}</p>
+                        </div>
+                        <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-amber-700">
+                          {formatPercent(item.target_weight * 100)}
+                        </span>
+                      </div>
+                      <p className="mt-3 text-sm text-ink/65">综合分 {item.score.toFixed(1)} · {item.conclusion}</p>
+                      <p className="mt-3 rounded-[8px] bg-white/70 px-3 py-2 text-xs leading-5 text-ink/55">
+                        {item.weight_explanation ?? `小仓原因：${item.risk_reasons.slice(0, 3).join("；")}`}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </>
             ) : null}
             {(observationPortfolio.data?.defensive_items ?? []).length ? (
               <>

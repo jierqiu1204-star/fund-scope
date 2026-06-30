@@ -581,6 +581,9 @@ export type ShortResearchAsset = {
   advisor_report: ShortResearchAdvisorReport | null;
   validation_evidence: ValidationEvidence;
   observation_portfolio: ObservationPortfolioContext;
+  research_signal_contract?: Record<string, unknown>;
+  evidence_status?: string;
+  evidence_summary?: Record<string, unknown>;
 };
 
 export type ShortResearchAdvisorReport = {
@@ -668,14 +671,17 @@ export type ShortResearchObservationPortfolio = {
   as_of_date: string;
   asset_type: "etf";
   items: ShortResearchObservationPortfolioItem[];
+  satellite_items?: ShortResearchObservationPortfolioItem[];
   defensive_items?: ShortResearchObservationPortfolioItem[];
   watch_only_items: ShortResearchObservationPortfolioItem[];
   excluded_items: ShortResearchObservationPortfolioItem[];
   cash_weight: number;
   target_invested_weight?: number;
   weight_sum?: number;
-  portfolio_mode?: "risk_on" | "defensive" | "cash_wait" | string;
+  portfolio_mode?: "risk_on" | "neutral" | "defensive" | "cash_wait" | string;
   market_regime?: "risk_on" | "defensive" | "cash_wait" | string;
+  primary_weight?: number;
+  satellite_weight?: number;
   risk_exposure_weight?: number;
   defensive_weight?: number;
   cash_reason?: string | null;
@@ -690,6 +696,9 @@ export type ShortResearchObservationPortfolio = {
   no_trade_instruction: boolean;
   note: string;
   methodology: string;
+  allocation_contract?: Record<string, unknown>;
+  evidence_status?: string;
+  evidence_summary?: Record<string, unknown>;
 };
 
 export type EtfPortfolioBacktestRunSummary = {
@@ -705,6 +714,9 @@ export type EtfPortfolioBacktestRunSummary = {
   benchmark: Record<string, unknown>;
   data_coverage: Record<string, unknown>;
   caveats: string[];
+  replay_contract?: Record<string, unknown>;
+  evidence_status?: string;
+  evidence_summary?: Record<string, unknown>;
   error_message: string | null;
 };
 
@@ -765,6 +777,30 @@ export type EtfPortfolioBacktestDetail = EtfPortfolioBacktestRunSummary & {
 
 export type EtfPortfolioBacktestList = {
   items: EtfPortfolioBacktestRunSummary[];
+};
+
+export type EtfStrategyComparisonStrategy = {
+  strategy_key: string;
+  strategy_label: string;
+  metrics: Record<string, unknown>;
+  equity_curve: Array<Record<string, unknown>>;
+  caveats: string[];
+};
+
+export type EtfStrategyComparison = {
+  id: number;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+  start_date: string;
+  end_date: string;
+  initial_cash: number;
+  fee_rate: number;
+  data_coverage: Record<string, unknown>;
+  caveats: string[];
+  strategies: EtfStrategyComparisonStrategy[];
+  best_strategy: string | null;
+  error_message: string | null;
 };
 
 export type TrackedPositionSnapshot = {

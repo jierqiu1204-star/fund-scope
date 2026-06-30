@@ -4,7 +4,7 @@ const staticExport = process.env.NEXT_STATIC_EXPORT === "1";
 const nextConfig = {
   ...(staticExport ? { output: "export" } : {}),
   experimental: {
-    webpackBuildWorker: staticExport ? undefined : false,
+    webpackBuildWorker: false,
     workerThreads: false
   }
 };

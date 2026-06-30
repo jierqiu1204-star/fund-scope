@@ -271,11 +271,13 @@ async def test_post_close_etf_observation_portfolio_job_refreshes_weights(monkey
                 "cash_weight": 0.0,
                 "weight_sum": 1.0,
                 "unavailable_reason": None,
-                "constraint_summary": {
-                    "primary_count": 3,
-                    "watch_only_count": 2,
-                    "excluded_count": 1,
-                },
+                    "constraint_summary": {
+                        "primary_count": 3,
+                        "satellite_count": 0,
+                        "defensive_count": 0,
+                        "watch_only_count": 2,
+                        "excluded_count": 1,
+                    },
             },
         )
 
@@ -295,6 +297,8 @@ async def test_post_close_etf_observation_portfolio_job_refreshes_weights(monkey
         "weight_sum": 1.0,
         "unavailable_reason": None,
         "primary_count": 3,
+        "satellite_count": 0,
+        "defensive_count": 0,
         "watch_only_count": 2,
         "excluded_count": 1,
     }

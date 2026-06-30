@@ -34,9 +34,14 @@ from app.models.entities import (
     FundNavHistory,
     ShortResearchSignalItem,
     ShortResearchSignalRun,
-    TrackedPosition,
     TradableEtf,
     utcnow,
+)
+from app.services.etf_research_evidence import (
+    EVIDENCE_STATUS_LEGACY,
+    EVIDENCE_STATUS_WAITING,
+    build_allocation_contract,
+    build_evidence_summary,
 )
 from app.services.jobs import sync_fund_nav_history
 from app.services.portfolio_allocation import (
@@ -44,12 +49,20 @@ from app.services.portfolio_allocation import (
     PORTFOLIO_ENTRY_TIMING_FORBIDDEN,
     PORTFOLIO_ENTRY_TIMING_OK,
     PORTFOLIO_HIGH_CORRELATION,
+    PORTFOLIO_LAYER_DEFENSIVE,
+    PORTFOLIO_LAYER_EXCLUDED,
+    PORTFOLIO_LAYER_PRIMARY,
+    PORTFOLIO_LAYER_SATELLITE,
+    PORTFOLIO_LAYER_WATCH_ONLY,
     PORTFOLIO_MODE_CASH_WAIT,
     PORTFOLIO_MODE_DEFENSIVE,
+    PORTFOLIO_MODE_NEUTRAL,
     PORTFOLIO_MODE_RISK_ON,
     PORTFOLIO_RISK_FLAGS_FORBIDDEN,
     PORTFOLIO_RISK_FLAGS_REDUCE_WEIGHT,
     PORTFOLIO_RISK_FLAGS_WATCH_ONLY,
+    PORTFOLIO_SATELLITE_EXPOSURE_CAP,
+    PORTFOLIO_SATELLITE_SINGLE_WEIGHT_CAP,
     PORTFOLIO_SINGLE_WEIGHT_CAP,
     PORTFOLIO_THEME_EXPOSURE_CAP,
     PORTFOLIO_TOTAL_EXPOSURE_CAP,
@@ -96,6 +109,8 @@ SURGE_RETURN_5D = 0.08
 HIGH_DAILY_VOLATILITY_20D = 0.035
 LARGE_DRAWDOWN_60D = -0.18
 _PORTFOLIO_SINGLE_WEIGHT_CAP = PORTFOLIO_SINGLE_WEIGHT_CAP
+_PORTFOLIO_SATELLITE_SINGLE_WEIGHT_CAP = PORTFOLIO_SATELLITE_SINGLE_WEIGHT_CAP
+_PORTFOLIO_SATELLITE_EXPOSURE_CAP = PORTFOLIO_SATELLITE_EXPOSURE_CAP
 _PORTFOLIO_TOTAL_EXPOSURE_CAP = PORTFOLIO_TOTAL_EXPOSURE_CAP
 _PORTFOLIO_THEME_EXPOSURE_CAP = PORTFOLIO_THEME_EXPOSURE_CAP
 _PORTFOLIO_HIGH_CORRELATION = PORTFOLIO_HIGH_CORRELATION
@@ -106,6 +121,7 @@ _PORTFOLIO_RISK_FLAGS_FORBIDDEN = PORTFOLIO_RISK_FLAGS_FORBIDDEN
 _PORTFOLIO_RISK_FLAGS_WATCH_ONLY = PORTFOLIO_RISK_FLAGS_WATCH_ONLY
 _PORTFOLIO_RISK_FLAGS_REDUCE_WEIGHT = PORTFOLIO_RISK_FLAGS_REDUCE_WEIGHT
 MARKET_REGIME_RISK_ON = "risk_on"
+MARKET_REGIME_NEUTRAL = "neutral"
 MARKET_REGIME_DEFENSIVE = "defensive"
 MARKET_REGIME_CASH_WAIT = "cash_wait"
 
@@ -1191,6 +1207,9 @@ async def review_etf_label_outcomes(
                 "future_price": payload.get("future_price"),
                 "future_date": payload.get("future_date"),
                 "stored_signal_context": True,
+                "signal_rule_version": (signal_run.config_json or {}).get("rule_version") or "short_research_signal_v1",
+                "signal_date": signal_run.as_of_date.isoformat(),
+                "data_reliability": (signal_item.metrics_json or {}).get("data_reliability", "verified"),
             }
             target.updated_at = now
             session.add(target)
@@ -1262,8 +1281,20 @@ async def _label_outcome_summary(session: AsyncSession, as_of_date: date) -> dic
         ).all()
     )
     grouped: dict[tuple[str, str], dict[int, list[EtfLabelOutcome]]] = {}
+    contract_groups: dict[str, int] = {}
     for row in rows:
         grouped.setdefault((row.label, row.entry_timing_label), {}).setdefault(row.horizon_days, []).append(row)
+        metrics = dict(row.metrics_json or {})
+        group_key = " / ".join(
+            [
+                row.label,
+                row.entry_timing_label,
+                str(metrics.get("signal_rule_version") or row.rule_version),
+                str(metrics.get("data_reliability") or "unknown"),
+                row.signal_date.isoformat() if row.signal_date else "unknown_date",
+            ]
+        )
+        contract_groups[group_key] = contract_groups.get(group_key, 0) + 1
     groups: list[dict[str, Any]] = []
     for (label, entry_label), windows in sorted(grouped.items()):
         window_summary = {
@@ -1288,6 +1319,8 @@ async def _label_outcome_summary(session: AsyncSession, as_of_date: date) -> dic
         "evaluated_asset_count": len({row.asset_code for row in rows if row.status == "completed"}),
         "windows": list(_LABEL_VALIDATION_WINDOWS),
         "min_sample_count": _LABEL_VALIDATION_MIN_SAMPLES,
+        "contract_group_count": len(contract_groups),
+        "contract_groups": contract_groups,
         "sufficient_sample_count": 50,
         "sample_policy": "读取已保存短线排序 signal item，等未来真实 ETF 日线收盘价出现后补 1/3/5/10 个交易日结果；不回放当前规则。",
         "groups": groups,
@@ -2600,19 +2633,10 @@ async def _prioritize_etf_sync_codes(
         )
     )
     watchlist = list(dict.fromkeys(str(code) for code in watchlist_rows.all()))
-    tracked_rows = await session.scalars(
-        select(TrackedPosition.asset_code).where(
-            TrackedPosition.asset_type == ASSET_TYPE_ETF,
-            TrackedPosition.status == "active",
-            TrackedPosition.asset_code.in_(codes),
-        )
-    )
-    tracked = list(dict.fromkeys(str(code) for code in tracked_rows.all()))
-    prioritized = [*priority, *(code for code in tracked if code not in priority)]
-    remaining = sorted(code_set - set(prioritized) - set(watchlist))
+    remaining = sorted(code_set - set(priority) - set(watchlist))
     return [
-        *prioritized,
-        *(code for code in watchlist if code not in prioritized),
+        *priority,
+        *(code for code in watchlist if code not in priority),
         *remaining,
     ]
 
@@ -2735,13 +2759,15 @@ def _portfolio_exclusion_reason(asset: ComputedAsset) -> str | None:
 
 
 def _portfolio_watch_only_reason(asset: ComputedAsset) -> str | None:
-    if asset.conclusion == CONCLUSION_HIGH_WATCH:
-        return "趋势强但处于高位观察，先放入强势但别追，不给组合权重。"
     if asset.entry_timing_label == ENTRY_TIMING_CHASE_RISK:
         return f"今日买点为{ENTRY_TIMING_CHASE_RISK}，适合继续盯，不分配主组合权重。"
     watch_flags = [flag for flag in _PORTFOLIO_RISK_FLAGS_WATCH_ONLY if flag in asset.risk_flags]
     if watch_flags:
         return f"存在{'、'.join(watch_flags)}，强势但不适合追入。"
+    if asset.conclusion == CONCLUSION_HIGH_WATCH:
+        if asset.entry_timing_label in _PORTFOLIO_ENTRY_TIMING_OK:
+            return None
+        return "趋势强但处于高位观察，但买点不健康，先放入强势但别追，不给组合权重。"
     if asset.conclusion != CONCLUSION_WATCH:
         return f"观察标签非短线观察（当前：{asset.conclusion}）。"
     if asset.entry_timing_label not in _PORTFOLIO_ENTRY_TIMING_OK:
@@ -2752,11 +2778,16 @@ def _portfolio_watch_only_reason(asset: ComputedAsset) -> str | None:
 def _portfolio_candidate_group(asset: ComputedAsset) -> tuple[str, str | None]:
     exclusion_reason = _portfolio_exclusion_reason(asset)
     if exclusion_reason is not None:
-        return "excluded", exclusion_reason
+        return PORTFOLIO_LAYER_EXCLUDED, exclusion_reason
+    if asset.conclusion == CONCLUSION_HIGH_WATCH and asset.entry_timing_label in _PORTFOLIO_ENTRY_TIMING_OK:
+        return (
+            PORTFOLIO_LAYER_SATELLITE,
+            "高位观察但买点仍为健康回踩/趋势延续，只进入小仓观察层并降低权重。",
+        )
     watch_reason = _portfolio_watch_only_reason(asset)
     if watch_reason is not None:
-        return "watch_only", watch_reason
-    return "primary", None
+        return PORTFOLIO_LAYER_WATCH_ONLY, watch_reason
+    return PORTFOLIO_LAYER_PRIMARY, None
 
 
 def _portfolio_fill_priority(asset: ComputedAsset) -> int:
@@ -2972,16 +3003,30 @@ def _portfolio_item(
     }
 
 
+def _portfolio_layer_cap(item_type: str) -> float:
+    if item_type == PORTFOLIO_LAYER_SATELLITE:
+        return _PORTFOLIO_SATELLITE_SINGLE_WEIGHT_CAP
+    return _PORTFOLIO_SINGLE_WEIGHT_CAP
+
+
 def _portfolio_raw_weight(asset: ComputedAsset) -> tuple[float, dict[str, Any]]:
     score_component = max(0.01, float(asset.total_score or 0.0) / 100.0)
+    entry_multiplier = 1.0
+    if asset.entry_timing_label == ENTRY_TIMING_HEALTHY_PULLBACK:
+        entry_multiplier = 1.08
+    elif asset.entry_timing_label == ENTRY_TIMING_TREND_CONTINUATION:
+        entry_multiplier = 1.0
+    label_multiplier = 0.68 if asset.conclusion == CONCLUSION_HIGH_WATCH else 1.0
     volatility = max(0.006, float(asset.metrics.get("volatility_20d") or 0.025))
     drawdown = abs(min(0.0, float(asset.metrics.get("max_drawdown_60d") or 0.0)))
     turnover = max(1.0, float(asset.metrics.get("average_turnover_20d") or 0.0))
     liquidity_component = min(1.25, max(0.75, (turnover / 100_000_000) ** 0.2))
     drawdown_adjustment = max(0.55, 1.0 - drawdown * 1.5)
-    risk_adjusted = score_component * liquidity_component * drawdown_adjustment / volatility
+    risk_adjusted = score_component * entry_multiplier * label_multiplier * liquidity_component * drawdown_adjustment / volatility
     return risk_adjusted, {
         "score_component": round(score_component, 4),
+        "entry_timing_multiplier": round(entry_multiplier, 4),
+        "label_multiplier": round(label_multiplier, 4),
         "volatility_unit": round(volatility, 6),
         "drawdown_adjustment": round(drawdown_adjustment, 4),
         "liquidity_component": round(liquidity_component, 4),
@@ -2996,12 +3041,23 @@ def _cap_normalized_weights(
     *,
     target_total: float = 1.0,
 ) -> list[float] | None:
+    return _cap_normalized_weights_by_caps(raw_weights, [cap for _item in raw_weights], target_total=target_total)
+
+
+def _cap_normalized_weights_by_caps(
+    raw_weights: list[float],
+    caps: list[float],
+    *,
+    target_total: float = 1.0,
+) -> list[float] | None:
     if not raw_weights:
         return None
+    if len(raw_weights) != len(caps):
+        raise ValueError("raw_weights and caps length mismatch")
     target = min(max(target_total, 0.0), 1.0)
     if target <= 0:
         return [0.0 for _item in raw_weights]
-    if cap * len(raw_weights) + 1e-9 < target:
+    if sum(caps) + 1e-9 < target:
         return None
     remaining_indices = set(range(len(raw_weights)))
     weights = [0.0 for _item in raw_weights]
@@ -3011,13 +3067,13 @@ def _cap_normalized_weights(
         if raw_total <= 0:
             equal = remaining_weight / len(remaining_indices)
             for index in list(remaining_indices):
-                weights[index] = min(cap, equal)
+                weights[index] = min(caps[index], equal)
             break
         capped_this_round: list[int] = []
         for index in remaining_indices:
             proposed = remaining_weight * raw_weights[index] / raw_total
-            if proposed > cap:
-                weights[index] = cap
+            if proposed > caps[index]:
+                weights[index] = caps[index]
                 capped_this_round.append(index)
         if not capped_this_round:
             for index in remaining_indices:
@@ -3124,8 +3180,40 @@ def _json_time(value: Any) -> Any:
     return value
 
 
+def _allocation_contract_from_portfolio(
+    portfolio: dict[str, Any],
+    *,
+    portfolio_run_id: int | None = None,
+    source_signal_run_id: int | None = None,
+) -> dict[str, Any]:
+    target_weights: dict[str, float] = {}
+    for key in ("items", "satellite_items", "defensive_items"):
+        for item in portfolio.get(key, []):
+            code = str(item.get("code") or "")
+            if code:
+                target_weights[code] = float(item.get("target_weight") or 0.0)
+    return build_allocation_contract(
+        portfolio_run_id=portfolio_run_id,
+        source_signal_run_id=source_signal_run_id,
+        portfolio_mode=str(portfolio.get("portfolio_mode") or PORTFOLIO_MODE_RISK_ON),
+        market_regime=str(portfolio.get("market_regime") or MARKET_REGIME_RISK_ON),
+        target_weights=target_weights,
+        allocation_layers={
+            "primary_weight": portfolio.get("primary_weight", 0.0),
+            "satellite_weight": portfolio.get("satellite_weight", 0.0),
+            "risk_exposure_weight": portfolio.get("risk_exposure_weight", 0.0),
+            "defensive_weight": portfolio.get("defensive_weight", 0.0),
+            "cash_weight": portfolio.get("cash_weight", 0.0),
+        },
+        constraints=dict(portfolio.get("constraints_used") or portfolio.get("constraint_summary") or {}),
+        data_as_of_time=portfolio.get("data_as_of_time") or portfolio.get("quote_time") or portfolio.get("daily_signal_date"),
+    )
+
+
 def _observation_snapshot_is_usable(snapshot: EtfObservationPortfolioSnapshot) -> bool:
     summary = dict(snapshot.summary_json or {})
+    if summary.get("allocation_contract"):
+        return True
     if summary.get("portfolio_mode") == PORTFOLIO_MODE_CASH_WAIT:
         return True
     try:
@@ -3149,17 +3237,22 @@ async def observation_portfolio_from_snapshot(
         )
     ).all()
     primary = [_snapshot_item_out(row) for row in rows if row.item_type == "primary"]
+    satellite = [_snapshot_item_out(row) for row in rows if row.item_type == "satellite"]
     defensive = [_snapshot_item_out(row) for row in rows if row.item_type == "defensive"]
     watch_only = [_snapshot_item_out(row) for row in rows if row.item_type == "watch_only"]
     excluded = [_snapshot_item_out(row) for row in rows if row.item_type == "excluded"]
     summary = dict(snapshot.summary_json or {})
-    weight_sum = round(sum(float(item.get("target_weight") or 0.0) for item in [*primary, *defensive]), 4)
+    weighted_items = [*primary, *satellite, *defensive]
+    weight_sum = round(sum(float(item.get("target_weight") or 0.0) for item in weighted_items), 4)
+    allocation_contract = dict(summary.get("allocation_contract") or {})
+    evidence_status = EVIDENCE_STATUS_WAITING if allocation_contract else EVIDENCE_STATUS_LEGACY
     return {
         "snapshot_id": snapshot.id,
         "generated_at": snapshot.created_at,
         "as_of_date": snapshot.as_of_date,
         "asset_type": snapshot.asset_type,
         "items": primary,
+        "satellite_items": satellite,
         "defensive_items": defensive,
         "watch_only_items": watch_only,
         "excluded_items": excluded,
@@ -3168,7 +3261,14 @@ async def observation_portfolio_from_snapshot(
         "weight_sum": float(summary.get("weight_sum", weight_sum)),
         "portfolio_mode": summary.get("portfolio_mode", PORTFOLIO_MODE_RISK_ON),
         "market_regime": summary.get("market_regime", MARKET_REGIME_RISK_ON),
-        "risk_exposure_weight": float(summary.get("risk_exposure_weight", round(sum(float(item.get("target_weight") or 0.0) for item in primary), 4))),
+        "primary_weight": float(summary.get("primary_weight", round(sum(float(item.get("target_weight") or 0.0) for item in primary), 4))),
+        "satellite_weight": float(summary.get("satellite_weight", round(sum(float(item.get("target_weight") or 0.0) for item in satellite), 4))),
+        "risk_exposure_weight": float(
+            summary.get(
+                "risk_exposure_weight",
+                round(sum(float(item.get("target_weight") or 0.0) for item in [*primary, *satellite]), 4),
+            )
+        ),
         "defensive_weight": float(summary.get("defensive_weight", round(sum(float(item.get("target_weight") or 0.0) for item in defensive), 4))),
         "cash_reason": summary.get("cash_reason"),
         "single_weight_cap": summary.get("single_weight_cap", _PORTFOLIO_SINGLE_WEIGHT_CAP),
@@ -3187,6 +3287,13 @@ async def observation_portfolio_from_snapshot(
         "daily_signal_date": summary.get("daily_signal_date"),
         "portfolio_generated_at": summary.get("portfolio_generated_at") or snapshot.created_at,
         "weight_fill_reason": summary.get("weight_fill_reason"),
+        "allocation_contract": allocation_contract,
+        "evidence_status": evidence_status,
+        "evidence_summary": build_evidence_summary(
+            current_contract=allocation_contract or None,
+            validation_evidence=None if allocation_contract else {"sample_count": 0},
+            caveats=["组合证据只说明当前权重口径是否有同源历史验证，不构成买卖指令。"],
+        ),
     }
 
 
@@ -3197,12 +3304,18 @@ async def persist_observation_portfolio_snapshot(
     source_signal_run_id: int | None,
     validation_run_id: int | None,
 ) -> EtfObservationPortfolioSnapshot:
+    allocation_contract = _allocation_contract_from_portfolio(
+        portfolio,
+        source_signal_run_id=source_signal_run_id,
+    )
     summary = {
         "cash_weight": portfolio.get("cash_weight", 0.0),
         "target_invested_weight": portfolio.get("target_invested_weight", _PORTFOLIO_TOTAL_EXPOSURE_CAP),
         "weight_sum": portfolio.get("weight_sum", 0.0),
         "portfolio_mode": portfolio.get("portfolio_mode", PORTFOLIO_MODE_RISK_ON),
         "market_regime": portfolio.get("market_regime", MARKET_REGIME_RISK_ON),
+        "primary_weight": portfolio.get("primary_weight", 0.0),
+        "satellite_weight": portfolio.get("satellite_weight", 0.0),
         "risk_exposure_weight": portfolio.get("risk_exposure_weight", 0.0),
         "defensive_weight": portfolio.get("defensive_weight", 0.0),
         "cash_reason": portfolio.get("cash_reason"),
@@ -3220,6 +3333,7 @@ async def persist_observation_portfolio_snapshot(
         "daily_signal_date": _json_time(portfolio.get("daily_signal_date")),
         "portfolio_generated_at": _json_time(portfolio.get("portfolio_generated_at")),
         "weight_fill_reason": portfolio.get("weight_fill_reason"),
+        "allocation_contract": allocation_contract,
     }
     snapshot = EtfObservationPortfolioSnapshot(
         status=RUN_STATUS_SUCCESS,
@@ -3229,6 +3343,8 @@ async def persist_observation_portfolio_snapshot(
         asset_type=ASSET_TYPE_ETF,
         config_json={
             "single_weight_cap": _PORTFOLIO_SINGLE_WEIGHT_CAP,
+            "satellite_single_weight_cap": _PORTFOLIO_SATELLITE_SINGLE_WEIGHT_CAP,
+            "satellite_exposure_cap": _PORTFOLIO_SATELLITE_EXPOSURE_CAP,
             "total_exposure_cap": _PORTFOLIO_TOTAL_EXPOSURE_CAP,
             "theme_exposure_cap": _PORTFOLIO_THEME_EXPOSURE_CAP,
             "high_correlation_threshold": _PORTFOLIO_HIGH_CORRELATION,
@@ -3237,8 +3353,15 @@ async def persist_observation_portfolio_snapshot(
     )
     session.add(snapshot)
     await session.flush()
+    summary["allocation_contract"] = _allocation_contract_from_portfolio(
+        portfolio,
+        portfolio_run_id=snapshot.id,
+        source_signal_run_id=source_signal_run_id,
+    )
+    snapshot.summary_json = summary
     for item_type, key in (
         ("primary", "items"),
+        ("satellite", "satellite_items"),
         ("defensive", "defensive_items"),
         ("watch_only", "watch_only_items"),
         ("excluded", "excluded_items"),
@@ -3302,6 +3425,7 @@ async def etf_observation_portfolio(
             "as_of_date": as_of_date or await latest_data_date(session) or date.today(),
             "asset_type": ASSET_TYPE_ETF,
             "items": [],
+            "satellite_items": [],
             "defensive_items": [],
             "watch_only_items": [],
             "excluded_items": [],
@@ -3311,6 +3435,8 @@ async def etf_observation_portfolio(
             "portfolio_mode": PORTFOLIO_MODE_CASH_WAIT,
             "market_regime": MARKET_REGIME_CASH_WAIT,
             "risk_exposure_weight": 0.0,
+            "primary_weight": 0.0,
+            "satellite_weight": 0.0,
             "defensive_weight": 0.0,
             "cash_reason": "暂无 ETF 排序快照，先生成短线排序后再查看资金配置。",
             "single_weight_cap": _PORTFOLIO_SINGLE_WEIGHT_CAP,
@@ -3334,6 +3460,12 @@ async def etf_observation_portfolio(
             "no_trade_instruction": True,
             "note": "暂无 ETF 排序快照，先生成短线排序后再查看观察组合。",
             "methodology": "按最新 ETF 短线排序生成研究参考；当前没有可用排序快照。",
+            "allocation_contract": {},
+            "evidence_status": EVIDENCE_STATUS_WAITING,
+            "evidence_summary": build_evidence_summary(
+                current_contract=None,
+                caveats=["没有 ETF 排序快照，因此没有可验证的组合证据。"],
+            ),
         }
     assets, _total = await cached_signal_assets(
         session,
@@ -3347,19 +3479,23 @@ async def etf_observation_portfolio(
     if validation_by_label:
         assets = [_asset_with_validation_evidence(asset, validation_by_label) for asset in assets]
     primary_candidates: list[ComputedAsset] = []
+    satellite_candidates: list[tuple[ComputedAsset, str | None]] = []
     defensive_candidates: list[tuple[ComputedAsset, str | None]] = []
     watch_only_candidates: list[tuple[ComputedAsset, str | None]] = []
     watch_only_items: list[dict[str, Any]] = []
     excluded_items: list[dict[str, Any]] = []
     for asset in assets:
         group, reason = _portfolio_candidate_group(asset)
-        if group == "primary":
+        if group == PORTFOLIO_LAYER_PRIMARY:
             primary_candidates.append(asset)
+            continue
+        if group == PORTFOLIO_LAYER_SATELLITE:
+            satellite_candidates.append((asset, reason))
             continue
         defensive_reason = _portfolio_defensive_reason(asset, reason)
         if defensive_reason is not None:
             defensive_candidates.append((asset, defensive_reason))
-        elif group == "watch_only":
+        elif group == PORTFOLIO_LAYER_WATCH_ONLY:
             watch_only_candidates.append((asset, reason))
         else:
             excluded_items.append(_portfolio_item(asset, target_weight=0.0, reason=reason))
@@ -3368,6 +3504,7 @@ async def etf_observation_portfolio(
         session,
         [
             *primary_candidates,
+            *[asset for asset, _reason in satellite_candidates],
             *[asset for asset, _reason in defensive_candidates],
             *[asset for asset, _reason in watch_only_candidates],
         ],
@@ -3397,7 +3534,36 @@ async def etf_observation_portfolio(
             watch_only_items.append(_portfolio_item(asset, target_weight=0.0, reason=selection_reason))
             continue
         selected_assets.append(asset)
-        selected_item_types[asset.metadata.code] = "primary"
+        selected_item_types[asset.metadata.code] = PORTFOLIO_LAYER_PRIMARY
+        for theme in asset_themes:
+            theme_counts[theme] = theme_counts.get(theme, 0) + 1
+        if asset_returns:
+            selected_return_maps[asset.metadata.code] = asset_returns
+
+    satellite_selected = 0
+    satellite_limit = max(1, int(_PORTFOLIO_SATELLITE_EXPOSURE_CAP / _PORTFOLIO_SATELLITE_SINGLE_WEIGHT_CAP))
+    for asset, original_reason in satellite_candidates:
+        if len(selected_assets) >= selected_limit or satellite_selected >= satellite_limit:
+            watch_only_items.append(_portfolio_item(asset, target_weight=0.0, reason=original_reason))
+            continue
+        selection_reason = None
+        asset_themes = _portfolio_theme_keys(asset) or ["ETF"]
+        if any(theme_counts.get(theme, 0) >= 2 for theme in asset_themes):
+            selection_reason = "同主题 ETF 已有足够候选，高位观察资产转入观察组。"
+        asset_returns = return_maps.get(asset.metadata.code)
+        if selection_reason is None and asset_returns:
+            for selected_code, selected_returns in selected_return_maps.items():
+                correlation = _correlation(asset_returns, selected_returns)
+                if correlation is not None and correlation >= _PORTFOLIO_HIGH_CORRELATION:
+                    selection_reason = f"与已选 ETF {selected_code} 近60日相关性约 {correlation:.2f}，高位观察资产转入观察组。"
+                    break
+        if selection_reason is not None:
+            watch_only_items.append(_portfolio_item(asset, target_weight=0.0, reason=selection_reason))
+            continue
+        selected_assets.append(asset)
+        selected_fill_reasons[asset.metadata.code] = original_reason or "高位观察但买点仍健康，仅小仓观察。"
+        selected_item_types[asset.metadata.code] = PORTFOLIO_LAYER_SATELLITE
+        satellite_selected += 1
         for theme in asset_themes:
             theme_counts[theme] = theme_counts.get(theme, 0) + 1
         if asset_returns:
@@ -3430,7 +3596,7 @@ async def etf_observation_portfolio(
             continue
         selected_assets.append(asset)
         selected_fill_reasons[asset.metadata.code] = fill_reason
-        selected_item_types[asset.metadata.code] = "defensive"
+        selected_item_types[asset.metadata.code] = PORTFOLIO_LAYER_DEFENSIVE
         for theme in asset_themes:
             theme_counts[theme] = theme_counts.get(theme, 0) + 1
         if asset_returns:
@@ -3440,16 +3606,21 @@ async def etf_observation_portfolio(
         watch_only_items.append(_portfolio_item(asset, target_weight=0.0, reason=original_reason))
 
     raw_weight_rows = [_portfolio_raw_weight(asset) for asset in selected_assets]
+    layer_caps = [
+        _portfolio_layer_cap(selected_item_types.get(asset.metadata.code, PORTFOLIO_LAYER_PRIMARY))
+        for asset in selected_assets
+    ]
     target_exposure = min(
         _PORTFOLIO_TOTAL_EXPOSURE_CAP,
-        len(selected_assets) * _PORTFOLIO_SINGLE_WEIGHT_CAP,
+        sum(layer_caps),
     )
-    normalized_weights = _cap_normalized_weights(
+    normalized_weights = _cap_normalized_weights_by_caps(
         [row[0] for row in raw_weight_rows],
-        _PORTFOLIO_SINGLE_WEIGHT_CAP,
+        layer_caps,
         target_total=target_exposure,
     )
     items: list[dict[str, Any]] = []
+    satellite_items: list[dict[str, Any]] = []
     defensive_items: list[dict[str, Any]] = []
     unavailable_reason: str | None = None
     cash_reason: str | None = None
@@ -3466,7 +3637,9 @@ async def etf_observation_portfolio(
             weight_reason.update(
                 {
                     "final_weight": round(target, 4),
-                    "single_cap_applied": target >= _PORTFOLIO_SINGLE_WEIGHT_CAP - 0.0001,
+                    "single_cap_applied": target >= _portfolio_layer_cap(item_type) - 0.0001,
+                    "single_weight_cap": _portfolio_layer_cap(item_type),
+                    "satellite_exposure_cap": _PORTFOLIO_SATELLITE_EXPOSURE_CAP,
                     "theme_tags": _portfolio_theme_keys(asset) or list(asset.metadata.theme_tags[:2]),
                     "correlation_policy": "高相关候选转入观察组，主组合只保留分散后的候选。",
                     "target_invested_weight": _PORTFOLIO_TOTAL_EXPOSURE_CAP,
@@ -3479,16 +3652,22 @@ async def etf_observation_portfolio(
             if fill_reason:
                 weight_reason["weight_fill_reason"] = fill_reason
             portfolio_item = _portfolio_item(asset, target_weight=target, weight_reason=weight_reason)
-            if item_type == "defensive":
+            if item_type == PORTFOLIO_LAYER_DEFENSIVE:
                 defensive_items.append(portfolio_item)
+            elif item_type == PORTFOLIO_LAYER_SATELLITE:
+                satellite_items.append(portfolio_item)
             else:
                 items.append(portfolio_item)
 
-    weight_sum = round(sum(float(item["target_weight"]) for item in [*items, *defensive_items]), 4)
-    rounding_residual = round(max(0.0, 1.0 - weight_sum), 4) if items or defensive_items else 0.0
-    if defensive_items:
+    weighted_items = [*items, *satellite_items, *defensive_items]
+    weight_sum = round(sum(float(item["target_weight"]) for item in weighted_items), 4)
+    rounding_residual = round(max(0.0, 1.0 - weight_sum), 4) if weighted_items else 0.0
+    if defensive_items and not items and not satellite_items:
         portfolio_mode = PORTFOLIO_MODE_DEFENSIVE
         market_regime = MARKET_REGIME_DEFENSIVE
+    elif satellite_items or defensive_items:
+        portfolio_mode = PORTFOLIO_MODE_NEUTRAL
+        market_regime = MARKET_REGIME_NEUTRAL
     elif items:
         portfolio_mode = PORTFOLIO_MODE_RISK_ON
         market_regime = MARKET_REGIME_RISK_ON
@@ -3499,11 +3678,15 @@ async def etf_observation_portfolio(
         cash_reason = cash_reason or "当前没有可用于配置的 ETF，建议等待。"
     if rounding_residual > 0.0001 and portfolio_mode != PORTFOLIO_MODE_CASH_WAIT:
         cash_reason = cash_reason or "满足条件的 ETF 不足以用满账户资金；剩余资金等待，不硬凑标的。"
-    risk_exposure_weight = round(sum(float(item["target_weight"]) for item in items), 4)
+    primary_weight = round(sum(float(item["target_weight"]) for item in items), 4)
+    satellite_weight = round(sum(float(item["target_weight"]) for item in satellite_items), 4)
+    risk_exposure_weight = round(primary_weight + satellite_weight, 4)
     defensive_weight = round(sum(float(item["target_weight"]) for item in defensive_items), 4)
     constraints_used = {
         "target_invested_weight": _PORTFOLIO_TOTAL_EXPOSURE_CAP,
         "single_weight_cap": _PORTFOLIO_SINGLE_WEIGHT_CAP,
+        "satellite_single_weight_cap": _PORTFOLIO_SATELLITE_SINGLE_WEIGHT_CAP,
+        "satellite_exposure_cap": _PORTFOLIO_SATELLITE_EXPOSURE_CAP,
         "theme_exposure_cap": _PORTFOLIO_THEME_EXPOSURE_CAP,
         "high_correlation_threshold": _PORTFOLIO_HIGH_CORRELATION,
         "minimum_full_exposure_holdings": 4,
@@ -3512,15 +3695,18 @@ async def etf_observation_portfolio(
     }
     risk_summary = {
         "primary_count": len(items),
+        "satellite_count": len(satellite_items),
         "defensive_count": len(defensive_items),
         "watch_only_count": len(watch_only_items),
         "excluded_count": len(excluded_items),
-        "high_volatility_count": sum(1 for item in [*items, *defensive_items] if "高波动" in item.get("risk_reasons", [])),
-        "max_single_weight": max((float(item["target_weight"]) for item in [*items, *defensive_items]), default=0.0),
+        "high_volatility_count": sum(1 for item in weighted_items if "高波动" in item.get("risk_reasons", [])),
+        "max_single_weight": max((float(item["target_weight"]) for item in weighted_items), default=0.0),
     }
     data_reliability_summary = {
         "eligible_candidates": len(primary_candidates),
+        "eligible_satellite_candidates": len(satellite_candidates),
         "selected_candidates": len(items),
+        "selected_satellite_candidates": len(satellite_items),
         "selected_defensive_candidates": len(defensive_items),
         "watch_only_candidates": len(watch_only_items),
         "excluded_candidates": len(excluded_items),
@@ -3531,13 +3717,18 @@ async def etf_observation_portfolio(
     if unavailable_reason:
         note = f"当前不建议动用 ETF 资金：{unavailable_reason}"
         items = []
+        satellite_items = []
         defensive_items = []
         weight_sum = 0.0
+        primary_weight = 0.0
         risk_exposure_weight = 0.0
+        satellite_weight = 0.0
         defensive_weight = 0.0
         rounding_residual = 1.0
-    elif defensive_items:
+    elif portfolio_mode == PORTFOLIO_MODE_DEFENSIVE:
         note = "当前市场不适合全仓进攻，优先用防守 ETF 做资金配置参考；未用满的资金继续等待。"
+    elif portfolio_mode == PORTFOLIO_MODE_NEUTRAL:
+        note = "当前主配置不足，采用主配置、小仓观察和防守资产混合；小仓观察不是强买信号。"
     elif watch_only_items or excluded_items:
         note = "高位/追高/数据不足资产会分到观察或等待分组，不进入主组合权重。" + note
     elif rounding_residual > 0.0001:
@@ -3545,7 +3736,7 @@ async def etf_observation_portfolio(
     quote_time = await session.scalar(select(func.max(EtfIntradayLatestQuote.quote_time)))
     portfolio_generated_at = utcnow()
     data_as_of_time = quote_time or portfolio_generated_at
-    return {
+    portfolio = {
         "as_of_date": as_of_date or run.as_of_date,
         "data_as_of_time": data_as_of_time,
         "quote_time": quote_time,
@@ -3553,6 +3744,7 @@ async def etf_observation_portfolio(
         "portfolio_generated_at": portfolio_generated_at,
         "asset_type": ASSET_TYPE_ETF,
         "items": items,
+        "satellite_items": satellite_items,
         "defensive_items": defensive_items,
         "watch_only_items": watch_only_items[:10],
         "excluded_items": excluded_items[:10],
@@ -3562,6 +3754,8 @@ async def etf_observation_portfolio(
         "portfolio_mode": portfolio_mode,
         "market_regime": market_regime,
         "risk_exposure_weight": risk_exposure_weight,
+        "primary_weight": primary_weight,
+        "satellite_weight": satellite_weight,
         "defensive_weight": defensive_weight,
         "cash_reason": cash_reason,
         "single_weight_cap": _PORTFOLIO_SINGLE_WEIGHT_CAP,
@@ -3569,6 +3763,7 @@ async def etf_observation_portfolio(
         "constraint_summary": {
             **constraints_used,
             "primary_count": len(items),
+            "satellite_count": len(satellite_items),
             "defensive_count": len(defensive_items),
             "watch_only_count": len(watch_only_items),
             "excluded_count": len(excluded_items),
@@ -3577,11 +3772,14 @@ async def etf_observation_portfolio(
         "risk_summary": {
             **risk_summary,
             "single_weight_cap": _PORTFOLIO_SINGLE_WEIGHT_CAP,
+            "satellite_single_weight_cap": _PORTFOLIO_SATELLITE_SINGLE_WEIGHT_CAP,
+            "satellite_exposure_cap": _PORTFOLIO_SATELLITE_EXPOSURE_CAP,
             "total_exposure_cap": _PORTFOLIO_TOTAL_EXPOSURE_CAP,
         },
         "data_reliability_summary": {
             **data_reliability_summary,
             "item_count": len(items),
+            "satellite_item_count": len(satellite_items),
             "defensive_item_count": len(defensive_items),
             "watch_only_item_count": len(watch_only_items[:10]),
             "excluded_item_count": len(excluded_items[:10]),
@@ -3595,3 +3793,11 @@ async def etf_observation_portfolio(
             "若候选不足以用满资金，则部分配置、剩余现金等待；进攻和防守都不足时才全现金等待。这是研究权重，不是交易指令。"
         ),
     }
+    allocation_contract = _allocation_contract_from_portfolio(portfolio, source_signal_run_id=run.id)
+    portfolio["allocation_contract"] = allocation_contract
+    portfolio["evidence_status"] = EVIDENCE_STATUS_WAITING
+    portfolio["evidence_summary"] = build_evidence_summary(
+        current_contract=allocation_contract,
+        caveats=["当前组合权重仍在等待同源历史回放验证。"],
+    )
+    return portfolio

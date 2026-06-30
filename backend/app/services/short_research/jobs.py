@@ -12,7 +12,10 @@ from app.models.entities import EtfPriceHistory
 from app.services.llm import LLMClient
 from app.services.short_etf.data import sync_etf_price_history_from_intraday_snapshot
 from app.services.short_research.advisor import run_advisor_generation
-from app.services.short_research.backtest import run_etf_portfolio_backtest
+from app.services.short_research.backtest import (
+    run_etf_portfolio_backtest,
+    run_etf_strategy_comparison_backtest,
+)
 from app.services.short_research.service import (
     run_etf_label_historical_replay,
     run_etf_observation_portfolio_optimization,
@@ -281,6 +284,25 @@ async def etf_portfolio_backtest_job(
     }
 
 
+async def etf_strategy_comparison_backtest_job(
+    session: AsyncSession,
+    *,
+    days: int = 180,
+    max_assets: int = 180,
+) -> dict[str, Any]:
+    run = await run_etf_strategy_comparison_backtest(session, days=days, max_assets=max_assets)
+    return {
+        "run_id": run.id,
+        "status": run.status,
+        "start_date": run.start_date.isoformat(),
+        "end_date": run.end_date.isoformat(),
+        "best_strategy": (run.metrics_json or {}).get("best_strategy"),
+        "strategy_count": len((run.metrics_json or {}).get("strategies") or []),
+        "data_coverage": dict(run.data_coverage_json or {}),
+        "error_message": run.error_message,
+    }
+
+
 async def post_close_etf_label_outcome_review_job(session: AsyncSession) -> dict[str, Any]:
     return await daily_etf_signal_validation_job(session)
 
@@ -305,6 +327,8 @@ async def post_close_etf_observation_portfolio_job(session: AsyncSession) -> dic
         "weight_sum": summary.get("weight_sum"),
         "unavailable_reason": summary.get("unavailable_reason"),
         "primary_count": constraint_summary.get("primary_count", 0),
+        "satellite_count": constraint_summary.get("satellite_count", 0),
+        "defensive_count": constraint_summary.get("defensive_count", 0),
         "watch_only_count": constraint_summary.get("watch_only_count", 0),
         "excluded_count": constraint_summary.get("excluded_count", 0),
     }

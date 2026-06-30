@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
-from statistics import mean, median
+from statistics import mean, median, pstdev
 from typing import Any
 
 from sqlalchemy import func, select
@@ -21,10 +21,26 @@ from app.models.entities import (
     User,
     utcnow,
 )
+from app.services.etf_research_evidence import (
+    EVIDENCE_STATUS_LEGACY,
+    EVIDENCE_STATUS_SAME_CONTRACT,
+    EVIDENCE_STATUS_WAITING,
+    EXECUTION_MODEL_DAILY_CLOSE,
+    FEE_MODEL_SIMPLE_RATE,
+    build_evidence_summary,
+    build_replay_contract,
+)
 from app.services.portfolio_allocation import (
+    PORTFOLIO_LAYER_DEFENSIVE,
+    PORTFOLIO_LAYER_PRIMARY,
+    PORTFOLIO_LAYER_SATELLITE,
+    PORTFOLIO_LAYER_WATCH_ONLY,
     PORTFOLIO_MODE_CASH_WAIT,
     PORTFOLIO_MODE_DEFENSIVE,
+    PORTFOLIO_MODE_NEUTRAL,
     PORTFOLIO_MODE_RISK_ON,
+    PORTFOLIO_SATELLITE_EXPOSURE_CAP,
+    PORTFOLIO_SATELLITE_SINGLE_WEIGHT_CAP,
     PORTFOLIO_SINGLE_WEIGHT_CAP,
 )
 from app.services.risk_alerts import (
@@ -46,19 +62,21 @@ from app.services.short_research.service import (
     CONCLUSION_REJECT,
     ComputedAsset,
     PricePoint,
-    _cap_normalized_weights,
+    _cap_normalized_weights_by_caps,
     _metadata_from_etf_row,
     _portfolio_candidate_group,
     _portfolio_defensive_priority,
     _portfolio_defensive_reason,
+    _portfolio_layer_cap,
     _portfolio_raw_weight,
     compute_asset_for_replay_from_series,
 )
 
 BACKTEST_RULE_VERSION = "etf_portfolio_backtest_v1"
 BACKTEST_RANKING_VERSION = "short_research_daily_replay_v1"
-BACKTEST_ALLOCATION_VERSION = "etf_portfolio_allocation_v2_partial_cash"
+BACKTEST_ALLOCATION_VERSION = "etf_portfolio_allocation_v3_layered"
 BACKTEST_EXIT_RULE_VERSION = "risk_alerts_daily_v1"
+STRATEGY_COMPARISON_RULE_VERSION = "etf_strategy_comparison_v1"
 DEFAULT_BACKTEST_DAYS = 180
 DEFAULT_BACKTEST_FEE_RATE = 0.001
 DEFAULT_BACKTEST_INITIAL_CASH = 10000.0
@@ -138,6 +156,22 @@ async def _create_backtest_run(
     )
     session.add(run)
     await session.flush()
+    replay_contract = build_replay_contract(
+        replay_run_id=run.id,
+        signal_rule_version=BACKTEST_RANKING_VERSION,
+        allocation_version=BACKTEST_ALLOCATION_VERSION,
+        execution_model=EXECUTION_MODEL_DAILY_CLOSE,
+        fee_model=FEE_MODEL_SIMPLE_RATE,
+        start_date=start_date,
+        end_date=end_date,
+        data_cutoff=end_date,
+    )
+    run.config_json = {
+        **dict(run.config_json or {}),
+        "replay_contract": replay_contract,
+        "contract_hash": replay_contract["contract_hash"],
+        "evidence_only": True,
+    }
     return run
 
 
@@ -274,25 +308,40 @@ def _build_daily_assets(
 
 def _generate_target_weights(assets: list[ComputedAsset]) -> tuple[dict[str, float], str, dict[str, Any]]:
     primary: list[ComputedAsset] = []
+    satellite: list[tuple[ComputedAsset, str | None]] = []
     defensive: list[tuple[ComputedAsset, str]] = []
     excluded = 0
     watch_only = 0
     for asset in assets:
         group, reason = _portfolio_candidate_group(asset)
-        if group == "primary":
+        if group == PORTFOLIO_LAYER_PRIMARY:
             primary.append(asset)
+            continue
+        if group == PORTFOLIO_LAYER_SATELLITE:
+            satellite.append((asset, reason))
             continue
         defensive_reason = _portfolio_defensive_reason(asset, reason)
         if defensive_reason is not None:
             defensive.append((asset, defensive_reason))
             continue
-        if group == "watch_only":
+        if group == PORTFOLIO_LAYER_WATCH_ONLY:
             watch_only += 1
         else:
             excluded += 1
 
     selected = primary[:MAX_BACKTEST_HOLDINGS]
-    item_types = {asset.metadata.code: "primary" for asset in selected}
+    item_types = {asset.metadata.code: PORTFOLIO_LAYER_PRIMARY for asset in selected}
+    satellite_limit = max(1, int(PORTFOLIO_SATELLITE_EXPOSURE_CAP / PORTFOLIO_SATELLITE_SINGLE_WEIGHT_CAP))
+    satellite_selected = 0
+    for asset, _reason in satellite:
+        if len(selected) >= MAX_BACKTEST_HOLDINGS or satellite_selected >= satellite_limit:
+            watch_only += 1
+            continue
+        if asset.metadata.code in item_types:
+            continue
+        selected.append(asset)
+        item_types[asset.metadata.code] = PORTFOLIO_LAYER_SATELLITE
+        satellite_selected += 1
     if len(selected) < MIN_WEIGHTABLE_HOLDINGS:
         for asset, _reason in sorted(
             defensive,
@@ -301,7 +350,7 @@ def _generate_target_weights(assets: list[ComputedAsset]) -> tuple[dict[str, flo
             if asset.metadata.code in item_types:
                 continue
             selected.append(asset)
-            item_types[asset.metadata.code] = "defensive"
+            item_types[asset.metadata.code] = PORTFOLIO_LAYER_DEFENSIVE
             if len(selected) >= MIN_WEIGHTABLE_HOLDINGS:
                 break
 
@@ -312,6 +361,7 @@ def _generate_target_weights(assets: list[ComputedAsset]) -> tuple[dict[str, flo
             {
                 "cash_reason": "没有满足进攻或防守约束的 ETF，按现金等待处理。",
                 "primary_count": len(primary),
+                "satellite_count": len(satellite),
                 "defensive_count": len(defensive),
                 "watch_only_count": watch_only,
                 "excluded_count": excluded,
@@ -321,10 +371,11 @@ def _generate_target_weights(assets: list[ComputedAsset]) -> tuple[dict[str, flo
         )
 
     raw_rows = [_portfolio_raw_weight(asset) for asset in selected]
-    target_exposure = min(1.0, len(selected) * PORTFOLIO_SINGLE_WEIGHT_CAP)
-    normalized = _cap_normalized_weights(
+    layer_caps = [_portfolio_layer_cap(item_types.get(asset.metadata.code, PORTFOLIO_LAYER_PRIMARY)) for asset in selected]
+    target_exposure = min(1.0, sum(layer_caps))
+    normalized = _cap_normalized_weights_by_caps(
         [row[0] for row in raw_rows],
-        PORTFOLIO_SINGLE_WEIGHT_CAP,
+        layer_caps,
         target_total=target_exposure,
     )
     if normalized is None:
@@ -334,23 +385,36 @@ def _generate_target_weights(assets: list[ComputedAsset]) -> tuple[dict[str, flo
             {
                 "cash_reason": "单只 30% 上限和候选数量约束不可行，按现金等待处理。",
                 "primary_count": len(primary),
+                "satellite_count": len(satellite),
                 "defensive_count": len(defensive),
                 "target_exposure": 0.0,
                 "cash_weight": 1.0,
             },
         )
     weights = {asset.metadata.code: weight for asset, weight in zip(selected, normalized, strict=True)}
-    mode = PORTFOLIO_MODE_DEFENSIVE if any(item_types[code] == "defensive" for code in weights) else PORTFOLIO_MODE_RISK_ON
+    has_primary = any(item_types[code] == PORTFOLIO_LAYER_PRIMARY for code in weights)
+    has_satellite = any(item_types[code] == PORTFOLIO_LAYER_SATELLITE for code in weights)
+    has_defensive = any(item_types[code] == PORTFOLIO_LAYER_DEFENSIVE for code in weights)
+    if has_defensive and not has_primary and not has_satellite:
+        mode = PORTFOLIO_MODE_DEFENSIVE
+    elif has_satellite or has_defensive:
+        mode = PORTFOLIO_MODE_NEUTRAL
+    else:
+        mode = PORTFOLIO_MODE_RISK_ON
     return (
         weights,
         mode,
         {
             "primary_count": len(primary),
+            "satellite_count": len(satellite),
             "defensive_count": len(defensive),
             "watch_only_count": watch_only,
             "excluded_count": excluded,
             "selected_codes": list(weights),
             "selected_item_types": item_types,
+            "layer_caps": {asset.metadata.code: cap for asset, cap in zip(selected, layer_caps, strict=True)},
+            "satellite_single_weight_cap": PORTFOLIO_SATELLITE_SINGLE_WEIGHT_CAP,
+            "satellite_exposure_cap": PORTFOLIO_SATELLITE_EXPOSURE_CAP,
             "target_exposure": round(sum(weights.values()), 4),
             "cash_weight": round(max(0.0, 1.0 - sum(weights.values())), 4),
             "cash_reason": "合格候选不足以用满资金，剩余现金等待。" if sum(weights.values()) < 0.999 else None,
@@ -1049,6 +1113,26 @@ async def backtest_detail_payload(session: AsyncSession, run: EtfPortfolioBackte
 
 
 def backtest_summary_payload(run: EtfPortfolioBacktestRun) -> dict[str, Any]:
+    replay_contract = dict((run.config_json or {}).get("replay_contract") or {})
+    evidence_status = (
+        EVIDENCE_STATUS_SAME_CONTRACT
+        if replay_contract and run.status == "success"
+        else EVIDENCE_STATUS_WAITING
+        if replay_contract
+        else EVIDENCE_STATUS_LEGACY
+    )
+    evidence_summary = build_evidence_summary(
+        current_contract=replay_contract or None,
+        validation_evidence={
+            "contract_hash": replay_contract.get("contract_hash"),
+            "sample_count": 20 if run.status == "success" and replay_contract else 0,
+        }
+        if replay_contract
+        else None,
+        backtest_metrics=dict(run.metrics_json or {}),
+        caveats=list(run.caveats_json or []),
+    )
+    evidence_summary["evidence_status"] = evidence_status
     return {
         "id": run.id,
         "status": run.status,
@@ -1062,5 +1146,290 @@ def backtest_summary_payload(run: EtfPortfolioBacktestRun) -> dict[str, Any]:
         "benchmark": dict(run.benchmark_json or {}),
         "data_coverage": dict(run.data_coverage_json or {}),
         "caveats": list(run.caveats_json or []),
+        "replay_contract": replay_contract,
+        "evidence_status": evidence_status,
+        "evidence_summary": evidence_summary,
+        "error_message": run.error_message,
+    }
+
+
+def _series_price_map(series_by_code: dict[str, list[PricePoint]]) -> dict[str, dict[date, float]]:
+    return {code: {point.point_date: point.value for point in series} for code, series in series_by_code.items()}
+
+
+def _positive_momentum_assets(assets: list[ComputedAsset], *, limit: int = 4) -> list[ComputedAsset]:
+    filtered = [
+        asset
+        for asset in assets
+        if isinstance(asset.metrics.get("return_20d"), (int, float))
+        and float(asset.metrics.get("return_20d") or 0.0) > 0
+        and asset.conclusion not in {CONCLUSION_REJECT, CONCLUSION_INSUFFICIENT}
+    ]
+    return sorted(filtered, key=lambda item: (float(item.metrics.get("return_20d") or 0.0), item.total_score), reverse=True)[
+        :limit
+    ]
+
+
+def _comparison_target_weights(strategy_key: str, assets: list[ComputedAsset]) -> tuple[dict[str, float], str]:
+    if strategy_key == "current_workbench":
+        weights, mode, _context = _generate_target_weights(assets)
+        return weights, mode
+    if strategy_key == "equal_weight_benchmark":
+        benchmark_assets = [asset for asset in assets if asset.metadata.code in BENCHMARK_CODES][:4]
+        selected = benchmark_assets or assets[:4]
+        if not selected:
+            return {}, PORTFOLIO_MODE_CASH_WAIT
+        weight = round(min(1.0 / len(selected), PORTFOLIO_SINGLE_WEIGHT_CAP), 4)
+        return {asset.metadata.code: weight for asset in selected}, PORTFOLIO_MODE_RISK_ON
+    selected = _positive_momentum_assets(assets, limit=4)
+    if strategy_key == "momentum_regime_cash_filter":
+        broad_returns = [
+            float(asset.metrics.get("return_20d") or 0.0)
+            for asset in assets
+            if asset.metadata.code in BENCHMARK_CODES and isinstance(asset.metrics.get("return_20d"), (int, float))
+        ]
+        if broad_returns and mean(broad_returns) <= 0:
+            return {}, PORTFOLIO_MODE_CASH_WAIT
+    if not selected:
+        return {}, PORTFOLIO_MODE_CASH_WAIT
+    if strategy_key == "momentum_volatility_weighted" or strategy_key == "momentum_regime_cash_filter":
+        raw = [1.0 / max(0.006, float(asset.metrics.get("volatility_20d") or 0.025)) for asset in selected]
+        weights = _cap_normalized_weights_by_caps(
+            raw,
+            [PORTFOLIO_SINGLE_WEIGHT_CAP for _asset in selected],
+            target_total=min(1.0, len(selected) * PORTFOLIO_SINGLE_WEIGHT_CAP),
+        )
+        return (
+            {asset.metadata.code: weight for asset, weight in zip(selected, weights or [], strict=False)},
+            PORTFOLIO_MODE_RISK_ON,
+        )
+    weight = round(min(1.0 / len(selected), PORTFOLIO_SINGLE_WEIGHT_CAP), 4)
+    return {asset.metadata.code: weight for asset in selected}, PORTFOLIO_MODE_RISK_ON
+
+
+def _comparison_metrics(
+    equity_curve: list[dict[str, Any]],
+    *,
+    initial_cash: float,
+    turnover: float,
+    total_fees: float,
+    trade_count: int,
+    cash_wait_days: int,
+) -> dict[str, Any]:
+    if not equity_curve:
+        return {}
+    returns = [
+        equity_curve[index]["equity"] / equity_curve[index - 1]["equity"] - 1.0
+        for index in range(1, len(equity_curve))
+        if equity_curve[index - 1]["equity"] > 0
+    ]
+    final_equity = float(equity_curve[-1]["equity"])
+    max_drawdown = min(float(item.get("drawdown") or 0.0) for item in equity_curve)
+    volatility = pstdev(returns) * (252**0.5) if len(returns) >= 2 else None
+    cumulative_return = final_equity / initial_cash - 1.0
+    return {
+        "cumulative_return": round(cumulative_return, 4),
+        "final_equity": _round_money(final_equity),
+        "max_drawdown": round(max_drawdown, 4),
+        "annualized_volatility": round(volatility, 4) if volatility is not None else None,
+        "return_drawdown_ratio": round(cumulative_return / abs(max_drawdown), 4) if max_drawdown < 0 else None,
+        "turnover": round(turnover / initial_cash, 4),
+        "total_fees": _round_money(total_fees),
+        "trade_count": trade_count,
+        "cash_wait_days": cash_wait_days,
+        "trading_days": len(equity_curve),
+    }
+
+
+def _simulate_comparison_strategy(
+    strategy_key: str,
+    *,
+    metadata_by_code: dict[str, ShortResearchAsset],
+    series_by_code: dict[str, list[PricePoint]],
+    trading_dates: list[date],
+    initial_cash: float,
+    fee_rate: float,
+) -> dict[str, Any]:
+    price_map = _series_price_map(series_by_code)
+    equity = initial_cash
+    high_watermark = initial_cash
+    previous_weights: dict[str, float] = {}
+    total_fees = 0.0
+    turnover = 0.0
+    trade_count = 0
+    cash_wait_days = 0
+    curve: list[dict[str, Any]] = []
+    for index, trade_date in enumerate(trading_dates):
+        if index > 0:
+            previous_date = trading_dates[index - 1]
+            day_return = 0.0
+            for code, weight in previous_weights.items():
+                previous_price = price_map.get(code, {}).get(previous_date)
+                current_price = price_map.get(code, {}).get(trade_date)
+                if previous_price and current_price:
+                    day_return += weight * (current_price / previous_price - 1.0)
+            equity *= 1.0 + day_return
+        assets = _build_daily_assets(metadata_by_code, series_by_code, trade_date)
+        target_weights, portfolio_mode = _comparison_target_weights(strategy_key, assets)
+        weight_change = sum(abs(target_weights.get(code, 0.0) - previous_weights.get(code, 0.0)) for code in set(target_weights) | set(previous_weights))
+        if weight_change > 0.0001:
+            fee = equity * weight_change * fee_rate
+            equity -= fee
+            total_fees += fee
+            turnover += equity * weight_change
+            trade_count += 1
+        previous_weights = target_weights
+        if not target_weights:
+            cash_wait_days += 1
+        high_watermark = max(high_watermark, equity)
+        drawdown = equity / high_watermark - 1.0 if high_watermark > 0 else 0.0
+        curve.append(
+            {
+                "date": trade_date.isoformat(),
+                "equity": _round_money(equity),
+                "drawdown": round(drawdown, 4),
+                "cash_weight": round(max(0.0, 1.0 - sum(target_weights.values())), 4),
+                "portfolio_mode": portfolio_mode,
+            }
+        )
+    return {
+        "strategy_key": strategy_key,
+        "strategy_label": {
+            "current_workbench": "当前 ETF 工作台策略",
+            "momentum_top_n": "动量 Top N 等权",
+            "momentum_volatility_weighted": "动量 + 波动率权重",
+            "momentum_regime_cash_filter": "动量 + 大盘过滤",
+            "equal_weight_benchmark": "宽基等权对照",
+        }.get(strategy_key, strategy_key),
+        "metrics": _comparison_metrics(
+            curve,
+            initial_cash=initial_cash,
+            turnover=turnover,
+            total_fees=total_fees,
+            trade_count=trade_count,
+            cash_wait_days=cash_wait_days,
+        ),
+        "equity_curve": curve[:: max(1, len(curve) // 120)] if len(curve) > 120 else curve,
+        "caveats": ["策略对照使用日线收盘价复盘，不模拟盘中成交和券商盘口。"],
+    }
+
+
+async def run_etf_strategy_comparison_backtest(
+    session: AsyncSession,
+    *,
+    user: User | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    days: int = DEFAULT_BACKTEST_DAYS,
+    initial_cash: float | None = None,
+    fee_rate: float = DEFAULT_BACKTEST_FEE_RATE,
+    max_assets: int = 180,
+) -> EtfPortfolioBacktestRun:
+    effective_end = end_date or await session.scalar(select(func.max(EtfPriceHistory.trade_date))) or date.today()
+    effective_start = start_date or (effective_end - timedelta(days=days))
+    capital = float(initial_cash or (user.etf_trading_capital if user else DEFAULT_BACKTEST_INITIAL_CASH) or DEFAULT_BACKTEST_INITIAL_CASH)
+    run = EtfPortfolioBacktestRun(
+        user_id=user.id if user else None,
+        status="running",
+        start_date=effective_start,
+        end_date=effective_end,
+        asset_type=ASSET_TYPE_ETF,
+        rule_version=STRATEGY_COMPARISON_RULE_VERSION,
+        ranking_version=BACKTEST_RANKING_VERSION,
+        allocation_version=BACKTEST_ALLOCATION_VERSION,
+        exit_rule_version=BACKTEST_EXIT_RULE_VERSION,
+        initial_cash=capital,
+        fee_rate=fee_rate,
+        config_json={"run_kind": "strategy_comparison", "max_assets": max_assets},
+        metrics_json={},
+        benchmark_json={},
+        data_coverage_json={},
+        caveats_json=[],
+    )
+    session.add(run)
+    await session.commit()
+    try:
+        metadata = await _load_etf_universe(session, max_assets=max_assets)
+        if len(metadata) < 20:
+            raise ValueError("ETF 历史池太小，无法做策略对照")
+        metadata_by_code = {item.code: item for item in metadata}
+        series_by_code = await _load_price_series(
+            session,
+            codes=list(metadata_by_code),
+            from_date=effective_start - timedelta(days=260),
+            to_date=effective_end,
+        )
+        trading_dates = _trading_dates(series_by_code, effective_start, effective_end)
+        if len(trading_dates) < 30:
+            raise ValueError("可用交易日少于 30 天，暂不生成策略对照")
+        strategies = [
+            _simulate_comparison_strategy(
+                strategy_key,
+                metadata_by_code=metadata_by_code,
+                series_by_code=series_by_code,
+                trading_dates=trading_dates,
+                initial_cash=capital,
+                fee_rate=fee_rate,
+            )
+            for strategy_key in (
+                "current_workbench",
+                "momentum_top_n",
+                "momentum_volatility_weighted",
+                "momentum_regime_cash_filter",
+                "equal_weight_benchmark",
+            )
+        ]
+        best = max(
+            strategies,
+            key=lambda item: float((item.get("metrics") or {}).get("return_drawdown_ratio") or -999.0),
+        )
+        run.status = "success"
+        run.finished_at = utcnow()
+        run.metrics_json = {
+            "run_kind": "strategy_comparison",
+            "strategy_count": len(strategies),
+            "best_strategy": best["strategy_key"],
+            "strategies": strategies,
+        }
+        run.data_coverage_json = {
+            "start_date": trading_dates[0].isoformat(),
+            "end_date": trading_dates[-1].isoformat(),
+            "trading_days": len(trading_dates),
+            "asset_count": len(metadata),
+            "priced_asset_count": len(series_by_code),
+        }
+        run.caveats_json = [
+            "策略对照只用于比较不同规则在同一历史数据中的表现，不代表未来收益。",
+            "当前工作台策略和页面组合使用同一目标权重生成逻辑。",
+        ]
+        await session.commit()
+        await session.refresh(run)
+        return run
+    except Exception as exc:
+        return await mark_backtest_failed(session, run, str(exc) or "ETF 策略对照失败")
+
+
+async def latest_strategy_comparison_run(session: AsyncSession) -> EtfPortfolioBacktestRun | None:
+    return await session.scalar(
+        select(EtfPortfolioBacktestRun)
+        .where(EtfPortfolioBacktestRun.asset_type == ASSET_TYPE_ETF, EtfPortfolioBacktestRun.rule_version == STRATEGY_COMPARISON_RULE_VERSION)
+        .order_by(EtfPortfolioBacktestRun.finished_at.desc(), EtfPortfolioBacktestRun.id.desc())
+    )
+
+
+def strategy_comparison_payload(run: EtfPortfolioBacktestRun) -> dict[str, Any]:
+    return {
+        "id": run.id,
+        "status": run.status,
+        "started_at": run.started_at,
+        "finished_at": run.finished_at,
+        "start_date": run.start_date,
+        "end_date": run.end_date,
+        "initial_cash": run.initial_cash,
+        "fee_rate": run.fee_rate,
+        "data_coverage": dict(run.data_coverage_json or {}),
+        "caveats": list(run.caveats_json or []),
+        "strategies": list((run.metrics_json or {}).get("strategies") or []),
+        "best_strategy": (run.metrics_json or {}).get("best_strategy"),
         "error_message": run.error_message,
     }

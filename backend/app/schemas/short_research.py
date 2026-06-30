@@ -145,6 +145,9 @@ class ShortResearchAssetOut(BaseModel):
     advisor_report: ShortResearchAdvisorReportOut | None = None
     validation_evidence: dict[str, Any] = Field(default_factory=dict)
     observation_portfolio: dict[str, Any] = Field(default_factory=dict)
+    research_signal_contract: dict[str, Any] = Field(default_factory=dict)
+    evidence_status: str = "等待验证"
+    evidence_summary: dict[str, Any] = Field(default_factory=dict)
 
 
 class ShortResearchAssetListOut(BaseModel):
@@ -200,6 +203,7 @@ class ShortResearchObservationPortfolioOut(BaseModel):
     as_of_date: date
     asset_type: str
     items: list[ShortResearchObservationPortfolioItemOut]
+    satellite_items: list[ShortResearchObservationPortfolioItemOut] = Field(default_factory=list)
     defensive_items: list[ShortResearchObservationPortfolioItemOut] = Field(default_factory=list)
     watch_only_items: list[ShortResearchObservationPortfolioItemOut] = Field(default_factory=list)
     excluded_items: list[ShortResearchObservationPortfolioItemOut] = Field(default_factory=list)
@@ -208,6 +212,8 @@ class ShortResearchObservationPortfolioOut(BaseModel):
     weight_sum: float = 0.0
     portfolio_mode: str = "risk_on"
     market_regime: str = "risk_on"
+    primary_weight: float = 0.0
+    satellite_weight: float = 0.0
     risk_exposure_weight: float = 0.0
     defensive_weight: float = 0.0
     cash_reason: str | None = None
@@ -229,6 +235,9 @@ class ShortResearchObservationPortfolioOut(BaseModel):
     daily_signal_date: date | None = None
     portfolio_generated_at: datetime | None = None
     weight_fill_reason: str | None = None
+    allocation_contract: dict[str, Any] = Field(default_factory=dict)
+    evidence_status: str = "等待验证"
+    evidence_summary: dict[str, Any] = Field(default_factory=dict)
 
 
 class EtfPortfolioBacktestRequest(BaseModel):
@@ -253,6 +262,9 @@ class EtfPortfolioBacktestRunSummaryOut(BaseModel):
     benchmark: dict[str, Any] = Field(default_factory=dict)
     data_coverage: dict[str, Any] = Field(default_factory=dict)
     caveats: list[str] = Field(default_factory=list)
+    replay_contract: dict[str, Any] = Field(default_factory=dict)
+    evidence_status: str = "等待验证"
+    evidence_summary: dict[str, Any] = Field(default_factory=dict)
     error_message: str | None = None
 
 
@@ -315,3 +327,28 @@ class EtfPortfolioBacktestDetailOut(EtfPortfolioBacktestRunSummaryOut):
 
 class EtfPortfolioBacktestListOut(BaseModel):
     items: list[EtfPortfolioBacktestRunSummaryOut] = Field(default_factory=list)
+
+
+class EtfStrategyComparisonRequest(BaseModel):
+    start_date: date | None = None
+    end_date: date | None = None
+    days: int = Field(default=180, ge=60, le=1000)
+    initial_cash: float | None = Field(default=None, gt=0)
+    fee_rate: float = Field(default=0.001, ge=0, le=0.02)
+    max_assets: int = Field(default=180, ge=20, le=500)
+
+
+class EtfStrategyComparisonOut(BaseModel):
+    id: int
+    status: str
+    started_at: datetime
+    finished_at: datetime | None = None
+    start_date: date
+    end_date: date
+    initial_cash: float
+    fee_rate: float
+    data_coverage: dict[str, Any] = Field(default_factory=dict)
+    caveats: list[str] = Field(default_factory=list)
+    strategies: list[dict[str, Any]] = Field(default_factory=list)
+    best_strategy: str | None = None
+    error_message: str | None = None

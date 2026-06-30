@@ -62,3 +62,10 @@ def test_short_research_layer_does_not_import_tracking_or_notification() -> None
     )
     for path in (ROOT / "short_research").glob("*.py"):
         _assert_no_forbidden_imports(path, forbidden)
+
+
+def test_workflows_are_allowed_to_orchestrate_multiple_domains() -> None:
+    workflow_text = "\n".join(_text(path) for path in (ROOT / "workflows").glob("*.py"))
+
+    assert "app.services.short_research" in workflow_text
+    assert "app.services.tracked_positions" in workflow_text

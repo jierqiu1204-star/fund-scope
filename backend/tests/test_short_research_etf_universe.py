@@ -16,6 +16,9 @@ from app.models.entities import (
 )
 from app.services.short_research import service as short_research_service
 from app.services.short_research.universe import EtfUniverseRecord, refresh_etf_universe
+from app.services.workflows.short_research_data import (
+    sync_short_research_data_with_tracking_priority,
+)
 
 
 async def _seed_etf_history(
@@ -533,7 +536,7 @@ async def test_dynamic_etf_sync_batches_and_prioritizes_tracked_etfs(app, monkey
         monkeypatch.setenv("SHORT_RESEARCH_ETF_SYNC_BATCH_SIZE", "2")
         monkeypatch.setattr(short_research_service, "sync_etf_price_history", fake_etf_sync)
 
-        result = await short_research_service.sync_short_research_data(
+        result = await sync_short_research_data_with_tracking_priority(
             session,
             from_date=date(2026, 6, 1),
             to_date=date(2026, 6, 5),

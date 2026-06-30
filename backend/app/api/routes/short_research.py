@@ -21,6 +21,8 @@ from app.schemas.short_research import (
     EtfPortfolioBacktestRequest,
     EtfSignalValidationItemOut,
     EtfSignalValidationRunOut,
+    EtfStrategyComparisonOut,
+    EtfStrategyComparisonRequest,
     ShortResearchAdvisorReportOut,
     ShortResearchAdvisorRunRequest,
     ShortResearchAssetDetailOut,
@@ -33,13 +35,21 @@ from app.schemas.short_research import (
     ShortResearchSignalRunRequest,
     ShortResearchStatusOut,
 )
+from app.services.etf_research_evidence import (
+    EVIDENCE_STATUS_WAITING,
+    build_evidence_summary,
+    build_research_signal_contract,
+)
 from app.services.short_research.advisor import latest_reports_by_asset, run_advisor_generation
 from app.services.short_research.backtest import (
     backtest_detail_payload,
     backtest_summary_payload,
     get_backtest_run,
+    latest_strategy_comparison_run,
     list_backtest_runs,
     run_etf_portfolio_backtest,
+    run_etf_strategy_comparison_backtest,
+    strategy_comparison_payload,
 )
 from app.services.short_research.service import (
     VALIDATION_MODE_FORWARD_LIVE,
@@ -86,6 +96,7 @@ def _asset_out(
     asset: ComputedAsset,
     advisor_report: Any | None = None,
     *,
+    signal_run: ShortResearchSignalRun | None = None,
     validation_evidence: dict[str, Any] | None = None,
     observation_portfolio: dict[str, Any] | None = None,
 ) -> ShortResearchAssetOut:
@@ -94,6 +105,39 @@ def _asset_out(
         or asset.rationale.get("theme_profile")
         or {}
     )
+    signal_contract: dict[str, Any] = {}
+    evidence_summary: dict[str, Any] = {}
+    evidence_status = EVIDENCE_STATUS_WAITING
+    if asset.metadata.asset_type == "etf":
+        signal_rule_version = None
+        if signal_run is not None:
+            signal_rule_version = (signal_run.config_json or {}).get("rule_version") or (
+                signal_run.summary_json or {}
+            ).get("rule_version")
+        source_data_time = (
+            asset.metrics.get("quote_time")
+            or asset.metrics.get("data_as_of_time")
+            or asset.metrics.get("latest_quote_time")
+            or asset.latest_date
+        )
+        signal_contract = build_research_signal_contract(
+            asset_type=asset.metadata.asset_type,
+            asset_code=asset.metadata.code,
+            signal_run_id=signal_run.id if signal_run else None,
+            signal_date=signal_run.as_of_date if signal_run else asset.latest_date,
+            score=asset.total_score,
+            observation_label=asset.conclusion,
+            entry_timing_label=asset.entry_timing_label,
+            data_reliability=str(asset.metrics.get("data_reliability") or asset.metrics.get("score_source") or "verified"),
+            source_data_time=source_data_time,
+            rule_version=str(signal_rule_version) if signal_rule_version else "short_research_signal_v1",
+        )
+        evidence_summary = build_evidence_summary(
+            current_contract=signal_contract,
+            validation_evidence=validation_evidence,
+            caveats=["研究证据只用于复盘标签有效性，不代表未来收益。"],
+        )
+        evidence_status = str(evidence_summary.get("evidence_status") or EVIDENCE_STATUS_WAITING)
     return ShortResearchAssetOut(
         asset_type=asset.metadata.asset_type,
         code=asset.metadata.code,
@@ -125,6 +169,9 @@ def _asset_out(
         advisor_report=_advisor_report_out(advisor_report),
         validation_evidence=validation_evidence or {},
         observation_portfolio=observation_portfolio or {},
+        research_signal_contract=signal_contract,
+        evidence_status=evidence_status,
+        evidence_summary=evidence_summary,
     )
 
 
@@ -183,6 +230,7 @@ def _portfolio_contexts(portfolio: dict[str, Any]) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for section, status in (
         ("items", "included"),
+        ("satellite_items", "satellite"),
         ("defensive_items", "defensive"),
         ("watch_only_items", "watch_only"),
         ("excluded_items", "excluded"),
@@ -289,6 +337,7 @@ async def _signal_run_out(
             _asset_out(
                 item,
                 advisor_reports.get((item.metadata.asset_type, item.metadata.code)),
+                signal_run=run,
             )
             for item in assets
         ],
@@ -353,6 +402,7 @@ async def list_short_research_assets(
             _asset_out(
                 item,
                 advisor_reports.get((item.metadata.asset_type, item.metadata.code)),
+                signal_run=run,
                 validation_evidence=_validation_for_asset(item, validation_by_label),
                 observation_portfolio=portfolio_context_by_code.get(item.metadata.code, {}),
             )
@@ -417,6 +467,49 @@ async def get_etf_portfolio_backtest(
     if run is None:
         raise HTTPException(status_code=404, detail="未找到 ETF 组合回测记录")
     return await backtest_detail_payload(session, run)
+
+
+@router.post("/etf-strategy-comparisons", response_model=EtfStrategyComparisonOut)
+async def start_etf_strategy_comparison(
+    payload: EtfStrategyComparisonRequest | None = Body(default=None),
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(require_approved_user),
+) -> dict[str, Any]:
+    payload = payload or EtfStrategyComparisonRequest()
+    run = await run_etf_strategy_comparison_backtest(
+        session,
+        user=user,
+        start_date=payload.start_date,
+        end_date=payload.end_date,
+        days=payload.days,
+        initial_cash=payload.initial_cash,
+        fee_rate=payload.fee_rate,
+        max_assets=payload.max_assets,
+    )
+    return strategy_comparison_payload(run)
+
+
+@router.get("/etf-strategy-comparisons/latest", response_model=EtfStrategyComparisonOut | None)
+async def get_latest_etf_strategy_comparison(
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = Depends(require_approved_user),
+) -> dict[str, Any] | None:
+    run = await latest_strategy_comparison_run(session)
+    if run is None:
+        return None
+    return strategy_comparison_payload(run)
+
+
+@router.get("/etf-strategy-comparisons/{run_id}", response_model=EtfStrategyComparisonOut)
+async def get_etf_strategy_comparison(
+    run_id: int,
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = Depends(require_approved_user),
+) -> dict[str, Any]:
+    run = await get_backtest_run(session, run_id)
+    if run is None or run.rule_version != "etf_strategy_comparison_v1":
+        raise HTTPException(status_code=404, detail="未找到 ETF 策略对照记录")
+    return strategy_comparison_payload(run)
 
 
 @router.post("/validation/run", response_model=EtfSignalValidationRunOut)
@@ -502,6 +595,7 @@ async def get_short_research_asset_detail(
         asset=_asset_out(
             asset,
             advisor_reports.get((asset.metadata.asset_type, asset.metadata.code)),
+            signal_run=run,
             validation_evidence=_validation_for_asset(asset, validation_by_label),
             observation_portfolio=portfolio_context_by_code.get(asset.metadata.code, {}),
         ),

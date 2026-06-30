@@ -169,6 +169,8 @@ async def test_etf_portfolio_backtest_api_create_list_and_detail(client, app) ->
     created_body = created.json()
     assert created_body["status"] == "success"
     assert created_body["metrics"]["trade_count"] > 0
+    assert created_body["replay_contract"]["contract_hash"]
+    assert created_body["evidence_status"] == "同源已验证"
 
     listed = await client.get("/api/short-research/etf-backtests?limit=5")
     assert listed.status_code == 200
