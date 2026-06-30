@@ -71,6 +71,12 @@ from app.services.short_research.service import (
 router = APIRouter(prefix="/api/short-research", tags=["short-research"])
 
 
+def _csv_values(raw: str | None) -> set[str]:
+    if not raw:
+        return set()
+    return {item.strip() for item in raw.split(",") if item.strip()}
+
+
 def _advisor_report_out(report: Any | None) -> ShortResearchAdvisorReportOut | None:
     if report is None:
         return None
@@ -359,6 +365,8 @@ async def list_short_research_assets(
     sort: str = Query(default="score"),
     q: str | None = Query(default=None),
     universe: str = Query(default="default"),
+    observation_labels: str | None = Query(default=None),
+    entry_labels: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_db_session),
@@ -379,6 +387,8 @@ async def list_short_research_assets(
             universe=universe,
             limit=limit,
             offset=offset,
+            observation_labels=_csv_values(observation_labels),
+            entry_labels=_csv_values(entry_labels),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

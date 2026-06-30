@@ -38,6 +38,17 @@ QUOTE_PRICE_DIFF_PCT_TOLERANCE = 0.003
 QUOTE_PRICE_DIFF_ABS_TOLERANCE = 0.003
 EASTMONEY_PAGE_SIZE = 5000
 EASTMONEY_MAX_PAGES = 30
+EASTMONEY_RETRY_ATTEMPTS = 3
+EASTMONEY_REQUEST_HEADERS = {
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+    "Connection": "keep-alive",
+    "Referer": "https://quote.eastmoney.com/",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+    ),
+}
 WATCH_REFRESH_SECONDS = 60
 PAGE_POLL_SECONDS = 30
 TOP_SIGNAL_LIMIT = 20
@@ -449,14 +460,16 @@ async def _fetch_akshare_provider(fetcher: Any | None = None) -> ProviderQuoteRe
     started = datetime.now(ASIA_SHANGHAI)
     now = started
     use_default_provider = fetcher is None
-    if use_default_provider and _PROVIDER_BACKOFF_UNTIL is not None and now < _PROVIDER_BACKOFF_UNTIL:
-        wait_seconds = int((_PROVIDER_BACKOFF_UNTIL - now).total_seconds())
-        return ProviderQuoteResult(
-            QUOTE_SOURCE_AKSHARE,
-            {},
-            f"ETF 行情源正在退避，约 {wait_seconds} 秒后再试。",
-            _elapsed_ms(started),
-        )
+    if use_default_provider and _PROVIDER_BACKOFF_UNTIL is not None:
+        if now < _PROVIDER_BACKOFF_UNTIL:
+            wait_seconds = max(1, int((_PROVIDER_BACKOFF_UNTIL - now).total_seconds()) + 1)
+            return ProviderQuoteResult(
+                QUOTE_SOURCE_AKSHARE,
+                {},
+                f"ETF 行情源正在退避，约 {wait_seconds} 秒后再试。",
+                _elapsed_ms(started),
+            )
+        _PROVIDER_BACKOFF_UNTIL = None
     effective_fetcher = fetcher or ak.fund_etf_spot_em
     try:
         frame = await asyncio.wait_for(asyncio.to_thread(effective_fetcher), timeout=QUOTE_PROVIDER_TIMEOUT_SECONDS)
@@ -505,12 +518,26 @@ async def _fetch_eastmoney_provider() -> ProviderQuoteResult:
     rows: list[dict[str, Any]] = []
     total: int | None = None
     try:
-        async with httpx.AsyncClient(timeout=QUOTE_PROVIDER_TIMEOUT_SECONDS) as client:
+        timeout = httpx.Timeout(QUOTE_PROVIDER_TIMEOUT_SECONDS * 2, connect=QUOTE_PROVIDER_TIMEOUT_SECONDS)
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            headers=EASTMONEY_REQUEST_HEADERS,
+            follow_redirects=True,
+        ) as client:
             for page in range(1, EASTMONEY_MAX_PAGES + 1):
                 params = dict(base_params)
                 params["pn"] = str(page)
-                response = await client.get(url, params=params)
-                response.raise_for_status()
+                response = None
+                for attempt in range(EASTMONEY_RETRY_ATTEMPTS):
+                    try:
+                        response = await client.get(url, params=params)
+                        response.raise_for_status()
+                        break
+                    except Exception:
+                        if attempt == EASTMONEY_RETRY_ATTEMPTS - 1:
+                            raise
+                if response is None:
+                    break
                 payload = response.json()
                 data = ((payload or {}).get("data") or {})
                 page_rows = data.get("diff") or []

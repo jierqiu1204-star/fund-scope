@@ -135,6 +135,24 @@ async def require_approved_user(user: User = Depends(get_current_user)) -> User:
     return user
 
 
+async def get_optional_current_user(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    session: AsyncSession = Depends(get_db_session),
+) -> User | None:
+    if not authorization:
+        return None
+    return await get_current_user(request, authorization=authorization, session=session)
+
+
+async def optional_approved_user(user: User | None = Depends(get_optional_current_user)) -> User | None:
+    if user is None:
+        return None
+    if not user.is_approved:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="账号等待管理员批准")
+    return user
+
+
 async def require_super_admin(user: User = Depends(require_approved_user)) -> User:
     if not user.is_super_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")

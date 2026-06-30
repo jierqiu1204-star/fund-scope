@@ -83,6 +83,18 @@ const labelFilterGroups: Array<{
   { key: "tracking", title: "持仓状态", options: ["我已持仓", "触发提醒", "仅网页提示"] }
 ];
 
+function appendLabelFilterParams(params: URLSearchParams, filters: LabelFilterState) {
+  if (filters.observation.length) {
+    params.set("observation_labels", filters.observation.join(","));
+  }
+  if (filters.entry.length) {
+    params.set("entry_labels", filters.entry.join(","));
+  }
+  if (filters.tracking.length) {
+    params.set("tracking_states", filters.tracking.join(","));
+  }
+}
+
 const assetModes: Record<
   AssetType,
   {
@@ -646,45 +658,6 @@ function itemEntryTimingDisplay(item: RankedAssetItem, marketStatus?: string | n
     label: "数据不足",
     reason: "等待新鲜盘中行情；日线买点只能作为参考。",
   };
-}
-
-function labelFilterKeyForItem(item: RankedAssetItem) {
-  return `${getItemAssetType(item)}-${toEtfItemCode(item)}`;
-}
-
-function trackedFilterStates(position: TrackedPosition | undefined): string[] {
-  if (!position) {
-    return [];
-  }
-  const states = ["我已持仓"];
-  if (position.exit_signal.alert_type) {
-    states.push("触发提醒");
-  }
-  if (position.current_snapshot.display_only_reason || position.exit_signal.email_eligible === false) {
-    states.push("仅网页提示");
-  }
-  return states;
-}
-
-function assetMatchesLabelFilters(
-  item: RankedAssetItem,
-  filters: LabelFilterState,
-  trackedByAsset: Map<string, TrackedPosition>,
-  marketStatus?: string | null,
-) {
-  if (filters.observation.length && !filters.observation.includes(itemConclusion(item))) {
-    return false;
-  }
-  if (filters.entry.length && !filters.entry.includes(itemEntryTimingDisplay(item, marketStatus).label)) {
-    return false;
-  }
-  if (filters.tracking.length) {
-    const states = trackedFilterStates(trackedByAsset.get(labelFilterKeyForItem(item)));
-    if (!filters.tracking.some((filter) => states.includes(filter))) {
-      return false;
-    }
-  }
-  return true;
 }
 
 function shortResearchThemeTags(item: RankedAssetItem): string[] {
@@ -1311,6 +1284,7 @@ function ShortTermClient() {
   const [sort, setSort] = useState<SortKey>("score");
   const [keyword, setKeyword] = useState("");
   const [labelFilters, setLabelFilters] = useState<LabelFilterState>(emptyLabelFilters);
+  const [labelFilterExpanded, setLabelFilterExpanded] = useState(false);
   const [assetOffset, setAssetOffset] = useState(0);
   const [selected, setSelected] = useState<{ asset_type: "fund" | "etf"; code: string } | null>(null);
   const [mobileTab, setMobileTab] = useState<MobileTab>("ranking");
@@ -1336,6 +1310,7 @@ function ShortTermClient() {
   const mode = assetModes[assetType];
   const sortOptions = assetType === "etf" ? etfSortOptions : baseSortOptions;
   const isEtfTradingPollWindow = assetType === "etf" && isAshareTradingPollWindow(pollClock);
+  const labelFilterSignature = useMemo(() => JSON.stringify(labelFilters), [labelFilters]);
 
   const status = useQuery({
     queryKey: ["short-research", "status"],
@@ -1343,12 +1318,13 @@ function ShortTermClient() {
   });
 
   const assets = useQuery({
-    queryKey: ["short-research", "assets", assetType, theme, sort, keyword, assetOffset],
+    queryKey: ["short-research", "assets", assetType, theme, sort, keyword, assetOffset, labelFilterSignature],
     queryFn: async () => {
       if (assetType === "etf") {
         const params = new URLSearchParams();
         params.set("limit", String(ASSET_PAGE_SIZE));
         params.set("offset", String(assetOffset));
+        appendLabelFilterParams(params, labelFilters);
         if (theme !== "all") {
           params.set("theme", theme);
         }
@@ -1361,6 +1337,7 @@ function ShortTermClient() {
       params.set("asset_type", assetType);
       params.set("limit", String(ASSET_PAGE_SIZE));
       params.set("offset", String(assetOffset));
+      appendLabelFilterParams(params, labelFilters);
       if (theme !== "all") {
         params.set("theme", theme);
       }
@@ -1454,8 +1431,8 @@ function ShortTermClient() {
     }
     return map;
   }, [activeTracked]);
-  const labelFilterSignature = useMemo(() => JSON.stringify(labelFilters), [labelFilters]);
   const activeLabelFilterCount = labelFilters.observation.length + labelFilters.entry.length + labelFilters.tracking.length;
+  const showLabelFilterDetails = labelFilterExpanded || activeLabelFilterCount > 0;
   const selectedLabelChips = useMemo(
     () =>
       labelFilterGroups.flatMap((group) =>
@@ -1467,10 +1444,7 @@ function ShortTermClient() {
       ),
     [labelFilters],
   );
-  const visibleAssets = useMemo(
-    () => rawAssets.filter((item) => assetMatchesLabelFilters(item, labelFilters, trackedByAsset, etfLiveData?.market_status)),
-    [rawAssets, labelFilters, trackedByAsset, etfLiveData?.market_status],
-  );
+  const visibleAssets = rawAssets;
 
   useEffect(() => {
     const timer = window.setInterval(() => setPollClock(Date.now()), 60_000);
@@ -2216,30 +2190,39 @@ function ShortTermClient() {
         >
           清空
         </button>
+        <button
+          type="button"
+          className="rounded-full border border-border bg-white px-3 py-1.5 text-xs font-semibold text-ink/60 transition hover:border-ink focus:outline-none focus:ring-2 focus:ring-accent/20"
+          onClick={() => setLabelFilterExpanded((value) => !value)}
+        >
+          {showLabelFilterDetails ? "收起标签" : "展开标签"}
+        </button>
       </div>
-      <div className="mt-4 grid gap-3 md:grid-cols-3">
-        {labelFilterGroups.map((group) => (
-          <fieldset key={group.key} className="rounded-[8px] border border-border bg-paper/50 p-3">
-            <legend className="px-1 text-xs font-semibold text-ink">{group.title}</legend>
-            <div className="mt-2 grid gap-2">
-              {group.options.map((option) => {
-                const checked = labelFilters[group.key].includes(option);
-                return (
-                  <label key={option} className="flex cursor-pointer items-center gap-2 text-xs text-ink/70">
-                    <input
-                      type="checkbox"
-                      className="h-3.5 w-3.5 rounded border-border text-ink focus:ring-2 focus:ring-accent/20"
-                      checked={checked}
-                      onChange={() => toggleLabelFilter(group.key, option)}
-                    />
-                    <span className={checked ? "font-semibold text-ink" : ""}>{option}</span>
-                  </label>
-                );
-              })}
-            </div>
-          </fieldset>
-        ))}
-      </div>
+      {showLabelFilterDetails ? (
+        <div className="mt-4 grid gap-3 md:grid-cols-3">
+          {labelFilterGroups.map((group) => (
+            <fieldset key={group.key} className="rounded-[8px] border border-border bg-paper/50 p-3">
+              <legend className="px-1 text-xs font-semibold text-ink">{group.title}</legend>
+              <div className="mt-2 grid gap-2">
+                {group.options.map((option) => {
+                  const checked = labelFilters[group.key].includes(option);
+                  return (
+                    <label key={option} className="flex cursor-pointer items-center gap-2 text-xs text-ink/70">
+                      <input
+                        type="checkbox"
+                        className="h-3.5 w-3.5 rounded border-border text-ink focus:ring-2 focus:ring-accent/20"
+                        checked={checked}
+                        onChange={() => toggleLabelFilter(group.key, option)}
+                      />
+                      <span className={checked ? "font-semibold text-ink" : ""}>{option}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            </fieldset>
+          ))}
+        </div>
+      ) : null}
       {selectedLabelChips.length ? (
         <div className="mt-3 flex flex-wrap gap-2">
           {selectedLabelChips.map((chip) => (
@@ -3293,8 +3276,8 @@ function ShortTermClient() {
       </div>
 
       <div className="hidden gap-6 lg:grid lg:grid-cols-[minmax(360px,0.76fr)_minmax(0,1.24fr)] lg:items-start xl:grid-cols-[minmax(380px,0.72fr)_minmax(0,1.28fr)]">
-        <Panel className="rounded-[12px] lg:sticky lg:top-24 lg:flex lg:max-h-[calc(100vh-7rem)] lg:flex-col lg:overflow-hidden">
-          <div className="-mx-5 -mt-5 shrink-0 border-b border-border bg-white px-5 pb-4 pt-5">
+        <Panel className="rounded-[12px] lg:sticky lg:top-24 lg:max-h-[calc(100vh-7rem)] lg:overflow-y-auto">
+          <div className="-mx-5 -mt-5 border-b border-border bg-white px-5 pb-4 pt-5">
             <div className="mb-5 flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
               <SectionKicker
                 eyebrow="买入观察榜单"
@@ -3352,7 +3335,7 @@ function ShortTermClient() {
             </div>
           </div>
 
-          <div className="mt-5 min-h-0 flex-1 space-y-3 overflow-y-auto pr-1 lg:pb-1">
+          <div className="mt-5 min-h-[520px] space-y-3 pr-1 lg:pb-1">
             {assets.isLoading ? (
               <div className="rounded-[10px] border border-dashed border-ink/20 p-6 text-sm text-ink/55">
                 正在读取短线研究池...

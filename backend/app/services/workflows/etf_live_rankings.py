@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.defaults.short_research import ASSET_TYPE_ETF
-from app.models.entities import ShortResearchSignalItem, TrackedPosition
+from app.models.entities import ShortResearchSignalItem, TrackedPosition, TrackedPositionAlert
 from app.schemas.etf_quotes import EtfLiveRankingItemOut, EtfLiveRankingListOut
 from app.services import market_data
 from app.services.intraday_etf import service as intraday_quotes
@@ -39,6 +39,11 @@ LIVE_LABEL_HEALTHY_PULLBACK = "健康回踩"
 LIVE_LABEL_TREND_CONTINUATION = "趋势延续"
 LIVE_LABEL_CHASE_WARNING = "冲高别追"
 _INTRADAY_RANKING_DATA_INSUFFICIENT_REASON = "暂无新鲜盘中行情，暂不做盘中加分。"
+TRACKING_STATE_ACTIVE = "我已持仓"
+TRACKING_STATE_ALERT = "触发提醒"
+TRACKING_STATE_WEB_ONLY = "仅网页提示"
+ENTRY_STATE_CLOSED = "休市"
+ENTRY_STATE_STALE = "行情滞后"
 
 
 def _float_or_none(value: Any) -> float | None:
@@ -106,6 +111,63 @@ def _signal_item_theme_values(signal_item: ShortResearchSignalItem | None) -> se
     return {item for item in values if item}
 
 
+async def _tracking_states_by_code(session: AsyncSession, user_id: int | None) -> dict[str, set[str]]:
+    if user_id is None:
+        return {}
+    positions = (
+        await session.scalars(
+            select(TrackedPosition).where(
+                TrackedPosition.user_id == user_id,
+                TrackedPosition.asset_type == ASSET_TYPE_ETF,
+                TrackedPosition.status == "active",
+            )
+        )
+    ).all()
+    states_by_code = {position.asset_code: {TRACKING_STATE_ACTIVE} for position in positions}
+    position_code_by_id = {position.id: position.asset_code for position in positions}
+    if not position_code_by_id:
+        return states_by_code
+    alerts = (
+        await session.scalars(
+            select(TrackedPositionAlert).where(
+                TrackedPositionAlert.tracked_position_id.in_(list(position_code_by_id))
+            ).order_by(
+                TrackedPositionAlert.tracked_position_id.asc(),
+                TrackedPositionAlert.created_at.desc(),
+            )
+        )
+    ).all()
+    seen_position_ids: set[int] = set()
+    for alert in alerts:
+        if alert.tracked_position_id in seen_position_ids:
+            continue
+        seen_position_ids.add(alert.tracked_position_id)
+        code = position_code_by_id.get(alert.tracked_position_id)
+        if code is None:
+            continue
+        states = states_by_code.setdefault(code, {TRACKING_STATE_ACTIVE})
+        if alert.alert_type:
+            states.add(TRACKING_STATE_ALERT)
+        if alert.suppression_status in {"web_only", "suppressed"} or alert.email_status == "skipped":
+            states.add(TRACKING_STATE_WEB_ONLY)
+    return states_by_code
+
+
+def _entry_filter_labels(
+    *,
+    live_label: str,
+    daily_label: str,
+    is_open: bool,
+    quote_is_stale: bool,
+) -> set[str]:
+    labels = {live_label, daily_label}
+    if not is_open:
+        labels.add(ENTRY_STATE_CLOSED)
+    elif quote_is_stale:
+        labels.add(ENTRY_STATE_STALE)
+    return {label for label in labels if label}
+
+
 async def _build_research_watchlist(session: AsyncSession) -> WatchlistResult:
     watchlist = await build_watchlist(session)
     watch_map = {item.etf_code: item for item in watchlist.items}
@@ -162,8 +224,15 @@ async def live_rankings(
     offset: int = 0,
     q: str | None = None,
     theme: str | None = None,
+    observation_labels: set[str] | None = None,
+    entry_labels: set[str] | None = None,
+    tracking_states: set[str] | None = None,
+    user_id: int | None = None,
 ) -> EtfLiveRankingListOut:
     safe_limit, safe_offset = _to_pagination(limit, offset)
+    observation_filters = observation_labels or set()
+    entry_filters = entry_labels or set()
+    tracking_filters = tracking_states or set()
     state = intraday_quotes.current_market_state()
     watchlist = await _build_research_watchlist(session)
     watch_codes = [item.etf_code for item in watchlist.items]
@@ -202,6 +271,7 @@ async def live_rankings(
     selected_theme = theme.strip() if theme else None
     if selected_theme in {"", "all", "全部"}:
         selected_theme = None
+    tracking_states_by_code = await _tracking_states_by_code(session, user_id) if tracking_filters else {}
 
     scored_rows: list[dict[str, Any]] = []
     for watch_item in watchlist.items:
@@ -214,6 +284,8 @@ async def live_rankings(
         base_score = _float_or_none(signal_item.total_score) if signal_item is not None else None
         base_rank = watch_item.rank
         conclusion = signal_item.conclusion if signal_item is not None else None
+        if observation_filters and (conclusion is None or conclusion not in observation_filters):
+            continue
         quote = latest_quotes.get(watch_item.etf_code)
         daily_entry_timing_label, daily_entry_timing_reason = _daily_entry_timing(signal_item)
 
@@ -256,6 +328,19 @@ async def live_rankings(
                         live_total_score = _clamp_score(live_total_score - 2)
                         intraday_adjustment_score = (intraday_adjustment_score or 0.0) - 2.0
                         score_contribution_reasons.append("盘中成交额明显偏低，流动性扣 2 分。")
+
+        if entry_filters and not (
+            entry_filters
+            & _entry_filter_labels(
+                live_label=live_label,
+                daily_label=daily_entry_timing_label,
+                is_open=is_open,
+                quote_is_stale=market_data.is_etf_quote_stale(quote.quote_time if quote is not None else None, now),
+            )
+        ):
+            continue
+        if tracking_filters and not (tracking_filters & tracking_states_by_code.get(watch_item.etf_code, set())):
+            continue
 
         scored_rows.append(
             {

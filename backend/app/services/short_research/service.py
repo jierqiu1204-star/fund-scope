@@ -535,6 +535,8 @@ async def cached_signal_assets(
     universe: str = UNIVERSE_DEFAULT,
     limit: int | None = None,
     offset: int = 0,
+    observation_labels: set[str] | None = None,
+    entry_labels: set[str] | None = None,
 ) -> tuple[list[ComputedAsset], int]:
     if universe not in {UNIVERSE_DEFAULT, UNIVERSE_ALL, UNIVERSE_ILLIQUID}:
         raise ValueError("ETF universe 只支持 default、all、illiquid")
@@ -548,6 +550,8 @@ async def cached_signal_assets(
     metadata_by_key = await _metadata_map_for_signal_items(session, items)
     code_set = set(codes or [])
     keyword = q.strip().lower() if q else None
+    observation_filters = observation_labels or set()
+    entry_filters = entry_labels or set()
     assets: list[ComputedAsset] = []
     for item in items:
         metadata = metadata_by_key.get((item.asset_type, item.asset_code)) or _metadata(
@@ -559,6 +563,10 @@ async def cached_signal_assets(
         if keyword and keyword not in metadata.code.lower() and keyword not in metadata.name.lower():
             continue
         asset = _cached_asset_from_signal_item(item, metadata, as_of_date=run.as_of_date)
+        if observation_filters and asset.conclusion not in observation_filters:
+            continue
+        if entry_filters and asset.entry_timing_label not in entry_filters:
+            continue
         if item.asset_type == ASSET_TYPE_ETF and universe == UNIVERSE_DEFAULT and not bool(
             asset.metrics.get("default_display_eligible", True)
         ):

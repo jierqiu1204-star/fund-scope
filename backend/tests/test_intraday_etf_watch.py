@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
+import httpx
 import pandas as pd
 import pytest
 from sqlalchemy import func, select
@@ -19,6 +20,7 @@ from app.models.entities import (
     User,
     utcnow,
 )
+from app.services.intraday_etf import service as intraday_service
 from app.services.intraday_etf.jobs import intraday_etf_watch_job
 from app.services.intraday_etf.service import (
     ASIA_SHANGHAI,
@@ -357,6 +359,55 @@ async def test_live_rankings_keeps_intraday_entry_timing_when_daily_cache_is_hig
 
 
 @pytest.mark.asyncio
+async def test_live_rankings_filters_labels_before_pagination_and_keeps_daily_entry_when_closed(
+    client, app, monkeypatch
+) -> None:
+    run_id = await _seed_signal_run(
+        app,
+        count=3,
+        conclusions=[CONCLUSION_WATCH, CONCLUSION_HIGH_WATCH, CONCLUSION_WATCH],
+        total_scores=[100.0, 99.0, 98.0],
+    )
+    now = datetime(2026, 6, 12, 16, 0, 0)
+    monkeypatch.setattr(
+        "app.services.intraday_etf.service.current_market_state",
+        lambda: MarketState("closed", "after_close", now.replace(tzinfo=ASIA_SHANGHAI)),
+    )
+    async with app.state.db.session() as session:
+        healthy_item = await session.scalar(
+            select(ShortResearchSignalItem).where(
+                ShortResearchSignalItem.run_id == run_id,
+                ShortResearchSignalItem.asset_code == "510002",
+            )
+        )
+        assert healthy_item is not None
+        healthy_item.metrics_json = {
+            **dict(healthy_item.metrics_json or {}),
+            "entry_timing_label": "健康回踩",
+            "entry_timing_reason": "休市后仍按日线健康回踩筛选。",
+        }
+        await session.commit()
+
+    high_response = await client.get(
+        "/api/etf-quotes/live-rankings?limit=1&observation_labels=高位观察"
+    )
+    assert high_response.status_code == 200
+    high_body = high_response.json()
+    assert high_body["total"] == 1
+    assert high_body["items"][0]["etf_code"] == "510001"
+
+    entry_response = await client.get(
+        "/api/etf-quotes/live-rankings?limit=1&entry_labels=健康回踩"
+    )
+    assert entry_response.status_code == 200
+    entry_body = entry_response.json()
+    assert entry_body["total"] == 1
+    assert entry_body["items"][0]["etf_code"] == "510002"
+    assert entry_body["items"][0]["live_entry_timing_label"] == "数据不足"
+    assert entry_body["items"][0]["daily_entry_timing_label"] == "健康回踩"
+
+
+@pytest.mark.asyncio
 async def test_live_rankings_marks_data_insufficient_without_faking_quote(client, app) -> None:
     await _seed_signal_run(app, count=1)
     response = await client.get("/api/etf-quotes/live-rankings")
@@ -526,6 +577,88 @@ async def test_eastmoney_provider_fetches_all_pages(monkeypatch) -> None:
 
     assert set(result.quotes) == {"510000", "510001", "510002"}
     assert [call["pn"] for call in calls] == ["1", "2"]
+
+
+@pytest.mark.asyncio
+async def test_eastmoney_provider_retries_transient_disconnect(monkeypatch) -> None:
+    quote_timestamp = int(datetime(2026, 6, 25, 14, 57, 0, tzinfo=ASIA_SHANGHAI).timestamp())
+    calls: list[str] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "data": {
+                    "total": 1,
+                    "diff": [
+                        {
+                            "f12": "510000",
+                            "f14": "ETF510000",
+                            "f2": 1.0,
+                            "f3": 0.5,
+                            "f5": 1000,
+                            "f6": 1_000_000,
+                            "f124": quote_timestamp,
+                        }
+                    ],
+                }
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeAsyncClient:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def get(self, _url: str, *, params: dict[str, str]) -> FakeResponse:
+            calls.append(params["pn"])
+            if len(calls) == 1:
+                raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
+            return FakeResponse()
+
+    monkeypatch.setattr("app.services.intraday_etf.service.httpx.AsyncClient", FakeAsyncClient)
+
+    result = await _fetch_eastmoney_provider()
+
+    assert result.error is None
+    assert set(result.quotes) == {"510000"}
+    assert calls == ["1", "1"]
+
+
+@pytest.mark.asyncio
+async def test_akshare_provider_clears_expired_backoff(monkeypatch) -> None:
+    monkeypatch.setattr(
+        intraday_service,
+        "_PROVIDER_BACKOFF_UNTIL",
+        datetime.now(ASIA_SHANGHAI) - timedelta(seconds=1),
+    )
+    monkeypatch.setattr(intraday_service, "_PROVIDER_FAILURE_COUNT", 2)
+
+    def fake_fetcher() -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "code": "510000",
+                    "latest_price": 1.0,
+                    "quote_time": "2026-06-25 14:57:00",
+                }
+            ]
+        )
+
+    monkeypatch.setattr(intraday_service.ak, "fund_etf_spot_em", fake_fetcher)
+
+    result = await intraday_service._fetch_akshare_provider()
+
+    assert result.error is None
+    assert set(result.quotes) == {"510000"}
+    assert intraday_service._PROVIDER_BACKOFF_UNTIL is None
+
 
 @pytest.mark.asyncio
 async def test_intraday_watch_reports_watch_codes_missing_from_provider(app) -> None:

@@ -435,6 +435,44 @@ async def test_assets_endpoint_uses_cached_signal_items_and_paginates(client, ap
 
 
 @pytest.mark.asyncio
+async def test_assets_endpoint_filters_labels_before_pagination(client, app, monkeypatch) -> None:
+    await _seed_cached_etf_signals(app, count=4)
+    async with app.state.db.session() as session:
+        high_item = await session.scalar(
+            select(ShortResearchSignalItem).where(ShortResearchSignalItem.asset_code == "562003")
+        )
+        assert high_item is not None
+        high_item.conclusion = "高位观察"
+        high_item.metrics_json = {
+            **dict(high_item.metrics_json or {}),
+            "entry_timing_label": "冲高别追",
+            "entry_timing_reason": "测试高位冲高，不应混入健康回踩筛选。",
+        }
+        await session.commit()
+
+    async def fail_full_recompute(*_args: Any, **_kwargs: Any) -> list[Any]:
+        raise AssertionError("assets endpoint should filter cached signal items")
+
+    monkeypatch.setattr(short_research_service, "list_computed_assets", fail_full_recompute)
+
+    observed = await client.get(
+        "/api/short-research/assets?asset_type=etf&limit=2&observation_labels=高位观察"
+    )
+    assert observed.status_code == 200
+    observed_body = observed.json()
+    assert observed_body["total"] == 1
+    assert [item["code"] for item in observed_body["items"]] == ["562003"]
+
+    entry = await client.get(
+        "/api/short-research/assets?asset_type=etf&limit=2&entry_labels=健康回踩"
+    )
+    assert entry.status_code == 200
+    entry_body = entry.json()
+    assert entry_body["total"] == 3
+    assert all(item["entry_timing_label"] == "健康回踩" for item in entry_body["items"])
+
+
+@pytest.mark.asyncio
 async def test_observation_portfolio_uses_cached_signals(client, app, monkeypatch) -> None:
     await _seed_cached_etf_signals(app, count=4)
 
