@@ -16,6 +16,8 @@ from app.services.short_research.backtest import (
     run_etf_portfolio_backtest,
     run_etf_strategy_comparison_backtest,
 )
+from app.services.short_research.healthcheck import run_etf_strategy_healthcheck
+from app.services.short_research.optimized_allocation import run_etf_optimized_allocation
 from app.services.short_research.service import (
     run_etf_label_historical_replay,
     run_etf_observation_portfolio_optimization,
@@ -300,6 +302,36 @@ async def etf_strategy_comparison_backtest_job(
         "strategy_count": len((run.metrics_json or {}).get("strategies") or []),
         "data_coverage": dict(run.data_coverage_json or {}),
         "error_message": run.error_message,
+    }
+
+
+async def etf_strategy_healthcheck_job(session: AsyncSession) -> dict[str, Any]:
+    snapshot = await run_etf_strategy_healthcheck(session)
+    summary = dict(snapshot.summary_json or {})
+    return {
+        "snapshot_id": snapshot.id,
+        "status": snapshot.status,
+        "as_of_date": snapshot.as_of_date.isoformat(),
+        "conclusion": snapshot.conclusion,
+        "evidence_status": snapshot.evidence_status,
+        "weak_label_count": int(summary.get("weak_label_count", 0)),
+        "full_window_days": summary.get("full_window_days"),
+        "recent_window_days": summary.get("recent_window_days"),
+    }
+
+
+async def etf_optimized_allocation_job(session: AsyncSession) -> dict[str, Any]:
+    snapshot = await run_etf_optimized_allocation(session)
+    summary = dict(snapshot.summary_json or {})
+    data_window = dict(snapshot.data_window_json or {})
+    return {
+        "snapshot_id": snapshot.id,
+        "status": snapshot.status,
+        "as_of_date": snapshot.as_of_date.isoformat(),
+        "method_set": snapshot.method_set,
+        "unavailable_reason": snapshot.unavailable_reason,
+        "method_count": int(summary.get("method_count", 0)),
+        "eligible_count": int(data_window.get("candidate_count", 0)),
     }
 
 

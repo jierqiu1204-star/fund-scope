@@ -59,6 +59,10 @@ from app.services.risk_alerts import (
     ETF_TRAILING_PROFIT_START_VOL_MULTIPLIER,
     HARD_STOP_LOSS_PCT,
 )
+from app.services.short_research.optimized_allocation import (
+    OptimizerCandidate,
+    optimized_method_weights,
+)
 from app.services.short_research.service import (
     CONCLUSION_INSUFFICIENT,
     CONCLUSION_REJECT,
@@ -1705,6 +1709,30 @@ def _positive_momentum_assets(assets: list[ComputedAsset], *, limit: int = 4) ->
     ]
 
 
+def _optimizer_candidates_from_assets(assets: list[ComputedAsset]) -> list[OptimizerCandidate]:
+    candidates: list[OptimizerCandidate] = []
+    for asset in assets:
+        if asset.conclusion in {CONCLUSION_REJECT, CONCLUSION_INSUFFICIENT}:
+            continue
+        if not isinstance(asset.metrics.get("return_20d"), (int, float)):
+            continue
+        if float(asset.metrics.get("return_20d") or 0.0) <= 0:
+            continue
+        theme_profile = dict(asset.metrics.get("theme_profile") or asset.rationale.get("theme_profile") or {})
+        candidates.append(
+            OptimizerCandidate(
+                code=asset.metadata.code,
+                name=asset.metadata.name,
+                score=float(asset.total_score),
+                theme_group=str(theme_profile.get("theme_group") or "unknown"),
+                data_date=asset.latest_date,
+                expected_return=float(asset.metrics.get("return_20d") or 0.0),
+                volatility=float(asset.metrics.get("volatility_20d") or 0.025),
+            )
+        )
+    return sorted(candidates, key=lambda item: item.score, reverse=True)[:10]
+
+
 def _comparison_target_weights(strategy_key: str, assets: list[ComputedAsset]) -> tuple[dict[str, float], str]:
     if strategy_key == "current_workbench":
         weights, mode, _context = _generate_target_weights(assets)
@@ -1716,6 +1744,10 @@ def _comparison_target_weights(strategy_key: str, assets: list[ComputedAsset]) -
             return {}, PORTFOLIO_MODE_CASH_WAIT
         weight = round(min(1.0 / len(selected), PORTFOLIO_SINGLE_WEIGHT_CAP), 4)
         return {asset.metadata.code: weight for asset in selected}, PORTFOLIO_MODE_RISK_ON
+    if strategy_key in {"optimized_min_volatility", "optimized_risk_parity"}:
+        method = "minimum_volatility" if strategy_key == "optimized_min_volatility" else "risk_parity"
+        weights = optimized_method_weights(method, _optimizer_candidates_from_assets(assets))
+        return (weights or {}, PORTFOLIO_MODE_RISK_ON if weights else PORTFOLIO_MODE_CASH_WAIT)
     selected = _positive_momentum_assets(assets, limit=4)
     if strategy_key == "momentum_regime_cash_filter":
         broad_returns = [
@@ -1834,6 +1866,8 @@ def _simulate_comparison_strategy(
             "momentum_top_n": "动量 Top N 等权",
             "momentum_volatility_weighted": "动量 + 波动率权重",
             "momentum_regime_cash_filter": "动量 + 大盘过滤",
+            "optimized_min_volatility": "优化组合：最小波动",
+            "optimized_risk_parity": "优化组合：风险平价",
             "equal_weight_benchmark": "宽基等权对照",
         }.get(strategy_key, strategy_key),
         "metrics": _comparison_metrics(
@@ -1911,6 +1945,8 @@ async def run_etf_strategy_comparison_backtest(
                 "momentum_top_n",
                 "momentum_volatility_weighted",
                 "momentum_regime_cash_filter",
+                "optimized_min_volatility",
+                "optimized_risk_parity",
                 "equal_weight_benchmark",
             )
         ]

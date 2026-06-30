@@ -16,6 +16,7 @@ from app.models.entities import (
     User,
 )
 from app.schemas.short_research import (
+    EtfOptimizedAllocationOut,
     EtfPortfolioBacktestDetailOut,
     EtfPortfolioBacktestListOut,
     EtfPortfolioBacktestRequest,
@@ -23,6 +24,7 @@ from app.schemas.short_research import (
     EtfSignalValidationRunOut,
     EtfStrategyComparisonOut,
     EtfStrategyComparisonRequest,
+    EtfStrategyHealthcheckOut,
     ShortResearchAdvisorReportOut,
     ShortResearchAdvisorRunRequest,
     ShortResearchAssetDetailOut,
@@ -51,6 +53,16 @@ from app.services.short_research.backtest import (
     run_etf_portfolio_backtest,
     run_etf_strategy_comparison_backtest,
     strategy_comparison_payload,
+)
+from app.services.short_research.healthcheck import (
+    healthcheck_payload,
+    latest_healthcheck_snapshot,
+    run_etf_strategy_healthcheck,
+)
+from app.services.short_research.optimized_allocation import (
+    latest_optimized_allocation_snapshot,
+    optimized_allocation_payload,
+    run_etf_optimized_allocation,
 )
 from app.services.short_research.service import (
     VALIDATION_MODE_FORWARD_LIVE,
@@ -436,6 +448,46 @@ async def get_short_research_observation_portfolio(
     if asset_type != "etf":
         raise HTTPException(status_code=400, detail="观察组合第一版只支持场内 ETF")
     return await etf_observation_portfolio(session, limit=limit, universe=universe)
+
+
+@router.post("/etf-strategy-healthcheck/run", response_model=EtfStrategyHealthcheckOut)
+async def run_etf_strategy_healthcheck_endpoint(
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = Depends(require_approved_user),
+) -> dict[str, Any]:
+    snapshot = await run_etf_strategy_healthcheck(session)
+    return await healthcheck_payload(session, snapshot)
+
+
+@router.get("/etf-strategy-healthcheck/latest", response_model=EtfStrategyHealthcheckOut | None)
+async def get_latest_etf_strategy_healthcheck(
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = Depends(require_approved_user),
+) -> dict[str, Any] | None:
+    snapshot = await latest_healthcheck_snapshot(session)
+    if snapshot is None:
+        return None
+    return await healthcheck_payload(session, snapshot)
+
+
+@router.post("/etf-optimized-allocation/run", response_model=EtfOptimizedAllocationOut)
+async def run_etf_optimized_allocation_endpoint(
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = Depends(require_approved_user),
+) -> dict[str, Any]:
+    snapshot = await run_etf_optimized_allocation(session)
+    return await optimized_allocation_payload(session, snapshot)
+
+
+@router.get("/etf-optimized-allocation/latest", response_model=EtfOptimizedAllocationOut | None)
+async def get_latest_etf_optimized_allocation(
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = Depends(require_approved_user),
+) -> dict[str, Any] | None:
+    snapshot = await latest_optimized_allocation_snapshot(session)
+    if snapshot is None:
+        return None
+    return await optimized_allocation_payload(session, snapshot)
 
 
 @router.post("/etf-backtests", response_model=EtfPortfolioBacktestDetailOut)

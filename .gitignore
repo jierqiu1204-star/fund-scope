@@ -30,6 +30,7 @@ __pycache__/
 .ruff_cache/
 .venv/
 .test-tmp/
+.tmp/
 node_modules/
 .next/
 dist/

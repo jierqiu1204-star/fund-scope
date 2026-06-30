@@ -22,6 +22,7 @@ import { Panel, StatPill } from "@/components/ui";
 import { api } from "@/lib/api";
 import { formatCurrency, formatDate, formatPercent } from "@/lib/format";
 import type {
+  EtfOptimizedAllocation,
   ShortResearchAsset,
   ShortResearchAssetDetail,
   ShortResearchAssetList,
@@ -31,6 +32,7 @@ import type {
   EtfPortfolioBacktestDetail,
   EtfPortfolioBacktestList,
   EtfStrategyComparison,
+  EtfStrategyHealthcheck,
   IntradayEtfLiveRankingItem,
   IntradayEtfLiveRankingList,
   TrackedPosition,
@@ -1422,6 +1424,20 @@ function ShortTermClient() {
       (await api.get<EtfStrategyComparison | null>("/api/short-research/etf-strategy-comparisons/latest")).data
   });
 
+  const etfStrategyHealthcheck = useQuery({
+    queryKey: ["short-research", "etf-strategy-healthcheck", "latest"],
+    enabled: assetType === "etf",
+    queryFn: async () =>
+      (await api.get<EtfStrategyHealthcheck | null>("/api/short-research/etf-strategy-healthcheck/latest")).data
+  });
+
+  const etfOptimizedAllocation = useQuery({
+    queryKey: ["short-research", "etf-optimized-allocation", "latest"],
+    enabled: assetType === "etf",
+    queryFn: async () =>
+      (await api.get<EtfOptimizedAllocation | null>("/api/short-research/etf-optimized-allocation/latest")).data
+  });
+
   const selectedDetail = useQuery({
     queryKey: ["short-research", "detail", selected?.asset_type, selected?.code],
     enabled: selected !== null,
@@ -1587,8 +1603,28 @@ function ShortTermClient() {
     }
   });
 
+  const runEtfStrategyHealthcheck = useMutation({
+    mutationFn: async () =>
+      (await api.post<EtfStrategyHealthcheck>("/api/short-research/etf-strategy-healthcheck/run")).data,
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["short-research", "etf-strategy-healthcheck"] });
+    }
+  });
+
+  const runEtfOptimizedAllocation = useMutation({
+    mutationFn: async () =>
+      (await api.post<EtfOptimizedAllocation>("/api/short-research/etf-optimized-allocation/run")).data,
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["short-research", "etf-optimized-allocation"] }),
+        queryClient.invalidateQueries({ queryKey: ["short-research", "observation-portfolio"] })
+      ]);
+    }
+  });
+
   const currentBacktestExecutionModel = backtestExecutionModel(etfBacktestDetail.data);
   const isIntradayBacktest = currentBacktestExecutionModel === "intraday_alert_v1";
+  const optimizedAllocationData = observationPortfolio.data?.optimized_allocation ?? etfOptimizedAllocation.data ?? null;
 
   const runAdvisor = useMutation({
     mutationFn: async () =>
@@ -4089,6 +4125,63 @@ function ShortTermClient() {
               </p>
             )}
           </div>
+          <div className="mt-4 rounded-[10px] border border-ink/10 bg-white p-4">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+              <div>
+                <p className="font-semibold text-ink">策略体检</p>
+                <p className="mt-2 text-xs leading-5 text-ink/55">
+                  对比完整样本和最近样本，检查标签是否近期失效；体检只提供证据，不自动改排序和邮件阈值。
+                </p>
+              </div>
+              <button
+                type="button"
+                className="w-fit rounded-[6px] border border-ink bg-ink px-3 py-2 text-xs font-semibold text-white transition hover:bg-ink/85 disabled:opacity-60"
+                disabled={runEtfStrategyHealthcheck.isPending}
+                onClick={() => runEtfStrategyHealthcheck.mutate()}
+              >
+                {runEtfStrategyHealthcheck.isPending ? "正在体检..." : "运行策略体检"}
+              </button>
+            </div>
+            {runEtfStrategyHealthcheck.isError ? (
+              <p className="mt-3 rounded-[8px] border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                {errorText(runEtfStrategyHealthcheck.error)}
+              </p>
+            ) : null}
+            {etfStrategyHealthcheck.data ? (
+              <>
+                <div className="mt-4 flex flex-wrap gap-2 text-xs text-ink/55">
+                  <span className="rounded-full bg-paper px-3 py-1">结论：{etfStrategyHealthcheck.data.conclusion}</span>
+                  <span className="rounded-full bg-paper px-3 py-1">
+                    证据：{etfStrategyHealthcheck.data.evidence_status}
+                  </span>
+                  <span className="rounded-full bg-paper px-3 py-1">
+                    体检日：{formatDate(etfStrategyHealthcheck.data.as_of_date)}
+                  </span>
+                </div>
+                <div className="mt-3 grid gap-3 lg:grid-cols-3">
+                  {etfStrategyHealthcheck.data.items.slice(0, 6).map((item) => (
+                    <div
+                      key={`${item.item_type}-${item.item_key}`}
+                      className="rounded-[8px] border border-border bg-paper/40 p-3 text-xs text-ink/60"
+                    >
+                      <p className="text-sm font-semibold text-ink">
+                        {item.item_type === "entry_timing" ? "今日买点" : "买入观察"}：{item.item_key}
+                      </p>
+                      <p className="mt-2">结论：{item.conclusion}</p>
+                      <p>样本：{item.sample_count}</p>
+                      <p>平均收益：{item.avg_return === null ? "暂无" : formatPercent(item.avg_return * 100)}</p>
+                      <p>胜率：{item.win_rate === null ? "暂无" : formatPercent(item.win_rate * 100)}</p>
+                      <p>最大回撤：{item.max_drawdown === null ? "暂无" : formatPercent(item.max_drawdown * 100)}</p>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <p className="mt-3 rounded-[8px] border border-dashed border-ink/20 bg-paper px-3 py-3 text-xs leading-5 text-ink/55">
+                暂无策略体检结果。请先运行历史回放/盘中提醒回测，再运行体检。
+              </p>
+            )}
+          </div>
           {etfBacktestDetail.data ? (
             <>
               <div className="mt-5 grid gap-3 md:grid-cols-4">
@@ -4320,6 +4413,58 @@ function ShortTermClient() {
               <p className="mt-2">
                 {evidenceContractText(observationPortfolio.data?.evidence_status, observationPortfolio.data?.evidence_summary)}
               </p>
+            </div>
+            <div className="mt-3 rounded-[10px] border border-ink/10 bg-white px-4 py-3">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                  <p className="text-sm font-semibold text-ink">优化组合对照</p>
+                  <p className="mt-2 text-xs leading-5 text-ink/55">
+                    用最小波动和风险平价做数学权重对照；它只用于比较权重稳定性，不会自动替换当前 ETF 资金配置。
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="w-fit rounded-[6px] border border-ink bg-ink px-3 py-2 text-xs font-semibold text-white transition hover:bg-ink/85 disabled:opacity-60"
+                  disabled={runEtfOptimizedAllocation.isPending}
+                  onClick={() => runEtfOptimizedAllocation.mutate()}
+                >
+                  {runEtfOptimizedAllocation.isPending ? "正在优化..." : "运行优化对照"}
+                </button>
+              </div>
+              {runEtfOptimizedAllocation.isError ? (
+                <p className="mt-3 rounded-[8px] border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                  {errorText(runEtfOptimizedAllocation.error)}
+                </p>
+              ) : null}
+              {optimizedAllocationData?.methods.length ? (
+                <div className="mt-3 grid gap-3 lg:grid-cols-3">
+                  {optimizedAllocationData.methods.map((method) => (
+                    <div key={method.method} className="rounded-[8px] border border-border bg-paper/40 p-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <p className="text-sm font-semibold text-ink">{method.label}</p>
+                        <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-ink/55">
+                          {formatPercent(method.weight_sum * 100)}
+                        </span>
+                      </div>
+                      <p className="mt-2 text-xs leading-5 text-ink/55">
+                        {method.unavailable_reason ?? "按历史波动、单只上限和主题集中度约束生成的数学权重对照。"}
+                      </p>
+                      <div className="mt-3 space-y-2">
+                        {method.items.slice(0, 4).map((item) => (
+                          <div key={item.code} className="flex items-center justify-between gap-3 text-xs text-ink/60">
+                            <span className="truncate">{item.name}</span>
+                            <span className="font-semibold text-ink">{formatPercent(item.target_weight * 100)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="mt-3 rounded-[8px] border border-dashed border-ink/20 bg-paper px-3 py-3 text-xs leading-5 text-ink/55">
+                  {optimizedAllocationData?.unavailable_reason ?? "暂无优化组合对照。候选数量、历史数据或主题分散度不足时不会硬凑数学权重。"}
+                </p>
+              )}
             </div>
             <div className="mt-4 grid gap-3 md:grid-cols-4">
               <div className="rounded-[10px] border border-ink/10 bg-white px-4 py-3">

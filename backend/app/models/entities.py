@@ -737,6 +737,95 @@ class EtfObservationPortfolioItem(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class EtfStrategyHealthcheckSnapshot(Base):
+    __tablename__ = "etf_strategy_healthcheck_snapshots"
+    __table_args__ = (SaIndex("ix_etf_strategy_healthcheck_status_created", "status", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    status: Mapped[str] = mapped_column(String(32), default="success")
+    source_signal_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("short_research_signal_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    validation_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("etf_signal_validation_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    backtest_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("etf_portfolio_backtest_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    as_of_date: Mapped[date] = mapped_column(Date)
+    execution_model: Mapped[str] = mapped_column(String(32), default="daily_close")
+    evidence_contract_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    evidence_status: Mapped[str] = mapped_column(String(64), default="等待验证")
+    conclusion: Mapped[str] = mapped_column(String(64), default="数据不足")
+    data_window_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    summary_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    caveats_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class EtfStrategyHealthcheckItem(Base):
+    __tablename__ = "etf_strategy_healthcheck_items"
+    __table_args__ = (SaIndex("ix_etf_strategy_healthcheck_items_snapshot_type", "snapshot_id", "item_type"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    snapshot_id: Mapped[int] = mapped_column(
+        ForeignKey("etf_strategy_healthcheck_snapshots.id", ondelete="CASCADE")
+    )
+    item_type: Mapped[str] = mapped_column(String(32))
+    item_key: Mapped[str] = mapped_column(String(128))
+    conclusion: Mapped[str] = mapped_column(String(64), default="数据不足")
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    avg_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    win_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_drawdown: Mapped[float | None] = mapped_column(Float, nullable=True)
+    metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class EtfOptimizedAllocationSnapshot(Base):
+    __tablename__ = "etf_optimized_allocation_snapshots"
+    __table_args__ = (SaIndex("ix_etf_optimized_allocation_status_created", "status", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    status: Mapped[str] = mapped_column(String(32), default="success")
+    source_signal_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("short_research_signal_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    observation_portfolio_snapshot_id: Mapped[int | None] = mapped_column(
+        ForeignKey("etf_observation_portfolio_snapshots.id", ondelete="SET NULL"), nullable=True
+    )
+    as_of_date: Mapped[date] = mapped_column(Date)
+    method_set: Mapped[str] = mapped_column(String(64), default="stable_v1")
+    evidence_contract_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    data_window_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    constraints_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    summary_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    unavailable_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class EtfOptimizedAllocationItem(Base):
+    __tablename__ = "etf_optimized_allocation_items"
+    __table_args__ = (SaIndex("ix_etf_optimized_allocation_items_snapshot_method", "snapshot_id", "method"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    snapshot_id: Mapped[int] = mapped_column(
+        ForeignKey("etf_optimized_allocation_snapshots.id", ondelete="CASCADE")
+    )
+    method: Mapped[str] = mapped_column(String(64))
+    asset_code: Mapped[str] = mapped_column(String(32))
+    asset_name: Mapped[str] = mapped_column(String(255))
+    target_weight: Mapped[float] = mapped_column(Float, default=0.0)
+    expected_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volatility: Mapped[float | None] = mapped_column(Float, nullable=True)
+    theme_group: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    data_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    explanation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class EtfPortfolioBacktestRun(Base):
     __tablename__ = "etf_portfolio_backtest_runs"
     __table_args__ = (

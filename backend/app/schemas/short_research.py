@@ -199,6 +199,45 @@ class ShortResearchObservationPortfolioItemOut(BaseModel):
     metrics: dict[str, Any] = Field(default_factory=dict)
 
 
+class EtfOptimizedAllocationItemOut(BaseModel):
+    method: str
+    code: str
+    name: str
+    target_weight: float
+    expected_return: float | None = None
+    volatility: float | None = None
+    theme_group: str | None = None
+    data_date: date | None = None
+    explanation: str | None = None
+    metrics: dict[str, Any] = Field(default_factory=dict)
+
+
+class EtfOptimizedAllocationMethodOut(BaseModel):
+    method: str
+    label: str
+    status: str
+    items: list[EtfOptimizedAllocationItemOut] = Field(default_factory=list)
+    weight_sum: float = 0.0
+    summary: dict[str, Any] = Field(default_factory=dict)
+    unavailable_reason: str | None = None
+
+
+class EtfOptimizedAllocationOut(BaseModel):
+    id: int | None = None
+    status: str
+    as_of_date: date | None = None
+    generated_at: datetime | None = None
+    method_set: str = "stable_v1"
+    evidence_contract_hash: str | None = None
+    data_window: dict[str, Any] = Field(default_factory=dict)
+    constraints: dict[str, Any] = Field(default_factory=dict)
+    summary: dict[str, Any] = Field(default_factory=dict)
+    unavailable_reason: str | None = None
+    methods: list[EtfOptimizedAllocationMethodOut] = Field(default_factory=list)
+    research_only: bool = True
+    no_trade_instruction: bool = True
+
+
 class ShortResearchObservationPortfolioOut(BaseModel):
     as_of_date: date
     asset_type: str
@@ -238,6 +277,39 @@ class ShortResearchObservationPortfolioOut(BaseModel):
     allocation_contract: dict[str, Any] = Field(default_factory=dict)
     evidence_status: str = "等待验证"
     evidence_summary: dict[str, Any] = Field(default_factory=dict)
+    optimized_allocation: EtfOptimizedAllocationOut | None = None
+
+
+class EtfStrategyHealthcheckItemOut(BaseModel):
+    item_type: str
+    item_key: str
+    conclusion: str
+    sample_count: int
+    avg_return: float | None = None
+    win_rate: float | None = None
+    max_drawdown: float | None = None
+    metrics: dict[str, Any] = Field(default_factory=dict)
+
+
+class EtfStrategyHealthcheckOut(BaseModel):
+    id: int | None = None
+    status: str
+    conclusion: str
+    as_of_date: date | None = None
+    generated_at: datetime | None = None
+    source_signal_run_id: int | None = None
+    validation_run_id: int | None = None
+    backtest_run_id: int | None = None
+    execution_model: str = "daily_close"
+    evidence_contract_hash: str | None = None
+    evidence_status: str = "等待验证"
+    data_window: dict[str, Any] = Field(default_factory=dict)
+    summary: dict[str, Any] = Field(default_factory=dict)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    caveats: list[str] = Field(default_factory=list)
+    items: list[EtfStrategyHealthcheckItemOut] = Field(default_factory=list)
+    research_only: bool = True
+    no_trade_instruction: bool = True
 
 
 class EtfPortfolioBacktestRequest(BaseModel):

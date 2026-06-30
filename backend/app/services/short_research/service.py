@@ -72,6 +72,10 @@ from app.services.short_research.dynamic_thresholds import (
     ThresholdPricePoint,
     dynamic_threshold_context,
 )
+from app.services.short_research.optimized_allocation import (
+    latest_optimized_allocation_snapshot,
+    optimized_allocation_payload,
+)
 from app.services.short_research.theme_taxonomy import (
     UNKNOWN_GROUP,
     UNKNOWN_THEME,
@@ -3406,13 +3410,25 @@ async def run_etf_observation_portfolio_optimization(
 ) -> EtfObservationPortfolioSnapshot:
     signal_run = await latest_signal_run(session, asset_type=ASSET_TYPE_ETF)
     validation_run = await latest_signal_validation_run(session, validation_mode=VALIDATION_MODE_FORWARD_LIVE)
-    portfolio = await etf_observation_portfolio(session, limit=limit, universe=UNIVERSE_DEFAULT, use_snapshot=False)
+    portfolio = await etf_observation_portfolio(
+        session,
+        limit=limit,
+        universe=UNIVERSE_DEFAULT,
+        use_snapshot=False,
+        include_optimized=False,
+    )
     return await persist_observation_portfolio_snapshot(
         session,
         portfolio,
         source_signal_run_id=signal_run.id if signal_run else None,
         validation_run_id=validation_run.id if validation_run else None,
     )
+
+
+async def _attach_optimized_allocation(session: AsyncSession, portfolio: dict[str, Any]) -> dict[str, Any]:
+    snapshot = await latest_optimized_allocation_snapshot(session)
+    portfolio["optimized_allocation"] = await optimized_allocation_payload(session, snapshot)
+    return portfolio
 
 
 async def etf_observation_portfolio(
@@ -3422,14 +3438,16 @@ async def etf_observation_portfolio(
     limit: int = 5,
     universe: str = UNIVERSE_DEFAULT,
     use_snapshot: bool = True,
+    include_optimized: bool = True,
 ) -> dict[str, Any]:
     if use_snapshot and universe == UNIVERSE_DEFAULT:
         snapshot = await latest_observation_portfolio_snapshot(session)
         if snapshot is not None and _observation_snapshot_is_usable(snapshot):
-            return await observation_portfolio_from_snapshot(session, snapshot)
+            portfolio = await observation_portfolio_from_snapshot(session, snapshot)
+            return await _attach_optimized_allocation(session, portfolio) if include_optimized else portfolio
     run = await latest_signal_run(session, asset_type=ASSET_TYPE_ETF)
     if run is None:
-        return {
+        portfolio = {
             "as_of_date": as_of_date or await latest_data_date(session) or date.today(),
             "asset_type": ASSET_TYPE_ETF,
             "items": [],
@@ -3475,6 +3493,7 @@ async def etf_observation_portfolio(
                 caveats=["没有 ETF 排序快照，因此没有可验证的组合证据。"],
             ),
         }
+        return await _attach_optimized_allocation(session, portfolio) if include_optimized else portfolio
     assets, _total = await cached_signal_assets(
         session,
         run,
@@ -3808,4 +3827,4 @@ async def etf_observation_portfolio(
         current_contract=allocation_contract,
         caveats=["当前组合权重仍在等待同源历史回放验证。"],
     )
-    return portfolio
+    return await _attach_optimized_allocation(session, portfolio) if include_optimized else portfolio
