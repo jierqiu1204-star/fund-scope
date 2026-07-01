@@ -8,6 +8,7 @@ from app.services.short_research.healthcheck import (
     HEALTHCHECK_CONCLUSION_OK,
     HEALTHCHECK_CONCLUSION_WATCH,
     HealthcheckStats,
+    aggregate_replay_samples_by_metric,
     aggregate_validation_rows,
     classify_healthcheck_conclusion,
     classify_item_conclusion,
@@ -81,3 +82,33 @@ def test_aggregate_validation_rows_groups_by_label() -> None:
     assert result["短线观察"].win_rate == pytest.approx(0.65)
     assert result["短线观察"].max_drawdown == -0.05
     assert result["高位观察"].sample_count == 1
+
+
+def test_aggregate_replay_samples_by_theme_metric() -> None:
+    rows = [
+        SimpleNamespace(
+            status="completed",
+            forward_return=0.03,
+            adverse_drawdown=-0.02,
+            metrics_json={"theme_group": "半导体"},
+        ),
+        SimpleNamespace(
+            status="completed",
+            forward_return=-0.01,
+            adverse_drawdown=-0.05,
+            metrics_json={"theme_group": "半导体"},
+        ),
+        SimpleNamespace(
+            status="completed",
+            forward_return=0.02,
+            adverse_drawdown=-0.01,
+            metrics_json={"market_regime": "defensive"},
+        ),
+    ]
+
+    result = aggregate_replay_samples_by_metric(rows, keys=("theme_group", "market_regime"))
+
+    assert result["半导体"].sample_count == 2
+    assert result["半导体"].avg_return == pytest.approx(0.01)
+    assert result["半导体"].max_drawdown == -0.05
+    assert result["defensive"].sample_count == 1

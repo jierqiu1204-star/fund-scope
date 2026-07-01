@@ -282,6 +282,14 @@ async def live_rankings(
         if selected_theme and selected_theme not in _signal_item_theme_values(signal_item):
             continue
         base_score = _float_or_none(signal_item.total_score) if signal_item is not None else None
+        signal_metrics = dict(signal_item.metrics_json or {}) if signal_item is not None else {}
+        signal_breakdown = dict(signal_item.score_breakdown_json or {}) if signal_item is not None else {}
+        final_score_breakdown = signal_breakdown.get("final_score_v2")
+        score_version = (
+            signal_metrics.get("score_version")
+            or signal_breakdown.get("score_version")
+            or (final_score_breakdown.get("score_version") if isinstance(final_score_breakdown, dict) else None)
+        )
         base_rank = watch_item.rank
         conclusion = signal_item.conclusion if signal_item is not None else None
         if observation_filters and (conclusion is None or conclusion not in observation_filters):
@@ -352,6 +360,8 @@ async def live_rankings(
                 "live_total_score": live_total_score,
                 "intraday_adjustment_score": intraday_adjustment_score,
                 "score_source": score_source,
+                "score_version": str(score_version or "legacy") if signal_item is not None else None,
+                "score_breakdown": signal_breakdown,
                 "score_contribution_reasons": score_contribution_reasons,
                 "live_entry_timing_label": live_label,
                 "live_entry_timing_reason": live_reason,
@@ -401,6 +411,8 @@ async def live_rankings(
                 live_total_score=row["live_total_score"],
                 intraday_adjustment_score=row["intraday_adjustment_score"],
                 score_source=row["score_source"],
+                score_version=row["score_version"],
+                score_breakdown=row["score_breakdown"],
                 score_contribution_reasons=row["score_contribution_reasons"],
                 live_entry_timing_label=row["live_entry_timing_label"],
                 live_entry_timing_reason=row["live_entry_timing_reason"],

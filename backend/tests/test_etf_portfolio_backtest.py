@@ -14,9 +14,11 @@ from app.models.entities import (
 )
 from app.services.short_research.backtest import (
     ReplayPosition,
+    _comparison_target_weights,
     _first_execution_quote_after,
     _generate_target_weights,
     _risk_action,
+    backtest_summary_payload,
     run_etf_portfolio_backtest,
 )
 from app.services.short_research.service import (
@@ -262,6 +264,50 @@ def test_backtest_portfolio_cash_wait_when_no_candidate_passes_filters() -> None
     assert weights == {}
     assert mode == "cash_wait"
     assert context["cash_weight"] == 1.0
+
+
+def test_strategy_comparison_optimized_and_equal_weight_are_independent() -> None:
+    assets = [_computed_asset(code) for code in ("510300", "512880", "513520", "588220")]
+    for asset, theme in zip(assets, ("宽基", "金融", "跨境", "科技"), strict=False):
+        asset.metrics["theme_profile"] = {"theme_group": theme}
+
+    optimized_weights, optimized_mode = _comparison_target_weights("optimized_min_volatility", assets)
+    equal_weights, equal_mode = _comparison_target_weights("equal_weight_benchmark", assets)
+
+    assert optimized_mode == "risk_on"
+    assert equal_mode == "risk_on"
+    assert optimized_weights
+    assert equal_weights
+    assert optimized_weights != equal_weights
+    assert max(optimized_weights.values()) <= 0.3
+
+
+def test_backtest_summary_marks_old_method_when_contract_is_missing() -> None:
+    run = type(
+        "Run",
+        (),
+        {
+            "id": 1,
+            "status": "success",
+            "started_at": datetime(2026, 6, 1, 10, 0),
+            "finished_at": datetime(2026, 6, 1, 10, 1),
+            "start_date": date(2026, 5, 1),
+            "end_date": date(2026, 6, 1),
+            "initial_cash": 10000.0,
+            "fee_rate": 0.001,
+            "metrics_json": {},
+            "benchmark_json": {},
+            "data_coverage_json": {},
+            "caveats_json": [],
+            "config_json": {},
+            "error_message": None,
+        },
+    )()
+
+    payload = backtest_summary_payload(run)
+
+    assert payload["evidence_status"] == "旧口径结果"
+    assert payload["execution_model"] is None
 
 
 def test_backtest_trailing_take_profit_daily_action() -> None:

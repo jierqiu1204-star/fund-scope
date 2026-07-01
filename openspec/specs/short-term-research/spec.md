@@ -411,3 +411,181 @@ The short-term research workbench SHALL display clear limits for historical ETF 
 - **WHEN** the backtest used daily data only
 - **THEN** the UI states that intraday ranking, minute-level alerts, and broker-app price differences are validated only by forward live tracking
 
+### Requirement: Short-term workbench displays ETF allocation layers
+The short-term research workbench SHALL display ETF observation portfolio output as allocation layers rather than a single flat recommendation list.
+
+#### Scenario: Layered portfolio is available
+- **WHEN** the latest ETF observation portfolio includes primary, satellite, defensive, or cash layers
+- **THEN** `/short-term` displays the layers as `主配置`, `小仓观察`, `防守配置`, and `等待资金`
+
+#### Scenario: Cash wait is active
+- **WHEN** the portfolio mode is `cash_wait`
+- **THEN** `/short-term` displays the cash-wait reason and MUST NOT imply that the system failed or forgot to generate a portfolio
+
+#### Scenario: Defensive mode is active
+- **WHEN** the portfolio mode is `defensive`
+- **THEN** `/short-term` explains that current conditions favor defensive observation over full offensive ETF allocation
+
+### Requirement: Short-term workbench explains ETF weight and exclusion reasons
+The short-term research workbench SHALL show why a selected ETF did or did not receive observation weight.
+
+#### Scenario: Selected ETF has weight
+- **WHEN** the selected ETF is included in the latest ETF observation portfolio
+- **THEN** the detail panel shows its allocation layer, target observation weight, cap constraints, risk factors, data timestamp, and weight reason
+
+#### Scenario: Selected ETF is watch-only
+- **WHEN** the selected ETF is watch-only because it is high-position, chase-risk, concentrated, defensive-mismatch, or data-limited
+- **THEN** the detail panel shows the watch-only reason without presenting it as a buy or sell instruction
+
+#### Scenario: Selected ETF is excluded
+- **WHEN** the selected ETF is excluded from the latest ETF observation portfolio
+- **THEN** the detail panel shows the exclusion reason such as stale data, insufficient liquidity, correlation duplicate, theme cap, or entry timing risk
+
+### Requirement: Short-term workbench separates observation from trading instruction
+The short-term research workbench SHALL label ETF allocation weights as research references and SHALL NOT present them as automatic trading instructions.
+
+#### Scenario: Portfolio weights are displayed
+- **WHEN** `/short-term` shows ETF allocation weights
+- **THEN** the UI states that weights are observation references for manual judgment and do not connect to a broker
+
+#### Scenario: Satellite allocation is displayed
+- **WHEN** `/short-term` shows a high-watch ETF in the satellite layer
+- **THEN** the UI explains that satellite weight means reduced observation exposure, not a strong buy signal
+
+### Requirement: Short-term workbench shows allocation data timestamps
+The short-term research workbench SHALL display the data timestamps used by ETF portfolio allocation.
+
+#### Scenario: Portfolio uses latest data
+- **WHEN** an ETF portfolio snapshot is displayed
+- **THEN** the UI shows portfolio generation time, daily signal date, quote time when available, and whether the result used real-time, daily, or fallback-ineligible data
+
+#### Scenario: Portfolio data is stale
+- **WHEN** the latest portfolio snapshot is older than the latest available ETF signal or quote context
+- **THEN** the UI shows a waiting or stale-state message instead of presenting the portfolio as freshly generated
+
+### Requirement: Short-Term Workbench Shows Strategy Comparison Evidence
+The short-term research workbench SHALL show historical comparison evidence for the current ETF workbench strategy and selected deterministic baseline strategies when such evidence is available.
+
+#### Scenario: Strategy comparison result is available
+- **WHEN** a completed ETF strategy comparison backtest exists
+- **THEN** `/short-term` shows the compared strategies, date range, current strategy metrics, benchmark metrics, and data coverage in Chinese
+
+#### Scenario: Strategy comparison result is unavailable
+- **WHEN** no completed ETF strategy comparison backtest exists
+- **THEN** `/short-term` shows that strategy comparison evidence is not yet available and MUST NOT imply that the current labels are proven
+
+### Requirement: Strategy comparison display distinguishes evidence from live recommendations
+The short-term research workbench SHALL clearly distinguish historical strategy comparison evidence from current ETF rankings, portfolio weights, and tracked-position alerts.
+
+#### Scenario: Historical strategy outperforms
+- **WHEN** a compared strategy has better historical return or risk metrics than the current strategy
+- **THEN** the UI displays it as historical research evidence and MUST NOT automatically change the current ETF资金配置参考 or tracked-position email rules
+
+#### Scenario: User views current ETF ranking
+- **WHEN** the user views current ETF rankings and selected ETF detail
+- **THEN** strategy comparison data appears as a separate evidence section and does not override the current ranking label, entry timing, quote price, or holding action
+
+### Requirement: Strategy comparison summary explains limitations
+The short-term research workbench SHALL explain the limits of strategy comparison backtests in beginner-readable Chinese.
+
+#### Scenario: User opens comparison evidence
+- **WHEN** the user views a strategy comparison summary
+- **THEN** the UI states that the comparison is based on historical daily data, does not validate minute-level intraday alerts, and does not guarantee future returns
+
+#### Scenario: Sample is short or incomplete
+- **WHEN** the strategy comparison has short sample history, missing data, or warm-up limitations
+- **THEN** the UI marks the evidence as 样本不足 or 数据覆盖有限 and avoids confident wording
+
+### Requirement: Short-Term Workbench Supports Label Filtering
+The short-term research workbench SHALL allow users to filter ranked ETF or fund cards by observation labels, entry timing labels, and tracked-position status.
+
+#### Scenario: User filters by observation label
+- **WHEN** the user selects one or more buy-observation labels such as `短线观察` or `高位观察`
+- **THEN** the ranked list shows only assets matching at least one selected buy-observation label while preserving the selected sort mode
+
+#### Scenario: User filters by entry timing
+- **WHEN** the user selects one or more entry timing labels such as `健康回踩`, `趋势延续`, or `冲高别追`
+- **THEN** the ranked list shows only assets matching at least one selected entry timing label
+
+#### Scenario: User filters by holding status
+- **WHEN** the user selects holding filters such as `我已持仓`, `触发提醒`, or `仅网页提示`
+- **THEN** the ranked list shows only assets matching the selected tracked-position state for the current user
+
+### Requirement: Label Filtering Is Separate From Sorting
+The short-term research workbench SHALL distinguish label filtering from ranking sort order.
+
+#### Scenario: User applies labels and sort
+- **WHEN** the user selects label filters and then chooses a sort mode such as real-time score or drawdown
+- **THEN** the system first applies the label filters and then orders the remaining assets by the selected sort mode
+
+#### Scenario: Real-time score sort remains available
+- **WHEN** label filtering is added to the workbench
+- **THEN** the existing real-time score sort remains available as a sort option and is not removed
+
+### Requirement: Label Filter Controls Follow Compact Geist Style
+The short-term research workbench SHALL render label filters as compact controls consistent with the existing Geist-style workbench UI.
+
+#### Scenario: User opens label filter
+- **WHEN** the user clicks the label filter control
+- **THEN** the UI shows grouped checkbox options for buy-observation labels, entry timing labels, and tracked-position labels without large decorative cards
+
+#### Scenario: User has active filters
+- **WHEN** one or more label filters are active
+- **THEN** the UI shows compact chips for the selected filters and allows each selected filter to be removed
+
+#### Scenario: User uses quick filter
+- **WHEN** the user clicks a quick filter such as `稳妥观察`, `高位谨慎`, or `只看持仓`
+- **THEN** the UI applies the corresponding label combination and shows the selected filter chips
+
+### Requirement: Label Filter State Is Clear And Reversible
+The short-term research workbench SHALL make active label filters visible and easy to clear.
+
+#### Scenario: User clears filters
+- **WHEN** the user clicks `清空`
+- **THEN** all label filters are removed and the ranked list returns to the current mode, direction, search, range, and sort settings
+
+#### Scenario: Filter returns no results
+- **WHEN** active label filters produce no visible assets
+- **THEN** the UI shows a Chinese empty state explaining that no assets match the selected labels and offers a clear-filter action
+
+#### Scenario: User changes high-level filters
+- **WHEN** the user changes asset mode, direction, search keyword, ETF range, or label filters
+- **THEN** the ranked list resets to the first page to avoid empty pages caused by stale pagination
+
+### Requirement: Label Filtering Avoids Trading Instructions
+The label filter UI SHALL describe filters as observation states and MUST NOT present any label combination as a direct buy instruction.
+
+#### Scenario: Conservative filter is selected
+- **WHEN** the user selects `稳妥观察` or equivalent filters
+- **THEN** the UI labels the result as observation candidates and does not use wording such as `推荐买入`, `可以买`, `必涨`, or `稳赚`
+
+#### Scenario: High-position filter is selected
+- **WHEN** the user selects high-position or chase-risk labels
+- **THEN** the UI keeps risk wording visible and does not hide that these assets may be unsuitable for immediate chasing
+
+### Requirement: Short-term workbench shows ETF evidence contract status
+The short-term research workbench SHALL show whether the selected ETF's current signal and allocation have matching historical evidence.
+
+#### Scenario: Evidence status is available
+- **WHEN** a selected ETF has evidence status from the ETF research evidence contract
+- **THEN** `/short-term` displays the status as `同源已验证`, `等待验证`, `样本不足`, `版本不一致`, or `旧口径结果`
+
+#### Scenario: Current strategy lacks evidence
+- **WHEN** the selected ETF's current signal or allocation version has no matching backtest or validation result
+- **THEN** `/short-term` explains that the current label or weight has not yet been historically replayed
+
+#### Scenario: Legacy evidence exists
+- **WHEN** only legacy simulation or old strategy-lab results exist
+- **THEN** `/short-term` labels them as old evidence and does not present them as proof of the current ETF workbench strategy
+
+### Requirement: Short-term workbench separates current evidence types
+The short-term research workbench SHALL distinguish current signal evidence, allocation evidence, label validation evidence, and backtest evidence.
+
+#### Scenario: User opens selected ETF detail
+- **WHEN** evidence summaries are available
+- **THEN** the detail panel separates label validation, portfolio allocation reason, and strategy backtest metrics into distinct sections
+
+#### Scenario: Evidence has limitations
+- **WHEN** evidence was produced using daily bars, limited samples, or missing intraday data
+- **THEN** the UI states those limitations near the evidence summary
+

@@ -574,7 +574,7 @@ export type ShortResearchAsset = {
   usable_days: number;
   sample_level: string;
   metrics: Record<string, unknown>;
-  score_breakdown: Record<string, unknown>;
+  score_breakdown: ShortResearchScoreBreakdown;
   risk_flags: string[];
   rationale: Record<string, unknown>;
   source_note: string;
@@ -584,6 +584,30 @@ export type ShortResearchAsset = {
   research_signal_contract?: Record<string, unknown>;
   evidence_status?: string;
   evidence_summary?: Record<string, unknown>;
+};
+
+export type ShortResearchScoreComponent = {
+  score?: number;
+  reason?: string;
+  confidence?: string;
+  sample_count?: number;
+  reliability?: string;
+  [key: string]: unknown;
+};
+
+export type ShortResearchFinalScoreBreakdown = {
+  score_version?: string;
+  final_score?: number;
+  confidence?: string;
+  components?: Record<string, ShortResearchScoreComponent>;
+  limitation_reasons?: string[];
+  weights?: Record<string, number>;
+  [key: string]: unknown;
+};
+
+export type ShortResearchScoreBreakdown = Record<string, unknown> & {
+  score_version?: string;
+  final_score_v2?: ShortResearchFinalScoreBreakdown;
 };
 
 export type ShortResearchAdvisorReport = {
@@ -684,7 +708,16 @@ export type EtfOptimizedAllocationMethod = {
   status: string;
   weight_sum: number;
   items: EtfOptimizedAllocationItem[];
-  summary: Record<string, unknown>;
+  summary: Record<string, unknown> & {
+    prior_source?: string | null;
+    view_count?: number | null;
+    confidence_summary?: Record<string, unknown> | null;
+    covariance?: Record<string, unknown> | null;
+    constraints?: Record<string, unknown> | null;
+    excluded_count?: number | null;
+    research_only?: boolean;
+    no_trade_instruction?: boolean;
+  };
   unavailable_reason: string | null;
 };
 
@@ -765,7 +798,15 @@ export type EtfStrategyHealthcheck = {
   evidence_contract_hash: string | null;
   evidence_status: string;
   data_window: Record<string, unknown>;
-  summary: Record<string, unknown>;
+  summary: Record<string, unknown> & {
+    daily_close_evidence?: string;
+    intraday_alert_evidence?: string;
+    daily_close_evidence_status?: string;
+    intraday_alert_evidence_status?: string;
+    backtest_evidence_status?: string;
+    weak_themes?: string[];
+    weak_market_regimes?: string[];
+  };
   metrics: Record<string, unknown>;
   caveats: string[];
   items: EtfStrategyHealthcheckItem[];
@@ -1104,6 +1145,8 @@ export type IntradayEtfLiveRankingItem = {
   live_total_score: number | null;
   intraday_adjustment_score: number | null;
   score_source: "intraday" | "daily" | "unavailable";
+  score_version: string | null;
+  score_breakdown: ShortResearchScoreBreakdown;
   score_contribution_reasons: string[];
   live_entry_timing_label: string;
   live_entry_timing_reason: string;

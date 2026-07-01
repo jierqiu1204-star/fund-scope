@@ -76,6 +76,12 @@ from app.services.short_research.optimized_allocation import (
     latest_optimized_allocation_snapshot,
     optimized_allocation_payload,
 )
+from app.services.short_research.ranking import (
+    FINAL_SCORE_VERSION,
+    RankingRecord,
+    apply_label_evidence,
+    build_final_score_breakdowns,
+)
 from app.services.short_research.theme_taxonomy import (
     UNKNOWN_GROUP,
     UNKNOWN_THEME,
@@ -498,6 +504,25 @@ def _cached_asset_from_signal_item(
     metrics.setdefault("entry_timing_reason", entry_timing_reason)
     rationale.setdefault("entry_timing_label", entry_timing_label)
     rationale.setdefault("entry_timing_reason", entry_timing_reason)
+    score_breakdown = dict(item.score_breakdown_json or {})
+    final_score_breakdown = score_breakdown.get("final_score_v2")
+    score_version = (
+        metrics.get("score_version")
+        or score_breakdown.get("score_version")
+        or (final_score_breakdown.get("score_version") if isinstance(final_score_breakdown, dict) else None)
+    )
+    if not score_version:
+        score_version = "legacy"
+        metrics["score_version"] = score_version
+        metrics["score_confidence"] = "legacy"
+        score_breakdown["score_version"] = score_version
+        score_breakdown["final_score_v2"] = {
+            "score_version": score_version,
+            "final_score": float(item.total_score),
+            "confidence": "legacy",
+            "components": {},
+            "limitation_reasons": ["旧口径排序缓存，请重新生成短线排序获得新评分拆解。"],
+        }
     latest_date = _date_metric(metrics.pop("latest_date", None)) or as_of_date
     latest_value = _float_metric(metrics.pop("latest_value", None))
     usable_days = _int_metric(metrics.pop("usable_days", None)) or 0
@@ -518,7 +543,7 @@ def _cached_asset_from_signal_item(
         usable_days=usable_days,
         sample_level=sample_level,
         metrics=metrics,
-        score_breakdown=dict(item.score_breakdown_json or {}),
+        score_breakdown=score_breakdown,
         risk_flags=list(item.risk_flags_json or []),
         rationale=rationale,
         source_note=source_note,
@@ -1004,6 +1029,16 @@ def _conclusion(metrics: dict[str, Any]) -> str:
     if total_score >= 50:
         return CONCLUSION_CAUTION
     return CONCLUSION_REJECT
+
+
+def _label_meaning(conclusion: str) -> str:
+    return {
+        CONCLUSION_WATCH: "进入观察清单，表示趋势和风险条件相对更好，但不是交易指令。",
+        CONCLUSION_HIGH_WATCH: "分数不低但风险也被触发，重点防止追高和波动。",
+        CONCLUSION_CAUTION: "条件不够突出，适合继续看图和等待更多数据。",
+        CONCLUSION_REJECT: "短线条件不适合，通常是流动性、风险或趋势条件较弱。",
+        CONCLUSION_INSUFFICIENT: "数据不足或滞后，不能形成有效短线结论。",
+    }.get(conclusion, "研究标签只表示观察状态，不是交易指令。")
 
 
 _LABEL_VALIDATION_WINDOWS = (1, 3, 5, 10)
@@ -2074,6 +2109,66 @@ async def _with_quality_metrics(
     )
 
 
+def _with_final_score_v2(assets: list[ComputedAsset]) -> list[ComputedAsset]:
+    etf_assets = [asset for asset in assets if asset.metadata.asset_type == ASSET_TYPE_ETF]
+    if not etf_assets:
+        return assets
+    score_by_code = build_final_score_breakdowns(
+        [
+            RankingRecord(
+                code=asset.metadata.code,
+                base_score=asset.total_score,
+                metrics=asset.metrics,
+                risk_flags=asset.risk_flags,
+            )
+            for asset in etf_assets
+        ]
+    )
+    updated: list[ComputedAsset] = []
+    for asset in assets:
+        final_breakdown = score_by_code.get(asset.metadata.code)
+        if asset.metadata.asset_type != ASSET_TYPE_ETF or not final_breakdown:
+            updated.append(asset)
+            continue
+        final_score = float(final_breakdown["final_score"])
+        metrics = {
+            **asset.metrics,
+            "total_score": final_score,
+            "score_version": FINAL_SCORE_VERSION,
+            "score_confidence": final_breakdown.get("confidence"),
+            "score_limitation_reasons": final_breakdown.get("limitation_reasons", []),
+        }
+        reliability_component = (final_breakdown.get("components") or {}).get("data_reliability") or {}
+        if isinstance(reliability_component, dict):
+            metrics["data_reliability"] = reliability_component.get("reliability")
+        conclusion = _conclusion({**metrics, "risk_flags": asset.risk_flags, "total_score": final_score})
+        score_breakdown = {
+            **asset.score_breakdown,
+            "score_version": FINAL_SCORE_VERSION,
+            "final_score_v2": final_breakdown,
+        }
+        rationale = {
+            **asset.rationale,
+            "key_reason": (
+                f"{conclusion}：最终分 {final_score:.1f}，"
+                "由横截面分位、动态阈值、标签历史有效性、数据可信度、流动性/折溢价共同生成。"
+            ),
+            "label_meaning": _label_meaning(conclusion),
+            "score_version": FINAL_SCORE_VERSION,
+        }
+        updated.append(
+            replace(
+                asset,
+                total_score=final_score,
+                conclusion=conclusion,
+                metrics=metrics,
+                score_breakdown=score_breakdown,
+                rationale=rationale,
+            )
+        )
+    return updated
+
+
 async def compute_asset(
     session: AsyncSession,
     metadata: ShortResearchAsset,
@@ -2316,6 +2411,8 @@ async def list_computed_assets(
         if _matches_filters(item, asset_type=asset_type, theme=theme, codes=codes)
     ]
     computed = [await compute_asset(session, item, as_of_date=as_of_date) for item in candidates]
+    if asset_type == ASSET_TYPE_ETF or any(item.metadata.asset_type == ASSET_TYPE_ETF for item in computed):
+        computed = _with_final_score_v2(computed)
     if asset_type == ASSET_TYPE_ETF and universe == UNIVERSE_DEFAULT and not codes:
         computed = [item for item in computed if bool(item.metrics.get("default_display_eligible"))]
         computed = _dedupe_etf_candidates(computed)
@@ -2407,6 +2504,13 @@ async def run_signal_generation(
             sort="score",
             universe=UNIVERSE_ALL if asset_type == ASSET_TYPE_ETF else UNIVERSE_DEFAULT,
         )
+        has_etf_assets = any(asset.metadata.asset_type == ASSET_TYPE_ETF for asset in assets)
+        if has_etf_assets:
+            validation_by_label = await latest_forward_validation_evidence_by_label(session)
+            if validation_by_label:
+                assets = [_asset_with_validation_evidence(asset, validation_by_label) for asset in assets]
+                assets.sort(key=lambda item: _sort_key(item, "score"), reverse=True)
+                assets = [replace(asset, rank=index) for index, asset in enumerate(assets, start=1)]
         for asset in assets:
             cached_metrics = {
                 **asset.metrics,
@@ -2446,7 +2550,9 @@ async def run_signal_generation(
                 "rule_version": _LABEL_VALIDATION_RULE_VERSION,
                 "label_validation_windows": list(_LABEL_VALIDATION_WINDOWS),
                 "portfolio_single_weight_cap": _PORTFOLIO_SINGLE_WEIGHT_CAP,
+                "score_version": FINAL_SCORE_VERSION if has_etf_assets else "legacy",
             },
+            "score_version": FINAL_SCORE_VERSION if has_etf_assets else "legacy",
             "label_validation": label_validation,
         }
         await session.commit()
@@ -2727,11 +2833,48 @@ def _asset_with_validation_evidence(
     if not evidence:
         return asset
     metrics = dict(asset.metrics)
-    metrics["validation_confidence"] = evidence.get("confidence", "insufficient")
-    metrics["validation_sample_count"] = evidence.get("sample_count", 0)
-    metrics["validation_median_return"] = evidence.get("median_return")
-    metrics["validation_win_rate"] = evidence.get("win_rate")
-    return replace(asset, metrics=metrics)
+    confidence = str(evidence.get("confidence", "insufficient"))
+    sample_count = int(evidence.get("sample_count") or 0)
+    median_return = evidence.get("median_return")
+    win_rate = evidence.get("win_rate")
+    metrics["validation_confidence"] = confidence
+    metrics["validation_sample_count"] = sample_count
+    metrics["validation_median_return"] = median_return
+    metrics["validation_win_rate"] = win_rate
+    score_breakdown = dict(asset.score_breakdown)
+    final_breakdown = score_breakdown.get("final_score_v2")
+    total_score = asset.total_score
+    conclusion = asset.conclusion
+    rationale = dict(asset.rationale)
+    if isinstance(final_breakdown, dict) and final_breakdown.get("score_version") == FINAL_SCORE_VERSION:
+        updated_final = apply_label_evidence(
+            final_breakdown,
+            confidence=confidence,
+            sample_count=sample_count,
+            median_return=median_return if isinstance(median_return, int | float) else None,
+            win_rate=win_rate if isinstance(win_rate, int | float) else None,
+        )
+        score_breakdown["final_score_v2"] = updated_final
+        total_score = float(updated_final.get("final_score") or total_score)
+        metrics["total_score"] = total_score
+        metrics["score_confidence"] = updated_final.get("confidence", metrics.get("score_confidence"))
+        conclusion = _conclusion({**metrics, "risk_flags": asset.risk_flags, "total_score": total_score})
+        rationale = {
+            **rationale,
+            "key_reason": (
+                f"{conclusion}：最终分 {total_score:.1f}，"
+                "已纳入标签历史有效性证据。"
+            ),
+            "label_meaning": _label_meaning(conclusion),
+        }
+    return replace(
+        asset,
+        total_score=total_score,
+        conclusion=conclusion,
+        metrics=metrics,
+        score_breakdown=score_breakdown,
+        rationale=rationale,
+    )
 
 
 def _portfolio_exposure_for_asset(asset: ComputedAsset) -> float:

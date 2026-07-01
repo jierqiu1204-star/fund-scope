@@ -314,7 +314,12 @@ async def etf_strategy_healthcheck_job(session: AsyncSession) -> dict[str, Any]:
         "as_of_date": snapshot.as_of_date.isoformat(),
         "conclusion": snapshot.conclusion,
         "evidence_status": snapshot.evidence_status,
+        "daily_close_evidence_status": summary.get("daily_close_evidence_status"),
+        "intraday_alert_evidence_status": summary.get("intraday_alert_evidence_status"),
+        "backtest_evidence_status": summary.get("backtest_evidence_status"),
         "weak_label_count": int(summary.get("weak_label_count", 0)),
+        "weak_theme_count": len(summary.get("weak_themes") or []),
+        "weak_market_regime_count": len(summary.get("weak_market_regimes") or []),
         "full_window_days": summary.get("full_window_days"),
         "recent_window_days": summary.get("recent_window_days"),
     }
@@ -324,6 +329,7 @@ async def etf_optimized_allocation_job(session: AsyncSession) -> dict[str, Any]:
     snapshot = await run_etf_optimized_allocation(session)
     summary = dict(snapshot.summary_json or {})
     data_window = dict(snapshot.data_window_json or {})
+    black_litterman = dict((summary.get("methods") or {}).get("black_litterman") or {})
     return {
         "snapshot_id": snapshot.id,
         "status": snapshot.status,
@@ -332,6 +338,9 @@ async def etf_optimized_allocation_job(session: AsyncSession) -> dict[str, Any]:
         "unavailable_reason": snapshot.unavailable_reason,
         "method_count": int(summary.get("method_count", 0)),
         "eligible_count": int(data_window.get("candidate_count", 0)),
+        "black_litterman_status": black_litterman.get("status"),
+        "black_litterman_unavailable_reason": black_litterman.get("unavailable_reason"),
+        "black_litterman_candidate_count": black_litterman.get("candidate_count"),
     }
 
 

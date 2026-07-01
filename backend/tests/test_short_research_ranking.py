@@ -1,0 +1,156 @@
+from __future__ import annotations
+
+from datetime import date
+
+from app.defaults.short_research import ASSET_TYPE_ETF, ShortResearchAsset
+from app.models.entities import ShortResearchSignalItem
+from app.services.short_research.ranking import (
+    FINAL_SCORE_VERSION,
+    RankingRecord,
+    apply_label_evidence,
+    build_final_score_breakdowns,
+    percentile_rank,
+)
+from app.services.short_research.service import _cached_asset_from_signal_item
+
+
+def _record(
+    code: str,
+    *,
+    return_20d: float,
+    drawdown: float,
+    volatility: float,
+    turnover: float,
+    bucket: str = "equity",
+    group: str = "technology",
+    entry_label: str = "趋势延续",
+    premium_state: str = "normal",
+    decision_eligible: bool = True,
+    risk_flags: list[str] | None = None,
+) -> RankingRecord:
+    return RankingRecord(
+        code=code,
+        base_score=70,
+        risk_flags=risk_flags or [],
+        metrics={
+            "return_5d": return_20d / 4,
+            "return_20d": return_20d,
+            "return_60d": return_20d * 1.8,
+            "max_drawdown_60d": drawdown,
+            "volatility_20d": volatility,
+            "average_turnover_20d": turnover,
+            "distance_to_ma5_pct": return_20d / 6,
+            "data_quality_score": 100,
+            "default_display_eligible": True,
+            "entry_timing_label": entry_label,
+            "theme_profile": {"asset_bucket": bucket, "theme_group": group},
+            "dynamic_threshold_context": {
+                "threshold_mode": "dynamic",
+                "asset_bucket": bucket,
+                "theme_group": group,
+                "decision_eligible": decision_eligible,
+                "premium_state": premium_state,
+            },
+        },
+    )
+
+
+def test_percentile_rank_is_tie_stable_and_null_safe() -> None:
+    assert percentile_rank(None, [1, 2, 3]) is None
+    assert percentile_rank(2, [1, 2, 2, 3]) == 50.0
+    assert percentile_rank(3, [1, 2, 3], higher_is_better=False) == 0.0
+
+
+def test_final_score_v2_separates_similar_base_scores() -> None:
+    records = [
+        _record("510001", return_20d=0.12, drawdown=-0.03, volatility=0.012, turnover=500_000_000),
+        _record("510002", return_20d=0.04, drawdown=-0.12, volatility=0.035, turnover=60_000_000),
+        _record("510003", return_20d=0.07, drawdown=-0.06, volatility=0.020, turnover=200_000_000),
+    ]
+
+    scores = build_final_score_breakdowns(records)
+
+    assert scores["510001"]["score_version"] == FINAL_SCORE_VERSION
+    assert scores["510001"]["final_score"] > scores["510002"]["final_score"]
+    assert scores["510001"]["components"]["cross_sectional_percentile"]["score"] > scores["510002"]["components"]["cross_sectional_percentile"]["score"]
+
+
+def test_dynamic_threshold_and_premium_penalize_ineligible_etf() -> None:
+    records = [
+        _record("513520", return_20d=0.10, drawdown=-0.04, volatility=0.020, turnover=300_000_000),
+        _record(
+            "513521",
+            return_20d=0.11,
+            drawdown=-0.04,
+            volatility=0.020,
+            turnover=300_000_000,
+            premium_state="extreme",
+            decision_eligible=False,
+        ),
+    ]
+
+    scores = build_final_score_breakdowns(records)
+
+    assert scores["513521"]["components"]["dynamic_threshold"]["score"] < scores["513520"]["components"]["dynamic_threshold"]["score"]
+    assert scores["513521"]["components"]["liquidity_premium"]["score"] < scores["513520"]["components"]["liquidity_premium"]["score"]
+
+
+def test_unavailable_data_cannot_improve_final_score() -> None:
+    records = [
+        _record("588001", return_20d=0.15, drawdown=-0.04, volatility=0.020, turnover=300_000_000, risk_flags=["数据滞后"]),
+        _record("588002", return_20d=0.02, drawdown=-0.04, volatility=0.020, turnover=300_000_000),
+    ]
+
+    scores = build_final_score_breakdowns(records)
+
+    assert scores["588001"]["final_score"] <= 55
+    assert scores["588001"]["components"]["data_reliability"]["reliability"] == "stale"
+
+
+def test_label_evidence_adjustment_is_bounded() -> None:
+    base = build_final_score_breakdowns(
+        [_record("515000", return_20d=0.08, drawdown=-0.04, volatility=0.020, turnover=300_000_000)]
+    )["515000"]
+
+    boosted = apply_label_evidence(base, confidence="sufficient", sample_count=80, median_return=0.01, win_rate=0.58)
+    weakened = apply_label_evidence(base, confidence="recent_weakening", sample_count=80, median_return=-0.01, win_rate=0.42)
+    insufficient = apply_label_evidence(base, confidence="sufficient", sample_count=5)
+
+    assert boosted["final_score"] > insufficient["final_score"]
+    assert weakened["final_score"] < insufficient["final_score"]
+    assert boosted["components"]["label_evidence"]["sample_count"] == 80
+
+
+def test_legacy_cached_signal_is_marked_as_old_scoring() -> None:
+    item = ShortResearchSignalItem(
+        asset_type=ASSET_TYPE_ETF,
+        asset_code="510300",
+        rank=1,
+        total_score=80,
+        conclusion="短线观察",
+        score_breakdown_json={"trend": {"score": 80}},
+        risk_flags_json=[],
+        rationale_json={},
+        metrics_json={
+            "entry_timing_label": "趋势延续",
+            "entry_timing_reason": "测试",
+            "latest_date": "2026-06-30",
+            "latest_value": 1.23,
+            "usable_days": 120,
+        },
+    )
+    metadata = ShortResearchAsset(
+        ASSET_TYPE_ETF,
+        "510300",
+        "沪深300ETF",
+        "broad_index",
+        ("宽基",),
+        "沪深300",
+        "T+1股票ETF",
+        exchange="SH",
+    )
+
+    asset = _cached_asset_from_signal_item(item, metadata, as_of_date=date(2026, 6, 30))
+
+    assert asset.metrics["score_version"] == "legacy"
+    assert asset.score_breakdown["final_score_v2"]["score_version"] == "legacy"

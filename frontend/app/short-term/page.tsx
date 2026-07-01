@@ -103,59 +103,46 @@ const assetModes: Record<
     label: string;
     shortLabel: string;
     title: string;
-    description: string;
+    description?: string;
     poolLabel: string;
     classification: string;
     latestLabel: string;
     priceLabel: string;
     dataButton: string;
     trackingTitle: string;
-    trackingDescription: string;
+    trackingDescription?: string;
     trackingEmpty: string;
     detailEmpty: string;
     noResults: string;
-    sourceSummary: string;
   }
 > = {
   etf: {
     label: "场内 ETF（证券账户实时交易）",
     shortLabel: "场内 ETF",
     title: "场内 ETF 短线研究",
-    description:
-      "默认看证券账户可以买卖的场内 ETF，更适合一两周到两三个月的短线观察。日线基准用收盘价、成交额和风险标签生成；盘中行情会单独显示当前价和行情时间，但仍不是券商盘口实时价。",
     poolLabel: "ETF 池",
     classification: "场内 ETF（证券账户交易）",
     latestLabel: "日线基准日",
     priceLabel: "日线收盘价",
     dataButton: "拉取近 120 天 ETF 日线",
     trackingTitle: "标注你已经在证券账户买入的场内 ETF",
-    trackingDescription:
-      "ETF 追踪按公开行情估算，不连接券商账户。数据滞后、暂无 IOPV 这类问题只在网页提示；只有硬止损、移动止盈、趋势转弱、退出观察才发邮件提醒你人工判断。",
     trackingEmpty: "还没有追踪记录。左侧选择一只场内 ETF 后，点“我已买入，开始追踪”。",
     detailEmpty: "左侧选择一只 ETF 后，这里会显示日线走势、盘中价、回撤、成交额、近期涨跌和解释。",
-    noResults: "当前筛选条件下没有 ETF 结果。可以换一个方向，或先更新日线数据并生成短线排序。",
-    sourceSummary:
-      "说明：ETF 排序以公开日线为基准，盘中价只在盯盘池里实时更新；页面不是券商盘口，也不会自动下单。"
+    noResults: "当前筛选条件下没有 ETF 结果。可以换一个方向，或先更新日线数据并生成短线排序。"
   },
   fund: {
     label: "支付宝场外基金（非实时净值）",
     shortLabel: "场外基金",
     title: "支付宝场外基金短线研究",
-    description:
-      "这里看支付宝可手动买入的场外基金，适合观察但不适合盘中即买即卖。数据来自公开基金净值，不是支付宝实时收益；15:00 后下单通常按下一交易日确认净值估算，名字带“ETF联接”的仍按场外基金处理。",
     poolLabel: "场外基金池",
     classification: "场外基金（非实时净值）",
     latestLabel: "最新净值日",
     priceLabel: "最新净值",
     dataButton: "拉取近 120 天基金净值",
     trackingTitle: "标注你已经在支付宝买入的场外基金",
-    trackingDescription:
-      "这里记录的是你在支付宝手动买入后的观察笔记。场外基金不是实时净值，系统每天检查公开数据，触发止盈观察、移动止盈、趋势转弱或明显风险时给你发邮件。",
     trackingEmpty: "还没有追踪记录。左侧选择一只场外基金后，点“我已买入，开始追踪”。",
     detailEmpty: "左侧选择一只场外基金后，这里会显示走势、回撤、近期涨跌和解释。",
-    noResults: "当前筛选条件下没有场外基金结果。可以换一个方向，或先点击“拉取近 120 天基金净值”。",
-    sourceSummary:
-      "说明：场外基金使用公开基金净值。净值通常不是盘中实时数据；名字里有“ETF联接”的仍按场外基金净值确认。"
+    noResults: "当前筛选条件下没有场外基金结果。可以换一个方向，或先点击“拉取近 120 天基金净值”。"
   }
 };
 
@@ -395,6 +382,11 @@ function metadataNumber(metadata: Record<string, unknown>, key: string) {
   return typeof value === "number" ? value : null;
 }
 
+function recordNumber(metadata: Record<string, unknown> | null | undefined, key: string) {
+  const value = metadata?.[key];
+  return typeof value === "number" ? value : null;
+}
+
 function observationPortfolioText(asset: ShortResearchAsset | null | undefined) {
   const context = asset?.observation_portfolio;
   if (!context || !context.status) {
@@ -557,6 +549,34 @@ function liveScoreText(item: IntradayEtfLiveRankingItem) {
     return "日线基础分 " + formatLiveScore(item.base_score ?? item.live_total_score) + " 分";
   }
   return "暂无分数";
+}
+
+const scoreDimensionLabels: Array<{ key: string; label: string }> = [
+  { key: "cross_sectional_percentile", label: "横截面分位" },
+  { key: "dynamic_threshold", label: "动态阈值" },
+  { key: "label_evidence", label: "历史有效性" },
+  { key: "data_reliability", label: "数据可信度" },
+  { key: "liquidity_premium", label: "流动性/折溢价" }
+];
+
+function finalScoreBreakdown(asset: ShortResearchAsset | null | undefined) {
+  const final = asset?.score_breakdown?.final_score_v2;
+  return final && typeof final === "object" ? final : null;
+}
+
+function scoreVersionText(asset: ShortResearchAsset | null | undefined) {
+  const final = finalScoreBreakdown(asset);
+  const version = final?.score_version ?? asset?.metrics?.score_version ?? asset?.score_breakdown?.score_version;
+  if (!version || version === "legacy") {
+    return "旧口径结果";
+  }
+  return version === "final_score_v2" ? "新评分口径" : String(version);
+}
+
+function scoreDimensionValue(asset: ShortResearchAsset | null | undefined, key: string) {
+  const component = finalScoreBreakdown(asset)?.components?.[key];
+  const score = component?.score;
+  return typeof score === "number" ? score.toFixed(1) : "暂无";
 }
 
 function hasFreshIntradayChange(
@@ -723,7 +743,7 @@ function previewAssetFromRankedItem(item: RankedAssetItem, marketStatus?: string
     usable_days: 0,
     sample_level: "正在加载完整日线详情。",
     metrics,
-    score_breakdown: {},
+    score_breakdown: item.score_breakdown ?? {},
     risk_flags: quote?.is_stale && marketStatus === "open" ? ["行情滞后"] : [],
     rationale: {
       key_reason: keyReason,
@@ -754,16 +774,6 @@ function previewAssetFromRankedItem(item: RankedAssetItem, marketStatus?: string
 
 function assetTypeLabel(assetType: string) {
   return assetType === "etf" ? "场内 ETF" : "支付宝场外基金";
-}
-
-function assetTradingNote(assetType: string, name?: string) {
-  if (assetType === "etf") {
-    return "证券账户交易，使用公开日线收盘价和成交额估算；可做短线研究，但页面不是券商盘口实时价。";
-  }
-  if (name?.includes("ETF联接")) {
-    return "支付宝可买；名字带 ETF联接，但仍是场外基金，非实时净值，按确认净值日估算。";
-  }
-  return "支付宝可买，非实时净值，按确认净值日估算。";
 }
 
 function formatTurnover(value: number | null) {
@@ -798,7 +808,7 @@ function labelMeaning(label: string) {
     case "数据不足":
       return "公开历史太短或最新数据滞后，系统不做有效判断。";
     default:
-      return "仅代表研究观察标签，不代表未来收益。";
+      return "暂无标签说明。";
   }
 }
 
@@ -1999,7 +2009,6 @@ function ShortTermClient() {
           <div className="rounded-[8px] border border-ink/10 p-3">
             <p className="text-xs font-semibold text-accent">买入观察</p>
             <p className="mt-2 text-base font-semibold text-ink">{selectedAsset.conclusion}</p>
-            <p className="mt-1 text-sm leading-6 text-ink/60">表示是否值得放入观察清单，不等于现在必须买入。</p>
           </div>
           <div className="rounded-[8px] border border-ink/10 p-3">
             <p className="text-xs font-semibold text-accent">{selectedEntryTiming.title}</p>
@@ -2074,9 +2083,6 @@ function ShortTermClient() {
                 <span>移动止盈启动：{dynamicPercent("profit_start_pct")}</span>
                 <span>高点回吐线：{dynamicPercent("trailing_giveback_pct")}</span>
               </div>
-              <p className="mt-2 text-sm leading-6 text-ink/55">
-                {themeText(dynamicContext.reason, "样本不足时使用保守默认线；这些阈值只用于研究和提醒解释，不是自动交易指令。")}
-              </p>
             </div>
           </div>
         ) : null}
@@ -2095,13 +2101,12 @@ function ShortTermClient() {
             </div>
             <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
               <p className="font-semibold text-ink">标签验证</p>
-              <span className="text-ink/45">研究证据，不是买入指令</span>
             </div>
             <div className="mt-2 grid gap-2 md:grid-cols-2">
               {[
-                ["历史回放", selectedHistoricalSummary, "用当前规则回放过去日线，样本多但有幸存者偏差。"],
-                ["真实前瞻", selectedForwardSummary, "系统上线后真实记录标签，再等未来结果，样本会慢慢积累。"]
-              ].map(([title, summary, note]) => {
+                ["历史回放", selectedHistoricalSummary],
+                ["真实前瞻", selectedForwardSummary]
+              ].map(([title, summary]) => {
                 const track = summary as ReturnType<typeof validationTrackSummary>;
                 return (
                   <div key={title as string} className="rounded-[8px] border border-ink/10 bg-white p-3">
@@ -2117,7 +2122,6 @@ function ShortTermClient() {
                       <span>覆盖率：{track.coverage}</span>
                       <span>截至：{track.asOfDate}</span>
                     </div>
-                    <p className="mt-2 text-ink/45">{note as string}</p>
                   </div>
                 );
               })}
@@ -2132,9 +2136,6 @@ function ShortTermClient() {
             {thresholds
               ? `硬止损${thresholds.hardStop}（距离${thresholds.hardStopDistance}）；止盈起点${thresholds.profitStart}（距离${thresholds.profitDistance}）；回撤减仓${thresholds.giveback}（距离${thresholds.givebackDistance}）；趋势减弱预警${thresholds.trendWeakening}`
               : "暂无追踪动态阈值"}
-          </p>
-          <p className="mt-2 text-xs leading-5 text-ink/55">
-            动态线由公开行情和规则计算，AI只解释依据和风险，不改写止盈/止损线。
           </p>
         </details>
       </div>
@@ -2213,9 +2214,6 @@ function ShortTermClient() {
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">标签筛选</p>
-          <p className="mt-1 text-xs text-ink/50">
-            筛选决定看哪些 ETF，排序决定这些 ETF 怎么排；标签不是交易指令。
-          </p>
         </div>
         <span className="w-fit rounded-full bg-paper px-3 py-1 text-xs font-semibold text-ink/60">
           已选 {activeLabelFilterCount} 项
@@ -2395,6 +2393,13 @@ function ShortTermClient() {
             const livePrice = quote?.latest_price;
             const timingDisplay = itemEntryTimingDisplay(item, etfLiveData?.market_status);
             const liveChange = intradayChangeDisplay(quote, etfLiveData?.market_status);
+            const itemScoreVersion = isLiveItem
+              ? item.score_version === "final_score_v2"
+                ? "新评分口径"
+                : item.score_version
+                ? "旧口径结果"
+                : "暂无口径"
+              : scoreVersionText(item as ShortResearchAsset);
             return (
               <button
                 key={`${itemAssetType}-${itemCode}`}
@@ -2425,6 +2430,9 @@ function ShortTermClient() {
                       {isLiveItem
                         ? liveScoreText(item)
                         : `${item.total_score.toFixed(1)} 分`}
+                    </span>
+                    <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : "bg-paper text-ink/60"}`}>
+                      {itemScoreVersion}
                     </span>
                     <span
                       className={`rounded-full px-3 py-1 text-xs font-semibold ${
@@ -2551,9 +2559,6 @@ function ShortTermClient() {
               {selectedAsset.name}
               <span className="ml-2 text-lg font-normal text-ink/45">{selectedAsset.code}</span>
             </h2>
-            <p className="mt-2 rounded-[8px] bg-paper px-4 py-3 text-sm leading-6 text-ink/65">
-              {assetTradingNote(selectedAsset.asset_type, selectedAsset.name)}
-            </p>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="rounded-[8px] bg-paper px-4 py-3">
@@ -2787,9 +2792,6 @@ function ShortTermClient() {
             />
           </label>
         </div>
-        <p className="mt-3 text-xs leading-5 text-ink/55">
-          保存后会重新计算估算份额、盈亏和持仓处理状态；不会自动发邮件，也不会连接券商或支付宝。
-        </p>
         {updateTracking.isError ? (
           <p className="mt-3 rounded-[8px] bg-rose-50 px-3 py-2 text-xs text-rose-700">
             保存失败：{errorText(updateTracking.error)}
@@ -2884,7 +2886,7 @@ function ShortTermClient() {
                 </p>
               ) : (
                 <p className="mt-3 rounded-[12px] bg-paper px-3 py-2 text-xs leading-5 text-ink/65">
-                  暂无追踪告警。数据质量/IOPV/流动性问题只在网页提示，不触发卖出邮件。
+                  暂无追踪告警。
                 </p>
               )}
               <div className="mt-4 flex flex-wrap gap-2">
@@ -3001,7 +3003,7 @@ function ShortTermClient() {
               </div>
             ) : (
               <p className="mt-4 rounded-[8px] bg-paper p-3 text-sm leading-6 text-ink/55">
-                暂无可展示告警。数据质量/IOPV/流动性问题只在网页提示，不触发卖出邮件。
+                暂无可展示告警。
               </p>
             )}
 
@@ -3181,9 +3183,6 @@ function ShortTermClient() {
               </div>
             </div>
           ) : null}
-          <p className="rounded-[8px] bg-white/70 px-4 py-3 text-xs text-ink/60">
-            {mode.sourceSummary}
-          </p>
         </div>
       ) : (
         <div className="rounded-[10px] border border-dashed border-ink/20 p-6 text-sm leading-6 text-ink/55">
@@ -3263,12 +3262,6 @@ function ShortTermClient() {
         </div>
 
         {assetType === "etf" ? (
-          <p className="mt-2 text-xs leading-5 text-ink/55">
-            日线缺口/失败统计的是历史日线覆盖情况；午休或 15:00 收盘后盘中行情正常不再刷新，不按滞后处理。
-          </p>
-        ) : null}
-
-        {assetType === "etf" ? (
           <div className="mt-4 grid gap-3 rounded-[10px] border border-ink/10 bg-ink px-4 py-3 text-white md:grid-cols-5">
             <div>
               <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-white/50">盘中盯盘</p>
@@ -3342,7 +3335,6 @@ function ShortTermClient() {
               <SectionKicker
                 eyebrow="买入观察榜单"
                 title={`${mode.shortLabel}排序`}
-                description="先扫分数、标签和关键指标；详细解释会在右侧展示。"
               />
               <span className="w-fit rounded-full bg-blush px-2.5 py-1 text-xs font-semibold text-ink/60">
                 每页 12 只
@@ -3544,12 +3536,6 @@ function ShortTermClient() {
                       {selectedAsset.name}
                       <span className="ml-2 text-lg font-normal text-ink/45">{selectedAsset.code}</span>
                     </h2>
-                    <p className="mt-2 rounded-[8px] bg-paper px-4 py-3 text-sm leading-6 text-ink/65">
-                      {assetTradingNote(selectedAsset.asset_type, selectedAsset.name)}
-                      {selectedAsset.asset_type === "etf"
-                        ? " 评分和标签是买入观察状态；持仓处理状态会根据你的买入价、盘中价格、止盈/止损和趋势变化单独计算。"
-                        : ""}
-                    </p>
                     <p className="mt-2 text-sm leading-6 text-ink/65">{selectedAsset.investment_direction}</p>
                     {selectedTracked.length ? (
                       <p className="mt-2 text-sm text-emerald-700">你正在追踪这只资产的 {selectedTracked.length} 笔买入。</p>
@@ -3563,6 +3549,9 @@ function ShortTermClient() {
                   <div className="flex flex-wrap gap-2">
                     <span className="rounded-full bg-ink px-4 py-2 text-sm font-semibold text-white">
                       {selectedAsset.total_score.toFixed(1)} 分
+                    </span>
+                    <span className="rounded-full bg-paper px-4 py-2 text-sm font-semibold text-ink/70">
+                      {scoreVersionText(selectedAsset)}
                     </span>
                     <span className={`rounded-full px-4 py-2 text-sm font-semibold ${conclusionTone(selectedAsset.conclusion)}`}>
                       买入观察：{selectedAsset.conclusion}
@@ -3606,6 +3595,20 @@ function ShortTermClient() {
                     </div>
                   </div>
 
+                  <div className="mt-3 rounded-[10px] border border-ink/10 bg-white p-4">
+                    <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">评分拆解</p>
+                    </div>
+                    <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+                      {scoreDimensionLabels.map((item) => (
+                        <div key={item.key} className="rounded-[8px] border border-ink/10 bg-paper px-3 py-2">
+                          <p className="text-xs text-ink/45">{item.label}</p>
+                          <p className="mt-1 text-base font-semibold text-ink">{scoreDimensionValue(selectedAsset, item.key)}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
                   {renderAssetStatusSummary()}
                 </div>
 
@@ -3613,11 +3616,6 @@ function ShortTermClient() {
                   <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                     <div>
                       <p className="text-sm font-semibold text-ink">我已买入，开始追踪</p>
-                      <p className="mt-1 text-sm leading-6 text-ink/60">
-                        {assetType === "etf"
-                          ? "输入你在证券账户手动买入的金额和日期。系统按公开日线收盘价估算份额和盈亏，不连接券商账户。"
-                          : "输入你手动买入的金额和下单时间。15:00 后下单会按下一条公开净值估算；支付宝已确认份额时可以手动填入。"}
-                      </p>
                     </div>
                     <button
                       className="rounded-[6px] bg-accent px-4 py-2.5 text-sm font-medium text-white transition hover:bg-accent/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
@@ -3717,9 +3715,6 @@ function ShortTermClient() {
                     <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                       <div>
                         <p className="text-sm font-semibold text-ink">追踪收益保护图</p>
-                        <p className="mt-1 text-sm leading-6 text-ink/60">
-                          展示这笔买入后的估算收益、历史最高盈利和移动止盈线。提醒只是卖出/减仓检查，不会替你自动交易。
-                        </p>
                       </div>
                       <span className={`w-fit rounded-full px-3 py-1 text-xs font-semibold ${exitSignalTone(primaryTracked.exit_signal.level)}`}>
                         {primaryTracked.exit_signal.label}
@@ -3802,16 +3797,11 @@ function ShortTermClient() {
                             ? `正在更新 ${selectedAsset.code} 研究说明...`
                             : "还没有 AI 研究报告，先看规则解释。"}
                       </h3>
-                      <p className="mt-2 text-sm leading-6 text-ink/60">
-                        {advisorReport
-                          ? `${advisorSourceLabel(advisorReport.source)} · ${advisorReport.model_name} · ${formatDate(advisorReport.generated_at)}`
-                          : isSelectedDetailPending
-                            ? "首屏摘要先用榜单数据展示，完整图表和说明加载完成后会自动补齐。"
-                            : "点击页面顶部“生成 AI 研究报告”后，会在这里显示多角度说明。没有报告时，排序和图表仍然正常可用。"}
-                      </p>
-                      <p className="mt-2 text-sm leading-6 text-ink/60">
-                        排序、买入观察标签、今日买点和持仓动态线由规则计算；AI只解释依据和风险，不直接决定买卖。
-                      </p>
+                      {advisorReport ? (
+                        <p className="mt-2 text-sm leading-6 text-ink/60">
+                          {advisorSourceLabel(advisorReport.source)} · {advisorReport.model_name} · {formatDate(advisorReport.generated_at)}
+                        </p>
+                      ) : null}
                     </div>
                     <span className={`w-fit rounded-full px-4 py-2 text-sm font-semibold ${advisorTone(advisorReport?.action_label ?? "暂不考虑")}`}>
                       {advisorReport?.action_label ?? "暂无报告"}
@@ -3949,12 +3939,6 @@ function ShortTermClient() {
                           风险标签：{selectedAsset.risk_flags.length ? selectedAsset.risk_flags.join("、") : "暂未触发主要风险标签"}
                         </p>
                         <p className="mt-2">数据来源：{selectedAsset.source_note}</p>
-                        <p className="mt-2">
-                          交易口径：
-                          {assetType === "etf"
-                            ? "证券账户场内 ETF，日线图按公开收盘价，盘中价在上方单独展示；页面不是券商盘口实时价。"
-                            : "支付宝场外基金，按确认净值日估算，不是盘中实时价格。"}
-                        </p>
                       </div>
                     </div>
                   </div>
@@ -4011,9 +3995,6 @@ function ShortTermClient() {
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">历史回测证据</p>
               <h2 className="mt-1 text-xl font-semibold text-ink">ETF 工作台策略证据</h2>
-              <p className="mt-2 max-w-3xl text-sm leading-6 text-ink/60">
-                日线收盘模拟只看每天收盘价，适合看大方向；盘中提醒执行回测会复盘历史盘中提醒、3 分钟后手动成交和减仓/清仓动作，更接近邮件提醒链路。
-              </p>
             </div>
             <div className="flex flex-wrap gap-2">
               <button
@@ -4057,9 +4038,6 @@ function ShortTermClient() {
             <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
               <div>
                 <p className="font-semibold text-ink">策略对照证据</p>
-                <p className="mt-2 text-xs leading-5 text-ink/55">
-                  用同一段 ETF 日线历史比较当前工作台、动量、波动率降权、趋势过滤和等权基准。它是历史模拟，不验证分钟级盘中提醒，也不会自动替换当前规则。
-                </p>
               </div>
               <button
                 type="button"
@@ -4121,7 +4099,7 @@ function ShortTermClient() {
               </>
             ) : (
               <p className="mt-3 rounded-[8px] border border-dashed border-ink/20 bg-paper px-3 py-3 text-xs leading-5 text-ink/55">
-                暂无策略对照结果。没有对照结果时，当前标签只能作为观察状态，不能证明长期有效。
+                暂无策略对照结果。
               </p>
             )}
           </div>
@@ -4129,9 +4107,6 @@ function ShortTermClient() {
             <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
               <div>
                 <p className="font-semibold text-ink">策略体检</p>
-                <p className="mt-2 text-xs leading-5 text-ink/55">
-                  对比完整样本和最近样本，检查标签是否近期失效；体检只提供证据，不自动改排序和邮件阈值。
-                </p>
               </div>
               <button
                 type="button"
@@ -4158,6 +4133,30 @@ function ShortTermClient() {
                     体检日：{formatDate(etfStrategyHealthcheck.data.as_of_date)}
                   </span>
                 </div>
+                <div className="mt-3 grid gap-3 md:grid-cols-2">
+                  <div className="rounded-[8px] border border-border bg-paper/40 p-3 text-xs leading-5 text-ink/60">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-sm font-semibold text-ink">日线收盘证据</p>
+                      <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-ink/55">
+                        {String(etfStrategyHealthcheck.data.summary.daily_close_evidence_status ?? etfStrategyHealthcheck.data.summary.daily_close_evidence ?? "等待")}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="rounded-[8px] border border-border bg-paper/40 p-3 text-xs leading-5 text-ink/60">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-sm font-semibold text-ink">盘中提醒证据</p>
+                      <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-ink/55">
+                        {String(etfStrategyHealthcheck.data.summary.intraday_alert_evidence_status ?? etfStrategyHealthcheck.data.summary.intraday_alert_evidence ?? "等待")}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                {etfStrategyHealthcheck.data.summary.backtest_evidence_status === "旧口径结果" ||
+                etfStrategyHealthcheck.data.summary.backtest_evidence_status === "legacy" ? (
+                  <p className="mt-3 rounded-[8px] border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
+                    最近回测缺少当前证据契约，只能作为旧口径结果，不能当作当前 ETF 工作台策略证明。
+                  </p>
+                ) : null}
                 <div className="mt-3 grid gap-3 lg:grid-cols-3">
                   {etfStrategyHealthcheck.data.items.slice(0, 6).map((item) => (
                     <div
@@ -4165,7 +4164,14 @@ function ShortTermClient() {
                       className="rounded-[8px] border border-border bg-paper/40 p-3 text-xs text-ink/60"
                     >
                       <p className="text-sm font-semibold text-ink">
-                        {item.item_type === "entry_timing" ? "今日买点" : "买入观察"}：{item.item_key}
+                        {item.item_type === "entry_timing"
+                          ? "今日买点"
+                          : item.item_type === "theme"
+                            ? "主题"
+                            : item.item_type === "market_regime"
+                              ? "市场状态"
+                              : "买入观察"}
+                        ：{item.item_key}
                       </p>
                       <p className="mt-2">结论：{item.conclusion}</p>
                       <p>样本：{item.sample_count}</p>
@@ -4370,7 +4376,7 @@ function ShortTermClient() {
             </>
           ) : (
             <p className="mt-5 rounded-[10px] border border-dashed border-ink/20 bg-white px-4 py-5 text-sm leading-6 text-ink/55">
-              当前 ETF 工作台策略还没有历史回测结果。可以先跑日线收盘模拟看大方向，再跑盘中提醒执行回测验证邮件提醒后的手动成交链路；结果都只代表历史模拟，不保证未来收益。
+              暂无历史回测结果。
             </p>
           )}
         </Panel>
@@ -4394,11 +4400,8 @@ function ShortTermClient() {
                       : "进攻配置"}
               </span>
             </summary>
-            <p className="mt-2 text-sm leading-6 text-ink/60">
-              这里的 100% 只指你放进证券账户、准备买 ETF 的这部分资金上限，不代表必须时时满仓。系统会先找进攻仓位；大趋势不好时转向防守仓位；合格标的不够时保留等待资金。
-            </p>
             <p className="mt-3 rounded-[8px] bg-paper px-4 py-3 text-xs leading-5 text-ink/55">
-              {observationPortfolio.data?.methodology ?? "按买点、风险和数据可靠性筛选，再做分散约束，不做收益承诺。"}
+              {observationPortfolio.data?.methodology ?? "按买点、风险和数据可靠性筛选，再做分散约束。"}
               {observationPortfolio.data
                 ? ` 单只 ETF 上限 ${formatPercent((observationPortfolio.data.single_weight_cap ?? 0) * 100)}，ETF 资金最高投入 ${formatPercent((observationPortfolio.data.target_invested_weight ?? 1) * 100)}。`
                 : ""}
@@ -4418,9 +4421,6 @@ function ShortTermClient() {
               <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                 <div>
                   <p className="text-sm font-semibold text-ink">优化组合对照</p>
-                  <p className="mt-2 text-xs leading-5 text-ink/55">
-                    用最小波动和风险平价做数学权重对照；它只用于比较权重稳定性，不会自动替换当前 ETF 资金配置。
-                  </p>
                 </div>
                 <button
                   type="button"
@@ -4447,8 +4447,27 @@ function ShortTermClient() {
                         </span>
                       </div>
                       <p className="mt-2 text-xs leading-5 text-ink/55">
-                        {method.unavailable_reason ?? "按历史波动、单只上限和主题集中度约束生成的数学权重对照。"}
+                        {method.unavailable_reason ??
+                          (method.method === "black_litterman"
+                            ? "按市场先验、结构化标签 view、证据置信度和约束生成的 Black-Litterman 对照。"
+                            : "按历史波动、单只上限和主题集中度约束生成的数学权重对照。")}
                       </p>
+                      {method.method === "black_litterman" ? (
+                        <div className="mt-3 grid gap-1 rounded-[8px] bg-white px-3 py-2 text-[11px] leading-5 text-ink/55">
+                          <p>先验来源：{String(method.summary.prior_source ?? "等待数据")}</p>
+                          <p>
+                            结构化 view：{String(method.summary.view_count ?? 0)} 个；平均置信度：
+                            {recordNumber(method.summary.confidence_summary, "avg") === null
+                              ? "暂无"
+                              : formatPercent((recordNumber(method.summary.confidence_summary, "avg") ?? 0) * 100)}
+                          </p>
+                          <p>
+                            约束：单只上限 {formatPercent(Number(method.summary.constraints?.single_weight_cap ?? 0.3) * 100)}；
+                            主题上限 {formatPercent(Number(method.summary.constraints?.theme_exposure_cap ?? 0.6) * 100)}
+                          </p>
+                          <p>排除资产：{String(method.summary.excluded_count ?? 0)} 只；仅作研究对照，需要人工判断。</p>
+                        </div>
+                      ) : null}
                       <div className="mt-3 space-y-2">
                         {method.items.slice(0, 4).map((item) => (
                           <div key={item.code} className="flex items-center justify-between gap-3 text-xs text-ink/60">
@@ -4494,7 +4513,7 @@ function ShortTermClient() {
             </div>
             {observationPortfolio.data?.portfolio_mode === "defensive" ? (
               <p className="mt-4 rounded-[10px] border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-800">
-                当前市场不适合全仓进攻，优先使用防守 ETF 做资金配置参考；这不是保本承诺，也不是自动交易。
+                当前市场不适合全仓进攻，优先使用防守 ETF 做资金配置参考。
               </p>
             ) : null}
             {(observationPortfolio.data?.cash_weight ?? 0) > 0 && observationPortfolio.data?.portfolio_mode !== "cash_wait" ? (
@@ -4653,9 +4672,6 @@ function ShortTermClient() {
                 </div>
               </>
             ) : null}
-            <p className="mt-4 text-xs leading-5 text-ink/50">
-              {observationPortfolio.data?.note ?? "观察组合只用于手动研究参考。"}
-            </p>
           </details>
         </Panel>
       ) : null}
@@ -4679,11 +4695,6 @@ function ShortTermClient() {
         </Panel>
       ) : null}
 
-      <p className="rounded-[10px] bg-white/70 px-5 py-4 text-sm leading-7 text-ink/60">
-        {mode.sourceSummary}
-        页面里的排序、标签和 AI 说明都用于研究观察，不代表未来收益，也不会触发真实操作；
-        真实买卖仍需要你在{assetType === "etf" ? "证券账户" : "支付宝"}手动确认。
-      </p>
       </div>
     </div>
   );

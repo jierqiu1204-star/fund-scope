@@ -85,6 +85,8 @@ class EtfLiveRankingItemOut(BaseModel):
     live_total_score: float | None = None
     intraday_adjustment_score: float | None = None
     score_source: str = "unavailable"
+    score_version: str | None = None
+    score_breakdown: dict[str, Any] = Field(default_factory=dict)
     score_contribution_reasons: list[str] = Field(default_factory=list)
     live_entry_timing_label: str
     live_entry_timing_reason: str
