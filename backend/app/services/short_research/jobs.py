@@ -78,51 +78,35 @@ async def post_close_etf_data_job(session: AsyncSession) -> dict[str, Any]:
     today = date.today()
     snapshot_result = await sync_etf_price_history_from_intraday_snapshot(session, trade_date=today)
     needs_history_provider = bool(snapshot_result.get("needs_history_provider"))
-    if _count(snapshot_result, "inserted") + _count(snapshot_result, "updated") > 0:
-        if needs_history_provider:
-            history_result = await sync_short_research_data(
-                session,
-                from_date=today - timedelta(days=120),
-                to_date=today,
-                asset_type=ASSET_TYPE_ETF,
-                sync_all_etfs=True,
-            )
-            return {
-                "from_date": (today - timedelta(days=120)).isoformat(),
-                "to_date": today.isoformat(),
-                "asset_type": ASSET_TYPE_ETF,
-                "etf": history_result,
-                "snapshot": snapshot_result,
-                "history_provider": history_result,
-                "asset_count": _count(history_result, "asset_count"),
-                "failed": _count(history_result, "failed"),
-                "source": "intraday_snapshot_plus_history_provider",
-            }
+    changed_count = _count(snapshot_result, "inserted") + _count(snapshot_result, "updated")
+    deferred_count = _count(snapshot_result, "missing") + _count(snapshot_result, "skipped_too_early")
+    if changed_count > 0:
         return {
             "from_date": today.isoformat(),
             "to_date": today.isoformat(),
             "asset_type": ASSET_TYPE_ETF,
             "etf": snapshot_result,
+            "snapshot": snapshot_result,
             "asset_count": _count(snapshot_result, "etfs"),
             "failed": 0,
-            "source": "intraday_snapshot",
+            "source": "intraday_snapshot_partial" if needs_history_provider else "intraday_snapshot",
+            "needs_history_provider": needs_history_provider,
+            "history_provider_deferred": needs_history_provider,
+            "deferred_history_provider_count": deferred_count if needs_history_provider else 0,
         }
 
-    result = await sync_short_research_data(
-        session,
-        from_date=today - timedelta(days=120),
-        to_date=today,
-        asset_type=ASSET_TYPE_ETF,
-        sync_all_etfs=True,
-    )
     return {
-        "from_date": (today - timedelta(days=120)).isoformat(),
+        "from_date": today.isoformat(),
         "to_date": today.isoformat(),
         "asset_type": ASSET_TYPE_ETF,
-        "etf": result,
-        "asset_count": _count(result, "asset_count"),
-        "failed": _count(result, "failed"),
-        "source": "history_provider",
+        "etf": snapshot_result,
+        "snapshot": snapshot_result,
+        "asset_count": _count(snapshot_result, "etfs"),
+        "failed": 0,
+        "source": "intraday_snapshot_unavailable",
+        "needs_history_provider": True,
+        "history_provider_deferred": True,
+        "deferred_history_provider_count": deferred_count,
     }
 
 
