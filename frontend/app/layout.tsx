@@ -13,7 +13,7 @@ export const metadata: Metadata = {
 
 const primaryNavItems = [
   { href: "/short-term", label: "短线研究", primary: true },
-  { href: "/short-term?section=tracking", label: "我的持仓" },
+  { href: "/short-term/evidence", label: "策略证据" },
   { href: "/admin/jobs", label: "数据任务" },
   { href: "/settings/notifications", label: "设置" }
 ];
