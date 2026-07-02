@@ -19,32 +19,30 @@ Create these files on the deployment host. Do not commit private values.
 - `POSTGRES_PASSWORD`: export in the shell or provide through a host-level environment file before running Compose.
 - `FQDN`: export the public hostname used by nginx and Certbot.
 
-## GitHub Actions Secrets
+## GitHub Actions Runner
 
-Configure these in GitHub: repository `Settings` -> `Secrets and variables` -> `Actions`.
-
-- `VPS_HOST`: DNS name or IP address of the deployment host.
-- `VPS_USER`: SSH user that owns or can access `/srv/fundscope`.
-- `VPS_SSH_KEY`: private key with permission to SSH to the host. Store the full PEM text.
+Automatic deployment uses a GitHub self-hosted runner on the VPS. The runner must
+be registered to this repository with the `fundscope-vps` label and must be able
+to run `sudo docker compose` without an interactive password prompt.
 
 Readiness check:
 
 ```bash
-gh secret list
+gh api repos/jierqiu1204-star/fund-scope/actions/runners
 ```
 
-The list should include `VPS_HOST`, `VPS_USER`, and `VPS_SSH_KEY`. The values are intentionally not printed.
+The runner list should include an `online` runner named `fundscope-vps`.
 
 ## Automatic Deploys
 
 Pushes to the GitHub `codex-strategy-lab` branch trigger `.github/workflows/deploy.yml`.
 
-The workflow checks out the pushed commit on GitHub Actions, uploads a tar
-archive to the server, replaces `/srv/fundscope`, preserves server-local
-configuration files, then runs Compose from `/srv/fundscope/deploy`. The server
-checkout does not need to be a git repository.
+The workflow runs on the `fundscope-vps` GitHub self-hosted runner installed on
+the VPS. It checks out the pushed commit, syncs it to `/srv/fundscope`, preserves
+server-local configuration files, then runs Compose from `/srv/fundscope/deploy`.
+The server checkout does not need to be a git repository.
 
-Server-local files preserved across each archive deploy:
+Server-local files preserved across each deploy:
 
 - `/srv/fundscope/.env`
 - `/srv/fundscope/deploy/.env`
@@ -53,7 +51,7 @@ Server-local files preserved across each archive deploy:
 It removes the previous Compose containers with:
 
 ```bash
-docker compose -f "$COMPOSE_FILE" down --remove-orphans
+sudo docker compose -f "$COMPOSE_FILE" down --remove-orphans
 ```
 
 It does not pass `-v`, so database and certificate volumes are retained.
