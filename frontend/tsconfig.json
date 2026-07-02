@@ -13,9 +13,7 @@
     "isolatedModules": true,
     "jsx": "preserve",
     "incremental": false,
-    "ignoreDeprecations": "6.0",
     "plugins": [{ "name": "next" }],
-    "baseUrl": ".",
     "paths": {
       "@/components/*": ["./components/*"],
       "@/lib/*": ["./lib/*"]
