@@ -3,19 +3,47 @@ name: Deploy
 on:
   push:
     branches:
-      - main
+      - codex-strategy-lab
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-codex-strategy-lab
+  cancel-in-progress: true
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Deploy via SSH
+      - name: Deploy codex-strategy-lab via SSH
         uses: appleboy/ssh-action@v1.2.0
+        env:
+          BRANCH: codex-strategy-lab
+          COMPOSE_FILE: ${{ vars.VPS_COMPOSE_FILE || 'docker-compose.yml' }}
+          DEPLOY_REMOTE: ${{ vars.VPS_GIT_REMOTE || 'github' }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          envs: BRANCH,COMPOSE_FILE,DEPLOY_REMOTE
           script: |
+            set -eu
+
             cd /srv/fundscope
-            git pull
-            docker compose up -d --build
+            if ! git remote get-url "$DEPLOY_REMOTE" >/dev/null 2>&1; then
+              DEPLOY_REMOTE=origin
+            fi
+
+            git fetch --prune "$DEPLOY_REMOTE" "$BRANCH"
+            if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+              git checkout "$BRANCH"
+            else
+              git checkout -B "$BRANCH" "$DEPLOY_REMOTE/$BRANCH"
+            fi
+            git reset --hard "$DEPLOY_REMOTE/$BRANCH"
+
+            cd deploy
+            docker compose -f "$COMPOSE_FILE" down --remove-orphans
+            docker compose -f "$COMPOSE_FILE" up -d --build
+            docker compose -f "$COMPOSE_FILE" exec -T backend alembic upgrade head
+            docker image prune -f
+            docker compose -f "$COMPOSE_FILE" ps

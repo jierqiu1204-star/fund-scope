@@ -35,6 +35,27 @@ gh secret list
 
 The list should include `VPS_HOST`, `VPS_USER`, and `VPS_SSH_KEY`. The values are intentionally not printed.
 
+## Automatic Deploys
+
+Pushes to the GitHub `codex-strategy-lab` branch trigger `.github/workflows/deploy.yml`.
+
+The workflow SSHes into `/srv/fundscope`, fetches the latest `codex-strategy-lab`
+revision, resets the server checkout to that revision, then runs Compose from
+`/srv/fundscope/deploy`.
+
+It removes the previous Compose containers with:
+
+```bash
+docker compose -f "$COMPOSE_FILE" down --remove-orphans
+```
+
+It does not pass `-v`, so database and certificate volumes are retained.
+
+Optional GitHub Actions repository variables:
+
+- `VPS_COMPOSE_FILE`: Compose file under `deploy/`. Defaults to `docker-compose.yml`. Set to `docker-compose.ip.yml` for the temporary IP deployment.
+- `VPS_GIT_REMOTE`: Git remote name on the server. Defaults to `github` and falls back to `origin` if `github` is not configured.
+
 ## First Deploy
 
 1. Clone the repository to `/srv/fundscope`.

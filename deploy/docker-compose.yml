@@ -21,7 +21,7 @@ services:
   frontend-static-builder:
     build:
       context: ../frontend
-    command: sh -c "cp -R /app/out /exported"
+    command: sh -c "rm -rf /exported/* && cp -R /app/out/. /exported/"
     volumes:
       - frontend-static:/exported
 
