@@ -10,40 +10,114 @@ concurrency:
   group: deploy-codex-strategy-lab
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
+env:
+  COMPOSE_FILE: ${{ vars.VPS_COMPOSE_FILE || 'docker-compose.yml' }}
+  DEPLOY_ARCHIVE: fundscope-deploy-${{ github.sha }}.tar.gz
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Deploy codex-strategy-lab via SSH
-        uses: appleboy/ssh-action@v1.2.0
+      - name: Check out codex-strategy-lab
+        uses: actions/checkout@v4
+
+      - name: Build deployment archive
+        run: tar --exclude='./.git' -czf "$RUNNER_TEMP/$DEPLOY_ARCHIVE" .
+
+      - name: Upload archive and deploy
         env:
-          BRANCH: codex-strategy-lab
-          COMPOSE_FILE: ${{ vars.VPS_COMPOSE_FILE || 'docker-compose.yml' }}
-          DEPLOY_REMOTE: ${{ vars.VPS_GIT_REMOTE || 'github' }}
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          envs: BRANCH,COMPOSE_FILE,DEPLOY_REMOTE
-          script: |
-            set -eu
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          set -eu
 
-            cd /srv/fundscope
-            if ! git remote get-url "$DEPLOY_REMOTE" >/dev/null 2>&1; then
-              DEPLOY_REMOTE=origin
+          case "$COMPOSE_FILE" in
+            docker-compose.yml|docker-compose.ip.yml) ;;
+            *)
+              echo "Unsupported VPS_COMPOSE_FILE: $COMPOSE_FILE" >&2
+              exit 1
+              ;;
+          esac
+
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/fundscope_deploy_key
+          chmod 600 ~/.ssh/fundscope_deploy_key
+          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts
+
+          scp -i ~/.ssh/fundscope_deploy_key \
+            "$RUNNER_TEMP/$DEPLOY_ARCHIVE" \
+            "$VPS_USER@$VPS_HOST:/tmp/$DEPLOY_ARCHIVE"
+
+          ssh -i ~/.ssh/fundscope_deploy_key "$VPS_USER@$VPS_HOST" \
+            "DEPLOY_ARCHIVE=$DEPLOY_ARCHIVE COMPOSE_FILE=$COMPOSE_FILE GITHUB_SHA=$GITHUB_SHA bash -s" <<'REMOTE'
+          set -eu
+
+          case "$COMPOSE_FILE" in
+            docker-compose.yml|docker-compose.ip.yml) ;;
+            *)
+              echo "Unsupported COMPOSE_FILE: $COMPOSE_FILE" >&2
+              exit 1
+              ;;
+          esac
+
+          deploy_dir=/srv/fundscope
+          archive=/tmp/$DEPLOY_ARCHIVE
+          tmp_dir=$(mktemp -d /tmp/fundscope-new.XXXXXX)
+          old_dir=
+
+          cleanup() {
+            status=$?
+            rm -f "$archive"
+            if [ -n "${tmp_dir:-}" ] && [ -d "$tmp_dir" ]; then
+              rm -rf "$tmp_dir"
             fi
-
-            git fetch --prune "$DEPLOY_REMOTE" "$BRANCH"
-            if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
-              git checkout "$BRANCH"
-            else
-              git checkout -B "$BRANCH" "$DEPLOY_REMOTE/$BRANCH"
+            if [ "$status" -ne 0 ] && [ -n "${old_dir:-}" ] && [ -d "$old_dir" ]; then
+              rm -rf "$deploy_dir"
+              mv "$old_dir" "$deploy_dir"
+            elif [ -n "${old_dir:-}" ] && [ -d "$old_dir" ]; then
+              rm -rf "$old_dir"
             fi
-            git reset --hard "$DEPLOY_REMOTE/$BRANCH"
+            exit "$status"
+          }
+          trap cleanup EXIT
 
-            cd deploy
-            docker compose -f "$COMPOSE_FILE" down --remove-orphans
-            docker compose -f "$COMPOSE_FILE" up -d --build
-            docker compose -f "$COMPOSE_FILE" exec -T backend alembic upgrade head
-            docker image prune -f
-            docker compose -f "$COMPOSE_FILE" ps
+          tar -xzf "$archive" -C "$tmp_dir"
+
+          if [ -f "$deploy_dir/.env" ]; then
+            cp "$deploy_dir/.env" "$tmp_dir/.env"
+          fi
+          if [ -f "$deploy_dir/deploy/.env" ]; then
+            cp "$deploy_dir/deploy/.env" "$tmp_dir/deploy/.env"
+          fi
+          if [ -f "$deploy_dir/deploy/.htpasswd" ]; then
+            cp "$deploy_dir/deploy/.htpasswd" "$tmp_dir/deploy/.htpasswd"
+          fi
+
+          case "$deploy_dir" in
+            /srv/fundscope) ;;
+            *)
+              echo "Refusing to replace unexpected deploy_dir: $deploy_dir" >&2
+              exit 1
+              ;;
+          esac
+
+          old_dir=$(mktemp -d /tmp/fundscope-old.XXXXXX)
+          rmdir "$old_dir"
+          if [ -d "$deploy_dir" ]; then
+            mv "$deploy_dir" "$old_dir"
+          fi
+          mv "$tmp_dir" "$deploy_dir"
+          tmp_dir=
+          echo "$GITHUB_SHA" > "$deploy_dir/.deploy-version"
+
+          cd "$deploy_dir/deploy"
+          docker compose -f "$COMPOSE_FILE" down --remove-orphans
+          docker compose -f "$COMPOSE_FILE" up -d --build
+          docker compose -f "$COMPOSE_FILE" exec -T backend alembic upgrade head
+          docker image prune -f
+          docker compose -f "$COMPOSE_FILE" ps
+          REMOTE
