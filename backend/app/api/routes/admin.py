@@ -36,6 +36,7 @@ from app.services.short_research.jobs import (
     daily_short_research_advisor_job,
     daily_short_research_data_job,
     daily_short_research_signals_job,
+    etf_exit_hyperopt_job,
     etf_history_backfill_job,
     etf_label_historical_replay_job,
     etf_optimized_allocation_job,
@@ -237,6 +238,16 @@ async def run_job_by_name(
         return await run_job(request.app.state.db.session, job_name, etf_strategy_healthcheck_job)
     if job_name == "etf_optimized_allocation":
         return await run_job(request.app.state.db.session, job_name, etf_optimized_allocation_job)
+    if job_name == "etf_exit_hyperopt":
+        return await run_job(
+            request.app.state.db.session,
+            job_name,
+            lambda tracked_session: etf_exit_hyperopt_job(
+                tracked_session,
+                days=min(days, 1095),
+                max_assets=max_assets,
+            ),
+        )
     if job_name == "daily_etf_label_outcome_review":
         return await run_job(request.app.state.db.session, job_name, daily_etf_label_outcome_review_job)
     if job_name == "daily_etf_observation_portfolio":

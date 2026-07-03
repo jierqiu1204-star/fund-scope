@@ -917,6 +917,39 @@ export type EtfStrategyComparison = {
   error_message: string | null;
 };
 
+export type EtfExitHyperoptItem = {
+  id: number;
+  bucket_type: string;
+  bucket_key: string;
+  status: string;
+  conclusion: string;
+  parameters: Record<string, unknown>;
+  train_metrics: Record<string, unknown>;
+  out_of_sample_metrics: Record<string, unknown>;
+  score: number;
+  sample_count: number;
+  trade_count: number;
+  created_at: string;
+};
+
+export type EtfExitHyperopt = {
+  id: number;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+  as_of_date: string;
+  objective: string;
+  rule_version: string;
+  train_range: Record<string, unknown>;
+  out_of_sample_range: Record<string, unknown>;
+  search_space: Record<string, unknown>;
+  summary: Record<string, unknown>;
+  error_message: string | null;
+  research_only: boolean;
+  no_trade_instruction: boolean;
+  items: EtfExitHyperoptItem[];
+};
+
 export type TrackedPositionSnapshot = {
   current_price: number | null;
   current_price_date: string | null;

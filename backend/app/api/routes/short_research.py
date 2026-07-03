@@ -16,6 +16,8 @@ from app.models.entities import (
     User,
 )
 from app.schemas.short_research import (
+    EtfExitHyperoptRequest,
+    EtfExitHyperoptRunOut,
     EtfOptimizedAllocationOut,
     EtfPortfolioBacktestDetailOut,
     EtfPortfolioBacktestListOut,
@@ -53,6 +55,11 @@ from app.services.short_research.backtest import (
     run_etf_portfolio_backtest,
     run_etf_strategy_comparison_backtest,
     strategy_comparison_payload,
+)
+from app.services.short_research.etf_exit_hyperopt import (
+    etf_exit_hyperopt_payload,
+    latest_etf_exit_hyperopt_run,
+    run_etf_exit_hyperopt,
 )
 from app.services.short_research.healthcheck import (
     healthcheck_payload,
@@ -574,6 +581,33 @@ async def get_etf_strategy_comparison(
     if run is None or run.rule_version != "etf_strategy_comparison_v1":
         raise HTTPException(status_code=404, detail="未找到 ETF 策略对照记录")
     return strategy_comparison_payload(run)
+
+
+@router.post("/etf-exit-hyperopt/run", response_model=EtfExitHyperoptRunOut)
+async def run_etf_exit_hyperopt_endpoint(
+    payload: EtfExitHyperoptRequest | None = Body(default=None),
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = Depends(require_approved_user),
+) -> dict[str, Any]:
+    payload = payload or EtfExitHyperoptRequest()
+    run = await run_etf_exit_hyperopt(
+        session,
+        days=payload.days,
+        max_assets=payload.max_assets,
+        objective=payload.objective,
+    )
+    return await etf_exit_hyperopt_payload(session, run)
+
+
+@router.get("/etf-exit-hyperopt/latest", response_model=EtfExitHyperoptRunOut | None)
+async def get_latest_etf_exit_hyperopt(
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = Depends(require_approved_user),
+) -> dict[str, Any] | None:
+    run = await latest_etf_exit_hyperopt_run(session)
+    if run is None:
+        return None
+    return await etf_exit_hyperopt_payload(session, run)
 
 
 @router.post("/validation/run", response_model=EtfSignalValidationRunOut)

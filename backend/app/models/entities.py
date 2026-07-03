@@ -826,6 +826,50 @@ class EtfOptimizedAllocationItem(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class EtfExitHyperoptRun(Base):
+    __tablename__ = "etf_exit_hyperopt_runs"
+    __table_args__ = (
+        SaIndex("ix_etf_exit_hyperopt_runs_status_started", "status", "started_at"),
+        SaIndex("ix_etf_exit_hyperopt_runs_finished", "finished_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    status: Mapped[str] = mapped_column(String(32), default="running")
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    as_of_date: Mapped[date] = mapped_column(Date)
+    objective: Mapped[str] = mapped_column(String(64), default="stability_first")
+    rule_version: Mapped[str] = mapped_column(String(64), default="etf_exit_hyperopt_v1")
+    train_range_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    out_of_sample_range_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    search_space_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    summary_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class EtfExitHyperoptItem(Base):
+    __tablename__ = "etf_exit_hyperopt_items"
+    __table_args__ = (
+        SaIndex("ix_etf_exit_hyperopt_items_run_bucket", "run_id", "bucket_type", "bucket_key"),
+        SaIndex("ix_etf_exit_hyperopt_items_run_score", "run_id", "score"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("etf_exit_hyperopt_runs.id", ondelete="CASCADE"))
+    bucket_type: Mapped[str] = mapped_column(String(32))
+    bucket_key: Mapped[str] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(32), default="candidate")
+    conclusion: Mapped[str] = mapped_column(String(64), default="候选待确认")
+    parameter_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    train_metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    out_of_sample_metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    score: Mapped[float] = mapped_column(Float, default=0.0)
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    trade_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class EtfPortfolioBacktestRun(Base):
     __tablename__ = "etf_portfolio_backtest_runs"
     __table_args__ = (

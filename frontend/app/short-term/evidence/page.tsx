@@ -16,6 +16,7 @@ import { Panel } from "@/components/ui";
 import { api } from "@/lib/api";
 import { formatCurrency, formatDate, formatPercent } from "@/lib/format";
 import type {
+  EtfExitHyperopt,
   EtfOptimizedAllocation,
   EtfPortfolioBacktestDetail,
   EtfPortfolioBacktestList,
@@ -136,6 +137,11 @@ export default function EtfEvidencePage() {
     queryFn: async () =>
       (await api.get<EtfOptimizedAllocation | null>("/api/short-research/etf-optimized-allocation/latest")).data
   });
+  const exitHyperopt = useQuery({
+    queryKey: ["short-research", "etf-exit-hyperopt", "latest"],
+    queryFn: async () =>
+      (await api.get<EtfExitHyperopt | null>("/api/short-research/etf-exit-hyperopt/latest")).data
+  });
 
   const runBacktest = useMutation({
     mutationFn: async (executionModel: "daily_close" | "intraday_alert") =>
@@ -179,6 +185,19 @@ export default function EtfEvidencePage() {
         queryClient.invalidateQueries({ queryKey: ["short-research", "etf-optimized-allocation"] }),
         queryClient.invalidateQueries({ queryKey: ["short-research", "observation-portfolio"] })
       ]);
+    }
+  });
+  const runExitHyperopt = useMutation({
+    mutationFn: async () =>
+      (
+        await api.post<EtfExitHyperopt>("/api/short-research/etf-exit-hyperopt/run", {
+          days: 730,
+          max_assets: 300,
+          objective: "stability_first"
+        })
+      ).data,
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["short-research", "etf-exit-hyperopt"] });
     }
   });
 
@@ -226,9 +245,16 @@ export default function EtfEvidencePage() {
             >
               策略体检
             </button>
+            <button
+              className="rounded-[6px] bg-ink px-3 py-2 text-sm font-semibold text-white transition hover:bg-ink/85 disabled:opacity-60"
+              disabled={runExitHyperopt.isPending}
+              onClick={() => runExitHyperopt.mutate()}
+            >
+              参数优化
+            </button>
           </div>
         </div>
-        {[runBacktest, runComparison, runHealthcheck, runOptimizedAllocation].map((mutation, index) =>
+        {[runBacktest, runComparison, runHealthcheck, runOptimizedAllocation, runExitHyperopt].map((mutation, index) =>
           mutation.isError ? (
             <p key={index} className="mt-3 rounded-[8px] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
               {errorText(mutation.error)}
@@ -390,6 +416,61 @@ export default function EtfEvidencePage() {
           )}
         </Panel>
       </div>
+
+      <Panel>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <p className="text-sm font-semibold text-ink">参数优化证据</p>
+            <p className="mt-1 text-xs text-ink/55">
+              当前邮件规则不自动改变；候选参数必须人工确认后才可能进入生效规则。
+            </p>
+          </div>
+          <span className="w-fit rounded-full bg-paper px-2.5 py-1 text-xs text-ink/60">
+            {exitHyperopt.data ? `${formatDate(exitHyperopt.data.as_of_date)} · ${exitHyperopt.data.objective}` : "暂无结果"}
+          </span>
+        </div>
+        {exitHyperopt.data ? (
+          <>
+            <div className="mt-4 grid gap-3 md:grid-cols-4">
+              <EvidenceStat label="分桶数量" value={metricInteger(exitHyperopt.data.summary, "bucket_count")} />
+              <EvidenceStat label="候选数量" value={metricInteger(exitHyperopt.data.summary, "candidate_count")} />
+              <EvidenceStat label="拒绝/不足" value={metricInteger(exitHyperopt.data.summary, "rejected_count")} />
+              <EvidenceStat label="参数组合" value={metricInteger(exitHyperopt.data.summary, "parameter_count")} />
+            </div>
+            <div className="mt-4 grid gap-3 lg:grid-cols-2">
+              {exitHyperopt.data.items.slice(0, 6).map((item) => (
+                <div key={item.id} className="rounded-[8px] border border-border bg-paper/40 p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-ink">
+                        {item.bucket_type} / {item.bucket_key}
+                      </p>
+                      <p className="mt-1 text-xs text-ink/55">
+                        {item.conclusion} · 分数 {item.score.toFixed(1)}
+                      </p>
+                    </div>
+                    <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-ink/55">
+                      {item.status}
+                    </span>
+                  </div>
+                  <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-ink/60">
+                    <span>样本外收益：{metricPercent(item.out_of_sample_metrics, "total_return")}</span>
+                    <span>样本外回撤：{metricPercent(item.out_of_sample_metrics, "max_drawdown")}</span>
+                    <span>胜率：{metricPercent(item.out_of_sample_metrics, "win_rate")}</span>
+                    <span>提醒次数：{metricInteger(item.out_of_sample_metrics, "alert_count")}</span>
+                    <span>交易次数：{item.trade_count}</span>
+                    <span>样本：{item.sample_count}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        ) : (
+          <p className="mt-4 rounded-[8px] border border-dashed border-border bg-paper px-3 py-4 text-sm text-ink/55">
+            暂无参数优化证据。可以点击“参数优化”运行一次，或等待服务器夜间任务。
+          </p>
+        )}
+      </Panel>
 
       <Panel>
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">

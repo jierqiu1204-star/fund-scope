@@ -16,6 +16,7 @@ from app.services.short_research.backtest import (
     run_etf_portfolio_backtest,
     run_etf_strategy_comparison_backtest,
 )
+from app.services.short_research.etf_exit_hyperopt import run_etf_exit_hyperopt
 from app.services.short_research.healthcheck import run_etf_strategy_healthcheck
 from app.services.short_research.optimized_allocation import run_etf_optimized_allocation
 from app.services.short_research.service import (
@@ -325,6 +326,30 @@ async def etf_optimized_allocation_job(session: AsyncSession) -> dict[str, Any]:
         "black_litterman_status": black_litterman.get("status"),
         "black_litterman_unavailable_reason": black_litterman.get("unavailable_reason"),
         "black_litterman_candidate_count": black_litterman.get("candidate_count"),
+    }
+
+
+async def etf_exit_hyperopt_job(
+    session: AsyncSession,
+    *,
+    days: int = 730,
+    max_assets: int = 300,
+) -> dict[str, Any]:
+    run = await run_etf_exit_hyperopt(session, days=days, max_assets=max_assets)
+    summary = dict(run.summary_json or {})
+    return {
+        "run_id": run.id,
+        "status": run.status,
+        "as_of_date": run.as_of_date.isoformat(),
+        "objective": run.objective,
+        "rule_version": run.rule_version,
+        "asset_count": int(summary.get("asset_count", 0)),
+        "bucket_count": int(summary.get("bucket_count", 0)),
+        "candidate_count": int(summary.get("candidate_count", 0)),
+        "rejected_count": int(summary.get("rejected_count", 0)),
+        "auto_applied": False,
+        "research_only": True,
+        "error_message": run.error_message,
     }
 
 

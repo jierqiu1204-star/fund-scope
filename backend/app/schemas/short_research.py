@@ -426,3 +426,42 @@ class EtfStrategyComparisonOut(BaseModel):
     strategies: list[dict[str, Any]] = Field(default_factory=list)
     best_strategy: str | None = None
     error_message: str | None = None
+
+
+class EtfExitHyperoptRequest(BaseModel):
+    days: int = Field(default=730, ge=120, le=1500)
+    max_assets: int = Field(default=300, ge=20, le=2000)
+    objective: str = "stability_first"
+
+
+class EtfExitHyperoptItemOut(BaseModel):
+    id: int
+    bucket_type: str
+    bucket_key: str
+    status: str
+    conclusion: str
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    train_metrics: dict[str, Any] = Field(default_factory=dict)
+    out_of_sample_metrics: dict[str, Any] = Field(default_factory=dict)
+    score: float
+    sample_count: int
+    trade_count: int
+    created_at: datetime
+
+
+class EtfExitHyperoptRunOut(BaseModel):
+    id: int
+    status: str
+    started_at: datetime
+    finished_at: datetime | None = None
+    as_of_date: date
+    objective: str
+    rule_version: str
+    train_range: dict[str, Any] = Field(default_factory=dict)
+    out_of_sample_range: dict[str, Any] = Field(default_factory=dict)
+    search_space: dict[str, Any] = Field(default_factory=dict)
+    summary: dict[str, Any] = Field(default_factory=dict)
+    error_message: str | None = None
+    research_only: bool = True
+    no_trade_instruction: bool = True
+    items: list[EtfExitHyperoptItemOut] = Field(default_factory=list)

@@ -2,6 +2,8 @@
 
 from app.models.entities import (
     EtfDataHealth,
+    EtfExitHyperoptItem,
+    EtfExitHyperoptRun,
     EtfLabelOutcome,
     EtfLabelReplaySample,
     EtfMetric,
@@ -56,6 +58,8 @@ from app.models.entities import (
 
 __all__ = [
     "EtfDataHealth",
+    "EtfExitHyperoptItem",
+    "EtfExitHyperoptRun",
     "EtfLabelOutcome",
     "EtfLabelReplaySample",
     "EtfMetric",
