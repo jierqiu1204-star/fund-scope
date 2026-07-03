@@ -556,6 +556,14 @@ export type ShortResearchAsset = {
   name: string;
   rank: number | null;
   total_score: number;
+  technical_score?: number | null;
+  opportunity_score?: number | null;
+  opportunity_label?: string | null;
+  catalyst_score?: number | null;
+  sentiment_heat_score?: number | null;
+  catalyst_summary?: string | null;
+  catalyst_events?: Array<Record<string, unknown>>;
+  catalyst_limitations?: string[];
   conclusion: string;
   entry_timing_label: string;
   entry_timing_reason: string;

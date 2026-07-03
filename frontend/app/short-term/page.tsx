@@ -38,7 +38,7 @@ import type {
 } from "@/lib/types";
 
 type AssetType = "fund" | "etf";
-type SortKey = "score" | "return_5d" | "return_20d" | "drawdown_low" | "risk_low" | "liquidity";
+type SortKey = "score" | "opportunity" | "return_5d" | "return_20d" | "drawdown_low" | "risk_low" | "liquidity";
 type OrderTimeBucket = "before_15" | "after_15" | "unknown";
 type MobileTab = "ranking" | "detail" | "tracking" | "explanation";
 type RankedAssetItem = ShortResearchAsset | IntradayEtfLiveRankingItem;
@@ -68,7 +68,8 @@ const baseSortOptions: Array<{ key: SortKey; label: string }> = [
 ];
 
 const etfSortOptions: Array<{ key: SortKey; label: string }> = [
-  { key: "score", label: "实时综合排序" }
+  { key: "score", label: "实时综合排序" },
+  { key: "opportunity", label: "综合关注" }
 ];
 
 const labelFilterGroups: Array<{
@@ -510,6 +511,21 @@ function liveScoreText(item: IntradayEtfLiveRankingItem) {
     return "日线基础分 " + formatLiveScore(item.base_score ?? item.live_total_score) + " 分";
   }
   return "暂无分数";
+}
+
+function formatOptionalScore(value: number | null | undefined) {
+  return value === null || value === undefined ? "暂无" : value.toFixed(1);
+}
+
+function opportunityScoreText(asset: ShortResearchAsset | null | undefined) {
+  if (!asset?.opportunity_score && asset?.opportunity_score !== 0) {
+    return "暂无综合关注";
+  }
+  return `综合关注 ${formatOptionalScore(asset.opportunity_score)} 分`;
+}
+
+function catalystSummaryText(asset: ShortResearchAsset | null | undefined) {
+  return asset?.catalyst_summary || "暂无主题催化数据，先按技术结构观察。";
 }
 
 const scoreDimensionLabels: Array<{ key: string; label: string }> = [
@@ -1313,7 +1329,7 @@ function ShortTermClient() {
   const assets = useQuery({
     queryKey: ["short-research", "assets", assetType, theme, sort, keyword, assetOffset, labelFilterSignature],
     queryFn: async () => {
-      if (assetType === "etf") {
+      if (assetType === "etf" && sort === "score") {
         const params = new URLSearchParams();
         params.set("limit", String(ASSET_PAGE_SIZE));
         params.set("offset", String(assetOffset));
@@ -2325,6 +2341,11 @@ function ShortTermClient() {
                         ? liveScoreText(item)
                         : `${item.total_score.toFixed(1)} 分`}
                     </span>
+                    {!isLiveItem && item.asset_type === "etf" && item.opportunity_score !== null && item.opportunity_score !== undefined ? (
+                      <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : "bg-accent text-white"}`}>
+                        {opportunityScoreText(item)}
+                      </span>
+                    ) : null}
                     <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : "bg-paper text-ink/60"}`}>
                       {itemScoreVersion}
                     </span>
@@ -2390,6 +2411,11 @@ function ShortTermClient() {
                       <span className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
                         {validationEvidenceText(item as ShortResearchAsset)}
                       </span>
+                      {item.asset_type === "etf" ? (
+                        <span className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                          主题催化：{catalystSummaryText(item)}
+                        </span>
+                      ) : null}
                       <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
                         最新日涨跌：{percentMetric(item.metrics, "today_return_pct")}
                       </span>
@@ -2458,7 +2484,7 @@ function ShortTermClient() {
             <div className="rounded-[8px] bg-paper px-4 py-3">
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">当前结论</p>
               <p className="mt-2 text-lg font-semibold text-ink">
-                {selectedAsset.conclusion} · {selectedAsset.total_score.toFixed(1)} 分
+                {selectedAsset.conclusion} · 技术分 {selectedAsset.total_score.toFixed(1)}
               </p>
               <p className="mt-2 text-sm leading-6 text-ink/65">
                 {rationaleText(selectedAsset, "key_reason", "暂无")}
@@ -2475,6 +2501,15 @@ function ShortTermClient() {
                 {rationaleText(selectedAsset, "holding_plan", "建议结合数据与风险控制后再操作。")}
               </p>
             </div>
+            {selectedAsset.asset_type === "etf" ? (
+              <div className="rounded-[8px] bg-paper px-4 py-3 sm:col-span-2">
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">主题催化</p>
+                <p className="mt-2 text-base font-semibold text-ink">
+                  {selectedAsset.opportunity_label ?? "技术优先"} · {opportunityScoreText(selectedAsset)}
+                </p>
+                <p className="mt-2 text-sm leading-6 text-ink/65">{catalystSummaryText(selectedAsset)}</p>
+              </div>
+            ) : null}
           </div>
 
           {assetType === "etf" ? (
@@ -3442,8 +3477,13 @@ function ShortTermClient() {
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <span className="rounded-full bg-ink px-4 py-2 text-sm font-semibold text-white">
-                      {selectedAsset.total_score.toFixed(1)} 分
+                      技术分 {selectedAsset.total_score.toFixed(1)}
                     </span>
+                    {selectedAsset.asset_type === "etf" && selectedAsset.opportunity_score !== null && selectedAsset.opportunity_score !== undefined ? (
+                      <span className="rounded-full bg-accent px-4 py-2 text-sm font-semibold text-white">
+                        {opportunityScoreText(selectedAsset)}
+                      </span>
+                    ) : null}
                     <span className="rounded-full bg-paper px-4 py-2 text-sm font-semibold text-ink/70">
                       {scoreVersionText(selectedAsset)}
                     </span>
@@ -3473,7 +3513,7 @@ function ShortTermClient() {
                     <div className="rounded-[10px] bg-paper p-4">
                       <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">当前结论</p>
                       <p className="mt-2 text-lg font-semibold text-ink">
-                        {selectedAsset.conclusion} · 综合分 {selectedAsset.total_score.toFixed(1)}
+                        {selectedAsset.conclusion} · 技术分 {selectedAsset.total_score.toFixed(1)}
                       </p>
                       <p className="mt-2 text-sm leading-7 text-ink/65">
                         {rationaleText(selectedAsset, "key_reason", "按近期趋势、回撤、波动、成交额和数据质量综合生成。")}
@@ -3488,6 +3528,28 @@ function ShortTermClient() {
                       </p>
                     </div>
                   </div>
+
+                  {selectedAsset.asset_type === "etf" ? (
+                    <div className="mt-3 rounded-[10px] border border-accent/20 bg-white p-4">
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">主题催化</p>
+                        <p className="text-sm font-semibold text-ink">
+                          {selectedAsset.opportunity_label ?? "技术优先"} · {opportunityScoreText(selectedAsset)}
+                        </p>
+                      </div>
+                      <p className="mt-2 text-sm leading-6 text-ink/65">{catalystSummaryText(selectedAsset)}</p>
+                      <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                        <StatPill label="技术分" value={formatOptionalScore(selectedAsset.technical_score ?? selectedAsset.total_score)} tone="bg-paper text-ink" />
+                        <StatPill label="催化分" value={formatOptionalScore(selectedAsset.catalyst_score)} tone="bg-paper text-ink" />
+                        <StatPill label="热度分" value={formatOptionalScore(selectedAsset.sentiment_heat_score)} tone="bg-paper text-ink" />
+                      </div>
+                      {selectedAsset.catalyst_limitations?.length ? (
+                        <p className="mt-2 text-xs leading-5 text-ink/50">
+                          限制：{selectedAsset.catalyst_limitations.slice(0, 2).join("；")}
+                        </p>
+                      ) : null}
+                    </div>
+                  ) : null}
 
                   <div className="mt-3 rounded-[10px] border border-ink/10 bg-white p-4">
                     <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">

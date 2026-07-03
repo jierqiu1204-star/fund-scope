@@ -783,6 +783,62 @@ class EtfStrategyHealthcheckItem(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class EtfThemeCatalystEvent(Base):
+    __tablename__ = "etf_theme_catalyst_events"
+    __table_args__ = (
+        UniqueConstraint("theme_key", "title", "event_date", name="uq_etf_theme_catalyst_event"),
+        SaIndex(
+            "ix_etf_theme_catalyst_active_window",
+            "theme_key",
+            "status",
+            "effective_start",
+            "effective_end",
+        ),
+        SaIndex("ix_etf_theme_catalyst_source_status", "source_type", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    theme_key: Mapped[str] = mapped_column(String(64))
+    theme_name: Mapped[str] = mapped_column(String(128))
+    catalyst_type: Mapped[str] = mapped_column(String(64))
+    title: Mapped[str] = mapped_column(String(255))
+    summary: Mapped[str] = mapped_column(Text, default="")
+    source_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    event_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    effective_start: Mapped[date | None] = mapped_column(Date, nullable=True)
+    effective_end: Mapped[date | None] = mapped_column(Date, nullable=True)
+    direction: Mapped[str] = mapped_column(String(32), default="positive")
+    strength_score: Mapped[float] = mapped_column(Float, default=50.0)
+    confidence_score: Mapped[float] = mapped_column(Float, default=50.0)
+    status: Mapped[str] = mapped_column(String(32), default="active")
+    source_type: Mapped[str] = mapped_column(String(32), default="manual")
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class EtfThemeCatalystSnapshot(Base):
+    __tablename__ = "etf_theme_catalyst_snapshots"
+    __table_args__ = (
+        UniqueConstraint("as_of_date", "theme_key", name="uq_etf_theme_catalyst_snapshot"),
+        SaIndex("ix_etf_theme_catalyst_snapshot_status_date", "status", "as_of_date"),
+        SaIndex("ix_etf_theme_catalyst_snapshot_theme", "theme_key", "as_of_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    as_of_date: Mapped[date] = mapped_column(Date)
+    theme_key: Mapped[str] = mapped_column(String(64))
+    theme_name: Mapped[str] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(32), default="success")
+    catalyst_score: Mapped[float] = mapped_column(Float, default=50.0)
+    sentiment_heat_score: Mapped[float] = mapped_column(Float, default=50.0)
+    event_count: Mapped[int] = mapped_column(Integer, default=0)
+    key_events_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    limitations_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    score_breakdown_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    generated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class EtfOptimizedAllocationSnapshot(Base):
     __tablename__ = "etf_optimized_allocation_snapshots"
     __table_args__ = (SaIndex("ix_etf_optimized_allocation_status_created", "status", "created_at"),)

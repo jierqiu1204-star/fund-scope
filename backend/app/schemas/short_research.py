@@ -120,6 +120,14 @@ class ShortResearchAssetOut(BaseModel):
     name: str
     rank: int | None = None
     total_score: float
+    technical_score: float | None = None
+    opportunity_score: float | None = None
+    opportunity_label: str | None = None
+    catalyst_score: float | None = None
+    sentiment_heat_score: float | None = None
+    catalyst_summary: str | None = None
+    catalyst_events: list[dict[str, Any]] = Field(default_factory=list)
+    catalyst_limitations: list[str] = Field(default_factory=list)
     conclusion: str
     entry_timing_label: str
     entry_timing_reason: str

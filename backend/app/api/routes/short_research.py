@@ -133,8 +133,9 @@ def _asset_out(
     validation_evidence: dict[str, Any] | None = None,
     observation_portfolio: dict[str, Any] | None = None,
 ) -> ShortResearchAssetOut:
+    metrics = dict(asset.metrics or {})
     theme_profile = dict(
-        asset.metrics.get("theme_profile")
+        metrics.get("theme_profile")
         or asset.rationale.get("theme_profile")
         or {}
     )
@@ -148,9 +149,9 @@ def _asset_out(
                 signal_run.summary_json or {}
             ).get("rule_version")
         source_data_time = (
-            asset.metrics.get("quote_time")
-            or asset.metrics.get("data_as_of_time")
-            or asset.metrics.get("latest_quote_time")
+            metrics.get("quote_time")
+            or metrics.get("data_as_of_time")
+            or metrics.get("latest_quote_time")
             or asset.latest_date
         )
         signal_contract = build_research_signal_contract(
@@ -161,7 +162,7 @@ def _asset_out(
             score=asset.total_score,
             observation_label=asset.conclusion,
             entry_timing_label=asset.entry_timing_label,
-            data_reliability=str(asset.metrics.get("data_reliability") or asset.metrics.get("score_source") or "verified"),
+            data_reliability=str(metrics.get("data_reliability") or metrics.get("score_source") or "verified"),
             source_data_time=source_data_time,
             rule_version=str(signal_rule_version) if signal_rule_version else "short_research_signal_v1",
         )
@@ -177,6 +178,14 @@ def _asset_out(
         name=asset.metadata.name,
         rank=asset.rank,
         total_score=round(asset.total_score, 2),
+        technical_score=round(float(metrics["technical_score"]), 2) if isinstance(metrics.get("technical_score"), (int, float)) else None,
+        opportunity_score=round(float(metrics["opportunity_score"]), 2) if isinstance(metrics.get("opportunity_score"), (int, float)) else None,
+        opportunity_label=str(metrics.get("opportunity_label")) if metrics.get("opportunity_label") else None,
+        catalyst_score=round(float(metrics["catalyst_score"]), 2) if isinstance(metrics.get("catalyst_score"), (int, float)) else None,
+        sentiment_heat_score=round(float(metrics["sentiment_heat_score"]), 2) if isinstance(metrics.get("sentiment_heat_score"), (int, float)) else None,
+        catalyst_summary=str(metrics.get("catalyst_summary")) if metrics.get("catalyst_summary") else None,
+        catalyst_events=list(metrics.get("catalyst_events") or []),
+        catalyst_limitations=list(metrics.get("catalyst_limitations") or []),
         conclusion=asset.conclusion,
         entry_timing_label=asset.entry_timing_label,
         entry_timing_reason=asset.entry_timing_reason,
@@ -194,7 +203,7 @@ def _asset_out(
         latest_value=asset.latest_value,
         usable_days=asset.usable_days,
         sample_level=asset.sample_level,
-        metrics=asset.metrics,
+        metrics=metrics,
         score_breakdown=asset.score_breakdown,
         risk_flags=asset.risk_flags,
         rationale=asset.rationale,

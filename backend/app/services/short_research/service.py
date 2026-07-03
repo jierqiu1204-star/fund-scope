@@ -82,6 +82,10 @@ from app.services.short_research.ranking import (
     apply_label_evidence,
     build_final_score_breakdowns,
 )
+from app.services.short_research.theme_catalysts import (
+    build_asset_opportunity_payload,
+    latest_theme_catalyst_snapshots_by_key,
+)
 from app.services.short_research.theme_taxonomy import (
     UNKNOWN_GROUP,
     UNKNOWN_THEME,
@@ -2169,6 +2173,47 @@ def _with_final_score_v2(assets: list[ComputedAsset]) -> list[ComputedAsset]:
     return updated
 
 
+async def _with_opportunity_scores(
+    session: AsyncSession,
+    assets: list[ComputedAsset],
+    as_of_date: date,
+) -> list[ComputedAsset]:
+    etf_assets = [asset for asset in assets if asset.metadata.asset_type == ASSET_TYPE_ETF]
+    if not etf_assets:
+        return assets
+    snapshots = await latest_theme_catalyst_snapshots_by_key(session, as_of_date=as_of_date)
+    updated: list[ComputedAsset] = []
+    for asset in assets:
+        if asset.metadata.asset_type != ASSET_TYPE_ETF:
+            updated.append(asset)
+            continue
+        payload = build_asset_opportunity_payload(
+            asset_name=asset.metadata.name,
+            theme_tags=list(asset.metadata.theme_tags),
+            metrics=asset.metrics,
+            risk_flags=asset.risk_flags,
+            technical_score=asset.total_score,
+            snapshots_by_key=snapshots,
+        )
+        opportunity_metrics = dict(payload["metrics"])
+        catalyst_summary = str(opportunity_metrics.get("catalyst_summary") or "")
+        opportunity_label = str(opportunity_metrics.get("opportunity_label") or "")
+        updated.append(
+            replace(
+                asset,
+                metrics={**asset.metrics, **opportunity_metrics},
+                score_breakdown={**asset.score_breakdown, "opportunity_score_v1": payload["breakdown"]},
+                rationale={
+                    **asset.rationale,
+                    "catalyst_summary": catalyst_summary,
+                    "opportunity_label": opportunity_label,
+                    "opportunity_meaning": "综合关注分只用于研究观察，不覆盖买点、数据可信度或风险标签。",
+                },
+            )
+        )
+    return updated
+
+
 async def compute_asset(
     session: AsyncSession,
     metadata: ShortResearchAsset,
@@ -2360,6 +2405,8 @@ def _matches_filters(
 
 def _sort_key(asset: ComputedAsset, sort: str) -> tuple[float, str]:
     metrics = asset.metrics
+    if sort == "opportunity":
+        return (float(metrics.get("opportunity_score") or asset.total_score), asset.metadata.code)
     if sort == "return_5d":
         return (float(metrics.get("return_5d") or -999), asset.metadata.code)
     if sort == "return_20d":
@@ -2405,14 +2452,16 @@ async def list_computed_assets(
     universe: str = UNIVERSE_DEFAULT,
 ) -> list[ComputedAsset]:
     await ensure_short_research_universe(session)
+    effective_date = as_of_date or await latest_data_date(session) or date.today()
     candidates = [
         item
         for item in await _available_assets(session, asset_type=asset_type, codes=codes)
         if _matches_filters(item, asset_type=asset_type, theme=theme, codes=codes)
     ]
-    computed = [await compute_asset(session, item, as_of_date=as_of_date) for item in candidates]
+    computed = [await compute_asset(session, item, as_of_date=effective_date) for item in candidates]
     if asset_type == ASSET_TYPE_ETF or any(item.metadata.asset_type == ASSET_TYPE_ETF for item in computed):
         computed = _with_final_score_v2(computed)
+        computed = await _with_opportunity_scores(session, computed, effective_date)
     if asset_type == ASSET_TYPE_ETF and universe == UNIVERSE_DEFAULT and not codes:
         computed = [item for item in computed if bool(item.metrics.get("default_display_eligible"))]
         computed = _dedupe_etf_candidates(computed)
@@ -2451,6 +2500,10 @@ async def get_asset_detail(
         else:
             raise ValueError("资产类型只支持 fund 或 etf")
     computed = await compute_asset(session, metadata, as_of_date=as_of_date)
+    if metadata.asset_type == ASSET_TYPE_ETF:
+        detail_date = as_of_date or await latest_data_date(session) or date.today()
+        computed = _with_final_score_v2([computed])[0]
+        computed = (await _with_opportunity_scores(session, [computed], detail_date))[0]
     series = await _series_for_asset(session, metadata, as_of_date or await latest_data_date(session))
     recent = series[-240:]
     drawdowns = _drawdown_series(recent)
@@ -2509,6 +2562,7 @@ async def run_signal_generation(
             validation_by_label = await latest_forward_validation_evidence_by_label(session)
             if validation_by_label:
                 assets = [_asset_with_validation_evidence(asset, validation_by_label) for asset in assets]
+                assets = await _with_opportunity_scores(session, assets, effective_date)
                 assets.sort(key=lambda item: _sort_key(item, "score"), reverse=True)
                 assets = [replace(asset, rank=index) for index, asset in enumerate(assets, start=1)]
         for asset in assets:

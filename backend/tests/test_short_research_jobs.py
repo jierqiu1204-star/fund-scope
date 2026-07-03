@@ -61,6 +61,26 @@ async def test_daily_etf_universe_job_reports_refresh_counts(monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
+async def test_daily_etf_theme_catalyst_job_reports_refresh_counts(monkeypatch) -> None:
+    async def fake_refresh_theme_catalyst_snapshots(_session: object) -> dict[str, Any]:
+        return {
+            "as_of_date": "2026-07-03",
+            "seeded": {"inserted": 4, "updated": 0},
+            "snapshots": 4,
+            "unavailable": 0,
+            "themes": ["光模块", "光模块_proxy", "机器人", "半导体"],
+        }
+
+    monkeypatch.setattr(jobs_module, "refresh_theme_catalyst_snapshots", fake_refresh_theme_catalyst_snapshots)
+
+    result = await jobs_module.daily_etf_theme_catalyst_job(object())  # type: ignore[arg-type]
+
+    assert result["snapshots"] == 4
+    assert result["seeded"]["inserted"] == 4
+    assert "机器人" in result["themes"]
+
+
+@pytest.mark.asyncio
 async def test_daily_short_research_signals_job_generates_fund_and_etf_runs(monkeypatch) -> None:
     calls: list[str] = []
 

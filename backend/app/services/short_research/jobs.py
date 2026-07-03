@@ -26,6 +26,7 @@ from app.services.short_research.service import (
     run_etf_signal_validation,
     run_signal_generation,
 )
+from app.services.short_research.theme_catalysts import refresh_theme_catalyst_snapshots
 from app.services.short_research.theme_taxonomy import refresh_etf_theme_profiles
 from app.services.short_research.universe import refresh_etf_universe
 from app.services.workflows.short_research_data import (
@@ -163,6 +164,10 @@ async def daily_etf_universe_job(session: AsyncSession) -> dict[str, Any]:
 
 async def daily_etf_taxonomy_job(session: AsyncSession) -> dict[str, Any]:
     return await refresh_etf_theme_profiles(session)
+
+
+async def daily_etf_theme_catalyst_job(session: AsyncSession) -> dict[str, Any]:
+    return await refresh_theme_catalyst_snapshots(session)
 
 
 async def daily_short_research_signals_job(session: AsyncSession) -> dict[str, Any]:

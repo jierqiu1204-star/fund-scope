@@ -115,6 +115,12 @@ const jobGroups: Array<{ title: string; description: string; actions: JobAction[
         endpoint: "/api/admin/jobs/daily_short_research_signals/run"
       },
       {
+        key: "daily_etf_theme_catalyst",
+        label: "刷新 ETF 主题催化",
+        description: "刷新机器人、半导体、光模块等主题催化快照；只影响综合关注展示，不改买点和风控。",
+        endpoint: "/api/admin/jobs/daily_etf_theme_catalyst/run"
+      },
+      {
         key: "etf_label_historical_replay",
         label: "运行标签历史回放",
         description: "用当前 ETF 标签规则回放过去 180 天日线，生成历史样本证据；不改变排名、组合或邮件提醒。",

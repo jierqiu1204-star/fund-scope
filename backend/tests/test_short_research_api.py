@@ -167,6 +167,101 @@ async def _seed_observation_portfolio_signal_run(
         await session.commit()
 
 
+async def _seed_opportunity_signal_run(app) -> None:
+    async with app.state.db.session() as session:
+        session.add_all(
+            [
+                TradableEtf(
+                    code="159001",
+                    name="机器人ETF测试",
+                    exchange="SZ",
+                    theme_tags_json=["机器人"],
+                    trading_rule_label="证券账户 T+1 ETF",
+                    asset_class="sector",
+                    is_short_term_eligible=True,
+                    is_watchlist=True,
+                ),
+                TradableEtf(
+                    code="159002",
+                    name="普通科技ETF测试",
+                    exchange="SZ",
+                    theme_tags_json=["科技"],
+                    trading_rule_label="证券账户 T+1 ETF",
+                    asset_class="sector",
+                    is_short_term_eligible=True,
+                    is_watchlist=True,
+                ),
+            ]
+        )
+        run = ShortResearchSignalRun(
+            status="success",
+            as_of_date=date(2026, 7, 3),
+            config_json={"asset_type": "etf", "language": "research_only"},
+            summary_json={"item_count": 2, "score_version": "final_score_v2"},
+        )
+        session.add(run)
+        await session.flush()
+        session.add_all(
+            [
+                ShortResearchSignalItem(
+                    run_id=run.id,
+                    asset_type="etf",
+                    asset_code="159001",
+                    rank=1,
+                    total_score=70,
+                    conclusion="高位观察",
+                    score_breakdown_json={"opportunity_score_v1": {"opportunity_score": 80}},
+                    risk_flags_json=[],
+                    rationale_json={"entry_timing_reason": "强势但冲高。"},
+                    metrics_json={
+                        "entry_timing_label": "冲高别追",
+                        "entry_timing_reason": "强势但冲高。",
+                        "latest_date": "2026-07-03",
+                        "latest_value": 1.2,
+                        "usable_days": 120,
+                        "default_display_eligible": True,
+                        "technical_score": 70,
+                        "opportunity_score": 80,
+                        "opportunity_label": "主题强但等买点",
+                        "catalyst_score": 90,
+                        "sentiment_heat_score": 80,
+                        "catalyst_summary": "宇树科技 IPO 催化机器人主题。",
+                        "catalyst_events": [{"summary": "宇树科技 IPO 催化机器人主题。"}],
+                        "catalyst_limitations": ["当前买点为冲高别追，主题催化不能覆盖追高风险。"],
+                    },
+                ),
+                ShortResearchSignalItem(
+                    run_id=run.id,
+                    asset_type="etf",
+                    asset_code="159002",
+                    rank=2,
+                    total_score=78,
+                    conclusion="短线观察",
+                    score_breakdown_json={"opportunity_score_v1": {"opportunity_score": 69}},
+                    risk_flags_json=[],
+                    rationale_json={"entry_timing_reason": "趋势延续。"},
+                    metrics_json={
+                        "entry_timing_label": "趋势延续",
+                        "entry_timing_reason": "趋势延续。",
+                        "latest_date": "2026-07-03",
+                        "latest_value": 1.1,
+                        "usable_days": 120,
+                        "default_display_eligible": True,
+                        "technical_score": 78,
+                        "opportunity_score": 69,
+                        "opportunity_label": "技术优先",
+                        "catalyst_score": 50,
+                        "sentiment_heat_score": 50,
+                        "catalyst_summary": "暂无可用于评分的主题催化事件。",
+                        "catalyst_events": [],
+                        "catalyst_limitations": ["主题催化数据不可用。"],
+                    },
+                ),
+            ]
+        )
+        await session.commit()
+
+
 async def _seed_observation_price_series(
     app,
     *,
@@ -260,6 +355,28 @@ async def test_short_research_signal_generation_is_deterministic_and_research_on
     latest_fund = await client.get("/api/short-research/signals/latest?asset_type=fund")
     assert latest_fund.status_code == 200
     assert latest_fund.json()["id"] == fund_body["id"]
+
+
+@pytest.mark.asyncio
+async def test_short_research_assets_return_opportunity_score_without_hiding_risk(client, app) -> None:
+    await _seed_opportunity_signal_run(app)
+
+    response = await client.get("/api/short-research/assets?asset_type=etf&sort=opportunity&universe=all")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 2
+    first = body["items"][0]
+    assert first["code"] == "159001"
+    assert first["total_score"] == 70
+    assert first["technical_score"] == 70
+    assert first["opportunity_score"] == 80
+    assert first["opportunity_label"] == "主题强但等买点"
+    assert first["catalyst_score"] == 90
+    assert first["sentiment_heat_score"] == 80
+    assert first["catalyst_summary"] == "宇树科技 IPO 催化机器人主题。"
+    assert first["entry_timing_label"] == "冲高别追"
+    assert any("冲高别追" in item for item in first["catalyst_limitations"])
 
 
 @pytest.mark.asyncio
