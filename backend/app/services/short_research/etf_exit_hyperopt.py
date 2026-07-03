@@ -2,18 +2,19 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from itertools import product
 from statistics import pstdev
 from typing import Any
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.entities import (
     EtfExitHyperoptItem,
     EtfExitHyperoptRun,
+    EtfIntradayQuote,
     EtfPriceHistory,
     EtfThemeProfile,
     TradableEtf,
@@ -26,6 +27,9 @@ CALIBRATION_RULE_VERSION = "etf_exit_calibration_v1"
 EXECUTION_MODEL_DAILY_CLOSE = "daily_close"
 EXECUTION_MODEL_INTRADAY_ALERT = "intraday_alert"
 OBJECTIVE_STABILITY_FIRST = "stability_first"
+DEFAULT_MANUAL_DELAY_MINUTES = 3
+MIN_DAILY_HISTORY_POINTS = 40
+MIN_INTRADAY_HISTORY_POINTS = 20
 STATUS_CANDIDATE = "candidate"
 STATUS_APPROVED = "approved"
 STATUS_EXPIRED = "expired"
@@ -42,6 +46,14 @@ DEFAULT_SEARCH_SPACE: dict[str, list[float | int]] = {
     "trailing_giveback_multiplier": [0.5, 0.65, 0.8],
     "trend_confirm_days": [1, 2],
     "take_profit_watch_pct": [3.0, 4.0],
+}
+
+DEFAULT_LIVE_PARAMS: dict[str, float | int] = {
+    "hard_stop_multiplier": 1.5,
+    "profit_start_multiplier": 1.1,
+    "trailing_giveback_multiplier": 0.65,
+    "trend_confirm_days": 1,
+    "take_profit_watch_pct": 3.0,
 }
 
 _BUCKET_LIMITS: dict[str, tuple[float, float]] = {
@@ -76,6 +88,35 @@ class HyperoptSeries:
     asset_bucket: str
     theme_group: str
     points: list[HyperoptPricePoint]
+    intraday_points: list[HyperoptIntradayPoint] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class HyperoptCoverage:
+    all_etf_count: int
+    eligible_count: int
+    selected_count: int
+    enough_daily_history_count: int
+    enough_intraday_history_count: int
+    final_optimized_count: int
+    sampled: bool
+    max_assets: int | None
+    exclusions: dict[str, int]
+    exclusion_examples: dict[str, list[str]]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "all_etf_count": self.all_etf_count,
+            "eligible_count": self.eligible_count,
+            "selected_count": self.selected_count,
+            "enough_daily_history_count": self.enough_daily_history_count,
+            "enough_intraday_history_count": self.enough_intraday_history_count,
+            "final_optimized_count": self.final_optimized_count,
+            "sampled": self.sampled,
+            "max_assets": self.max_assets,
+            "exclusions": self.exclusions,
+            "exclusion_examples": self.exclusion_examples,
+        }
 
 
 def parameter_grid(search_space: dict[str, list[float | int]] | None = None) -> list[dict[str, float | int]]:
@@ -231,6 +272,7 @@ def simulate_intraday_exit_rule(
     asset_bucket: str = "unknown",
     daily_points: list[HyperoptPricePoint] | None = None,
     allow_daily_fallback: bool = False,
+    manual_delay_minutes: int = DEFAULT_MANUAL_DELAY_MINUTES,
 ) -> dict[str, Any]:
     eligible_points = [
         point
@@ -267,22 +309,146 @@ def simulate_intraday_exit_rule(
             "source_reliability": "unavailable",
             "missing_intraday_evidence_count": 1,
             "no_lookahead_exclusions": ["缺少可决策盘中行情，未用日线收盘价替代。"],
+            "execution_delay_minutes": manual_delay_minutes,
         }
 
-    replay_points = [
+    if len(eligible_points) < MIN_INTRADAY_HISTORY_POINTS:
+        return {
+            "sample_count": 0,
+            "trade_count": 0,
+            "alert_count": 0,
+            "win_rate": None,
+            "total_return": None,
+            "avg_trade_return": None,
+            "max_drawdown": None,
+            "turnover": None,
+            "unfilled_count": 0,
+            "false_exit_count": 0,
+            "protected_exit_count": 0,
+            "missed_upside_rate": None,
+            "protected_exit_rate": None,
+            "execution_model": EXECUTION_MODEL_INTRADAY_ALERT,
+            "source_reliability": "unavailable",
+            "missing_intraday_evidence_count": 1,
+            "no_lookahead_exclusions": ["可决策盘中行情样本不足，未用日线收盘价替代。"],
+            "execution_delay_minutes": manual_delay_minutes,
+        }
+
+    threshold_points = daily_points if daily_points and len(daily_points) >= 20 else [
         HyperoptPricePoint(point.quote_time.date(), point.price)
         for point in eligible_points
     ]
-    result = simulate_exit_rule(replay_points, params, asset_bucket=asset_bucket)
-    result.update(
-        {
-            "execution_model": EXECUTION_MODEL_INTRADAY_ALERT,
-            "source_reliability": "verified_intraday",
-            "missing_intraday_evidence_count": 0,
-            "no_lookahead_exclusions": [],
-        }
-    )
-    return result
+    vol_pct = volatility_unit_pct(threshold_points, asset_bucket)
+    thresholds = thresholds_from_params(params, volatility_pct=vol_pct)
+    trend_confirm_days = max(1, int(params["trend_confirm_days"]))
+    delay = timedelta(minutes=max(0, manual_delay_minutes))
+
+    entry_price = eligible_points[0].price
+    peak_price = entry_price
+    equity = 1.0
+    peak_equity = 1.0
+    max_drawdown = 0.0
+    trade_returns: list[float] = []
+    alert_count = 0
+    unfilled_count = 0
+    false_exit_count = 0
+    protected_exit_count = 0
+    watch_alert_active = False
+    negative_streak = 0
+    index = 1
+
+    while index < len(eligible_points):
+        point = eligible_points[index]
+        current = point.price
+        previous = eligible_points[index - 1].price
+        if previous > 0 and current < previous:
+            negative_streak += 1
+        else:
+            negative_streak = 0
+        peak_price = max(peak_price, current)
+        profit_pct = (current / entry_price - 1.0) * 100
+        peak_profit_pct = (peak_price / entry_price - 1.0) * 100
+        giveback_pct = peak_profit_pct - profit_pct
+        in_trade_equity = equity * (current / entry_price)
+        peak_equity = max(peak_equity, in_trade_equity)
+        if peak_equity > 0:
+            max_drawdown = min(max_drawdown, in_trade_equity / peak_equity - 1.0)
+
+        exit_reason: str | None = None
+        if profit_pct <= thresholds["hard_stop_pct"]:
+            exit_reason = "hard_stop"
+        elif peak_profit_pct >= thresholds["profit_start_pct"] and giveback_pct >= thresholds["trailing_giveback_pct"]:
+            exit_reason = "trailing_take_profit"
+        elif negative_streak >= trend_confirm_days and profit_pct < 0:
+            exit_reason = "trend_weakening"
+        elif profit_pct >= thresholds["take_profit_watch_pct"] and not watch_alert_active:
+            alert_count += 1
+            watch_alert_active = True
+
+        if exit_reason is not None:
+            alert_count += 1
+            execute_after = point.quote_time + delay
+            fill_index: int | None = None
+            for candidate_index in range(index + 1, len(eligible_points)):
+                if eligible_points[candidate_index].quote_time >= execute_after:
+                    fill_index = candidate_index
+                    break
+            if fill_index is None:
+                unfilled_count += 1
+                index += 1
+                continue
+
+            fill = eligible_points[fill_index]
+            realized = fill.price / entry_price - 1.0
+            trade_returns.append(realized)
+            future = eligible_points[fill_index + 1 : fill_index + 6]
+            if future:
+                max_future_return = max(point.price / fill.price - 1.0 for point in future)
+                min_future_return = min(point.price / fill.price - 1.0 for point in future)
+                if max_future_return * 100 >= max(1.0, vol_pct):
+                    false_exit_count += 1
+                if min_future_return * 100 <= -max(1.0, vol_pct):
+                    protected_exit_count += 1
+            equity *= 1.0 + realized
+            peak_equity = max(peak_equity, equity)
+            index = fill_index + 1
+            if index >= len(eligible_points):
+                break
+            entry_price = eligible_points[index].price
+            peak_price = entry_price
+            watch_alert_active = False
+            negative_streak = 0
+            continue
+        index += 1
+
+    final_return = eligible_points[-1].price / entry_price - 1.0
+    total_return = equity * (1.0 + final_return) - 1.0
+    trade_count = len(trade_returns)
+    win_rate = sum(1 for value in trade_returns if value > 0) / trade_count if trade_count else None
+    avg_trade_return = sum(trade_returns) / trade_count if trade_count else None
+    turnover = trade_count / max(len(eligible_points) / 80, 1)
+    return {
+        "sample_count": 1,
+        "trade_count": trade_count,
+        "alert_count": alert_count,
+        "win_rate": win_rate,
+        "total_return": total_return,
+        "avg_trade_return": avg_trade_return,
+        "max_drawdown": max_drawdown,
+        "turnover": turnover,
+        "unfilled_count": unfilled_count,
+        "false_exit_count": false_exit_count,
+        "protected_exit_count": protected_exit_count,
+        "missed_upside_rate": false_exit_count / trade_count if trade_count else None,
+        "protected_exit_rate": protected_exit_count / trade_count if trade_count else None,
+        "volatility_unit_pct": vol_pct,
+        "thresholds": thresholds,
+        "execution_model": EXECUTION_MODEL_INTRADAY_ALERT,
+        "source_reliability": "verified_intraday",
+        "missing_intraday_evidence_count": 0,
+        "no_lookahead_exclusions": [],
+        "execution_delay_minutes": manual_delay_minutes,
+    }
 
 
 def aggregate_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -337,7 +503,11 @@ def aggregate_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def stability_score(train_metrics: dict[str, Any], oos_metrics: dict[str, Any]) -> float:
+def stability_score(
+    train_metrics: dict[str, Any],
+    oos_metrics: dict[str, Any],
+    baseline_metrics: dict[str, Any] | None = None,
+) -> float:
     oos_return = float(oos_metrics.get("total_return") or 0.0)
     oos_drawdown = abs(float(oos_metrics.get("max_drawdown") or 0.0))
     train_return = float(train_metrics.get("total_return") or 0.0)
@@ -349,6 +519,18 @@ def stability_score(train_metrics: dict[str, Any], oos_metrics: dict[str, Any]) 
     protected_exit_rate = float(oos_metrics.get("protected_exit_rate") or 0.0)
     overfit_penalty = max(0.0, train_return - oos_return - 0.08) * 100
     sparse_penalty = 18.0 if trade_count < 3 else 0.0
+    baseline_penalty = 0.0
+    if baseline_metrics and baseline_metrics.get("sample_count"):
+        baseline_return = float(baseline_metrics.get("total_return") or 0.0)
+        baseline_drawdown = abs(float(baseline_metrics.get("max_drawdown") or 0.0))
+        baseline_false_exit_count = int(baseline_metrics.get("false_exit_count") or 0)
+        false_exit_count = int(oos_metrics.get("false_exit_count") or 0)
+        if oos_return < baseline_return:
+            baseline_penalty += (baseline_return - oos_return) * 120
+        if oos_drawdown > baseline_drawdown + 0.02:
+            baseline_penalty += (oos_drawdown - baseline_drawdown) * 140
+        if false_exit_count > baseline_false_exit_count:
+            baseline_penalty += (false_exit_count - baseline_false_exit_count) * 2
     return round(
         100
         + oos_return * 160
@@ -358,12 +540,61 @@ def stability_score(train_metrics: dict[str, Any], oos_metrics: dict[str, Any]) 
         - missed_upside_rate * 18
         + protected_exit_rate * 8
         - overfit_penalty
-        - sparse_penalty,
+        - sparse_penalty
+        - baseline_penalty,
         4,
     )
 
 
-def classify_hyperopt_candidate(train_metrics: dict[str, Any], oos_metrics: dict[str, Any]) -> tuple[str, str]:
+def baseline_comparison(candidate_metrics: dict[str, Any], baseline_metrics: dict[str, Any]) -> dict[str, Any]:
+    candidate_return = candidate_metrics.get("total_return")
+    baseline_return = baseline_metrics.get("total_return")
+    candidate_drawdown = candidate_metrics.get("max_drawdown")
+    baseline_drawdown = baseline_metrics.get("max_drawdown")
+    candidate_false_exit = int(candidate_metrics.get("false_exit_count") or 0)
+    baseline_false_exit = int(baseline_metrics.get("false_exit_count") or 0)
+    candidate_alert_count = int(candidate_metrics.get("alert_count") or 0)
+    baseline_alert_count = int(baseline_metrics.get("alert_count") or 0)
+    return_delta = (
+        float(candidate_return) - float(baseline_return)
+        if candidate_return is not None and baseline_return is not None
+        else None
+    )
+    drawdown_delta = (
+        float(candidate_drawdown) - float(baseline_drawdown)
+        if candidate_drawdown is not None and baseline_drawdown is not None
+        else None
+    )
+    beats_baseline = True
+    reasons: list[str] = []
+    if return_delta is not None and return_delta < -0.01:
+        beats_baseline = False
+        reasons.append("样本外收益低于当前默认规则。")
+    if drawdown_delta is not None and drawdown_delta < -0.02:
+        beats_baseline = False
+        reasons.append("样本外最大回撤比当前默认规则更差。")
+    if candidate_false_exit > baseline_false_exit + max(2, int(baseline_false_exit * 0.5)):
+        beats_baseline = False
+        reasons.append("过早离场次数明显多于当前默认规则。")
+    if candidate_alert_count > baseline_alert_count + max(5, int(baseline_alert_count * 0.5)):
+        beats_baseline = False
+        reasons.append("邮件/提醒次数明显多于当前默认规则。")
+    return {
+        "return_delta": return_delta,
+        "drawdown_delta": drawdown_delta,
+        "false_exit_delta": candidate_false_exit - baseline_false_exit,
+        "alert_count_delta": candidate_alert_count - baseline_alert_count,
+        "beats_baseline": beats_baseline,
+        "reasons": reasons,
+    }
+
+
+def classify_hyperopt_candidate(
+    train_metrics: dict[str, Any],
+    oos_metrics: dict[str, Any],
+    baseline_metrics: dict[str, Any] | None = None,
+    rolling_metrics: dict[str, Any] | None = None,
+) -> tuple[str, str]:
     sample_count = int(oos_metrics.get("sample_count") or 0)
     trade_count = int(oos_metrics.get("trade_count") or 0)
     train_return = train_metrics.get("total_return")
@@ -380,7 +611,41 @@ def classify_hyperopt_candidate(train_metrics: dict[str, Any], oos_metrics: dict
         return STATUS_REJECTED, CONCLUSION_REJECTED
     if oos_drawdown is not None and float(oos_drawdown) < -0.12:
         return STATUS_REJECTED, CONCLUSION_REJECTED
+    if baseline_metrics and int(baseline_metrics.get("sample_count") or 0) > 0:
+        comparison = baseline_comparison(oos_metrics, baseline_metrics)
+        if not comparison["beats_baseline"]:
+            return STATUS_REJECTED, CONCLUSION_REJECTED
+    if rolling_metrics and int(rolling_metrics.get("window_count") or 0) > 0:
+        stable_window_rate = rolling_metrics.get("stable_window_rate")
+        if stable_window_rate is not None and float(stable_window_rate) < 0.4:
+            return STATUS_REJECTED, CONCLUSION_REJECTED
     return STATUS_CANDIDATE, CONCLUSION_CANDIDATE
+
+
+def rejection_reason_for_candidate(
+    status: str,
+    conclusion: str,
+    *,
+    train_metrics: dict[str, Any],
+    oos_metrics: dict[str, Any],
+    baseline_metrics: dict[str, Any],
+    rolling_metrics: dict[str, Any],
+) -> str | None:
+    if status == STATUS_CANDIDATE:
+        return None
+    sample_count = int(oos_metrics.get("sample_count") or 0)
+    trade_count = int(oos_metrics.get("trade_count") or 0)
+    if status == STATUS_EVIDENCE_INSUFFICIENT:
+        return f"样本不足：样本 {sample_count}，触发交易 {trade_count}，不足以替代当前默认规则。"
+    comparison = baseline_comparison(oos_metrics, baseline_metrics)
+    if comparison["reasons"]:
+        return "；".join(str(reason) for reason in comparison["reasons"])
+    if conclusion == CONCLUSION_OVERFIT:
+        return "样本内表现明显好于样本外，疑似过拟合。"
+    stable_window_rate = rolling_metrics.get("stable_window_rate")
+    if stable_window_rate is not None and float(stable_window_rate) < 0.4:
+        return "滚动窗口稳定性不足。"
+    return "样本外收益或回撤未达到稳健优先要求。"
 
 
 def _split_points(points: list[HyperoptPricePoint]) -> tuple[list[HyperoptPricePoint], list[HyperoptPricePoint]]:
@@ -388,14 +653,49 @@ def _split_points(points: list[HyperoptPricePoint]) -> tuple[list[HyperoptPriceP
     return points[:split_index], points[split_index:]
 
 
-def evaluate_parameter_set(series: list[HyperoptSeries], params: dict[str, float | int]) -> tuple[dict[str, Any], dict[str, Any]]:
+def _split_intraday_points(
+    points: list[HyperoptIntradayPoint],
+) -> tuple[list[HyperoptIntradayPoint], list[HyperoptIntradayPoint]]:
+    split_index = max(MIN_INTRADAY_HISTORY_POINTS, int(len(points) * 0.7))
+    return points[:split_index], points[split_index:]
+
+
+def evaluate_parameter_set(
+    series: list[HyperoptSeries],
+    params: dict[str, float | int],
+    *,
+    execution_model: str = EXECUTION_MODEL_INTRADAY_ALERT,
+    manual_delay_minutes: int = DEFAULT_MANUAL_DELAY_MINUTES,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     train_results: list[dict[str, Any]] = []
     oos_results: list[dict[str, Any]] = []
     for item in series:
         train_points, oos_points = _split_points(item.points)
-        train_results.append(simulate_exit_rule(train_points, params, asset_bucket=item.asset_bucket))
-        if len(oos_points) >= 20:
-            oos_results.append(simulate_exit_rule(oos_points, params, asset_bucket=item.asset_bucket))
+        if execution_model == EXECUTION_MODEL_INTRADAY_ALERT:
+            train_intraday, oos_intraday = _split_intraday_points(item.intraday_points)
+            train_results.append(
+                simulate_intraday_exit_rule(
+                    train_intraday,
+                    params,
+                    asset_bucket=item.asset_bucket,
+                    daily_points=train_points,
+                    manual_delay_minutes=manual_delay_minutes,
+                )
+            )
+            if len(oos_intraday) >= MIN_INTRADAY_HISTORY_POINTS:
+                oos_results.append(
+                    simulate_intraday_exit_rule(
+                        oos_intraday,
+                        params,
+                        asset_bucket=item.asset_bucket,
+                        daily_points=oos_points,
+                        manual_delay_minutes=manual_delay_minutes,
+                    )
+                )
+        else:
+            train_results.append(simulate_exit_rule(train_points, params, asset_bucket=item.asset_bucket))
+            if len(oos_points) >= 20:
+                oos_results.append(simulate_exit_rule(oos_points, params, asset_bucket=item.asset_bucket))
     return aggregate_metrics(train_results), aggregate_metrics(oos_results)
 
 
@@ -405,9 +705,27 @@ def rolling_validation_metrics(
     *,
     window_size: int = 60,
     step_size: int = 20,
+    execution_model: str = EXECUTION_MODEL_DAILY_CLOSE,
+    manual_delay_minutes: int = DEFAULT_MANUAL_DELAY_MINUTES,
 ) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     for item in series:
+        if execution_model == EXECUTION_MODEL_INTRADAY_ALERT:
+            intraday_points = item.intraday_points
+            if len(intraday_points) < window_size:
+                continue
+            for start in range(0, len(intraday_points) - window_size + 1, step_size):
+                window = intraday_points[start : start + window_size]
+                results.append(
+                    simulate_intraday_exit_rule(
+                        window,
+                        params,
+                        asset_bucket=item.asset_bucket,
+                        daily_points=item.points,
+                        manual_delay_minutes=manual_delay_minutes,
+                    )
+                )
+            continue
         points = item.points
         if len(points) < window_size:
             continue
@@ -472,11 +790,16 @@ def confidence_summary(metrics: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def calibration_contract_hash(*, search_space: dict[str, list[float | int]], objective: str) -> str:
+def calibration_contract_hash(
+    *,
+    search_space: dict[str, list[float | int]],
+    objective: str,
+    execution_model: str = EXECUTION_MODEL_INTRADAY_ALERT,
+) -> str:
     payload = {
         "rule_version": RULE_VERSION,
         "calibration_rule_version": CALIBRATION_RULE_VERSION,
-        "execution_model": EXECUTION_MODEL_DAILY_CLOSE,
+        "execution_model": execution_model,
         "objective": objective,
         "search_space": search_space,
     }
@@ -484,28 +807,79 @@ def calibration_contract_hash(*, search_space: dict[str, list[float | int]], obj
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def best_candidate_for_bucket(series: list[HyperoptSeries]) -> dict[str, Any]:
+def best_candidate_for_bucket(
+    series: list[HyperoptSeries],
+    *,
+    execution_model: str,
+    manual_delay_minutes: int,
+) -> dict[str, Any]:
+    baseline_train_metrics, baseline_oos_metrics = evaluate_parameter_set(
+        series,
+        DEFAULT_LIVE_PARAMS,
+        execution_model=execution_model,
+        manual_delay_minutes=manual_delay_minutes,
+    )
     best: dict[str, Any] | None = None
     for params in parameter_grid():
-        train_metrics, oos_metrics = evaluate_parameter_set(series, params)
-        score = stability_score(train_metrics, oos_metrics)
-        status, conclusion = classify_hyperopt_candidate(train_metrics, oos_metrics)
+        train_metrics, oos_metrics = evaluate_parameter_set(
+            series,
+            params,
+            execution_model=execution_model,
+            manual_delay_minutes=manual_delay_minutes,
+        )
+        rolling_metrics = rolling_validation_metrics(
+            series,
+            params,
+            execution_model=execution_model,
+            manual_delay_minutes=manual_delay_minutes,
+        )
+        score = stability_score(train_metrics, oos_metrics, baseline_oos_metrics)
+        status, conclusion = classify_hyperopt_candidate(
+            train_metrics,
+            oos_metrics,
+            baseline_oos_metrics,
+            rolling_metrics,
+        )
+        comparison = baseline_comparison(oos_metrics, baseline_oos_metrics)
+        rejection_reason = rejection_reason_for_candidate(
+            status,
+            conclusion,
+            train_metrics=train_metrics,
+            oos_metrics=oos_metrics,
+            baseline_metrics=baseline_oos_metrics,
+            rolling_metrics=rolling_metrics,
+        )
         candidate = {
             "params": params,
             "train_metrics": train_metrics,
             "out_of_sample_metrics": oos_metrics,
+            "rolling_metrics": rolling_metrics,
             "score": score,
             "status": status,
             "conclusion": conclusion,
+            "baseline_metrics": baseline_oos_metrics,
+            "baseline_comparison": comparison,
+            "rejection_reason": rejection_reason,
             "sample_count": int(oos_metrics.get("sample_count") or 0),
             "trade_count": int(oos_metrics.get("trade_count") or 0),
         }
         if best is None or score > float(best["score"]):
             best = candidate
     assert best is not None
-    best["rolling_metrics"] = rolling_validation_metrics(series, best["params"])
-    best["confidence"] = confidence_summary(best["out_of_sample_metrics"])
-    best["source_reliability"] = "verified_daily_close"
+    confidence = confidence_summary(best["out_of_sample_metrics"])
+    confidence.update(
+        {
+            "baseline_metrics": best["baseline_metrics"],
+            "baseline_comparison": best["baseline_comparison"],
+            "rejection_reason": best["rejection_reason"],
+            "execution_model": execution_model,
+            "manual_delay_minutes": manual_delay_minutes,
+        }
+    )
+    best["confidence"] = confidence
+    best["source_reliability"] = (
+        "verified_intraday" if execution_model == EXECUTION_MODEL_INTRADAY_ALERT else "verified_daily_close"
+    )
     return best
 
 
@@ -514,20 +888,44 @@ async def _load_series(
     *,
     start_date: date,
     end_date: date,
-    max_assets: int,
-) -> list[HyperoptSeries]:
-    etfs = (
-        await session.execute(
-            select(TradableEtf, EtfThemeProfile)
-            .outerjoin(EtfThemeProfile, EtfThemeProfile.etf_code == TradableEtf.code)
+    max_assets: int | None,
+    execution_model: str,
+) -> tuple[list[HyperoptSeries], HyperoptCoverage, datetime | None]:
+    all_etf_count = int(await session.scalar(select(func.count()).select_from(TradableEtf)) or 0)
+    eligible_count = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(TradableEtf)
             .where(TradableEtf.is_short_term_eligible.is_(True))
-            .order_by(TradableEtf.code.asc())
-            .limit(max_assets)
         )
+        or 0
+    )
+    etf_stmt = (
+        select(TradableEtf, EtfThemeProfile)
+        .outerjoin(EtfThemeProfile, EtfThemeProfile.etf_code == TradableEtf.code)
+        .where(TradableEtf.is_short_term_eligible.is_(True))
+        .order_by(TradableEtf.code.asc())
+    )
+    if max_assets is not None:
+        etf_stmt = etf_stmt.limit(max_assets)
+    etfs = (
+        await session.execute(etf_stmt)
     ).all()
     codes = [row[0].code for row in etfs]
     if not codes:
-        return []
+        coverage = HyperoptCoverage(
+            all_etf_count=all_etf_count,
+            eligible_count=eligible_count,
+            selected_count=0,
+            enough_daily_history_count=0,
+            enough_intraday_history_count=0,
+            final_optimized_count=0,
+            sampled=False,
+            max_assets=max_assets,
+            exclusions={},
+            exclusion_examples={},
+        )
+        return [], coverage, None
     history_rows = (
         await session.scalars(
             select(EtfPriceHistory)
@@ -543,10 +941,52 @@ async def _load_series(
     for row in history_rows:
         history_by_code.setdefault(row.etf_code, []).append(HyperoptPricePoint(row.trade_date, float(row.close)))
 
+    intraday_by_code: dict[str, list[HyperoptIntradayPoint]] = {}
+    latest_intraday_time: datetime | None = None
+    if execution_model == EXECUTION_MODEL_INTRADAY_ALERT:
+        intraday_rows = (
+            await session.scalars(
+                select(EtfIntradayQuote)
+                .where(
+                    EtfIntradayQuote.etf_code.in_(codes),
+                    EtfIntradayQuote.trade_date >= start_date,
+                    EtfIntradayQuote.trade_date <= end_date,
+                    EtfIntradayQuote.latest_price > 0,
+                    EtfIntradayQuote.freshness_status == "fresh",
+                )
+                .order_by(EtfIntradayQuote.etf_code.asc(), EtfIntradayQuote.quote_time.asc())
+            )
+        ).all()
+        for row in intraday_rows:
+            intraday_by_code.setdefault(row.etf_code, []).append(
+                HyperoptIntradayPoint(row.quote_time, float(row.latest_price), True)
+            )
+            latest_intraday_time = max(latest_intraday_time, row.quote_time) if latest_intraday_time else row.quote_time
+
     series: list[HyperoptSeries] = []
+    exclusions: dict[str, int] = {}
+    exclusion_examples: dict[str, list[str]] = {}
+    enough_daily_history_count = 0
+    enough_intraday_history_count = 0
+
+    def record_exclusion(reason: str, code: str) -> None:
+        exclusions[reason] = exclusions.get(reason, 0) + 1
+        examples = exclusion_examples.setdefault(reason, [])
+        if len(examples) < 8:
+            examples.append(code)
+
     for etf, profile in etfs:
         points = history_by_code.get(etf.code, [])
-        if len(points) < 40:
+        if len(points) >= MIN_DAILY_HISTORY_POINTS:
+            enough_daily_history_count += 1
+        else:
+            record_exclusion("insufficient_daily_history", etf.code)
+            continue
+        intraday_points = intraday_by_code.get(etf.code, [])
+        if len(intraday_points) >= MIN_INTRADAY_HISTORY_POINTS:
+            enough_intraday_history_count += 1
+        elif execution_model == EXECUTION_MODEL_INTRADAY_ALERT:
+            record_exclusion("insufficient_intraday_history", etf.code)
             continue
         series.append(
             HyperoptSeries(
@@ -555,9 +995,22 @@ async def _load_series(
                 asset_bucket=(profile.asset_bucket if profile else etf.asset_class) or "unknown",
                 theme_group=(profile.theme_group if profile else "unknown") or "unknown",
                 points=points,
+                intraday_points=intraday_points,
             )
         )
-    return series
+    coverage = HyperoptCoverage(
+        all_etf_count=all_etf_count,
+        eligible_count=eligible_count,
+        selected_count=len(codes),
+        enough_daily_history_count=enough_daily_history_count,
+        enough_intraday_history_count=enough_intraday_history_count,
+        final_optimized_count=len(series),
+        sampled=max_assets is not None and len(codes) < eligible_count,
+        max_assets=max_assets,
+        exclusions=exclusions,
+        exclusion_examples=exclusion_examples,
+    )
+    return series, coverage, latest_intraday_time
 
 
 def _bucket_series(series: list[HyperoptSeries]) -> dict[tuple[str, str], list[HyperoptSeries]]:
@@ -580,8 +1033,10 @@ async def run_etf_exit_hyperopt(
     session: AsyncSession,
     *,
     days: int = 730,
-    max_assets: int = 300,
+    max_assets: int | None = None,
     objective: str = OBJECTIVE_STABILITY_FIRST,
+    execution_model: str = EXECUTION_MODEL_INTRADAY_ALERT,
+    manual_delay_minutes: int = DEFAULT_MANUAL_DELAY_MINUTES,
 ) -> EtfExitHyperoptRun:
     latest_date = await session.scalar(select(EtfPriceHistory.trade_date).order_by(desc(EtfPriceHistory.trade_date)).limit(1))
     as_of_date = latest_date or date.today()
@@ -594,8 +1049,12 @@ async def run_etf_exit_hyperopt(
         objective=objective,
         rule_version=RULE_VERSION,
         calibration_rule_version=CALIBRATION_RULE_VERSION,
-        execution_model=EXECUTION_MODEL_DAILY_CLOSE,
-        contract_hash=calibration_contract_hash(search_space=DEFAULT_SEARCH_SPACE, objective=objective),
+        execution_model=execution_model,
+        contract_hash=calibration_contract_hash(
+            search_space=DEFAULT_SEARCH_SPACE,
+            objective=objective,
+            execution_model=execution_model,
+        ),
         data_cutoff=utcnow(),
         train_range_json={"start_date": start_date.isoformat(), "end_date": train_cutoff.isoformat()},
         out_of_sample_range_json={"start_date": train_cutoff.isoformat(), "end_date": as_of_date.isoformat()},
@@ -608,15 +1067,28 @@ async def run_etf_exit_hyperopt(
     await session.flush()
 
     try:
-        series = await _load_series(session, start_date=start_date, end_date=as_of_date, max_assets=max_assets)
+        series, coverage, latest_intraday_time = await _load_series(
+            session,
+            start_date=start_date,
+            end_date=as_of_date,
+            max_assets=max_assets,
+            execution_model=execution_model,
+        )
+        if latest_intraday_time is not None:
+            run.data_cutoff = latest_intraday_time
         buckets = _bucket_series(series)
         item_count = 0
         candidate_count = 0
         rejected_count = 0
         evidence_insufficient_count = 0
         bucket_summary: dict[str, int] = {}
+        baseline_metrics_by_bucket: dict[str, dict[str, Any]] = {}
         for (bucket_type, bucket_key), bucket_items in buckets.items():
-            best = best_candidate_for_bucket(bucket_items)
+            best = best_candidate_for_bucket(
+                bucket_items,
+                execution_model=execution_model,
+                manual_delay_minutes=manual_delay_minutes,
+            )
             if best["status"] == STATUS_CANDIDATE:
                 candidate_count += 1
             elif best["status"] == STATUS_EVIDENCE_INSUFFICIENT:
@@ -625,6 +1097,8 @@ async def run_etf_exit_hyperopt(
                 rejected_count += 1
             item_count += 1
             bucket_summary[bucket_type] = bucket_summary.get(bucket_type, 0) + 1
+            bucket_identifier = f"{bucket_type}:{bucket_key}"
+            baseline_metrics_by_bucket[bucket_identifier] = dict(best.get("baseline_metrics") or {})
             session.add(
                 EtfExitHyperoptItem(
                     run_id=run.id,
@@ -651,13 +1125,22 @@ async def run_etf_exit_hyperopt(
             "objective": objective,
             "rule_version": RULE_VERSION,
             "calibration_rule_version": CALIBRATION_RULE_VERSION,
-            "execution_model": EXECUTION_MODEL_DAILY_CLOSE,
+            "execution_model": execution_model,
             "contract_hash": run.contract_hash,
             "asset_count": len(series),
+            "coverage": coverage.as_dict(),
+            "coverage_funnel": coverage.as_dict(),
+            "sampled": coverage.sampled,
+            "max_assets": max_assets,
+            "final_optimized_count": coverage.final_optimized_count,
+            "enough_daily_history_count": coverage.enough_daily_history_count,
+            "enough_intraday_history_count": coverage.enough_intraday_history_count,
+            "manual_delay_minutes": manual_delay_minutes,
             "bucket_count": item_count,
             "candidate_count": candidate_count,
             "rejected_count": rejected_count,
             "evidence_insufficient_count": evidence_insufficient_count,
+            "baseline_metrics_by_bucket": baseline_metrics_by_bucket,
             "parameter_count": len(parameter_grid()),
             "auto_applied": False,
             "research_only": True,
@@ -667,7 +1150,12 @@ async def run_etf_exit_hyperopt(
         run.status = "failed"
         run.finished_at = utcnow()
         run.error_message = str(exc)
-        run.summary_json = {"objective": objective, "research_only": True, "auto_applied": False}
+        run.summary_json = {
+            "objective": objective,
+            "execution_model": execution_model,
+            "research_only": True,
+            "auto_applied": False,
+        }
         raise
     finally:
         await session.commit()
@@ -689,6 +1177,8 @@ async def etf_exit_hyperopt_payload(session: AsyncSession, run: EtfExitHyperoptR
             .order_by(EtfExitHyperoptItem.score.desc(), EtfExitHyperoptItem.id.asc())
         )
     ).all()
+    summary = dict(run.summary_json or {})
+    coverage_status = "sampled" if summary.get("sampled") else "full_universe"
     return {
         "id": run.id,
         "status": run.status,
@@ -705,7 +1195,7 @@ async def etf_exit_hyperopt_payload(session: AsyncSession, run: EtfExitHyperoptR
         "out_of_sample_range": dict(run.out_of_sample_range_json or {}),
         "search_space": dict(run.search_space_json or {}),
         "bucket_summary": dict(run.bucket_summary_json or {}),
-        "summary": dict(run.summary_json or {}),
+        "summary": summary,
         "error_message": run.error_message,
         "research_only": True,
         "no_trade_instruction": True,
@@ -720,6 +1210,11 @@ async def etf_exit_hyperopt_payload(session: AsyncSession, run: EtfExitHyperoptR
                 "train_metrics": dict(item.train_metrics_json or {}),
                 "out_of_sample_metrics": dict(item.out_of_sample_metrics_json or {}),
                 "rolling_metrics": dict(item.rolling_metrics_json or {}),
+                "baseline_metrics": dict((item.confidence_json or {}).get("baseline_metrics") or {}),
+                "baseline_comparison": dict((item.confidence_json or {}).get("baseline_comparison") or {}),
+                "rejection_reason": (item.confidence_json or {}).get("rejection_reason"),
+                "coverage_status": coverage_status,
+                "manual_delay_minutes": (item.confidence_json or {}).get("manual_delay_minutes"),
                 "confidence": dict(item.confidence_json or {}),
                 "source_reliability": item.source_reliability,
                 "score": item.score,

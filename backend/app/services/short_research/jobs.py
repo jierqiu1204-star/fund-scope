@@ -339,21 +339,38 @@ async def etf_exit_hyperopt_job(
     session: AsyncSession,
     *,
     days: int = 730,
-    max_assets: int = 300,
+    max_assets: int | None = None,
+    execution_model: str = "intraday_alert",
+    manual_delay_minutes: int = 3,
 ) -> dict[str, Any]:
-    run = await run_etf_exit_hyperopt(session, days=days, max_assets=max_assets)
+    run = await run_etf_exit_hyperopt(
+        session,
+        days=days,
+        max_assets=max_assets,
+        execution_model=execution_model,
+        manual_delay_minutes=manual_delay_minutes,
+    )
     summary = dict(run.summary_json or {})
+    coverage = dict(summary.get("coverage") or summary.get("coverage_funnel") or {})
     return {
         "run_id": run.id,
         "status": run.status,
         "as_of_date": run.as_of_date.isoformat(),
         "objective": run.objective,
         "rule_version": run.rule_version,
+        "execution_model": run.execution_model,
         "asset_count": int(summary.get("asset_count", 0)),
         "bucket_count": int(summary.get("bucket_count", 0)),
         "candidate_count": int(summary.get("candidate_count", 0)),
         "rejected_count": int(summary.get("rejected_count", 0)),
         "evidence_insufficient_count": int(summary.get("evidence_insufficient_count", 0)),
+        "coverage": coverage,
+        "sampled": bool(summary.get("sampled", False)),
+        "max_assets": summary.get("max_assets"),
+        "final_optimized_count": int(summary.get("final_optimized_count", 0)),
+        "enough_daily_history_count": int(summary.get("enough_daily_history_count", 0)),
+        "enough_intraday_history_count": int(summary.get("enough_intraday_history_count", 0)),
+        "manual_delay_minutes": int(summary.get("manual_delay_minutes", manual_delay_minutes)),
         "calibration_rule_version": summary.get("calibration_rule_version"),
         "contract_hash": summary.get("contract_hash"),
         "auto_applied": False,

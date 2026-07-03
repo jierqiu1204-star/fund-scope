@@ -217,8 +217,9 @@ export default function EtfEvidencePage() {
       (
         await api.post<EtfExitHyperopt>("/api/short-research/etf-exit-hyperopt/run", {
           days: 730,
-          max_assets: 300,
-          objective: "stability_first"
+          objective: "stability_first",
+          execution_model: "intraday_alert",
+          manual_delay_minutes: 3
         })
       ).data,
     onSuccess: async () => {
@@ -242,6 +243,11 @@ export default function EtfEvidencePage() {
   const detail = backtestDetail.data;
   const isIntradayBacktest = backtestExecutionModel(detail) === "intraday_alert_v1";
   const optimized = observationPortfolio.data?.optimized_allocation ?? optimizedAllocation.data ?? null;
+  const hyperoptCoverageRaw = exitHyperopt.data?.summary.coverage ?? exitHyperopt.data?.summary.coverage_funnel;
+  const hyperoptCoverage =
+    typeof hyperoptCoverageRaw === "object" && hyperoptCoverageRaw !== null
+      ? (hyperoptCoverageRaw as Record<string, unknown>)
+      : {};
 
   return (
     <div className="space-y-5">
@@ -563,6 +569,19 @@ export default function EtfEvidencePage() {
             </div>
             <div className="mt-3 grid gap-3 md:grid-cols-3">
               <EvidenceStat label="执行模型" value={exitHyperopt.data.execution_model ?? "日线收盘"} />
+              <EvidenceStat
+                label="覆盖口径"
+                value={exitHyperopt.data.summary.sampled === true ? "抽样结果" : "全量候选"}
+              />
+              <EvidenceStat label="手动延迟" value={`${metricInteger(exitHyperopt.data.summary, "manual_delay_minutes")} 分钟`} />
+            </div>
+            <div className="mt-3 grid gap-3 md:grid-cols-4">
+              <EvidenceStat label="全市场 ETF" value={metricInteger(hyperoptCoverage, "all_etf_count")} />
+              <EvidenceStat label="可优化候选" value={metricInteger(hyperoptCoverage, "eligible_count")} />
+              <EvidenceStat label="盘中样本足够" value={metricInteger(hyperoptCoverage, "enough_intraday_history_count")} />
+              <EvidenceStat label="完成优化" value={metricInteger(hyperoptCoverage, "final_optimized_count")} />
+            </div>
+            <div className="mt-3 grid gap-3 md:grid-cols-2">
               <EvidenceStat label="校准版本" value={exitHyperopt.data.calibration_rule_version ?? "旧口径"} />
               <EvidenceStat
                 label="合同 hash"
@@ -596,9 +615,18 @@ export default function EtfEvidencePage() {
                     <span>最差窗口收益：{metricPercent(item.rolling_metrics, "worst_window_return")}</span>
                     <span>错杀率：{metricPercent(item.out_of_sample_metrics, "missed_upside_rate")}</span>
                     <span>保护率：{metricPercent(item.out_of_sample_metrics, "protected_exit_rate")}</span>
+                    <span>对默认规则：{item.baseline_comparison.beats_baseline === true ? "更好" : "未胜出"}</span>
+                    <span>覆盖：{item.coverage_status ?? "旧口径"}</span>
+                    <span>未成交：{metricInteger(item.out_of_sample_metrics, "unfilled_count")}</span>
+                    <span>延迟：{item.manual_delay_minutes ?? "暂无"} 分钟</span>
                     <span>置信度：{metadataString(item.confidence, "level") ?? "暂无"}</span>
                     <span>数据源：{item.source_reliability ?? "旧口径"}</span>
                   </div>
+                  {item.rejection_reason ? (
+                    <p className="mt-2 rounded-[6px] bg-white px-2 py-1 text-xs text-ink/55">
+                      未采用原因：{item.rejection_reason}
+                    </p>
+                  ) : null}
                 </div>
               ))}
             </div>

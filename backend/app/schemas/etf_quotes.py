@@ -144,6 +144,9 @@ class DynamicExitThresholdsOut(BaseModel):
     calibration_candidate_id: int | None = None
     calibration_bucket_key: str | None = None
     calibration_version: str | None = None
+    calibration_execution_model: str | None = None
+    calibration_contract_hash: str | None = None
+    calibration_coverage_status: str | None = None
     volatility_unit_pct: float | None = None
     hard_stop_pct: float | None = None
     profit_start_pct: float | None = None

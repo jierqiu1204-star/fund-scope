@@ -10,6 +10,7 @@ from app.services.short_research import jobs as jobs_module
 from app.services.short_research.etf_exit_hyperopt import (
     CONCLUSION_INSUFFICIENT,
     CONCLUSION_OVERFIT,
+    CONCLUSION_REJECTED,
     DEFAULT_SEARCH_SPACE,
     EXECUTION_MODEL_DAILY_CLOSE,
     EXECUTION_MODEL_INTRADAY_ALERT,
@@ -68,6 +69,21 @@ def test_calibration_contract_hash_is_deterministic() -> None:
 
     assert first == second
     assert len(first) == 64
+
+
+def test_calibration_contract_hash_separates_execution_models() -> None:
+    intraday = calibration_contract_hash(
+        search_space=DEFAULT_SEARCH_SPACE,
+        objective=OBJECTIVE_STABILITY_FIRST,
+        execution_model=EXECUTION_MODEL_INTRADAY_ALERT,
+    )
+    daily = calibration_contract_hash(
+        search_space=DEFAULT_SEARCH_SPACE,
+        objective=OBJECTIVE_STABILITY_FIRST,
+        execution_model=EXECUTION_MODEL_DAILY_CLOSE,
+    )
+
+    assert intraday != daily
 
 
 def test_exit_calibration_contract_helper_includes_status_and_ids() -> None:
@@ -232,6 +248,70 @@ def test_intraday_replay_excludes_ineligible_quotes_from_decision() -> None:
     assert eligible_result["missing_intraday_evidence_count"] == 0
 
 
+def test_intraday_replay_fills_after_manual_delay() -> None:
+    base_time = datetime(2026, 7, 1, 9, 30)
+    prices = [1.00, 1.02, 1.04, 1.06, 1.03, 1.02, 1.01, 1.00] + [1.0 + index * 0.001 for index in range(20)]
+    params = {
+        "hard_stop_multiplier": 1.2,
+        "profit_start_multiplier": 0.9,
+        "trailing_giveback_multiplier": 0.5,
+        "trend_confirm_days": 2,
+        "take_profit_watch_pct": 3.0,
+    }
+
+    result = simulate_intraday_exit_rule(
+        [
+            HyperoptIntradayPoint(base_time + timedelta(minutes=index), price, True)
+            for index, price in enumerate(prices)
+        ],
+        params,
+        asset_bucket="equity",
+        manual_delay_minutes=3,
+    )
+
+    assert result["execution_model"] == EXECUTION_MODEL_INTRADAY_ALERT
+    assert result["trade_count"] >= 1
+    assert result["unfilled_count"] == 0
+    assert result["execution_delay_minutes"] == 3
+
+
+def test_intraday_replay_does_not_use_daily_close_when_fill_missing() -> None:
+    base_time = datetime(2026, 7, 1, 9, 30)
+    prices = [1.00 + index * 0.004 for index in range(24)] + [1.04]
+    params = {
+        "hard_stop_multiplier": 1.2,
+        "profit_start_multiplier": 0.9,
+        "trailing_giveback_multiplier": 0.5,
+        "trend_confirm_days": 2,
+        "take_profit_watch_pct": 3.0,
+    }
+
+    result = simulate_intraday_exit_rule(
+        [
+            HyperoptIntradayPoint(base_time + timedelta(minutes=index), price, True)
+            for index, price in enumerate(prices)
+        ],
+        params,
+        asset_bucket="equity",
+        manual_delay_minutes=3,
+    )
+
+    assert result["execution_model"] == EXECUTION_MODEL_INTRADAY_ALERT
+    assert result["unfilled_count"] >= 1
+    assert result["source_reliability"] == "verified_intraday"
+
+
+def test_candidate_worse_than_baseline_is_rejected() -> None:
+    status, conclusion = classify_hyperopt_candidate(
+        {"sample_count": 8, "trade_count": 5, "total_return": 0.12, "max_drawdown": -0.04},
+        {"sample_count": 8, "trade_count": 5, "total_return": 0.02, "max_drawdown": -0.08},
+        {"sample_count": 8, "trade_count": 5, "total_return": 0.08, "max_drawdown": -0.04},
+    )
+
+    assert status == STATUS_REJECTED
+    assert conclusion == CONCLUSION_REJECTED
+
+
 def test_rolling_validation_reports_window_stability() -> None:
     from app.services.short_research.etf_exit_hyperopt import HyperoptSeries
 
@@ -255,18 +335,26 @@ def test_rolling_validation_reports_window_stability() -> None:
 async def test_etf_exit_hyperopt_job_reports_research_only_summary(monkeypatch) -> None:
     async def fake_run_etf_exit_hyperopt(_session: object, **kwargs: object) -> SimpleNamespace:
         assert kwargs["days"] == 730
-        assert kwargs["max_assets"] == 300
+        assert kwargs["max_assets"] is None
+        assert kwargs["execution_model"] == EXECUTION_MODEL_INTRADAY_ALERT
+        assert kwargs["manual_delay_minutes"] == 3
         return SimpleNamespace(
             id=11,
             status="success",
             as_of_date=date(2026, 7, 2),
             objective="stability_first",
             rule_version="etf_exit_hyperopt_v1",
+            execution_model=EXECUTION_MODEL_INTRADAY_ALERT,
             summary_json={
                 "asset_count": 88,
                 "bucket_count": 6,
                 "candidate_count": 2,
                 "rejected_count": 4,
+                "coverage": {"all_etf_count": 1000, "final_optimized_count": 88},
+                "sampled": False,
+                "final_optimized_count": 88,
+                "enough_intraday_history_count": 88,
+                "manual_delay_minutes": 3,
             },
             error_message=None,
         )
@@ -277,5 +365,8 @@ async def test_etf_exit_hyperopt_job_reports_research_only_summary(monkeypatch) 
 
     assert result["run_id"] == 11
     assert result["candidate_count"] == 2
+    assert result["execution_model"] == EXECUTION_MODEL_INTRADAY_ALERT
+    assert result["sampled"] is False
+    assert result["final_optimized_count"] == 88
     assert result["auto_applied"] is False
     assert result["research_only"] is True

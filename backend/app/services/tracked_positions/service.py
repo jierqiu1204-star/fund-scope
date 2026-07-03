@@ -45,6 +45,12 @@ from app.schemas.tracked_positions import (
     TrackedPositionExitSignal,
     TrackedPositionSnapshot,
 )
+from app.services.etf_exit_calibration import (
+    DEFAULT_SEARCH_SPACE,
+    EXECUTION_MODEL_INTRADAY_ALERT,
+    OBJECTIVE_STABILITY_FIRST,
+    calibration_contract_hash,
+)
 from app.services.market_data import (
     ASIA_SHANGHAI,
 )
@@ -411,23 +417,47 @@ async def _approved_calibration_thresholds(
 ) -> dict[str, Any] | None:
     if not bucket_candidates:
         return None
+    expected_contract_hash = calibration_contract_hash(
+        search_space=DEFAULT_SEARCH_SPACE,
+        objective=OBJECTIVE_STABILITY_FIRST,
+        execution_model=EXECUTION_MODEL_INTRADAY_ALERT,
+    )
     conditions = [
         and_(EtfExitHyperoptItem.bucket_type == bucket_type, EtfExitHyperoptItem.bucket_key == bucket_key)
         for bucket_type, bucket_key in bucket_candidates
     ]
-    row = (
+    rows = (
         await session.execute(
             select(EtfExitHyperoptItem, EtfExitHyperoptRun)
             .join(EtfExitHyperoptRun, EtfExitHyperoptRun.id == EtfExitHyperoptItem.run_id)
-            .where(EtfExitHyperoptItem.status == "approved", or_(*conditions))
+            .where(
+                EtfExitHyperoptItem.status == "approved",
+                EtfExitHyperoptItem.approved_at.is_not(None),
+                EtfExitHyperoptRun.execution_model == EXECUTION_MODEL_INTRADAY_ALERT,
+                EtfExitHyperoptRun.contract_hash == expected_contract_hash,
+                or_(*conditions),
+            )
             .order_by(
                 EtfExitHyperoptItem.score.desc(),
                 EtfExitHyperoptItem.approved_at.desc(),
                 EtfExitHyperoptItem.id.desc(),
             )
-            .limit(1)
+            .limit(20)
         )
-    ).first()
+    ).all()
+    row: tuple[EtfExitHyperoptItem, EtfExitHyperoptRun] | None = None
+    coverage_status = None
+    for candidate_item, candidate_run in rows:
+        summary = dict(candidate_run.summary_json or {})
+        if summary.get("sampled"):
+            continue
+        if int(summary.get("final_optimized_count", 0) or 0) <= 0:
+            continue
+        if int(summary.get("enough_intraday_history_count", 0) or 0) <= 0:
+            continue
+        row = (candidate_item, candidate_run)
+        coverage_status = "full_universe"
+        break
     if row is None:
         return None
 
@@ -446,6 +476,9 @@ async def _approved_calibration_thresholds(
         "candidate_id": item.id,
         "bucket_key": f"{item.bucket_type}:{item.bucket_key}",
         "calibration_version": run.calibration_rule_version or run.rule_version,
+        "execution_model": run.execution_model,
+        "contract_hash": run.contract_hash,
+        "coverage_status": coverage_status,
     }
 
 
@@ -608,6 +641,9 @@ async def dynamic_thresholds_for_position(
     calibration_candidate_id = None
     calibration_bucket_key = None
     calibration_version = None
+    calibration_execution_model = None
+    calibration_contract_hash_value = None
+    calibration_coverage_status = None
     if approved_calibration is not None:
         approved_thresholds = dict(approved_calibration["thresholds"])
         hard_stop_pct = float(approved_thresholds["hard_stop_pct"])
@@ -619,6 +655,9 @@ async def dynamic_thresholds_for_position(
         calibration_candidate_id = int(approved_calibration["candidate_id"])
         calibration_bucket_key = str(approved_calibration["bucket_key"])
         calibration_version = str(approved_calibration["calibration_version"])
+        calibration_execution_model = str(approved_calibration["execution_model"])
+        calibration_contract_hash_value = str(approved_calibration["contract_hash"])
+        calibration_coverage_status = str(approved_calibration["coverage_status"])
 
     prices = [point.price for point in chart]
     ma5 = _mean_or_none(prices[-5:]) if len(prices) >= 5 else None
@@ -666,6 +705,9 @@ async def dynamic_thresholds_for_position(
         calibration_candidate_id=calibration_candidate_id,
         calibration_bucket_key=calibration_bucket_key,
         calibration_version=calibration_version,
+        calibration_execution_model=calibration_execution_model,
+        calibration_contract_hash=calibration_contract_hash_value,
+        calibration_coverage_status=calibration_coverage_status,
         volatility_unit_pct=_round_or_none(volatility_unit_pct),
         hard_stop_pct=_round_or_none(hard_stop_pct),
         profit_start_pct=_round_or_none(profit_start_pct),
@@ -1549,6 +1591,9 @@ def _alert_threshold_context(
         "distance_to_hard_stop_pct": dynamic_thresholds.get("distance_to_hard_stop_pct"),
         "distance_to_profit_start_pct": dynamic_thresholds.get("distance_to_profit_start_pct"),
         "distance_to_trailing_giveback_pct": dynamic_thresholds.get("distance_to_trailing_giveback_pct"),
+        "calibration_execution_model": dynamic_thresholds.get("calibration_execution_model"),
+        "calibration_contract_hash": dynamic_thresholds.get("calibration_contract_hash"),
+        "calibration_coverage_status": dynamic_thresholds.get("calibration_coverage_status"),
         "max_profit_pct": state.get("max_profit_pct"),
         "profit_giveback_pct": state.get("profit_giveback_pct"),
         "holding_days": state.get("holding_days"),

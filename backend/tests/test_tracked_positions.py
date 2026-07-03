@@ -20,6 +20,13 @@ from app.models.entities import (
     User,
     utcnow,
 )
+from app.services.etf_exit_calibration import (
+    DEFAULT_SEARCH_SPACE,
+    EXECUTION_MODEL_DAILY_CLOSE,
+    EXECUTION_MODEL_INTRADAY_ALERT,
+    OBJECTIVE_STABILITY_FIRST,
+    calibration_contract_hash,
+)
 from app.services.intraday_etf.service import ASIA_SHANGHAI
 from app.services.tracked_positions.jobs import daily_tracked_position_alerts_job
 from app.services.tracked_positions.service import (
@@ -698,7 +705,18 @@ async def _seed_etf_dynamic_threshold_position(session, *, code: str):
     )
 
 
-async def _seed_exit_hyperopt_item(session, *, status: str) -> EtfExitHyperoptItem:
+async def _seed_exit_hyperopt_item(
+    session,
+    *,
+    status: str,
+    execution_model: str = EXECUTION_MODEL_INTRADAY_ALERT,
+    sampled: bool = False,
+) -> EtfExitHyperoptItem:
+    contract_hash = calibration_contract_hash(
+        search_space=DEFAULT_SEARCH_SPACE,
+        objective=OBJECTIVE_STABILITY_FIRST,
+        execution_model=execution_model,
+    )
     run = EtfExitHyperoptRun(
         status="success",
         started_at=utcnow(),
@@ -707,14 +725,19 @@ async def _seed_exit_hyperopt_item(session, *, status: str) -> EtfExitHyperoptIt
         objective="stability_first",
         rule_version="etf_exit_hyperopt_v1",
         calibration_rule_version="etf_exit_calibration_v1",
-        execution_model="daily_close",
-        contract_hash="test-contract",
+        execution_model=execution_model,
+        contract_hash=contract_hash,
         data_cutoff=utcnow(),
         train_range_json={"start_date": "2026-01-01", "end_date": "2026-02-28"},
         out_of_sample_range_json={"start_date": "2026-03-01", "end_date": "2026-03-31"},
         search_space_json={},
         bucket_summary_json={"all": 1},
-        summary_json={"research_only": True},
+        summary_json={
+            "research_only": True,
+            "sampled": sampled,
+            "final_optimized_count": 1,
+            "enough_intraday_history_count": 5 if execution_model == EXECUTION_MODEL_INTRADAY_ALERT else 0,
+        },
         created_at=utcnow(),
     )
     session.add(run)
@@ -736,7 +759,9 @@ async def _seed_exit_hyperopt_item(session, *, status: str) -> EtfExitHyperoptIt
         out_of_sample_metrics_json={"sample_count": 5, "trade_count": 3},
         rolling_metrics_json={"window_count": 2},
         confidence_json={"level": "较充分"},
-        source_reliability="verified_daily_close",
+        source_reliability="verified_intraday"
+        if execution_model == EXECUTION_MODEL_INTRADAY_ALERT
+        else "verified_daily_close",
         score=99.0,
         sample_count=5,
         trade_count=3,
@@ -762,6 +787,9 @@ async def test_etf_dynamic_thresholds_use_approved_calibration(app) -> None:
     assert analysis.dynamic_thresholds.calibration_candidate_id == item.id
     assert analysis.dynamic_thresholds.calibration_bucket_key == "all:all"
     assert analysis.dynamic_thresholds.calibration_version == "etf_exit_calibration_v1"
+    assert analysis.dynamic_thresholds.calibration_execution_model == EXECUTION_MODEL_INTRADAY_ALERT
+    assert analysis.dynamic_thresholds.calibration_contract_hash is not None
+    assert analysis.dynamic_thresholds.calibration_coverage_status == "full_universe"
 
 
 @pytest.mark.asyncio
@@ -774,6 +802,22 @@ async def test_etf_dynamic_thresholds_ignore_unapproved_calibration(app) -> None
     assert analysis.dynamic_thresholds is not None
     assert analysis.dynamic_thresholds.threshold_source == "rule_dynamic"
     assert analysis.dynamic_thresholds.rule_version == "dynamic_etf_threshold_v1"
+    assert analysis.dynamic_thresholds.calibration_candidate_id is None
+
+
+@pytest.mark.asyncio
+async def test_etf_dynamic_thresholds_ignore_daily_close_calibration(app) -> None:
+    async with app.state.db.session() as session:
+        position = await _seed_etf_dynamic_threshold_position(session, code="589903")
+        await _seed_exit_hyperopt_item(
+            session,
+            status="approved",
+            execution_model=EXECUTION_MODEL_DAILY_CLOSE,
+        )
+        analysis = await position_analysis(session, position)
+
+    assert analysis.dynamic_thresholds is not None
+    assert analysis.dynamic_thresholds.threshold_source == "rule_dynamic"
     assert analysis.dynamic_thresholds.calibration_candidate_id is None
 
 

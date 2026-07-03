@@ -150,10 +150,11 @@ async def run_job_by_name(
     job_name: str,
     request: Request,
     days: int = Query(default=180, ge=30, le=1095),
-    max_assets: int = Query(default=300, ge=1, le=2000),
+    max_assets: int | None = Query(default=None, ge=1, le=2000),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, object]:
     llm_client = LLMClient(request.app.state.settings)
+    effective_max_assets = max_assets or 300
     if job_name == "daily_fund_nav":
         return await run_job(request.app.state.db.session, job_name, daily_fund_nav_job)
     if job_name == "daily_valuation":
@@ -215,7 +216,7 @@ async def run_job_by_name(
             lambda tracked_session: etf_label_historical_replay_job(
                 tracked_session,
                 days=days,
-                max_assets=max_assets,
+                max_assets=effective_max_assets,
             ),
         )
     if job_name == "etf_portfolio_backtest":
@@ -225,7 +226,7 @@ async def run_job_by_name(
             lambda tracked_session: etf_portfolio_backtest_job(
                 tracked_session,
                 days=days,
-                max_assets=min(max_assets, 500),
+                max_assets=min(effective_max_assets, 500),
             ),
         )
     if job_name == "etf_strategy_comparison_backtest":
@@ -235,7 +236,7 @@ async def run_job_by_name(
             lambda tracked_session: etf_strategy_comparison_backtest_job(
                 tracked_session,
                 days=days,
-                max_assets=min(max_assets, 500),
+                max_assets=min(effective_max_assets, 500),
             ),
         )
     if job_name == "etf_strategy_healthcheck":
@@ -250,6 +251,8 @@ async def run_job_by_name(
                 tracked_session,
                 days=min(days, 1095),
                 max_assets=max_assets,
+                execution_model="intraday_alert",
+                manual_delay_minutes=3,
             ),
         )
     if job_name == "etf_exit_signal_credibility":
@@ -259,7 +262,7 @@ async def run_job_by_name(
             lambda tracked_session: etf_exit_signal_credibility_job(
                 tracked_session,
                 days=min(days, 1095),
-                max_assets=max_assets,
+                max_assets=effective_max_assets,
             ),
         )
     if job_name == "daily_etf_label_outcome_review":

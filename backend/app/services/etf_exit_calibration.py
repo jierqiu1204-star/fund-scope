@@ -6,6 +6,7 @@ It intentionally does not import notifier, tracked-position mutation paths, or A
 
 from app.services.short_research.etf_exit_hyperopt import (
     CALIBRATION_RULE_VERSION,
+    DEFAULT_SEARCH_SPACE,
     EXECUTION_MODEL_DAILY_CLOSE,
     EXECUTION_MODEL_INTRADAY_ALERT,
     OBJECTIVE_STABILITY_FIRST,
@@ -17,6 +18,7 @@ from app.services.short_research.etf_exit_hyperopt import (
     STATUS_REJECTED,
     HyperoptIntradayPoint,
     HyperoptPricePoint,
+    calibration_contract_hash,
     etf_exit_hyperopt_payload,
     latest_etf_exit_hyperopt_run,
     run_etf_exit_hyperopt,
@@ -25,6 +27,7 @@ from app.services.short_research.etf_exit_hyperopt import (
 
 __all__ = [
     "CALIBRATION_RULE_VERSION",
+    "DEFAULT_SEARCH_SPACE",
     "EXECUTION_MODEL_DAILY_CLOSE",
     "EXECUTION_MODEL_INTRADAY_ALERT",
     "HyperoptIntradayPoint",
@@ -36,6 +39,7 @@ __all__ = [
     "STATUS_EVIDENCE_INSUFFICIENT",
     "STATUS_EXPIRED",
     "STATUS_REJECTED",
+    "calibration_contract_hash",
     "etf_exit_hyperopt_payload",
     "latest_etf_exit_hyperopt_run",
     "run_etf_exit_hyperopt",

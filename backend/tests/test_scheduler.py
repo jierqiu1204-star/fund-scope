@@ -42,6 +42,7 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     post_close_etf_signals = scheduler.get_job("post_close_etf_signals")
     post_close_etf_label_review = scheduler.get_job("post_close_etf_label_outcome_review")
     post_close_etf_observation = scheduler.get_job("post_close_etf_observation_portfolio")
+    etf_exit_signal_credibility = scheduler.get_job("etf_exit_signal_credibility")
     etf_exit_hyperopt = scheduler.get_job("etf_exit_hyperopt")
 
     def trigger_field(job: object, name: str) -> str:
@@ -58,6 +59,7 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     assert "intraday_etf_watch_10" in job_ids
     assert "intraday_etf_watch_11" in job_ids
     assert "intraday_etf_watch_13_14" in job_ids
+    assert "etf_exit_signal_credibility" in job_ids
     assert "etf_exit_hyperopt" in job_ids
     assert "intraday_etf_watch_1500" not in job_ids
     assert intraday_11 is not None
@@ -65,6 +67,7 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     assert post_close_etf_signals is not None
     assert post_close_etf_label_review is not None
     assert post_close_etf_observation is not None
+    assert etf_exit_signal_credibility is not None
     assert etf_exit_hyperopt is not None
     assert trigger_field(intraday_11, "minute") == "0-29"
     assert trigger_field(post_close_etf_data, "hour") == "15"
@@ -75,8 +78,10 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     assert trigger_field(post_close_etf_label_review, "minute") == "11"
     assert trigger_field(post_close_etf_observation, "hour") == "15"
     assert trigger_field(post_close_etf_observation, "minute") == "12"
+    assert trigger_field(etf_exit_signal_credibility, "hour") == "23"
+    assert trigger_field(etf_exit_signal_credibility, "minute") == "30"
     assert trigger_field(etf_exit_hyperopt, "hour") == "23"
-    assert trigger_field(etf_exit_hyperopt, "minute") == "30"
+    assert trigger_field(etf_exit_hyperopt, "minute") == "45"
     assert "daily_short_etf_data" not in job_ids
     assert "daily_short_etf_signals" not in job_ids
     assert "daily_short_etf_paper" not in job_ids

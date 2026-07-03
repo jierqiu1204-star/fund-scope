@@ -438,8 +438,10 @@ class EtfStrategyComparisonOut(BaseModel):
 
 class EtfExitHyperoptRequest(BaseModel):
     days: int = Field(default=730, ge=120, le=1500)
-    max_assets: int = Field(default=300, ge=20, le=2000)
+    max_assets: int | None = Field(default=None, ge=20, le=2000)
     objective: str = "stability_first"
+    execution_model: Literal["intraday_alert", "daily_close"] = "intraday_alert"
+    manual_delay_minutes: int = Field(default=3, ge=0, le=60)
 
 
 class EtfExitHyperoptItemOut(BaseModel):
@@ -452,6 +454,11 @@ class EtfExitHyperoptItemOut(BaseModel):
     train_metrics: dict[str, Any] = Field(default_factory=dict)
     out_of_sample_metrics: dict[str, Any] = Field(default_factory=dict)
     rolling_metrics: dict[str, Any] = Field(default_factory=dict)
+    baseline_metrics: dict[str, Any] = Field(default_factory=dict)
+    baseline_comparison: dict[str, Any] = Field(default_factory=dict)
+    rejection_reason: str | None = None
+    coverage_status: str | None = None
+    manual_delay_minutes: int | None = None
     confidence: dict[str, Any] = Field(default_factory=dict)
     source_reliability: str | None = None
     score: float
