@@ -451,9 +451,13 @@ class EtfExitHyperoptItemOut(BaseModel):
     parameters: dict[str, Any] = Field(default_factory=dict)
     train_metrics: dict[str, Any] = Field(default_factory=dict)
     out_of_sample_metrics: dict[str, Any] = Field(default_factory=dict)
+    rolling_metrics: dict[str, Any] = Field(default_factory=dict)
+    confidence: dict[str, Any] = Field(default_factory=dict)
+    source_reliability: str | None = None
     score: float
     sample_count: int
     trade_count: int
+    approved_at: datetime | None = None
     created_at: datetime
 
 
@@ -465,9 +469,14 @@ class EtfExitHyperoptRunOut(BaseModel):
     as_of_date: date
     objective: str
     rule_version: str
+    calibration_rule_version: str | None = None
+    execution_model: str | None = None
+    contract_hash: str | None = None
+    data_cutoff: datetime | None = None
     train_range: dict[str, Any] = Field(default_factory=dict)
     out_of_sample_range: dict[str, Any] = Field(default_factory=dict)
     search_space: dict[str, Any] = Field(default_factory=dict)
+    bucket_summary: dict[str, Any] = Field(default_factory=dict)
     summary: dict[str, Any] = Field(default_factory=dict)
     error_message: str | None = None
     research_only: bool = True

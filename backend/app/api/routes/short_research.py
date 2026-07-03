@@ -41,6 +41,11 @@ from app.schemas.short_research import (
     ShortResearchSignalRunRequest,
     ShortResearchStatusOut,
 )
+from app.services.etf_exit_calibration import (
+    etf_exit_hyperopt_payload,
+    latest_etf_exit_hyperopt_run,
+    run_etf_exit_hyperopt,
+)
 from app.services.etf_research_evidence import (
     EVIDENCE_STATUS_WAITING,
     build_evidence_summary,
@@ -62,11 +67,6 @@ from app.services.short_research.etf_exit_credibility import (
     etf_exit_credibility_payload,
     latest_etf_exit_credibility_run,
     run_etf_exit_credibility,
-)
-from app.services.short_research.etf_exit_hyperopt import (
-    etf_exit_hyperopt_payload,
-    latest_etf_exit_hyperopt_run,
-    run_etf_exit_hyperopt,
 )
 from app.services.short_research.healthcheck import (
     healthcheck_payload,

@@ -934,9 +934,13 @@ export type EtfExitHyperoptItem = {
   parameters: Record<string, unknown>;
   train_metrics: Record<string, unknown>;
   out_of_sample_metrics: Record<string, unknown>;
+  rolling_metrics: Record<string, unknown>;
+  confidence: Record<string, unknown>;
+  source_reliability: string | null;
   score: number;
   sample_count: number;
   trade_count: number;
+  approved_at: string | null;
   created_at: string;
 };
 
@@ -948,9 +952,14 @@ export type EtfExitHyperopt = {
   as_of_date: string;
   objective: string;
   rule_version: string;
+  calibration_rule_version: string | null;
+  execution_model: string | null;
+  contract_hash: string | null;
+  data_cutoff: string | null;
   train_range: Record<string, unknown>;
   out_of_sample_range: Record<string, unknown>;
   search_space: Record<string, unknown>;
+  bucket_summary: Record<string, unknown>;
   summary: Record<string, unknown>;
   error_message: string | null;
   research_only: boolean;
@@ -1296,6 +1305,10 @@ export type TrackedEtfIntradaySnapshot = {
 export type DynamicExitThresholds = {
   threshold_source: string;
   rule_version: string;
+  calibration_run_id: number | null;
+  calibration_candidate_id: number | null;
+  calibration_bucket_key: string | null;
+  calibration_version: string | null;
   volatility_unit_pct: number | null;
   hard_stop_pct: number | null;
   profit_start_pct: number | null;

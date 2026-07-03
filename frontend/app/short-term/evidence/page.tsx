@@ -558,8 +558,16 @@ export default function EtfEvidencePage() {
             <div className="mt-4 grid gap-3 md:grid-cols-4">
               <EvidenceStat label="分桶数量" value={metricInteger(exitHyperopt.data.summary, "bucket_count")} />
               <EvidenceStat label="候选数量" value={metricInteger(exitHyperopt.data.summary, "candidate_count")} />
-              <EvidenceStat label="拒绝/不足" value={metricInteger(exitHyperopt.data.summary, "rejected_count")} />
-              <EvidenceStat label="参数组合" value={metricInteger(exitHyperopt.data.summary, "parameter_count")} />
+              <EvidenceStat label="证据不足" value={metricInteger(exitHyperopt.data.summary, "evidence_insufficient_count")} />
+              <EvidenceStat label="数据截止" value={formatDateTime(exitHyperopt.data.data_cutoff)} />
+            </div>
+            <div className="mt-3 grid gap-3 md:grid-cols-3">
+              <EvidenceStat label="执行模型" value={exitHyperopt.data.execution_model ?? "日线收盘"} />
+              <EvidenceStat label="校准版本" value={exitHyperopt.data.calibration_rule_version ?? "旧口径"} />
+              <EvidenceStat
+                label="合同 hash"
+                value={exitHyperopt.data.contract_hash ? exitHyperopt.data.contract_hash.slice(0, 10) : "暂无"}
+              />
             </div>
             <div className="mt-4 grid gap-3 lg:grid-cols-2">
               {exitHyperopt.data.items.slice(0, 6).map((item) => (
@@ -584,6 +592,12 @@ export default function EtfEvidencePage() {
                     <span>提醒次数：{metricInteger(item.out_of_sample_metrics, "alert_count")}</span>
                     <span>交易次数：{item.trade_count}</span>
                     <span>样本：{item.sample_count}</span>
+                    <span>滚动稳定率：{metricPercent(item.rolling_metrics, "stable_window_rate")}</span>
+                    <span>最差窗口收益：{metricPercent(item.rolling_metrics, "worst_window_return")}</span>
+                    <span>错杀率：{metricPercent(item.out_of_sample_metrics, "missed_upside_rate")}</span>
+                    <span>保护率：{metricPercent(item.out_of_sample_metrics, "protected_exit_rate")}</span>
+                    <span>置信度：{metadataString(item.confidence, "level") ?? "暂无"}</span>
+                    <span>数据源：{item.source_reliability ?? "旧口径"}</span>
                   </div>
                 </div>
               ))}

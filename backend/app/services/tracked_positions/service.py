@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta
 from statistics import pstdev
 from typing import Any, cast
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
@@ -20,6 +20,8 @@ from app.defaults.short_research import (
     SHORT_RESEARCH_ASSET_BY_KEY,
 )
 from app.models.entities import (
+    EtfExitHyperoptItem,
+    EtfExitHyperoptRun,
     EtfObservationPortfolioItem,
     EtfObservationPortfolioSnapshot,
     EtfPriceHistory,
@@ -401,6 +403,52 @@ def _quote_source_message(snapshot: TrackedEtfIntradaySnapshotOut | None) -> str
     return f"数据源：{snapshot.price_source}。"
 
 
+async def _approved_calibration_thresholds(
+    session: AsyncSession,
+    *,
+    bucket_candidates: list[tuple[str, str]],
+    volatility_unit_pct: float,
+) -> dict[str, Any] | None:
+    if not bucket_candidates:
+        return None
+    conditions = [
+        and_(EtfExitHyperoptItem.bucket_type == bucket_type, EtfExitHyperoptItem.bucket_key == bucket_key)
+        for bucket_type, bucket_key in bucket_candidates
+    ]
+    row = (
+        await session.execute(
+            select(EtfExitHyperoptItem, EtfExitHyperoptRun)
+            .join(EtfExitHyperoptRun, EtfExitHyperoptRun.id == EtfExitHyperoptItem.run_id)
+            .where(EtfExitHyperoptItem.status == "approved", or_(*conditions))
+            .order_by(
+                EtfExitHyperoptItem.score.desc(),
+                EtfExitHyperoptItem.approved_at.desc(),
+                EtfExitHyperoptItem.id.desc(),
+            )
+            .limit(1)
+        )
+    ).first()
+    if row is None:
+        return None
+
+    item, run = row
+    params = dict(item.parameter_json or {})
+    hard_stop_multiplier = float(params.get("hard_stop_multiplier") or 1.5)
+    profit_start_multiplier = float(params.get("profit_start_multiplier") or 1.1)
+    trailing_giveback_multiplier = float(params.get("trailing_giveback_multiplier") or 0.65)
+    return {
+        "thresholds": {
+            "hard_stop_pct": -_clamp(hard_stop_multiplier * volatility_unit_pct, 1.2, 7.0),
+            "profit_start_pct": _clamp(profit_start_multiplier * volatility_unit_pct, 2.0, 6.0),
+            "trailing_giveback_pct": _clamp(trailing_giveback_multiplier * volatility_unit_pct, 1.0, 4.0),
+        },
+        "run_id": run.id,
+        "candidate_id": item.id,
+        "bucket_key": f"{item.bucket_type}:{item.bucket_key}",
+        "calibration_version": run.calibration_rule_version or run.rule_version,
+    }
+
+
 async def dynamic_thresholds_for_position(
     session: AsyncSession,
     position: TrackedPosition,
@@ -538,6 +586,39 @@ async def dynamic_thresholds_for_position(
             ),
         )
     )
+    if volatility_unit_pct < 1.0:
+        volatility_bucket = "low_volatility"
+    elif volatility_unit_pct < 2.5:
+        volatility_bucket = "mid_volatility"
+    else:
+        volatility_bucket = "high_volatility"
+    approved_calibration = await _approved_calibration_thresholds(
+        session,
+        bucket_candidates=[
+            ("asset_bucket", theme_profile.asset_bucket or "unknown"),
+            ("theme_group", theme_profile.theme_group or "unknown"),
+            ("volatility", volatility_bucket),
+            ("all", "all"),
+        ],
+        volatility_unit_pct=volatility_unit_pct,
+    )
+    threshold_source = "rule_dynamic"
+    threshold_rule_version = str(threshold_context.get("rule_version") or "dynamic_exit_v2")
+    calibration_run_id = None
+    calibration_candidate_id = None
+    calibration_bucket_key = None
+    calibration_version = None
+    if approved_calibration is not None:
+        approved_thresholds = dict(approved_calibration["thresholds"])
+        hard_stop_pct = float(approved_thresholds["hard_stop_pct"])
+        profit_start_pct = float(approved_thresholds["profit_start_pct"])
+        trailing_giveback_pct = float(approved_thresholds["trailing_giveback_pct"])
+        threshold_source = "approved_calibration"
+        threshold_rule_version = "approved_etf_exit_calibration"
+        calibration_run_id = int(approved_calibration["run_id"])
+        calibration_candidate_id = int(approved_calibration["candidate_id"])
+        calibration_bucket_key = str(approved_calibration["bucket_key"])
+        calibration_version = str(approved_calibration["calibration_version"])
 
     prices = [point.price for point in chart]
     ma5 = _mean_or_none(prices[-5:]) if len(prices) >= 5 else None
@@ -579,8 +660,12 @@ async def dynamic_thresholds_for_position(
             structure_warnings.append("暂无 IOPV，无法判断盘中价格相对净值是否偏贵。")
 
     return DynamicExitThresholdsOut(
-        threshold_source="rule_dynamic",
-        rule_version=str(threshold_context.get("rule_version") or "dynamic_exit_v2"),
+        threshold_source=threshold_source,
+        rule_version=threshold_rule_version,
+        calibration_run_id=calibration_run_id,
+        calibration_candidate_id=calibration_candidate_id,
+        calibration_bucket_key=calibration_bucket_key,
+        calibration_version=calibration_version,
         volatility_unit_pct=_round_or_none(volatility_unit_pct),
         hard_stop_pct=_round_or_none(hard_stop_pct),
         profit_start_pct=_round_or_none(profit_start_pct),

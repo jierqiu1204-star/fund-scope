@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings, get_settings
 from app.defaults.short_research import ASSET_TYPE_ETF, ASSET_TYPE_FUND
 from app.models.entities import EtfPriceHistory
+from app.services.etf_exit_calibration import run_etf_exit_hyperopt
 from app.services.llm import LLMClient
 from app.services.short_etf.data import sync_etf_price_history_from_intraday_snapshot
 from app.services.short_research.advisor import run_advisor_generation
@@ -17,7 +18,6 @@ from app.services.short_research.backtest import (
     run_etf_strategy_comparison_backtest,
 )
 from app.services.short_research.etf_exit_credibility import run_etf_exit_credibility
-from app.services.short_research.etf_exit_hyperopt import run_etf_exit_hyperopt
 from app.services.short_research.healthcheck import run_etf_strategy_healthcheck
 from app.services.short_research.optimized_allocation import run_etf_optimized_allocation
 from app.services.short_research.service import (
@@ -353,6 +353,9 @@ async def etf_exit_hyperopt_job(
         "bucket_count": int(summary.get("bucket_count", 0)),
         "candidate_count": int(summary.get("candidate_count", 0)),
         "rejected_count": int(summary.get("rejected_count", 0)),
+        "evidence_insufficient_count": int(summary.get("evidence_insufficient_count", 0)),
+        "calibration_rule_version": summary.get("calibration_rule_version"),
+        "contract_hash": summary.get("contract_hash"),
         "auto_applied": False,
         "research_only": True,
         "error_message": run.error_message,

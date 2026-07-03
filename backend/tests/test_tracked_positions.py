@@ -6,6 +6,8 @@ import pytest
 from sqlalchemy import select
 
 from app.models.entities import (
+    EtfExitHyperoptItem,
+    EtfExitHyperoptRun,
     EtfIntradayQuote,
     EtfPriceHistory,
     FundNavHistory,
@@ -650,6 +652,129 @@ async def test_fund_dynamic_thresholds_use_daily_nav_behavior(app) -> None:
     assert analysis.technical_metrics["threshold_rule_version"] == "dynamic_exit_v2"
     assert analysis.technical_metrics["distance_to_hard_stop_pct"] is not None
     assert analysis.technical_metrics["price_source"] == "daily_close"
+
+
+async def _seed_etf_dynamic_threshold_position(session, *, code: str):
+    session.add(
+        TradableEtf(
+            code=code,
+            name=f"阈值测试ETF{code}",
+            exchange="SH",
+            theme_tags_json=["阈值测试"],
+            trading_rule_label="证券账户 T+1 ETF",
+            asset_class="sector",
+            is_short_term_eligible=True,
+            is_watchlist=True,
+        )
+    )
+    start = date(2026, 1, 1)
+    close = 1.0
+    for offset in range(90):
+        close = close * (1.002 + (0.001 if offset % 7 == 0 else 0.0))
+        previous = 1.0 if offset == 0 else close / 1.002
+        session.add(
+            EtfPriceHistory(
+                etf_code=code,
+                trade_date=start + timedelta(days=offset),
+                open=close * 0.995,
+                high=close * 1.01,
+                low=close * 0.99,
+                close=close,
+                volume=2_000_000,
+                turnover=close * 2_000_000,
+                pct_change=(close / previous - 1.0) * 100,
+            )
+        )
+    await session.commit()
+    return await create_position(
+        session,
+        asset_type="etf",
+        asset_code=code,
+        user_id=1,
+        buy_amount=3000,
+        buy_date=start,
+        confirmed_nav=1.0,
+        confirmed_shares=3000,
+    )
+
+
+async def _seed_exit_hyperopt_item(session, *, status: str) -> EtfExitHyperoptItem:
+    run = EtfExitHyperoptRun(
+        status="success",
+        started_at=utcnow(),
+        finished_at=utcnow(),
+        as_of_date=date(2026, 3, 31),
+        objective="stability_first",
+        rule_version="etf_exit_hyperopt_v1",
+        calibration_rule_version="etf_exit_calibration_v1",
+        execution_model="daily_close",
+        contract_hash="test-contract",
+        data_cutoff=utcnow(),
+        train_range_json={"start_date": "2026-01-01", "end_date": "2026-02-28"},
+        out_of_sample_range_json={"start_date": "2026-03-01", "end_date": "2026-03-31"},
+        search_space_json={},
+        bucket_summary_json={"all": 1},
+        summary_json={"research_only": True},
+        created_at=utcnow(),
+    )
+    session.add(run)
+    await session.flush()
+    item = EtfExitHyperoptItem(
+        run_id=run.id,
+        bucket_type="all",
+        bucket_key="all",
+        status=status,
+        conclusion="候选待确认" if status != "approved" else "人工批准",
+        parameter_json={
+            "hard_stop_multiplier": 1.2,
+            "profit_start_multiplier": 0.9,
+            "trailing_giveback_multiplier": 0.5,
+            "trend_confirm_days": 2,
+            "take_profit_watch_pct": 3.0,
+        },
+        train_metrics_json={"sample_count": 5},
+        out_of_sample_metrics_json={"sample_count": 5, "trade_count": 3},
+        rolling_metrics_json={"window_count": 2},
+        confidence_json={"level": "较充分"},
+        source_reliability="verified_daily_close",
+        score=99.0,
+        sample_count=5,
+        trade_count=3,
+        approved_at=utcnow() if status == "approved" else None,
+        created_at=utcnow(),
+    )
+    session.add(item)
+    await session.commit()
+    await session.refresh(item)
+    return item
+
+
+@pytest.mark.asyncio
+async def test_etf_dynamic_thresholds_use_approved_calibration(app) -> None:
+    async with app.state.db.session() as session:
+        position = await _seed_etf_dynamic_threshold_position(session, code="589901")
+        item = await _seed_exit_hyperopt_item(session, status="approved")
+        analysis = await position_analysis(session, position)
+
+    assert analysis.dynamic_thresholds is not None
+    assert analysis.dynamic_thresholds.threshold_source == "approved_calibration"
+    assert analysis.dynamic_thresholds.rule_version == "approved_etf_exit_calibration"
+    assert analysis.dynamic_thresholds.calibration_candidate_id == item.id
+    assert analysis.dynamic_thresholds.calibration_bucket_key == "all:all"
+    assert analysis.dynamic_thresholds.calibration_version == "etf_exit_calibration_v1"
+
+
+@pytest.mark.asyncio
+async def test_etf_dynamic_thresholds_ignore_unapproved_calibration(app) -> None:
+    async with app.state.db.session() as session:
+        position = await _seed_etf_dynamic_threshold_position(session, code="589902")
+        await _seed_exit_hyperopt_item(session, status="candidate")
+        analysis = await position_analysis(session, position)
+
+    assert analysis.dynamic_thresholds is not None
+    assert analysis.dynamic_thresholds.threshold_source == "rule_dynamic"
+    assert analysis.dynamic_thresholds.rule_version == "dynamic_etf_threshold_v1"
+    assert analysis.dynamic_thresholds.calibration_candidate_id is None
 
 
 @pytest.mark.asyncio

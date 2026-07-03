@@ -10,6 +10,7 @@ EVIDENCE_SCHEMA_VERSION = "etf_research_evidence_v1"
 SIGNAL_CONTRACT_VERSION = "short_research_signal_v1"
 ALLOCATION_CONTRACT_VERSION = "etf_portfolio_allocation_contract_v1"
 REPLAY_CONTRACT_VERSION = "etf_replay_contract_v1"
+EXIT_CALIBRATION_CONTRACT_VERSION = "etf_exit_calibration_contract_v1"
 EXECUTION_MODEL_DAILY_CLOSE = "daily_close_v1"
 EXECUTION_MODEL_INTRADAY_ALERT = "intraday_alert_v1"
 FEE_MODEL_SIMPLE_RATE = "simple_fee_rate_v1"
@@ -90,6 +91,25 @@ class ReplayContract:
     data_cutoff: str | None
     evidence_schema_version: str = EVIDENCE_SCHEMA_VERSION
     replay_contract_version: str = REPLAY_CONTRACT_VERSION
+
+    def to_dict(self) -> dict[str, Any]:
+        return _with_hash(asdict(self))
+
+
+@dataclass(frozen=True)
+class ExitCalibrationContract:
+    calibration_run_id: int | None
+    calibration_candidate_id: int | None
+    approved_parameter_id: int | None
+    signal_rule_version: str
+    exit_rule_version: str
+    calibration_rule_version: str
+    execution_model: str
+    evidence_status: str
+    data_cutoff: str | None
+    data_window: dict[str, str | None]
+    evidence_schema_version: str = EVIDENCE_SCHEMA_VERSION
+    calibration_contract_version: str = EXIT_CALIBRATION_CONTRACT_VERSION
 
     def to_dict(self) -> dict[str, Any]:
         return _with_hash(asdict(self))
@@ -184,6 +204,37 @@ def build_replay_contract(
             "end_date": end_date.isoformat() if end_date else None,
         },
         data_cutoff=str(_canonical(data_cutoff)) if data_cutoff is not None else None,
+    ).to_dict()
+
+
+def build_exit_calibration_contract(
+    *,
+    calibration_run_id: int | None,
+    calibration_candidate_id: int | None,
+    approved_parameter_id: int | None,
+    signal_rule_version: str,
+    exit_rule_version: str,
+    calibration_rule_version: str,
+    execution_model: str,
+    evidence_status: str,
+    start_date: date | None,
+    end_date: date | None,
+    data_cutoff: date | datetime | None,
+) -> dict[str, Any]:
+    return ExitCalibrationContract(
+        calibration_run_id=calibration_run_id,
+        calibration_candidate_id=calibration_candidate_id,
+        approved_parameter_id=approved_parameter_id,
+        signal_rule_version=signal_rule_version,
+        exit_rule_version=exit_rule_version,
+        calibration_rule_version=calibration_rule_version,
+        execution_model=execution_model,
+        evidence_status=evidence_status,
+        data_cutoff=str(_canonical(data_cutoff)) if data_cutoff is not None else None,
+        data_window={
+            "start_date": start_date.isoformat() if start_date else None,
+            "end_date": end_date.isoformat() if end_date else None,
+        },
     ).to_dict()
 
 

@@ -140,6 +140,10 @@ class TrackedEtfIntradaySnapshotOut(BaseModel):
 class DynamicExitThresholdsOut(BaseModel):
     threshold_source: str = "rule_dynamic"
     rule_version: str = "dynamic_exit_v2"
+    calibration_run_id: int | None = None
+    calibration_candidate_id: int | None = None
+    calibration_bucket_key: str | None = None
+    calibration_version: str | None = None
     volatility_unit_pct: float | None = None
     hard_stop_pct: float | None = None
     profit_start_pct: float | None = None

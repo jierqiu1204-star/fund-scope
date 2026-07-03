@@ -8,6 +8,8 @@ import pytest
 from sqlalchemy import func, select
 
 from app.models.entities import (
+    EtfExitHyperoptItem,
+    EtfExitHyperoptRun,
     EtfLabelReplaySample,
     EtfPriceHistory,
     FundNavHistory,
@@ -16,6 +18,7 @@ from app.models.entities import (
     ShortResearchSignalRun,
     TrackedPositionAlert,
     TradableEtf,
+    utcnow,
 )
 from app.services.short_research.service import (
     allowed_conclusions,
@@ -99,6 +102,67 @@ async def _seed_entry_timing_etf(
 
 def _steady_uptrend(days: int = 80, *, start: float = 1.0, step: float = 0.01) -> list[float]:
     return [round(start + offset * step, 6) for offset in range(days)]
+
+
+async def _seed_exit_hyperopt_run(
+    session,
+    *,
+    status: str = "candidate",
+) -> EtfExitHyperoptRun:
+    run = EtfExitHyperoptRun(
+        status="success",
+        started_at=utcnow(),
+        finished_at=utcnow(),
+        as_of_date=date(2026, 7, 3),
+        objective="stability_first",
+        rule_version="etf_exit_hyperopt_v1",
+        calibration_rule_version="etf_exit_calibration_v1",
+        execution_model="daily_close",
+        contract_hash="api-test-contract",
+        data_cutoff=utcnow(),
+        train_range_json={"start_date": "2026-01-01", "end_date": "2026-05-01"},
+        out_of_sample_range_json={"start_date": "2026-05-02", "end_date": "2026-07-03"},
+        search_space_json={"hard_stop_multiplier": [1.2]},
+        bucket_summary_json={"all": 1},
+        summary_json={
+            "bucket_count": 1,
+            "candidate_count": 1 if status == "candidate" else 0,
+            "rejected_count": 0,
+            "evidence_insufficient_count": 0,
+            "research_only": True,
+            "auto_applied": False,
+        },
+        created_at=utcnow(),
+    )
+    session.add(run)
+    await session.flush()
+    session.add(
+        EtfExitHyperoptItem(
+            run_id=run.id,
+            bucket_type="all",
+            bucket_key="all",
+            status=status,
+            conclusion="候选待确认",
+            parameter_json={
+                "hard_stop_multiplier": 1.2,
+                "profit_start_multiplier": 0.9,
+                "trailing_giveback_multiplier": 0.5,
+                "trend_confirm_days": 2,
+                "take_profit_watch_pct": 3.0,
+            },
+            train_metrics_json={"sample_count": 5, "total_return": 0.08},
+            out_of_sample_metrics_json={"sample_count": 5, "trade_count": 3, "total_return": 0.04},
+            rolling_metrics_json={"window_count": 2, "stable_window_rate": 0.5},
+            confidence_json={"level": "一般"},
+            source_reliability="verified_daily_close",
+            score=88.0,
+            sample_count=5,
+            trade_count=3,
+            created_at=utcnow(),
+        )
+    )
+    await session.flush()
+    return run
 
 
 async def _seed_observation_portfolio_signal_run(
@@ -606,6 +670,52 @@ async def test_etf_label_historical_replay_api_separates_tracks_and_does_not_not
     assert "historical_replay" in evidence["evidence_tracks"]
     assert "forward_live" in evidence["evidence_tracks"]
 
+    async with app.state.db.session() as session:
+        notification_count = await session.scalar(select(func.count()).select_from(NotificationLog))
+        alert_count = await session.scalar(select(func.count()).select_from(TrackedPositionAlert))
+    assert notification_count == 0
+    assert alert_count == 0
+
+
+@pytest.mark.asyncio
+async def test_etf_exit_hyperopt_latest_endpoint_returns_research_only_evidence(client, app) -> None:
+    async with app.state.db.session() as session:
+        run = await _seed_exit_hyperopt_run(session)
+        await session.commit()
+
+    response = await client.get("/api/short-research/etf-exit-hyperopt/latest")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == run.id
+    assert body["research_only"] is True
+    assert body["no_trade_instruction"] is True
+    assert body["calibration_rule_version"] == "etf_exit_calibration_v1"
+    assert body["items"][0]["status"] == "candidate"
+    assert body["items"][0]["source_reliability"] == "verified_daily_close"
+
+
+@pytest.mark.asyncio
+async def test_etf_exit_hyperopt_manual_run_endpoint_returns_structured_summary(client, app, monkeypatch) -> None:
+    from app.api.routes import short_research as short_research_routes
+
+    async def fake_run_etf_exit_hyperopt(session, **kwargs):
+        assert kwargs["days"] == 180
+        assert kwargs["max_assets"] == 20
+        return await _seed_exit_hyperopt_run(session)
+
+    monkeypatch.setattr(short_research_routes, "run_etf_exit_hyperopt", fake_run_etf_exit_hyperopt)
+
+    response = await client.post(
+        "/api/short-research/etf-exit-hyperopt/run",
+        json={"days": 180, "max_assets": 20, "objective": "stability_first"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"]["research_only"] is True
+    assert body["summary"]["auto_applied"] is False
+    assert body["items"]
     async with app.state.db.session() as session:
         notification_count = await session.scalar(select(func.count()).select_from(NotificationLog))
         alert_count = await session.scalar(select(func.count()).select_from(TrackedPositionAlert))

@@ -1,18 +1,30 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 
+from app.services.etf_research_evidence import build_exit_calibration_contract
 from app.services.short_research import jobs as jobs_module
 from app.services.short_research.etf_exit_hyperopt import (
+    CONCLUSION_INSUFFICIENT,
     CONCLUSION_OVERFIT,
+    DEFAULT_SEARCH_SPACE,
+    EXECUTION_MODEL_DAILY_CLOSE,
+    EXECUTION_MODEL_INTRADAY_ALERT,
+    OBJECTIVE_STABILITY_FIRST,
+    STATUS_EVIDENCE_INSUFFICIENT,
     STATUS_REJECTED,
+    HyperoptIntradayPoint,
     HyperoptPricePoint,
+    calibration_contract_hash,
     classify_hyperopt_candidate,
+    confidence_summary,
     parameter_grid,
+    rolling_validation_metrics,
     simulate_exit_rule,
+    simulate_intraday_exit_rule,
 )
 
 
@@ -38,6 +50,65 @@ def test_oos_degradation_marks_overfit() -> None:
 
     assert status == STATUS_REJECTED
     assert conclusion == CONCLUSION_OVERFIT
+
+
+def test_sparse_oos_marks_evidence_insufficient() -> None:
+    status, conclusion = classify_hyperopt_candidate(
+        {"sample_count": 8, "trade_count": 4, "total_return": 0.12, "max_drawdown": -0.03},
+        {"sample_count": 2, "trade_count": 1, "total_return": 0.05, "max_drawdown": -0.02},
+    )
+
+    assert status == STATUS_EVIDENCE_INSUFFICIENT
+    assert conclusion == CONCLUSION_INSUFFICIENT
+
+
+def test_calibration_contract_hash_is_deterministic() -> None:
+    first = calibration_contract_hash(search_space=DEFAULT_SEARCH_SPACE, objective=OBJECTIVE_STABILITY_FIRST)
+    second = calibration_contract_hash(search_space=dict(reversed(DEFAULT_SEARCH_SPACE.items())), objective=OBJECTIVE_STABILITY_FIRST)
+
+    assert first == second
+    assert len(first) == 64
+
+
+def test_exit_calibration_contract_helper_includes_status_and_ids() -> None:
+    contract = build_exit_calibration_contract(
+        calibration_run_id=10,
+        calibration_candidate_id=21,
+        approved_parameter_id=21,
+        signal_rule_version="short_research_signal_v1",
+        exit_rule_version="dynamic_exit_v2",
+        calibration_rule_version="etf_exit_calibration_v1",
+        execution_model="daily_close",
+        evidence_status="current",
+        start_date=date(2026, 1, 1),
+        end_date=date(2026, 6, 30),
+        data_cutoff=datetime(2026, 7, 1, 0, 0),
+    )
+    same_contract = build_exit_calibration_contract(
+        calibration_run_id=10,
+        calibration_candidate_id=21,
+        approved_parameter_id=21,
+        signal_rule_version="short_research_signal_v1",
+        exit_rule_version="dynamic_exit_v2",
+        calibration_rule_version="etf_exit_calibration_v1",
+        execution_model="daily_close",
+        evidence_status="current",
+        start_date=date(2026, 1, 1),
+        end_date=date(2026, 6, 30),
+        data_cutoff=datetime(2026, 7, 1, 0, 0),
+    )
+
+    assert contract["calibration_candidate_id"] == 21
+    assert contract["approved_parameter_id"] == 21
+    assert contract["evidence_status"] == "current"
+    assert contract["contract_hash"] == same_contract["contract_hash"]
+
+
+def test_confidence_summary_shrinks_small_samples() -> None:
+    confidence = confidence_summary({"sample_count": 3, "trade_count": 2, "win_rate": 1.0})
+
+    assert confidence["level"] == "样本不足"
+    assert confidence["shrunk_win_rate"] < 1.0
 
 
 def test_simulation_triggers_trailing_take_profit_without_email_side_effects() -> None:
@@ -83,6 +154,101 @@ def test_simulation_triggers_trailing_take_profit_without_email_side_effects() -
     assert result["trade_count"] >= 1
     assert result["alert_count"] >= result["trade_count"]
     assert result["unfilled_count"] == 0
+    assert "missed_upside_rate" in result
+
+
+def test_intraday_replay_missing_history_does_not_use_daily_without_opt_in() -> None:
+    result = simulate_intraday_exit_rule(
+        [],
+        {
+            "hard_stop_multiplier": 1.2,
+            "profit_start_multiplier": 0.9,
+            "trailing_giveback_multiplier": 0.5,
+            "trend_confirm_days": 2,
+            "take_profit_watch_pct": 3.0,
+        },
+        daily_points=_points([1.0 + index * 0.01 for index in range(25)]),
+        asset_bucket="equity",
+    )
+
+    assert result["execution_model"] == EXECUTION_MODEL_INTRADAY_ALERT
+    assert result["sample_count"] == 0
+    assert result["missing_intraday_evidence_count"] == 1
+    assert result["source_reliability"] == "unavailable"
+
+
+def test_intraday_replay_uses_daily_only_when_explicitly_allowed() -> None:
+    result = simulate_intraday_exit_rule(
+        [],
+        {
+            "hard_stop_multiplier": 1.2,
+            "profit_start_multiplier": 0.9,
+            "trailing_giveback_multiplier": 0.5,
+            "trend_confirm_days": 2,
+            "take_profit_watch_pct": 3.0,
+        },
+        daily_points=_points([1.0 + index * 0.01 for index in range(25)]),
+        asset_bucket="equity",
+        allow_daily_fallback=True,
+    )
+
+    assert result["execution_model"] == EXECUTION_MODEL_DAILY_CLOSE
+    assert result["source_reliability"] == "verified_daily_close"
+    assert result["missing_intraday_evidence_count"] == 0
+
+
+def test_intraday_replay_excludes_ineligible_quotes_from_decision() -> None:
+    base_time = datetime(2026, 7, 1, 9, 30)
+    params = {
+        "hard_stop_multiplier": 1.2,
+        "profit_start_multiplier": 0.9,
+        "trailing_giveback_multiplier": 0.5,
+        "trend_confirm_days": 2,
+        "take_profit_watch_pct": 3.0,
+    }
+    result = simulate_intraday_exit_rule(
+        [
+            HyperoptIntradayPoint(base_time + timedelta(minutes=index), 1.0 + index * 0.01, False)
+            for index in range(25)
+        ],
+        params,
+        asset_bucket="equity",
+    )
+
+    assert result["sample_count"] == 0
+    assert result["missing_intraday_evidence_count"] == 1
+
+    eligible_result = simulate_intraday_exit_rule(
+        [
+            HyperoptIntradayPoint(base_time + timedelta(minutes=index), 1.0 + index * 0.01, True)
+            for index in range(25)
+        ],
+        params,
+        asset_bucket="equity",
+    )
+
+    assert eligible_result["execution_model"] == EXECUTION_MODEL_INTRADAY_ALERT
+    assert eligible_result["source_reliability"] == "verified_intraday"
+    assert eligible_result["missing_intraday_evidence_count"] == 0
+
+
+def test_rolling_validation_reports_window_stability() -> None:
+    from app.services.short_research.etf_exit_hyperopt import HyperoptSeries
+
+    prices = _points([1.0 + index * 0.003 for index in range(90)])
+    metrics = rolling_validation_metrics(
+        [HyperoptSeries("510300", "沪深300ETF", "broad_base", "宽基", prices)],
+        {
+            "hard_stop_multiplier": 1.2,
+            "profit_start_multiplier": 0.9,
+            "trailing_giveback_multiplier": 0.5,
+            "trend_confirm_days": 2,
+            "take_profit_watch_pct": 3.0,
+        },
+    )
+
+    assert metrics["window_count"] >= 1
+    assert metrics["stable_window_rate"] is not None
 
 
 @pytest.mark.asyncio

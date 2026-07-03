@@ -896,9 +896,14 @@ class EtfExitHyperoptRun(Base):
     as_of_date: Mapped[date] = mapped_column(Date)
     objective: Mapped[str] = mapped_column(String(64), default="stability_first")
     rule_version: Mapped[str] = mapped_column(String(64), default="etf_exit_hyperopt_v1")
+    calibration_rule_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    execution_model: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    contract_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    data_cutoff: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     train_range_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     out_of_sample_range_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     search_space_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    bucket_summary_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=dict, nullable=True)
     summary_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
@@ -909,6 +914,7 @@ class EtfExitHyperoptItem(Base):
     __table_args__ = (
         SaIndex("ix_etf_exit_hyperopt_items_run_bucket", "run_id", "bucket_type", "bucket_key"),
         SaIndex("ix_etf_exit_hyperopt_items_run_score", "run_id", "score"),
+        SaIndex("ix_etf_exit_hyperopt_items_status_bucket_score", "status", "bucket_type", "bucket_key", "score"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -920,9 +926,13 @@ class EtfExitHyperoptItem(Base):
     parameter_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     train_metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     out_of_sample_metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    rolling_metrics_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=dict, nullable=True)
+    confidence_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=dict, nullable=True)
+    source_reliability: Mapped[str | None] = mapped_column(String(32), nullable=True)
     score: Mapped[float] = mapped_column(Float, default=0.0)
     sample_count: Mapped[int] = mapped_column(Integer, default=0)
     trade_count: Mapped[int] = mapped_column(Integer, default=0)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
