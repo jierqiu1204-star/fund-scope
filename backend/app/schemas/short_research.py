@@ -465,3 +465,64 @@ class EtfExitHyperoptRunOut(BaseModel):
     research_only: bool = True
     no_trade_instruction: bool = True
     items: list[EtfExitHyperoptItemOut] = Field(default_factory=list)
+
+
+class EtfExitCredibilityRequest(BaseModel):
+    days: int = Field(default=730, ge=30, le=1500)
+    max_assets: int = Field(default=300, ge=1, le=2000)
+    execution_model: Literal["intraday_alert", "daily_close"] = "intraday_alert"
+
+
+class EtfExitCredibilityEventOut(BaseModel):
+    id: int
+    etf_code: str
+    etf_name: str | None = None
+    signal_type: str
+    signal_time: datetime | None = None
+    signal_date: date
+    signal_price: float
+    outcome: str
+    forward_window_days: int
+    forward_return: float | None = None
+    max_favorable_return: float | None = None
+    max_adverse_return: float | None = None
+    context: dict[str, Any] = Field(default_factory=dict)
+
+
+class EtfExitCredibilityItemOut(BaseModel):
+    id: int
+    signal_type: str
+    group_type: str
+    group_key: str
+    evidence_level: str
+    sample_count: int
+    success_avoidance_rate: float | None = None
+    false_stop_rate: float | None = None
+    sold_too_early_rate: float | None = None
+    avg_avoided_drawdown: float | None = None
+    avg_missed_upside: float | None = None
+    avg_forward_return: float | None = None
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    events: list[EtfExitCredibilityEventOut] = Field(default_factory=list)
+    created_at: datetime
+
+
+class EtfExitCredibilityRunOut(BaseModel):
+    id: int
+    status: str
+    started_at: datetime
+    finished_at: datetime | None = None
+    as_of_date: date
+    execution_model: str
+    signal_version: str
+    exit_rule_version: str
+    contract_hash: str | None = None
+    evidence_status: str
+    data_cutoff: datetime | None = None
+    data_window: dict[str, Any] = Field(default_factory=dict)
+    summary: dict[str, Any] = Field(default_factory=dict)
+    insufficiency_reasons: list[str] = Field(default_factory=list)
+    error_message: str | None = None
+    research_only: bool = True
+    no_trade_instruction: bool = True
+    items: list[EtfExitCredibilityItemOut] = Field(default_factory=list)

@@ -870,6 +870,90 @@ class EtfExitHyperoptItem(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class EtfExitSignalCredibilityRun(Base):
+    __tablename__ = "etf_exit_signal_credibility_runs"
+    __table_args__ = (
+        SaIndex("ix_etf_exit_cred_runs_status_started", "status", "started_at"),
+        SaIndex("ix_etf_exit_cred_runs_model_finished", "execution_model", "finished_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    status: Mapped[str] = mapped_column(String(32), default="running")
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    as_of_date: Mapped[date] = mapped_column(Date)
+    execution_model: Mapped[str] = mapped_column(String(32), default="intraday_alert")
+    signal_version: Mapped[str] = mapped_column(String(64), default="short_research_v1")
+    exit_rule_version: Mapped[str] = mapped_column(String(64), default="risk_alerts_v1")
+    contract_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    evidence_status: Mapped[str] = mapped_column(String(32), default="等待验证")
+    data_cutoff: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    data_window_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    summary_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    insufficiency_reasons_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class EtfExitSignalCredibilityItem(Base):
+    __tablename__ = "etf_exit_signal_credibility_items"
+    __table_args__ = (
+        SaIndex(
+            "ix_etf_exit_cred_items_run_signal_group",
+            "run_id",
+            "signal_type",
+            "group_type",
+            "group_key",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("etf_exit_signal_credibility_runs.id", ondelete="CASCADE")
+    )
+    signal_type: Mapped[str] = mapped_column(String(64))
+    group_type: Mapped[str] = mapped_column(String(32), default="signal")
+    group_key: Mapped[str] = mapped_column(String(128), default="all")
+    evidence_level: Mapped[str] = mapped_column(String(32), default="样本不足")
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    success_avoidance_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    false_stop_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sold_too_early_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_avoided_drawdown: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_missed_upside: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_forward_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class EtfExitSignalCredibilityEvent(Base):
+    __tablename__ = "etf_exit_signal_credibility_events"
+    __table_args__ = (
+        SaIndex("ix_etf_exit_cred_events_run_signal", "run_id", "signal_type", "signal_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("etf_exit_signal_credibility_runs.id", ondelete="CASCADE")
+    )
+    item_id: Mapped[int | None] = mapped_column(
+        ForeignKey("etf_exit_signal_credibility_items.id", ondelete="SET NULL"), nullable=True
+    )
+    etf_code: Mapped[str] = mapped_column(String(32))
+    etf_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    signal_type: Mapped[str] = mapped_column(String(64))
+    signal_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    signal_date: Mapped[date] = mapped_column(Date)
+    signal_price: Mapped[float] = mapped_column(Float)
+    outcome: Mapped[str] = mapped_column(String(64))
+    forward_window_days: Mapped[int] = mapped_column(Integer)
+    forward_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_favorable_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_adverse_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    context_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class EtfPortfolioBacktestRun(Base):
     __tablename__ = "etf_portfolio_backtest_runs"
     __table_args__ = (

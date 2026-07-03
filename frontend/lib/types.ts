@@ -950,6 +950,61 @@ export type EtfExitHyperopt = {
   items: EtfExitHyperoptItem[];
 };
 
+export type EtfExitCredibilityEvent = {
+  id: number;
+  etf_code: string;
+  etf_name: string | null;
+  signal_type: string;
+  signal_time: string | null;
+  signal_date: string;
+  signal_price: number;
+  outcome: string;
+  forward_window_days: number;
+  forward_return: number | null;
+  max_favorable_return: number | null;
+  max_adverse_return: number | null;
+  context: Record<string, unknown>;
+};
+
+export type EtfExitCredibilityItem = {
+  id: number;
+  signal_type: string;
+  group_type: string;
+  group_key: string;
+  evidence_level: string;
+  sample_count: number;
+  success_avoidance_rate: number | null;
+  false_stop_rate: number | null;
+  sold_too_early_rate: number | null;
+  avg_avoided_drawdown: number | null;
+  avg_missed_upside: number | null;
+  avg_forward_return: number | null;
+  metrics: Record<string, unknown>;
+  events: EtfExitCredibilityEvent[];
+  created_at: string;
+};
+
+export type EtfExitCredibility = {
+  id: number;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+  as_of_date: string;
+  execution_model: string;
+  signal_version: string;
+  exit_rule_version: string;
+  contract_hash: string | null;
+  evidence_status: string;
+  data_cutoff: string | null;
+  data_window: Record<string, unknown>;
+  summary: Record<string, unknown>;
+  insufficiency_reasons: string[];
+  error_message: string | null;
+  research_only: boolean;
+  no_trade_instruction: boolean;
+  items: EtfExitCredibilityItem[];
+};
+
 export type TrackedPositionSnapshot = {
   current_price: number | null;
   current_price_date: string | null;

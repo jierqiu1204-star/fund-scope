@@ -16,6 +16,7 @@ import { Panel } from "@/components/ui";
 import { api } from "@/lib/api";
 import { formatCurrency, formatDate, formatPercent } from "@/lib/format";
 import type {
+  EtfExitCredibility,
   EtfExitHyperopt,
   EtfOptimizedAllocation,
   EtfPortfolioBacktestDetail,
@@ -48,6 +49,21 @@ function metricPercent(metrics: Record<string, unknown> | undefined, key: string
 function metricInteger(metrics: Record<string, unknown> | undefined, key: string) {
   const value = metricNumber(metrics, key);
   return value === null ? "暂无" : String(Math.round(value));
+}
+
+function formatNullableRate(value: number | null | undefined) {
+  return value === null || value === undefined ? "暂无" : formatPercent(value * 100);
+}
+
+function signalLabel(value: string) {
+  const labels: Record<string, string> = {
+    hard_stop: "硬止损",
+    trailing_take_profit: "移动止盈",
+    trend_weakening: "趋势转弱",
+    take_profit_watch: "止盈观察",
+    exit_watch: "退出观察"
+  };
+  return labels[value] ?? value;
 }
 
 function metadataString(metadata: Record<string, unknown>, key: string) {
@@ -142,6 +158,15 @@ export default function EtfEvidencePage() {
     queryFn: async () =>
       (await api.get<EtfExitHyperopt | null>("/api/short-research/etf-exit-hyperopt/latest")).data
   });
+  const exitCredibility = useQuery({
+    queryKey: ["short-research", "etf-exit-credibility", "latest"],
+    queryFn: async () =>
+      (
+        await api.get<EtfExitCredibility | null>(
+          "/api/short-research/etf-exit-credibility/latest?execution_model=intraday_alert"
+        )
+      ).data
+  });
 
   const runBacktest = useMutation({
     mutationFn: async (executionModel: "daily_close" | "intraday_alert") =>
@@ -200,6 +225,19 @@ export default function EtfEvidencePage() {
       await queryClient.invalidateQueries({ queryKey: ["short-research", "etf-exit-hyperopt"] });
     }
   });
+  const runExitCredibility = useMutation({
+    mutationFn: async () =>
+      (
+        await api.post<EtfExitCredibility>("/api/short-research/etf-exit-credibility/run", {
+          days: 730,
+          max_assets: 300,
+          execution_model: "intraday_alert"
+        })
+      ).data,
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["short-research", "etf-exit-credibility"] });
+    }
+  });
 
   const detail = backtestDetail.data;
   const isIntradayBacktest = backtestExecutionModel(detail) === "intraday_alert_v1";
@@ -252,14 +290,100 @@ export default function EtfEvidencePage() {
             >
               参数优化
             </button>
+            <button
+              className="rounded-[6px] bg-ink px-3 py-2 text-sm font-semibold text-white transition hover:bg-ink/85 disabled:opacity-60"
+              disabled={runExitCredibility.isPending}
+              onClick={() => runExitCredibility.mutate()}
+            >
+              退出信号验证
+            </button>
           </div>
         </div>
-        {[runBacktest, runComparison, runHealthcheck, runOptimizedAllocation, runExitHyperopt].map((mutation, index) =>
+        {[runBacktest, runComparison, runHealthcheck, runOptimizedAllocation, runExitHyperopt, runExitCredibility].map((mutation, index) =>
           mutation.isError ? (
             <p key={index} className="mt-3 rounded-[8px] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
               {errorText(mutation.error)}
             </p>
           ) : null
+        )}
+      </Panel>
+
+      <Panel>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <p className="text-sm font-semibold text-ink">退出信号可信度</p>
+            <p className="mt-1 text-xs text-ink/55">
+              {exitCredibility.data
+                ? `${exitCredibility.data.execution_model} · ${exitCredibility.data.evidence_status}`
+                : "等待验证"}
+            </p>
+          </div>
+          <span className="w-fit rounded-full bg-paper px-2.5 py-1 text-xs text-ink/60">
+            {exitCredibility.data
+              ? `${formatDate(exitCredibility.data.as_of_date)} · 样本 ${metricInteger(exitCredibility.data.summary, "event_count")}`
+              : "暂无报告"}
+          </span>
+        </div>
+        {exitCredibility.data ? (
+          <>
+            <div className="mt-4 grid gap-3 md:grid-cols-4">
+              <EvidenceStat label="覆盖 ETF" value={metricInteger(exitCredibility.data.summary, "asset_count")} />
+              <EvidenceStat label="理论事件" value={metricInteger(exitCredibility.data.summary, "event_count")} />
+              <EvidenceStat label="已验证信号" value={metricInteger(exitCredibility.data.summary, "verified_signal_count")} />
+              <EvidenceStat label="数据截止" value={formatDateTime(exitCredibility.data.data_cutoff)} />
+            </div>
+            {exitCredibility.data.insufficiency_reasons.length ? (
+              <div className="mt-4 rounded-[8px] border border-dashed border-border bg-paper px-3 py-3 text-sm text-ink/60">
+                {exitCredibility.data.insufficiency_reasons.join("；")}
+              </div>
+            ) : null}
+            <div className="mt-4 grid gap-3 lg:grid-cols-2">
+              {exitCredibility.data.items
+                .filter((item) => item.group_type === "signal")
+                .map((item) => (
+                  <div key={item.id} className="rounded-[8px] border border-border bg-paper/40 p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-semibold text-ink">{signalLabel(item.signal_type)}</p>
+                        <p className="mt-1 text-xs text-ink/55">
+                          {item.evidence_level} · 样本 {item.sample_count}
+                        </p>
+                      </div>
+                      <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-ink/55">
+                        {formatNullableRate(item.success_avoidance_rate)}
+                      </span>
+                    </div>
+                    <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-ink/60">
+                      <span>成功避险：{formatNullableRate(item.success_avoidance_rate)}</span>
+                      <span>错杀率：{formatNullableRate(item.false_stop_rate)}</span>
+                      <span>卖飞率：{formatNullableRate(item.sold_too_early_rate)}</span>
+                      <span>
+                        平均后续收益：{item.avg_forward_return === null ? "暂无" : formatPercent(item.avg_forward_return * 100)}
+                      </span>
+                      <span>
+                        平均少亏：{item.avg_avoided_drawdown === null ? "暂无" : formatPercent(item.avg_avoided_drawdown * 100)}
+                      </span>
+                      <span>
+                        平均错过上涨：{item.avg_missed_upside === null ? "暂无" : formatPercent(item.avg_missed_upside * 100)}
+                      </span>
+                    </div>
+                    {item.events.length ? (
+                      <div className="mt-3 space-y-1 border-t border-border pt-3 text-xs text-ink/50">
+                        {item.events.slice(0, 2).map((event) => (
+                          <p key={event.id}>
+                            {event.etf_name ?? event.etf_code} · {formatDate(event.signal_date)} · {event.outcome}
+                          </p>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
+            </div>
+          </>
+        ) : (
+          <p className="mt-4 rounded-[8px] border border-dashed border-border bg-paper px-3 py-4 text-sm text-ink/55">
+            暂无退出信号可信度报告。可以点击“退出信号验证”运行一次，或等待服务器夜间任务。
+          </p>
         )}
       </Panel>
 

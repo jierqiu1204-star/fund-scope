@@ -16,6 +16,8 @@ from app.models.entities import (
     User,
 )
 from app.schemas.short_research import (
+    EtfExitCredibilityRequest,
+    EtfExitCredibilityRunOut,
     EtfExitHyperoptRequest,
     EtfExitHyperoptRunOut,
     EtfOptimizedAllocationOut,
@@ -55,6 +57,11 @@ from app.services.short_research.backtest import (
     run_etf_portfolio_backtest,
     run_etf_strategy_comparison_backtest,
     strategy_comparison_payload,
+)
+from app.services.short_research.etf_exit_credibility import (
+    etf_exit_credibility_payload,
+    latest_etf_exit_credibility_run,
+    run_etf_exit_credibility,
 )
 from app.services.short_research.etf_exit_hyperopt import (
     etf_exit_hyperopt_payload,
@@ -608,6 +615,34 @@ async def get_latest_etf_exit_hyperopt(
     if run is None:
         return None
     return await etf_exit_hyperopt_payload(session, run)
+
+
+@router.post("/etf-exit-credibility/run", response_model=EtfExitCredibilityRunOut)
+async def run_etf_exit_credibility_endpoint(
+    payload: EtfExitCredibilityRequest | None = Body(default=None),
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = Depends(require_approved_user),
+) -> dict[str, Any]:
+    payload = payload or EtfExitCredibilityRequest()
+    run = await run_etf_exit_credibility(
+        session,
+        days=payload.days,
+        max_assets=payload.max_assets,
+        execution_model=payload.execution_model,
+    )
+    return await etf_exit_credibility_payload(session, run)
+
+
+@router.get("/etf-exit-credibility/latest", response_model=EtfExitCredibilityRunOut | None)
+async def get_latest_etf_exit_credibility(
+    execution_model: str | None = Query(default=None),
+    session: AsyncSession = Depends(get_db_session),
+    _user: User = Depends(require_approved_user),
+) -> dict[str, Any] | None:
+    run = await latest_etf_exit_credibility_run(session, execution_model=execution_model)
+    if run is None:
+        return None
+    return await etf_exit_credibility_payload(session, run)
 
 
 @router.post("/validation/run", response_model=EtfSignalValidationRunOut)

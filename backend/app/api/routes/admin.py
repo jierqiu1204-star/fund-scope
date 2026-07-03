@@ -37,6 +37,7 @@ from app.services.short_research.jobs import (
     daily_short_research_data_job,
     daily_short_research_signals_job,
     etf_exit_hyperopt_job,
+    etf_exit_signal_credibility_job,
     etf_history_backfill_job,
     etf_label_historical_replay_job,
     etf_optimized_allocation_job,
@@ -243,6 +244,16 @@ async def run_job_by_name(
             request.app.state.db.session,
             job_name,
             lambda tracked_session: etf_exit_hyperopt_job(
+                tracked_session,
+                days=min(days, 1095),
+                max_assets=max_assets,
+            ),
+        )
+    if job_name == "etf_exit_signal_credibility":
+        return await run_job(
+            request.app.state.db.session,
+            job_name,
+            lambda tracked_session: etf_exit_signal_credibility_job(
                 tracked_session,
                 days=min(days, 1095),
                 max_assets=max_assets,

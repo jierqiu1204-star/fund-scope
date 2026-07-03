@@ -16,6 +16,7 @@ from app.services.short_research.backtest import (
     run_etf_portfolio_backtest,
     run_etf_strategy_comparison_backtest,
 )
+from app.services.short_research.etf_exit_credibility import run_etf_exit_credibility
 from app.services.short_research.etf_exit_hyperopt import run_etf_exit_hyperopt
 from app.services.short_research.healthcheck import run_etf_strategy_healthcheck
 from app.services.short_research.optimized_allocation import run_etf_optimized_allocation
@@ -349,6 +350,41 @@ async def etf_exit_hyperopt_job(
         "rejected_count": int(summary.get("rejected_count", 0)),
         "auto_applied": False,
         "research_only": True,
+        "error_message": run.error_message,
+    }
+
+
+async def etf_exit_signal_credibility_job(
+    session: AsyncSession,
+    *,
+    days: int = 730,
+    max_assets: int = 300,
+    execution_model: str = "intraday_alert",
+) -> dict[str, Any]:
+    run = await run_etf_exit_credibility(
+        session,
+        days=days,
+        max_assets=max_assets,
+        execution_model=execution_model,
+    )
+    summary = dict(run.summary_json or {})
+    return {
+        "run_id": run.id,
+        "status": run.status,
+        "as_of_date": run.as_of_date.isoformat(),
+        "execution_model": run.execution_model,
+        "signal_version": run.signal_version,
+        "exit_rule_version": run.exit_rule_version,
+        "contract_hash": run.contract_hash,
+        "evidence_status": run.evidence_status,
+        "asset_count": int(summary.get("asset_count", 0)),
+        "event_count": int(summary.get("event_count", 0)),
+        "verified_signal_count": int(summary.get("verified_signal_count", 0)),
+        "insufficiency_reasons": list(run.insufficiency_reasons_json or []),
+        "research_only": True,
+        "auto_applied": False,
+        "email_sent": False,
+        "tracked_position_mutated": False,
         "error_message": run.error_message,
     }
 
