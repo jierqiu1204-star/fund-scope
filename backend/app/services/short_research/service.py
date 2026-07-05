@@ -73,6 +73,10 @@ from app.services.short_research.dynamic_thresholds import (
     ThresholdPricePoint,
     dynamic_threshold_context,
 )
+from app.services.short_research.factors import (
+    FACTOR_PROFILE_UNAVAILABLE_VERSION,
+    build_asset_factor_payload,
+)
 from app.services.short_research.optimized_allocation import (
     latest_optimized_allocation_snapshot,
     optimized_allocation_payload,
@@ -476,6 +480,13 @@ def has_unavailable_theme_catalyst(metrics: Mapping[str, Any]) -> bool:
 def has_available_opportunity_score(metrics: Mapping[str, Any]) -> bool:
     if not isinstance(metrics.get("opportunity_score"), int | float):
         return False
+    factor_profile_version = str(metrics.get("factor_profile_version") or "")
+    if (
+        factor_profile_version
+        and factor_profile_version != FACTOR_PROFILE_UNAVAILABLE_VERSION
+        and isinstance(metrics.get("factor_profile_score"), int | float)
+    ):
+        return True
     if not has_unavailable_theme_catalyst(metrics):
         return True
     return str(metrics.get("sector_trend_status") or "") == "success" and isinstance(
@@ -2251,18 +2262,34 @@ async def _with_opportunity_scores(
             snapshots_by_key=snapshots,
         )
         opportunity_metrics = dict(payload["metrics"])
+        combined_metrics = {**asset.metrics, **opportunity_metrics}
+        combined_score_breakdown = {**asset.score_breakdown, "opportunity_score_v2": payload["breakdown"]}
+        factor_payload = build_asset_factor_payload(
+            asset_name=asset.metadata.name,
+            theme_tags=list(asset.metadata.theme_tags),
+            metrics=combined_metrics,
+            risk_flags=asset.risk_flags,
+            technical_score=asset.total_score,
+            score_breakdown=combined_score_breakdown,
+            as_of_date=as_of_date,
+        )
+        factor_metrics = dict(factor_payload["metrics"])
+        factor_score = factor_metrics.get("factor_profile_score")
+        if isinstance(factor_score, int | float):
+            factor_metrics["opportunity_score"] = round(float(factor_score), 2)
+            factor_metrics["opportunity_score_version"] = str(factor_metrics["factor_profile_version"])
         catalyst_summary = str(opportunity_metrics.get("catalyst_summary") or "")
         opportunity_label = str(opportunity_metrics.get("opportunity_label") or "")
         updated.append(
             replace(
                 asset,
-                metrics={**asset.metrics, **opportunity_metrics},
-                score_breakdown={**asset.score_breakdown, "opportunity_score_v2": payload["breakdown"]},
+                metrics={**combined_metrics, **factor_metrics},
+                score_breakdown={**combined_score_breakdown, "factor_profile_v1": factor_payload["breakdown"]},
                 rationale={
                     **asset.rationale,
                     "catalyst_summary": catalyst_summary,
                     "opportunity_label": opportunity_label,
-                    "opportunity_meaning": "综合关注分只用于研究观察，不覆盖买点、数据可信度或风险标签。",
+                    "opportunity_meaning": "综合关注分只用于研究观察，不覆盖买点、数据可信度或风险标签；缺失因子不会用中性分补位。",
                 },
             )
         )

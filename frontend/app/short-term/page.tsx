@@ -536,6 +536,12 @@ function opportunityStatusText(asset: ShortResearchAsset | null | undefined) {
 
 function opportunityVersionText(asset: ShortResearchAsset | null | undefined) {
   switch (asset?.opportunity_score_version) {
+    case "etf_factor_profile_v1_full":
+      return "口径：ETF 多因子完整口径";
+    case "etf_factor_profile_v1_degraded":
+      return "口径：ETF 多因子降级口径";
+    case "etf_factor_profile_v1_unavailable":
+      return "暂无综合关注口径";
     case "opportunity_score_v2_full":
       return "口径：技术 60% + 板块 20% + 催化 15% + 事件 5%";
     case "opportunity_score_v2_sector_only":
@@ -546,6 +552,48 @@ function opportunityVersionText(asset: ShortResearchAsset | null | undefined) {
     default:
       return "暂无综合关注口径";
   }
+}
+
+const factorGroupOrder = ["price_momentum", "sector_trend", "theme_event", "fund_flow", "constituent_breadth", "liquidity", "etf_structure"];
+
+function factorProfileText(asset: ShortResearchAsset | null | undefined) {
+  if (!asset?.factor_profile_version) {
+    return "因子口径：暂无";
+  }
+  const score = formatOptionalScore(asset.factor_profile_score);
+  if (asset.factor_profile_version === "etf_factor_profile_v1_unavailable") {
+    return "因子口径：暂无综合因子";
+  }
+  const label = asset.factor_profile_version === "etf_factor_profile_v1_full" ? "完整多因子" : "降级多因子";
+  return `因子口径：${label} · ${score} 分`;
+}
+
+function factorGroupHighlights(asset: ShortResearchAsset | null | undefined) {
+  const groups = asset?.factor_group_scores;
+  if (!groups) {
+    return [];
+  }
+  return factorGroupOrder
+    .map((key) => groups[key])
+    .filter(Boolean)
+    .slice(0, 6)
+    .map((item) => ({
+      key: item.group,
+      label: item.label,
+      value: item.score === null || item.score === undefined ? "暂无" : `${item.score.toFixed(1)} 分`,
+      muted: item.availability !== "available"
+    }));
+}
+
+function activeRiskGateText(asset: ShortResearchAsset | null | undefined) {
+  const active = (asset?.risk_gates ?? []).filter((gate) => gate.active === true);
+  if (!active.length) {
+    return "风险门槛：未触发硬门槛";
+  }
+  return `风险门槛：${active
+    .slice(0, 3)
+    .map((gate) => String(gate.label ?? gate.gate_id ?? "风险"))
+    .join("、")}`;
 }
 
 function sectorTrendText(asset: ShortResearchAsset | null | undefined) {
@@ -2454,6 +2502,11 @@ function ShortTermClient() {
                           <span className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
                             主题催化：{catalystSummaryText(item)}
                           </span>
+                          {item.factor_profile_version ? (
+                            <span className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                              {factorProfileText(item)}
+                            </span>
+                          ) : null}
                         </>
                       ) : null}
                       <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
@@ -3580,16 +3633,29 @@ function ShortTermClient() {
                         </p>
                       </div>
                       <p className="mt-1 text-xs text-ink/50">{opportunityVersionText(selectedAsset)}</p>
+                      <p className="mt-1 text-xs text-ink/50">{factorProfileText(selectedAsset)}</p>
+                      <p className="mt-1 text-xs text-ink/50">{activeRiskGateText(selectedAsset)}</p>
                       <p className="mt-2 text-sm leading-6 text-ink/65">
                         板块趋势：{selectedAsset.sector_trend_summary || sectorTrendText(selectedAsset)}
                       </p>
                       <p className="mt-2 text-sm leading-6 text-ink/65">{catalystSummaryText(selectedAsset)}</p>
-                      <div className="mt-3 grid gap-2 sm:grid-cols-4">
+                      <div className="mt-3 grid gap-2 sm:grid-cols-5">
                         <StatPill label="技术分" value={formatOptionalScore(selectedAsset.technical_score ?? selectedAsset.total_score)} tone="bg-paper text-ink" />
+                        <StatPill label="因子综合" value={formatOptionalScore(selectedAsset.factor_profile_score)} tone="bg-paper text-ink" />
                         <StatPill label="板块趋势" value={formatOptionalScore(selectedAsset.sector_trend_score)} tone="bg-paper text-ink" />
                         <StatPill label="催化分" value={formatOptionalScore(selectedAsset.catalyst_score)} tone="bg-paper text-ink" />
                         <StatPill label="事件热度" value={formatOptionalScore(selectedAsset.sentiment_heat_score)} tone="bg-paper text-ink" />
                       </div>
+                      {factorGroupHighlights(selectedAsset).length ? (
+                        <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                          {factorGroupHighlights(selectedAsset).map((item) => (
+                            <div key={item.key} className="rounded-[8px] border border-ink/10 bg-paper px-3 py-2">
+                              <p className="text-xs text-ink/45">{item.label}</p>
+                              <p className={`mt-1 text-sm font-semibold ${item.muted ? "text-ink/45" : "text-ink"}`}>{item.value}</p>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
                       {selectedAsset.catalyst_limitations?.length ? (
                         <p className="mt-2 text-xs leading-5 text-ink/50">
                           限制：{selectedAsset.catalyst_limitations.slice(0, 2).join("；")}

@@ -550,6 +550,33 @@ export type ObservationPortfolioContext = {
   generated_at?: string | null;
 };
 
+export type ShortResearchFactorResult = {
+  factor_id: string;
+  group: string;
+  group_label?: string;
+  label: string;
+  score: number | null;
+  availability: string;
+  reliability: string;
+  source: string;
+  reason: string;
+  decision_eligible?: boolean;
+  raw_value?: unknown;
+  components?: Record<string, unknown>;
+};
+
+export type ShortResearchFactorGroupScore = {
+  group: string;
+  label: string;
+  score: number | null;
+  availability: string;
+  reliability?: string;
+  reason?: string;
+  factor_count?: number;
+  available_factor_count?: number;
+  factor_ids?: string[];
+};
+
 export type ShortResearchAsset = {
   asset_type: "fund" | "etf";
   code: string;
@@ -571,6 +598,14 @@ export type ShortResearchAsset = {
   catalyst_summary?: string | null;
   catalyst_events?: Array<Record<string, unknown>>;
   catalyst_limitations?: string[];
+  factor_profile_version?: string | null;
+  factor_profile_status?: string | null;
+  factor_profile_score?: number | null;
+  factor_group_scores?: Record<string, ShortResearchFactorGroupScore>;
+  factor_scores?: ShortResearchFactorResult[];
+  factor_availability?: Record<string, unknown>;
+  risk_gates?: Array<Record<string, unknown>>;
+  opportunity_breakdown?: Record<string, unknown>;
   conclusion: string;
   entry_timing_label: string;
   entry_timing_reason: string;

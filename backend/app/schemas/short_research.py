@@ -135,6 +135,14 @@ class ShortResearchAssetOut(BaseModel):
     catalyst_summary: str | None = None
     catalyst_events: list[dict[str, Any]] = Field(default_factory=list)
     catalyst_limitations: list[str] = Field(default_factory=list)
+    factor_profile_version: str | None = None
+    factor_profile_status: str | None = None
+    factor_profile_score: float | None = None
+    factor_group_scores: dict[str, Any] = Field(default_factory=dict)
+    factor_scores: list[dict[str, Any]] = Field(default_factory=list)
+    factor_availability: dict[str, Any] = Field(default_factory=dict)
+    risk_gates: list[dict[str, Any]] = Field(default_factory=list)
+    opportunity_breakdown: dict[str, Any] = Field(default_factory=dict)
     conclusion: str
     entry_timing_label: str
     entry_timing_reason: str

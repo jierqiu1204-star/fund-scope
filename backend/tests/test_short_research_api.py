@@ -274,7 +274,13 @@ async def _seed_opportunity_signal_run(app) -> None:
                     rank=1,
                     total_score=70,
                     conclusion="高位观察",
-                    score_breakdown_json={"opportunity_score_v1": {"opportunity_score": 80}},
+                    score_breakdown_json={
+                        "opportunity_score_v1": {"opportunity_score": 80},
+                        "factor_profile_v1": {
+                            "score_version": "etf_factor_profile_v1_degraded",
+                            "factor_profile": {"profile_version": "etf_factor_profile_v1_degraded", "score": 81.5},
+                        },
+                    },
                     risk_flags_json=[],
                     rationale_json={"entry_timing_reason": "强势但冲高。"},
                     metrics_json={
@@ -292,6 +298,65 @@ async def _seed_opportunity_signal_run(app) -> None:
                         "catalyst_summary": "宇树科技 IPO 催化机器人主题。",
                         "catalyst_events": [{"summary": "宇树科技 IPO 催化机器人主题。"}],
                         "catalyst_limitations": ["当前买点为冲高别追，主题催化不能覆盖追高风险。"],
+                        "factor_profile_version": "etf_factor_profile_v1_degraded",
+                        "factor_profile_status": "gated",
+                        "factor_profile_score": 81.5,
+                        "factor_group_scores": {
+                            "price_momentum": {
+                                "group": "price_momentum",
+                                "label": "价格动量",
+                                "score": 70,
+                                "availability": "available",
+                            },
+                            "theme_event": {
+                                "group": "theme_event",
+                                "label": "主题事件",
+                                "score": 90,
+                                "availability": "available",
+                            },
+                            "fund_flow": {
+                                "group": "fund_flow",
+                                "label": "资金流",
+                                "score": None,
+                                "availability": "unavailable",
+                                "reason": "资金流数据不可用。",
+                            },
+                        },
+                        "factor_scores": [
+                            {
+                                "factor_id": "theme_event_score",
+                                "group": "theme_event",
+                                "label": "主题事件",
+                                "score": 90,
+                                "availability": "available",
+                                "reliability": "verified",
+                                "source": "cached_test",
+                                "reason": "缓存因子。",
+                                "decision_eligible": True,
+                            }
+                        ],
+                        "factor_availability": {
+                            "fund_flow_score": {
+                                "availability": "unavailable",
+                                "reliability": "unavailable",
+                                "reason": "资金流数据不可用。",
+                                "decision_eligible": False,
+                            }
+                        },
+                        "risk_gates": [
+                            {
+                                "gate_id": "overheat",
+                                "label": "反转/过热",
+                                "active": True,
+                                "reason": "冲高别追。",
+                            }
+                        ],
+                        "opportunity_breakdown": {
+                            "profile_version": "etf_factor_profile_v1_degraded",
+                            "score": 81.5,
+                            "included_groups": ["price_momentum", "theme_event"],
+                            "excluded_groups": ["fund_flow"],
+                        },
                     },
                 ),
                 ShortResearchSignalItem(
@@ -649,6 +714,11 @@ async def test_short_research_assets_return_opportunity_score_without_hiding_ris
     assert first["catalyst_summary"] == "宇树科技 IPO 催化机器人主题。"
     assert first["entry_timing_label"] == "冲高别追"
     assert any("冲高别追" in item for item in first["catalyst_limitations"])
+    assert first["factor_profile_version"] == "etf_factor_profile_v1_degraded"
+    assert first["factor_profile_score"] == 81.5
+    assert first["factor_group_scores"]["theme_event"]["score"] == 90
+    assert first["factor_availability"]["fund_flow_score"]["availability"] == "unavailable"
+    assert first["risk_gates"][0]["active"] is True
 
 
 @pytest.mark.asyncio
@@ -665,6 +735,9 @@ async def test_short_research_asset_detail_uses_cached_etf_signal_scores(client,
     assert asset["opportunity_score"] == 80
     assert asset["catalyst_score"] == 90
     assert asset["sentiment_heat_score"] == 80
+    assert asset["factor_profile_version"] == "etf_factor_profile_v1_degraded"
+    assert asset["factor_profile_score"] == 81.5
+    assert asset["opportunity_breakdown"]["profile_version"] == "etf_factor_profile_v1_degraded"
 
 
 @pytest.mark.asyncio

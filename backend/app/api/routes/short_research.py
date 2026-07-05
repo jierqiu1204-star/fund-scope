@@ -215,6 +215,20 @@ def _asset_out(
         catalyst_summary=str(metrics.get("catalyst_summary")) if metrics.get("catalyst_summary") else None,
         catalyst_events=list(metrics.get("catalyst_events") or []),
         catalyst_limitations=list(metrics.get("catalyst_limitations") or []),
+        factor_profile_version=str(metrics.get("factor_profile_version"))
+        if metrics.get("factor_profile_version")
+        else None,
+        factor_profile_status=str(metrics.get("factor_profile_status"))
+        if metrics.get("factor_profile_status")
+        else None,
+        factor_profile_score=round(float(metrics["factor_profile_score"]), 2)
+        if isinstance(metrics.get("factor_profile_score"), int | float)
+        else None,
+        factor_group_scores=dict(metrics.get("factor_group_scores") or {}),
+        factor_scores=list(metrics.get("factor_scores") or []),
+        factor_availability=dict(metrics.get("factor_availability") or {}),
+        risk_gates=list(metrics.get("risk_gates") or []),
+        opportunity_breakdown=dict(metrics.get("opportunity_breakdown") or {}),
         conclusion=asset.conclusion,
         entry_timing_label=asset.entry_timing_label,
         entry_timing_reason=asset.entry_timing_reason,
