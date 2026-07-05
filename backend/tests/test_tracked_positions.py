@@ -21,11 +21,11 @@ from app.models.entities import (
     utcnow,
 )
 from app.services.etf_exit_calibration import (
-    DEFAULT_SEARCH_SPACE,
     EXECUTION_MODEL_DAILY_CLOSE,
     EXECUTION_MODEL_INTRADAY_ALERT,
     OBJECTIVE_STABILITY_FIRST,
     calibration_contract_hash,
+    search_space_for_execution_model,
 )
 from app.services.intraday_etf.service import ASIA_SHANGHAI
 from app.services.tracked_positions.jobs import daily_tracked_position_alerts_job
@@ -713,7 +713,7 @@ async def _seed_exit_hyperopt_item(
     sampled: bool = False,
 ) -> EtfExitHyperoptItem:
     contract_hash = calibration_contract_hash(
-        search_space=DEFAULT_SEARCH_SPACE,
+        search_space=search_space_for_execution_model(execution_model),
         objective=OBJECTIVE_STABILITY_FIRST,
         execution_model=execution_model,
     )

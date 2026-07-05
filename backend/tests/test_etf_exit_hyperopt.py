@@ -14,6 +14,7 @@ from app.services.short_research.etf_exit_hyperopt import (
     DEFAULT_SEARCH_SPACE,
     EXECUTION_MODEL_DAILY_CLOSE,
     EXECUTION_MODEL_INTRADAY_ALERT,
+    INTRADAY_SEARCH_SPACE,
     OBJECTIVE_STABILITY_FIRST,
     STATUS_EVIDENCE_INSUFFICIENT,
     STATUS_REJECTED,
@@ -24,6 +25,7 @@ from app.services.short_research.etf_exit_hyperopt import (
     confidence_summary,
     parameter_grid,
     rolling_validation_metrics,
+    search_space_for_execution_model,
     simulate_exit_rule,
     simulate_intraday_exit_rule,
 )
@@ -41,6 +43,17 @@ def test_parameter_grid_is_deterministic() -> None:
     assert first == second
     assert len(first) == 3 * 3 * 3 * 2 * 2
     assert first[0]["hard_stop_multiplier"] == 1.2
+
+
+def test_intraday_search_space_is_bounded_for_server_runtime() -> None:
+    intraday_space = search_space_for_execution_model(EXECUTION_MODEL_INTRADAY_ALERT)
+
+    assert intraday_space == INTRADAY_SEARCH_SPACE
+    assert set(intraday_space) == set(DEFAULT_SEARCH_SPACE)
+    assert len(parameter_grid(intraday_space)) < len(parameter_grid(DEFAULT_SEARCH_SPACE))
+    assert len(parameter_grid(intraday_space)) == 27
+    assert intraday_space["trend_confirm_days"] == [1]
+    assert intraday_space["take_profit_watch_pct"] == [3.0]
 
 
 def test_oos_degradation_marks_overfit() -> None:

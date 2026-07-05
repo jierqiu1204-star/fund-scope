@@ -22,6 +22,7 @@ from app.services.short_research.etf_exit_hyperopt import (
     etf_exit_hyperopt_payload,
     latest_etf_exit_hyperopt_run,
     run_etf_exit_hyperopt,
+    search_space_for_execution_model,
     simulate_intraday_exit_rule,
 )
 
@@ -43,5 +44,6 @@ __all__ = [
     "etf_exit_hyperopt_payload",
     "latest_etf_exit_hyperopt_run",
     "run_etf_exit_hyperopt",
+    "search_space_for_execution_model",
     "simulate_intraday_exit_rule",
 ]

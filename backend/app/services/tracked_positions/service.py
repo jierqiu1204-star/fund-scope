@@ -46,10 +46,10 @@ from app.schemas.tracked_positions import (
     TrackedPositionSnapshot,
 )
 from app.services.etf_exit_calibration import (
-    DEFAULT_SEARCH_SPACE,
     EXECUTION_MODEL_INTRADAY_ALERT,
     OBJECTIVE_STABILITY_FIRST,
     calibration_contract_hash,
+    search_space_for_execution_model,
 )
 from app.services.market_data import (
     ASIA_SHANGHAI,
@@ -418,7 +418,7 @@ async def _approved_calibration_thresholds(
     if not bucket_candidates:
         return None
     expected_contract_hash = calibration_contract_hash(
-        search_space=DEFAULT_SEARCH_SPACE,
+        search_space=search_space_for_execution_model(EXECUTION_MODEL_INTRADAY_ALERT),
         objective=OBJECTIVE_STABILITY_FIRST,
         execution_model=EXECUTION_MODEL_INTRADAY_ALERT,
     )

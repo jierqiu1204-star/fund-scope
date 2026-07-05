@@ -48,6 +48,14 @@ DEFAULT_SEARCH_SPACE: dict[str, list[float | int]] = {
     "take_profit_watch_pct": [3.0, 4.0],
 }
 
+INTRADAY_SEARCH_SPACE: dict[str, list[float | int]] = {
+    "hard_stop_multiplier": [1.2, 1.5, 1.8],
+    "profit_start_multiplier": [0.9, 1.1, 1.3],
+    "trailing_giveback_multiplier": [0.5, 0.65, 0.8],
+    "trend_confirm_days": [1],
+    "take_profit_watch_pct": [3.0],
+}
+
 DEFAULT_LIVE_PARAMS: dict[str, float | int] = {
     "hard_stop_multiplier": 1.5,
     "profit_start_multiplier": 1.1,
@@ -123,6 +131,12 @@ def parameter_grid(search_space: dict[str, list[float | int]] | None = None) -> 
     space = search_space or DEFAULT_SEARCH_SPACE
     keys = list(space.keys())
     return [dict(zip(keys, values, strict=True)) for values in product(*(space[key] for key in keys))]
+
+
+def search_space_for_execution_model(execution_model: str) -> dict[str, list[float | int]]:
+    if execution_model == EXECUTION_MODEL_INTRADAY_ALERT:
+        return INTRADAY_SEARCH_SPACE
+    return DEFAULT_SEARCH_SPACE
 
 
 def volatility_unit_pct(points: list[HyperoptPricePoint], asset_bucket: str) -> float:
@@ -274,11 +288,7 @@ def simulate_intraday_exit_rule(
     allow_daily_fallback: bool = False,
     manual_delay_minutes: int = DEFAULT_MANUAL_DELAY_MINUTES,
 ) -> dict[str, Any]:
-    eligible_points = [
-        point
-        for point in sorted(intraday_points, key=lambda item: item.quote_time)
-        if point.decision_eligible and point.price > 0
-    ]
+    eligible_points = [point for point in intraday_points if point.decision_eligible and point.price > 0]
     if not eligible_points:
         if allow_daily_fallback and daily_points:
             result = simulate_exit_rule(daily_points, params, asset_bucket=asset_bucket)
@@ -813,6 +823,7 @@ def best_candidate_for_bucket(
     execution_model: str,
     manual_delay_minutes: int,
 ) -> dict[str, Any]:
+    search_space = search_space_for_execution_model(execution_model)
     baseline_train_metrics, baseline_oos_metrics = evaluate_parameter_set(
         series,
         DEFAULT_LIVE_PARAMS,
@@ -820,14 +831,8 @@ def best_candidate_for_bucket(
         manual_delay_minutes=manual_delay_minutes,
     )
     best: dict[str, Any] | None = None
-    for params in parameter_grid():
+    for params in parameter_grid(search_space):
         train_metrics, oos_metrics = evaluate_parameter_set(
-            series,
-            params,
-            execution_model=execution_model,
-            manual_delay_minutes=manual_delay_minutes,
-        )
-        rolling_metrics = rolling_validation_metrics(
             series,
             params,
             execution_model=execution_model,
@@ -838,7 +843,7 @@ def best_candidate_for_bucket(
             train_metrics,
             oos_metrics,
             baseline_oos_metrics,
-            rolling_metrics,
+            None,
         )
         comparison = baseline_comparison(oos_metrics, baseline_oos_metrics)
         rejection_reason = rejection_reason_for_candidate(
@@ -847,13 +852,13 @@ def best_candidate_for_bucket(
             train_metrics=train_metrics,
             oos_metrics=oos_metrics,
             baseline_metrics=baseline_oos_metrics,
-            rolling_metrics=rolling_metrics,
+            rolling_metrics=None,
         )
         candidate = {
             "params": params,
             "train_metrics": train_metrics,
             "out_of_sample_metrics": oos_metrics,
-            "rolling_metrics": rolling_metrics,
+            "rolling_metrics": {},
             "score": score,
             "status": status,
             "conclusion": conclusion,
@@ -866,6 +871,29 @@ def best_candidate_for_bucket(
         if best is None or score > float(best["score"]):
             best = candidate
     assert best is not None
+    rolling_metrics = rolling_validation_metrics(
+        series,
+        best["params"],
+        execution_model=execution_model,
+        manual_delay_minutes=manual_delay_minutes,
+    )
+    status, conclusion = classify_hyperopt_candidate(
+        best["train_metrics"],
+        best["out_of_sample_metrics"],
+        baseline_oos_metrics,
+        rolling_metrics,
+    )
+    best["status"] = status
+    best["conclusion"] = conclusion
+    best["rolling_metrics"] = rolling_metrics
+    best["rejection_reason"] = rejection_reason_for_candidate(
+        status,
+        conclusion,
+        train_metrics=best["train_metrics"],
+        oos_metrics=best["out_of_sample_metrics"],
+        baseline_metrics=baseline_oos_metrics,
+        rolling_metrics=rolling_metrics,
+    )
     confidence = confidence_summary(best["out_of_sample_metrics"])
     confidence.update(
         {
@@ -1013,11 +1041,16 @@ async def _load_series(
     return series, coverage, latest_intraday_time
 
 
-def _bucket_series(series: list[HyperoptSeries]) -> dict[tuple[str, str], list[HyperoptSeries]]:
+def _bucket_series(
+    series: list[HyperoptSeries],
+    *,
+    execution_model: str = EXECUTION_MODEL_DAILY_CLOSE,
+) -> dict[tuple[str, str], list[HyperoptSeries]]:
     buckets: dict[tuple[str, str], list[HyperoptSeries]] = {("all", "all"): list(series)}
     for item in series:
         buckets.setdefault(("asset_bucket", item.asset_bucket or "unknown"), []).append(item)
-        buckets.setdefault(("theme_group", item.theme_group or "unknown"), []).append(item)
+        if execution_model != EXECUTION_MODEL_INTRADAY_ALERT:
+            buckets.setdefault(("theme_group", item.theme_group or "unknown"), []).append(item)
         vol = volatility_unit_pct(item.points, item.asset_bucket)
         if vol < 1.0:
             volatility_bucket = "low_volatility"
@@ -1038,6 +1071,7 @@ async def run_etf_exit_hyperopt(
     execution_model: str = EXECUTION_MODEL_INTRADAY_ALERT,
     manual_delay_minutes: int = DEFAULT_MANUAL_DELAY_MINUTES,
 ) -> EtfExitHyperoptRun:
+    search_space = search_space_for_execution_model(execution_model)
     latest_date = await session.scalar(select(EtfPriceHistory.trade_date).order_by(desc(EtfPriceHistory.trade_date)).limit(1))
     as_of_date = latest_date or date.today()
     start_date = as_of_date - timedelta(days=days)
@@ -1051,14 +1085,14 @@ async def run_etf_exit_hyperopt(
         calibration_rule_version=CALIBRATION_RULE_VERSION,
         execution_model=execution_model,
         contract_hash=calibration_contract_hash(
-            search_space=DEFAULT_SEARCH_SPACE,
+            search_space=search_space,
             objective=objective,
             execution_model=execution_model,
         ),
         data_cutoff=utcnow(),
         train_range_json={"start_date": start_date.isoformat(), "end_date": train_cutoff.isoformat()},
         out_of_sample_range_json={"start_date": train_cutoff.isoformat(), "end_date": as_of_date.isoformat()},
-        search_space_json=DEFAULT_SEARCH_SPACE,
+        search_space_json=search_space,
         bucket_summary_json={},
         summary_json={},
         created_at=utcnow(),
@@ -1076,7 +1110,7 @@ async def run_etf_exit_hyperopt(
         )
         if latest_intraday_time is not None:
             run.data_cutoff = latest_intraday_time
-        buckets = _bucket_series(series)
+        buckets = _bucket_series(series, execution_model=execution_model)
         item_count = 0
         candidate_count = 0
         rejected_count = 0
@@ -1141,7 +1175,7 @@ async def run_etf_exit_hyperopt(
             "rejected_count": rejected_count,
             "evidence_insufficient_count": evidence_insufficient_count,
             "baseline_metrics_by_bucket": baseline_metrics_by_bucket,
-            "parameter_count": len(parameter_grid()),
+            "parameter_count": len(parameter_grid(search_space)),
             "auto_applied": False,
             "research_only": True,
             "no_trade_instruction": True,

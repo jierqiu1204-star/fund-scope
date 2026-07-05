@@ -69,7 +69,7 @@
 
 ## 9. Server Verification
 
-- [ ] 9.1 Deploy migrations and code to the server.
+- [x] 9.1 Deploy migrations and code to the server.
 - [ ] 9.2 Manually run ETF exit Hyperopt with default settings and confirm it reports full eligible coverage.
 - [ ] 9.3 Verify the optimized count is materially above the old 271 when enough intraday history exists, or that exclusions explain the gap.
 - [ ] 9.4 Verify latest evidence API separates current live rule from intraday candidate rule.

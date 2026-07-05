@@ -129,7 +129,7 @@ async def test_tracked_position_alert_uses_owner_email(app, monkeypatch) -> None
     monkeypatch.setattr("app.services.tracked_positions.service.Notifier.send_template", fake_send_template)
     monkeypatch.setattr(
         "app.services.tracked_positions.service._email_payload",
-        lambda position, alert, decision: {"title": "测试提醒"},
+        lambda position, alert, decision, position_sizing=None: {"title": "测试提醒"},
     )
 
     async def fake_decision(session, position):
