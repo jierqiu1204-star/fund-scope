@@ -117,6 +117,32 @@ function evidenceContractText(status: string | undefined, summary: Record<string
   return "等待更多同源证据。";
 }
 
+const CURRENT_EVIDENCE_STATUS = "同源已验证";
+
+function visibleHealthcheckItems(data: EtfStrategyHealthcheck | null | undefined) {
+  if (!data || data.evidence_status !== CURRENT_EVIDENCE_STATUS) {
+    return [];
+  }
+  return data.items.filter((item) => item.sample_count > 0);
+}
+
+function healthcheckEvidenceIssue(data: EtfStrategyHealthcheck | null | undefined) {
+  if (!data) {
+    return null;
+  }
+  const issue = data.summary.evidence_issue;
+  if (typeof issue === "string" && issue.trim()) {
+    return issue;
+  }
+  if (data.evidence_status !== CURRENT_EVIDENCE_STATUS) {
+    return "当前体检是旧口径，不能证明当前标签；请重新生成同源证据。";
+  }
+  if (visibleHealthcheckItems(data).length === 0) {
+    return "缺少可用标签回放样本，请先运行标签历史回放或策略回测。";
+  }
+  return null;
+}
+
 type LabelEvidencePoint = {
   sampleCount: number;
   medianReturn: number | null;
@@ -319,6 +345,8 @@ export default function EtfEvidencePage() {
   const isIntradayBacktest = backtestExecutionModel(detail) === "intraday_alert_v1";
   const optimized = observationPortfolio.data?.optimized_allocation ?? optimizedAllocation.data ?? null;
   const labelEvidenceRows = useMemo(() => buildLabelEvidenceRows(detail?.label_summaries ?? []), [detail?.label_summaries]);
+  const healthcheckIssue = healthcheckEvidenceIssue(strategyHealthcheck.data);
+  const healthcheckItems = visibleHealthcheckItems(strategyHealthcheck.data);
   const hyperoptCoverageRaw = exitHyperopt.data?.summary.coverage ?? exitHyperopt.data?.summary.coverage_funnel;
   const hyperoptCoverage =
     typeof hyperoptCoverageRaw === "object" && hyperoptCoverageRaw !== null
@@ -363,7 +391,7 @@ export default function EtfEvidencePage() {
               disabled={runHealthcheck.isPending}
               onClick={() => runHealthcheck.mutate()}
             >
-              策略体检
+              重新生成策略体检
             </button>
             <button
               className="rounded-[6px] bg-ink px-3 py-2 text-sm font-semibold text-white transition hover:bg-ink/85 disabled:opacity-60"
@@ -629,16 +657,26 @@ export default function EtfEvidencePage() {
               <p className="mt-4 rounded-[8px] bg-paper px-3 py-2 text-sm font-semibold text-ink">
                 {strategyHealthcheck.data.conclusion}
               </p>
-              <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                {strategyHealthcheck.data.items.slice(0, 6).map((item) => (
-                  <div key={`${item.item_type}-${item.item_key}`} className="rounded-[8px] border border-border bg-paper/40 p-3 text-xs leading-5 text-ink/60">
-                    <p className="text-sm font-semibold text-ink">{item.item_key}</p>
-                    <p>结论：{item.conclusion}</p>
-                    <p>样本：{item.sample_count}</p>
-                    <p>胜率：{item.win_rate === null ? "暂无" : formatPercent(item.win_rate * 100)}</p>
-                  </div>
-                ))}
-              </div>
+              {healthcheckIssue ? (
+                <div className="mt-3 rounded-[8px] border border-dashed border-border bg-paper/60 p-3 text-sm leading-6 text-ink/65">
+                  <p className="font-semibold text-ink">当前体检不能作为当前策略证据</p>
+                  <p className="mt-1">{healthcheckIssue}</p>
+                  <p className="mt-1 text-xs text-ink/50">
+                    建议先运行日线/盘中回测和标签历史回放，再重新生成策略体检。
+                  </p>
+                </div>
+              ) : (
+                <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                  {healthcheckItems.slice(0, 6).map((item) => (
+                    <div key={`${item.item_type}-${item.item_key}`} className="rounded-[8px] border border-border bg-paper/40 p-3 text-xs leading-5 text-ink/60">
+                      <p className="text-sm font-semibold text-ink">{item.item_key}</p>
+                      <p>结论：{item.conclusion}</p>
+                      <p>样本：{item.sample_count}</p>
+                      <p>胜率：{item.win_rate === null ? "暂无" : formatPercent(item.win_rate * 100)}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
             </>
           ) : (
             <p className="mt-4 rounded-[8px] border border-dashed border-border bg-paper px-3 py-4 text-sm text-ink/55">

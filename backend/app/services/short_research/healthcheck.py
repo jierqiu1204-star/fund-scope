@@ -90,6 +90,35 @@ def classify_item_conclusion(stats: HealthcheckStats) -> str:
     return HEALTHCHECK_CONCLUSION_WATCH
 
 
+def publishable_healthcheck_groups(
+    groups: dict[str, HealthcheckStats],
+    *,
+    evidence_status: str,
+) -> dict[str, HealthcheckStats]:
+    if evidence_status != EVIDENCE_STATUS_SAME_CONTRACT:
+        return {}
+    return {key: stats for key, stats in groups.items() if stats.sample_count > 0}
+
+
+def build_healthcheck_evidence_issue(
+    *,
+    evidence_status: str,
+    full_sample_count: int,
+    intraday_available: bool,
+) -> str | None:
+    if evidence_status == EVIDENCE_STATUS_VERSION_MISMATCH:
+        return "标签验证来自旧信号快照，请重新生成同源证据。"
+    if evidence_status == EVIDENCE_STATUS_LEGACY:
+        return "最近证据是旧口径结果，请重新生成当前策略证据。"
+    if evidence_status in {EVIDENCE_STATUS_WAITING, EVIDENCE_STATUS_INSUFFICIENT}:
+        return "缺少同源标签验证结果，请先运行标签历史回放或策略回测。"
+    if full_sample_count <= 0:
+        return "缺少可用标签回放样本，请先运行标签历史回放或策略回测。"
+    if not intraday_available:
+        return "暂无同源盘中提醒执行回测，不能证明邮件盘中操作效果。"
+    return None
+
+
 def aggregate_validation_rows(rows: Iterable[EtfSignalValidationItem], *, key_attr: str) -> dict[str, HealthcheckStats]:
     groups: dict[str, list[EtfSignalValidationItem]] = {}
     for row in rows:
@@ -176,6 +205,10 @@ async def healthcheck_payload(
             .order_by(EtfStrategyHealthcheckItem.item_type.asc(), EtfStrategyHealthcheckItem.sample_count.desc())
         )
     ).all()
+    if snapshot.evidence_status != EVIDENCE_STATUS_SAME_CONTRACT:
+        rows = []
+    else:
+        rows = [row for row in rows if row.sample_count > 0]
     return {
         "id": snapshot.id,
         "status": snapshot.status,
@@ -255,7 +288,7 @@ async def run_etf_strategy_healthcheck(session: AsyncSession) -> EtfStrategyHeal
         validation_evidence_status = EVIDENCE_STATUS_SAME_CONTRACT
 
     validation_rows: list[EtfSignalValidationItem] = []
-    if validation_run is not None:
+    if validation_run is not None and validation_evidence_status == EVIDENCE_STATUS_SAME_CONTRACT:
         validation_rows = list(
             (
                 await session.scalars(
@@ -267,7 +300,7 @@ async def run_etf_strategy_healthcheck(session: AsyncSession) -> EtfStrategyHeal
     entry_stats = aggregate_validation_rows(validation_rows, key_attr="entry_timing_label")
 
     replay_samples: list[EtfLabelReplaySample] = []
-    if validation_run is not None:
+    if validation_run is not None and validation_evidence_status == EVIDENCE_STATUS_SAME_CONTRACT:
         replay_samples = list(
             (
                 await session.scalars(
@@ -314,6 +347,18 @@ async def run_etf_strategy_healthcheck(session: AsyncSession) -> EtfStrategyHeal
         backtest_evidence_status = EVIDENCE_STATUS_LEGACY
     else:
         backtest_evidence_status = EVIDENCE_STATUS_SAME_CONTRACT
+    label_stats = publishable_healthcheck_groups(label_stats, evidence_status=validation_evidence_status)
+    entry_stats = publishable_healthcheck_groups(entry_stats, evidence_status=validation_evidence_status)
+    theme_stats = publishable_healthcheck_groups(theme_stats, evidence_status=validation_evidence_status)
+    market_regime_stats = publishable_healthcheck_groups(
+        market_regime_stats,
+        evidence_status=validation_evidence_status,
+    )
+    evidence_issue = build_healthcheck_evidence_issue(
+        evidence_status=evidence_status,
+        full_sample_count=full_stats.sample_count,
+        intraday_available=intraday_available,
+    )
     data_window = {
         "as_of_date": as_of.isoformat(),
         "validation_run_id": validation_run.id if validation_run else None,
@@ -326,6 +371,7 @@ async def run_etf_strategy_healthcheck(session: AsyncSession) -> EtfStrategyHeal
         "intraday_alert_evidence": "available" if intraday_available else "unavailable",
         "validation_evidence_status": validation_evidence_status,
         "backtest_evidence_status": backtest_evidence_status,
+        "evidence_issue": evidence_issue,
     }
     metrics = {
         "full": full_stats.__dict__,
@@ -341,6 +387,8 @@ async def run_etf_strategy_healthcheck(session: AsyncSession) -> EtfStrategyHeal
     ]
     if not intraday_available:
         caveats.append("暂无同源盘中提醒执行回测，不能证明邮件盘中操作效果。")
+    if evidence_issue:
+        caveats.append(evidence_issue)
     if validation_evidence_status == EVIDENCE_STATUS_VERSION_MISMATCH:
         caveats.append("标签验证来自旧信号快照，只能作为旧口径证据。")
     if backtest_evidence_status == EVIDENCE_STATUS_LEGACY:
@@ -366,6 +414,7 @@ async def run_etf_strategy_healthcheck(session: AsyncSession) -> EtfStrategyHeal
                 backtest_evidence_status if intraday_available else EVIDENCE_STATUS_INSUFFICIENT
             ),
             "backtest_evidence_status": backtest_evidence_status,
+            "evidence_issue": evidence_issue,
             "full_window_days": data_window["full_window_days"],
             "recent_window_days": data_window["recent_window_days"],
             "custom_window_days": data_window["custom_window_days"],

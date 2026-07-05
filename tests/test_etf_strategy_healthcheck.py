@@ -2,6 +2,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.services.etf_research_evidence import (
+    EVIDENCE_STATUS_SAME_CONTRACT,
+    EVIDENCE_STATUS_VERSION_MISMATCH,
+)
 from app.services.short_research.healthcheck import (
     HEALTHCHECK_CONCLUSION_FAILED,
     HEALTHCHECK_CONCLUSION_INSUFFICIENT,
@@ -10,8 +14,10 @@ from app.services.short_research.healthcheck import (
     HealthcheckStats,
     aggregate_replay_samples_by_metric,
     aggregate_validation_rows,
+    build_healthcheck_evidence_issue,
     classify_healthcheck_conclusion,
     classify_item_conclusion,
+    publishable_healthcheck_groups,
 )
 
 
@@ -112,3 +118,34 @@ def test_aggregate_replay_samples_by_theme_metric() -> None:
     assert result["半导体"].avg_return == pytest.approx(0.01)
     assert result["半导体"].max_drawdown == -0.05
     assert result["defensive"].sample_count == 1
+
+
+def test_publishable_healthcheck_groups_requires_same_contract_and_samples() -> None:
+    groups = {
+        "健康回踩": HealthcheckStats(sample_count=0, avg_return=None, win_rate=None, max_drawdown=None),
+        "趋势延续": HealthcheckStats(sample_count=12, avg_return=0.01, win_rate=0.55, max_drawdown=-0.03),
+    }
+
+    assert publishable_healthcheck_groups(groups, evidence_status=EVIDENCE_STATUS_VERSION_MISMATCH) == {}
+    assert publishable_healthcheck_groups(groups, evidence_status=EVIDENCE_STATUS_SAME_CONTRACT) == {
+        "趋势延续": groups["趋势延续"]
+    }
+
+
+def test_healthcheck_evidence_issue_explains_unusable_evidence() -> None:
+    assert (
+        build_healthcheck_evidence_issue(
+            evidence_status=EVIDENCE_STATUS_VERSION_MISMATCH,
+            full_sample_count=0,
+            intraday_available=False,
+        )
+        == "标签验证来自旧信号快照，请重新生成同源证据。"
+    )
+    assert (
+        build_healthcheck_evidence_issue(
+            evidence_status=EVIDENCE_STATUS_SAME_CONTRACT,
+            full_sample_count=0,
+            intraday_available=False,
+        )
+        == "缺少可用标签回放样本，请先运行标签历史回放或策略回测。"
+    )
