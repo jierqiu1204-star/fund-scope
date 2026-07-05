@@ -14,7 +14,9 @@ from app.services.short_research.etf_exit_hyperopt import (
     DEFAULT_SEARCH_SPACE,
     EXECUTION_MODEL_DAILY_CLOSE,
     EXECUTION_MODEL_INTRADAY_ALERT,
+    INTRADAY_HYPEROPT_BAR_MINUTES,
     INTRADAY_SEARCH_SPACE,
+    MAX_INTRADAY_HYPEROPT_DAYS,
     OBJECTIVE_STABILITY_FIRST,
     STATUS_EVIDENCE_INSUFFICIENT,
     STATUS_REJECTED,
@@ -54,6 +56,8 @@ def test_intraday_search_space_is_bounded_for_server_runtime() -> None:
     assert len(parameter_grid(intraday_space)) == 27
     assert intraday_space["trend_confirm_days"] == [1]
     assert intraday_space["take_profit_watch_pct"] == [3.0]
+    assert MAX_INTRADAY_HYPEROPT_DAYS == 45
+    assert INTRADAY_HYPEROPT_BAR_MINUTES == 10
 
 
 def test_oos_degradation_marks_overfit() -> None:

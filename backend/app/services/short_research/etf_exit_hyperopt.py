@@ -30,6 +30,8 @@ OBJECTIVE_STABILITY_FIRST = "stability_first"
 DEFAULT_MANUAL_DELAY_MINUTES = 3
 MIN_DAILY_HISTORY_POINTS = 40
 MIN_INTRADAY_HISTORY_POINTS = 20
+MAX_INTRADAY_HYPEROPT_DAYS = 45
+INTRADAY_HYPEROPT_BAR_MINUTES = 10
 STATUS_CANDIDATE = "candidate"
 STATUS_APPROVED = "approved"
 STATUS_EXPIRED = "expired"
@@ -955,8 +957,8 @@ async def _load_series(
         )
         return [], coverage, None
     history_rows = (
-        await session.scalars(
-            select(EtfPriceHistory)
+        await session.execute(
+            select(EtfPriceHistory.etf_code, EtfPriceHistory.trade_date, EtfPriceHistory.close)
             .where(
                 EtfPriceHistory.etf_code.in_(codes),
                 EtfPriceHistory.trade_date >= start_date,
@@ -966,30 +968,32 @@ async def _load_series(
         )
     ).all()
     history_by_code: dict[str, list[HyperoptPricePoint]] = {}
-    for row in history_rows:
-        history_by_code.setdefault(row.etf_code, []).append(HyperoptPricePoint(row.trade_date, float(row.close)))
+    for etf_code, trade_date, close in history_rows:
+        history_by_code.setdefault(etf_code, []).append(HyperoptPricePoint(trade_date, float(close)))
 
     intraday_by_code: dict[str, list[HyperoptIntradayPoint]] = {}
     latest_intraday_time: datetime | None = None
     if execution_model == EXECUTION_MODEL_INTRADAY_ALERT:
+        intraday_start_date = max(start_date, end_date - timedelta(days=MAX_INTRADAY_HYPEROPT_DAYS))
         intraday_rows = (
-            await session.scalars(
-                select(EtfIntradayQuote)
+            await session.execute(
+                select(EtfIntradayQuote.etf_code, EtfIntradayQuote.quote_time, EtfIntradayQuote.latest_price)
                 .where(
                     EtfIntradayQuote.etf_code.in_(codes),
-                    EtfIntradayQuote.trade_date >= start_date,
+                    EtfIntradayQuote.trade_date >= intraday_start_date,
                     EtfIntradayQuote.trade_date <= end_date,
                     EtfIntradayQuote.latest_price > 0,
                     EtfIntradayQuote.freshness_status == "fresh",
+                    (func.extract("minute", EtfIntradayQuote.quote_time) % INTRADAY_HYPEROPT_BAR_MINUTES) == 0,
                 )
                 .order_by(EtfIntradayQuote.etf_code.asc(), EtfIntradayQuote.quote_time.asc())
             )
         ).all()
-        for row in intraday_rows:
-            intraday_by_code.setdefault(row.etf_code, []).append(
-                HyperoptIntradayPoint(row.quote_time, float(row.latest_price), True)
+        for etf_code, quote_time, latest_price in intraday_rows:
+            intraday_by_code.setdefault(etf_code, []).append(
+                HyperoptIntradayPoint(quote_time, float(latest_price), True)
             )
-            latest_intraday_time = max(latest_intraday_time, row.quote_time) if latest_intraday_time else row.quote_time
+            latest_intraday_time = max(latest_intraday_time, quote_time) if latest_intraday_time else quote_time
 
     series: list[HyperoptSeries] = []
     exclusions: dict[str, int] = {}
@@ -1170,6 +1174,12 @@ async def run_etf_exit_hyperopt(
             "enough_daily_history_count": coverage.enough_daily_history_count,
             "enough_intraday_history_count": coverage.enough_intraday_history_count,
             "manual_delay_minutes": manual_delay_minutes,
+            "intraday_hyperopt_days": MAX_INTRADAY_HYPEROPT_DAYS
+            if execution_model == EXECUTION_MODEL_INTRADAY_ALERT
+            else None,
+            "intraday_bar_minutes": INTRADAY_HYPEROPT_BAR_MINUTES
+            if execution_model == EXECUTION_MODEL_INTRADAY_ALERT
+            else None,
             "bucket_count": item_count,
             "candidate_count": candidate_count,
             "rejected_count": rejected_count,
