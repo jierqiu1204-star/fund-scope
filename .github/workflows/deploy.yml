@@ -21,19 +21,26 @@ jobs:
     runs-on: [self-hosted, Linux, X64, fundscope-vps]
     timeout-minutes: 30
     steps:
-      - name: Configure git fetch for self-hosted runner
+      - name: Download pushed source archive
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          git_config="$RUNNER_TEMP/gitconfig"
-          touch "$git_config"
-          echo "GIT_CONFIG_GLOBAL=$git_config" >> "$GITHUB_ENV"
-          git config --file "$git_config" http.version HTTP/1.1
-          git config --file "$git_config" http.lowSpeedLimit 0
-          git config --file "$git_config" http.lowSpeedTime 999999
+          set -eu
 
-      - name: Check out pushed commit
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
+          archive="$RUNNER_TEMP/fundscope-source.tar.gz"
+          source_dir="$RUNNER_TEMP/fundscope-source"
+          rm -rf "$source_dir"
+          mkdir -p "$source_dir" "$GITHUB_WORKSPACE"
+
+          curl --fail --location --retry 5 --retry-all-errors --retry-delay 5 \
+            --connect-timeout 20 --max-time 300 \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/tarball/$GITHUB_SHA" \
+            -o "$archive"
+          tar -xzf "$archive" -C "$source_dir" --strip-components=1
+          rsync -a --delete "$source_dir"/ "$GITHUB_WORKSPACE"/
 
       - name: Deploy on VPS
         run: |
