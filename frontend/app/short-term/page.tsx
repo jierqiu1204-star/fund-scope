@@ -68,8 +68,8 @@ const baseSortOptions: Array<{ key: SortKey; label: string }> = [
 ];
 
 const etfSortOptions: Array<{ key: SortKey; label: string }> = [
-  { key: "score", label: "实时综合排序" },
-  { key: "opportunity", label: "综合关注" }
+  { key: "opportunity", label: "综合关注" },
+  { key: "score", label: "盘中买点榜" }
 ];
 
 const labelFilterGroups: Array<{
@@ -1371,7 +1371,7 @@ function ShortTermClient() {
   const trackingSectionRef = useRef<HTMLDivElement | null>(null);
   const [assetType, setAssetType] = useState<AssetType>("etf");
   const [theme, setTheme] = useState("all");
-  const [sort, setSort] = useState<SortKey>("score");
+  const [sort, setSort] = useState<SortKey>("opportunity");
   const [keyword, setKeyword] = useState("");
   const [labelFilters, setLabelFilters] = useState<LabelFilterState>(emptyLabelFilters);
   const [labelFilterExpanded, setLabelFilterExpanded] = useState(false);
@@ -1557,7 +1557,7 @@ function ShortTermClient() {
   }, [selected, visibleAssets]);
 
   useEffect(() => {
-    if (assetType === "fund" && sort === "liquidity") {
+    if (assetType === "fund" && !baseSortOptions.some((option) => option.key === sort)) {
       setSort("score");
     }
   }, [assetType, sort]);
@@ -1605,6 +1605,10 @@ function ShortTermClient() {
         })
       ).data,
     onSuccess: async (result) => {
+      if (assetType === "etf") {
+        setSort("opportunity");
+        setAssetOffset(0);
+      }
       setLastResult({
         as_of_date: result.as_of_date,
         item_count: result.summary.item_count,
@@ -3249,8 +3253,10 @@ function ShortTermClient() {
                 }`}
                 onClick={() => {
                   setAssetType(item);
+                  setSort(item === "etf" ? "opportunity" : "score");
                   setTheme("all");
                   setSelected(null);
+                  setAssetOffset(0);
                 }}
               >
                 {assetModes[item].label}
