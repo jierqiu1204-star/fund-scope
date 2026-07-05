@@ -2,6 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
+import { useMemo } from "react";
 import {
   CartesianGrid,
   Line,
@@ -20,6 +21,7 @@ import type {
   EtfExitHyperopt,
   EtfOptimizedAllocation,
   EtfPortfolioBacktestDetail,
+  EtfPortfolioBacktestLabelSummary,
   EtfPortfolioBacktestList,
   EtfStrategyComparison,
   EtfStrategyHealthcheck,
@@ -113,6 +115,79 @@ function evidenceContractText(status: string | undefined, summary: Record<string
     return "旧口径结果：只能作为历史参考，不能证明当前工作台策略。";
   }
   return "等待更多同源证据。";
+}
+
+type LabelEvidencePoint = {
+  sampleCount: number;
+  medianReturn: number | null;
+  winRate: number | null;
+};
+
+type LabelEvidenceRow = {
+  label: string;
+  entryTimingLabel: string;
+  fiveDay?: LabelEvidencePoint;
+  tenDay?: LabelEvidencePoint;
+};
+
+function formatEvidencePercent(value: number | null | undefined) {
+  return value === null || value === undefined ? "暂无" : formatPercent(value * 100);
+}
+
+function buildLabelEvidenceRows(summaries: EtfPortfolioBacktestLabelSummary[]) {
+  const rows = new Map<string, LabelEvidenceRow>();
+  for (const item of summaries) {
+    if (item.horizon_days !== 5 && item.horizon_days !== 10) {
+      continue;
+    }
+    const key = `${item.label}::${item.entry_timing_label}`;
+    const row = rows.get(key) ?? {
+      label: item.label,
+      entryTimingLabel: item.entry_timing_label
+    };
+    const point = {
+      sampleCount: item.sample_count,
+      medianReturn: item.median_return,
+      winRate: item.win_rate
+    };
+    if (item.horizon_days === 5 && (!row.fiveDay || item.sample_count > row.fiveDay.sampleCount)) {
+      row.fiveDay = point;
+    }
+    if (item.horizon_days === 10 && (!row.tenDay || item.sample_count > row.tenDay.sampleCount)) {
+      row.tenDay = point;
+    }
+    rows.set(key, row);
+  }
+  return Array.from(rows.values()).sort((left, right) => {
+    const rightSamples = right.tenDay?.sampleCount ?? right.fiveDay?.sampleCount ?? 0;
+    const leftSamples = left.tenDay?.sampleCount ?? left.fiveDay?.sampleCount ?? 0;
+    if (rightSamples !== leftSamples) {
+      return rightSamples - leftSamples;
+    }
+    return `${left.label}${left.entryTimingLabel}`.localeCompare(`${right.label}${right.entryTimingLabel}`, "zh-CN");
+  });
+}
+
+function labelEvidenceConclusion(row: LabelEvidenceRow) {
+  const tenDay = row.tenDay;
+  if (!tenDay?.sampleCount) {
+    return "样本不足";
+  }
+  const median = tenDay.medianReturn;
+  const winRate = tenDay.winRate;
+  if (row.entryTimingLabel === "跌破等待" && median !== null && median !== undefined && median > 0) {
+    return "历史反弹较多，风险也高";
+  }
+  if (median !== null && median !== undefined && winRate !== null && winRate !== undefined && median > 0 && winRate >= 0.55) {
+    return "历史表现较好";
+  }
+  if ((median !== null && median !== undefined && median > 0) || (winRate !== null && winRate !== undefined && winRate >= 0.5)) {
+    return "勉强可看";
+  }
+  if (median !== null && median !== undefined && winRate !== null && winRate !== undefined && median < 0 && winRate < 0.45) {
+    return "不理想";
+  }
+  return "样本有限";
 }
 
 export default function EtfEvidencePage() {
@@ -243,6 +318,7 @@ export default function EtfEvidencePage() {
   const detail = backtestDetail.data;
   const isIntradayBacktest = backtestExecutionModel(detail) === "intraday_alert_v1";
   const optimized = observationPortfolio.data?.optimized_allocation ?? optimizedAllocation.data ?? null;
+  const labelEvidenceRows = useMemo(() => buildLabelEvidenceRows(detail?.label_summaries ?? []), [detail?.label_summaries]);
   const hyperoptCoverageRaw = exitHyperopt.data?.summary.coverage ?? exitHyperopt.data?.summary.coverage_funnel;
   const hyperoptCoverage =
     typeof hyperoptCoverageRaw === "object" && hyperoptCoverageRaw !== null
@@ -445,31 +521,56 @@ export default function EtfEvidencePage() {
         <Panel>
           <div className="flex items-start justify-between gap-3">
             <div>
-              <p className="text-sm font-semibold text-ink">标签事后表现</p>
-              <p className="mt-1 text-xs text-ink/55">按买入观察和今日买点分组</p>
+              <p className="text-sm font-semibold text-ink">标签组合有效性</p>
+              <p className="mt-1 text-xs text-ink/55">按买入观察和今日买点分组，展示历史前瞻表现。</p>
             </div>
             <Link href="/short-term" className="rounded-[6px] border border-border px-3 py-2 text-xs font-semibold text-ink/70">
               回到短线研究
             </Link>
           </div>
-          <div className="mt-4 grid gap-2">
-            {detail?.label_summaries.slice(0, 8).map((item) => (
-              <div key={`${item.label}-${item.entry_timing_label}-${item.horizon_days}`} className="rounded-[8px] bg-paper px-3 py-2 text-xs leading-5 text-ink/60">
-                <p className="font-semibold text-ink">
-                  {item.label} / {item.entry_timing_label} / {item.horizon_days}日
-                </p>
-                <p>
-                  样本 {item.sample_count}，中位收益 {item.median_return === null ? "暂无" : formatPercent(item.median_return * 100)}，
-                  胜率 {item.win_rate === null ? "暂无" : formatPercent(item.win_rate * 100)}
-                </p>
-              </div>
-            ))}
-            {!detail?.label_summaries.length ? (
-              <p className="rounded-[8px] border border-dashed border-border bg-paper px-3 py-4 text-sm text-ink/55">
+          {labelEvidenceRows.length ? (
+            <div className="mt-4 overflow-x-auto rounded-[10px] border border-border">
+              <table className="min-w-[760px] w-full border-collapse text-left text-xs">
+                <thead className="bg-paper text-ink/55">
+                  <tr>
+                    <th className="px-3 py-2 font-semibold">标签组合</th>
+                    <th className="px-3 py-2 font-semibold">5日中位收益</th>
+                    <th className="px-3 py-2 font-semibold">5日胜率</th>
+                    <th className="px-3 py-2 font-semibold">10日中位收益</th>
+                    <th className="px-3 py-2 font-semibold">10日胜率</th>
+                    <th className="px-3 py-2 font-semibold">样本数</th>
+                    <th className="px-3 py-2 font-semibold">结论</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {labelEvidenceRows.map((row) => (
+                    <tr key={`${row.label}-${row.entryTimingLabel}`} className="border-t border-border align-top">
+                      <td className="px-3 py-2 font-semibold text-ink">
+                        {row.label} + {row.entryTimingLabel}
+                      </td>
+                      <td className="px-3 py-2 text-ink/65">{formatEvidencePercent(row.fiveDay?.medianReturn)}</td>
+                      <td className="px-3 py-2 text-ink/65">{formatEvidencePercent(row.fiveDay?.winRate)}</td>
+                      <td className="px-3 py-2 text-ink/65">{formatEvidencePercent(row.tenDay?.medianReturn)}</td>
+                      <td className="px-3 py-2 text-ink/65">{formatEvidencePercent(row.tenDay?.winRate)}</td>
+                      <td className="px-3 py-2 text-ink/65">
+                        5日 {row.fiveDay?.sampleCount ?? 0} / 10日 {row.tenDay?.sampleCount ?? 0}
+                      </td>
+                      <td className="px-3 py-2 text-ink/75">{labelEvidenceConclusion(row)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="mt-4 rounded-[8px] border border-dashed border-border bg-paper px-3 py-4 text-sm text-ink/55">
                 暂无标签样本。先运行回测或等待标签事后验证完成。
-              </p>
-            ) : null}
-          </div>
+            </p>
+          )}
+          {labelEvidenceRows.length ? (
+            <p className="mt-3 text-xs leading-5 text-ink/50">
+              标签表现只用于验证和降权参考，不等于买入指令。
+            </p>
+          ) : null}
         </Panel>
       </div>
 
