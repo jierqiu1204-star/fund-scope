@@ -1038,6 +1038,7 @@ async def test_etf_label_historical_replay_defaults_to_all_eligible_etfs(client,
     body = response.json()
     assert body["summary"]["universe_scope"] == "all_eligible"
     assert body["summary"]["asset_count"] == 301
+    assert body["summary"]["batch_size"] == 25
 
 
 @pytest.mark.asyncio

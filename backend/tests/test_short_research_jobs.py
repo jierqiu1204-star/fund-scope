@@ -255,6 +255,47 @@ async def test_etf_history_backfill_job_syncs_all_etfs(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_etf_label_historical_replay_job_defaults_to_full_batched_run(monkeypatch) -> None:
+    calls: dict[str, Any] = {}
+
+    async def fake_run_etf_label_historical_replay(
+        _session: object,
+        *,
+        days: int,
+        max_assets: int | None,
+        batch_size: int,
+    ) -> SimpleNamespace:
+        calls["days"] = days
+        calls["max_assets"] = max_assets
+        calls["batch_size"] = batch_size
+        return SimpleNamespace(
+            id=23,
+            status="success",
+            validation_mode="historical_replay",
+            as_of_date=date(2026, 7, 3),
+            rule_version="label_validation_v1",
+            summary_json={
+                "asset_count": 1442,
+                "evaluated_asset_count": 1442,
+                "completed_samples": 100,
+                "excluded_samples": 10,
+                "groups": [{"key": "高位观察 / 冲高别追"}],
+                "universe_scope": "all_eligible",
+                "batch_size": 25,
+            },
+        )
+
+    monkeypatch.setattr(jobs_module, "run_etf_label_historical_replay", fake_run_etf_label_historical_replay)
+
+    result = await jobs_module.etf_label_historical_replay_job(object(), days=180)  # type: ignore[arg-type]
+
+    assert calls == {"days": 180, "max_assets": None, "batch_size": 25}
+    assert result["processed_etfs"] == 1442
+    assert result["universe_scope"] == "all_eligible"
+    assert result["batch_size"] == 25
+
+
+@pytest.mark.asyncio
 async def test_post_close_etf_signals_job_generates_only_etf_run(monkeypatch) -> None:
     calls: list[str] = []
 

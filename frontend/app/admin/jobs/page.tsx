@@ -122,8 +122,8 @@ const jobGroups: Array<{ title: string; description: string; actions: JobAction[
       },
       {
         key: "etf_label_historical_replay",
-        label: "运行标签历史回放",
-        description: "用当前 ETF 标签规则回放过去 180 天日线，生成历史样本证据；不改变排名、组合或邮件提醒。",
+        label: "分批全量标签回放",
+        description: "后台按批回放全量 eligible ETF，提交后可在右侧任务列表看进度；不改变排名、组合或邮件提醒。",
         endpoint: "/api/admin/jobs/etf_label_historical_replay/run?days=180"
       },
       {
@@ -232,7 +232,8 @@ export default function AdminJobsPage() {
 
   const jobs = useQuery({
     queryKey: ["job-runs"],
-    queryFn: async () => (await api.get<JobRun[]>("/api/admin/jobs")).data
+    queryFn: async () => (await api.get<JobRun[]>("/api/admin/jobs")).data,
+    refetchInterval: 5000
   });
 
   const dataStatus = useQuery({

@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 from sqlalchemy import select
 
+from app.api.routes import admin as admin_routes
 from app.defaults.funds import DEFAULT_RESEARCH_FUNDS
 from app.models.entities import (
     EtfIntradayLatestQuote,
@@ -137,6 +138,34 @@ async def test_admin_etf_quote_diagnostics_reports_display_source(client, app) -
     assert by_code["510300"]["display_price"] == 4.05
     assert by_code["510300"]["display_price_source"] == "daily_reference"
     assert by_code["510300"]["email_eligible"] is False
+
+
+@pytest.mark.asyncio
+async def test_admin_etf_label_replay_uses_background_job(monkeypatch: pytest.MonkeyPatch, client) -> None:
+    async def fake_run_job(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {"status": "success", "ran_sync": True}
+
+    async def fake_start_background_job(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "id": 99,
+            "job_name": "etf_label_historical_replay",
+            "status": "running",
+            "started_at": "2026-07-05T15:30:00",
+            "finished_at": None,
+            "error_message": None,
+            "details": {"queued": True, "batch_size": 25, "universe_scope": "all_eligible"},
+        }
+
+    monkeypatch.setattr(admin_routes, "run_job", fake_run_job)
+    monkeypatch.setattr(admin_routes, "start_background_job", fake_start_background_job, raising=False)
+
+    response = await client.post("/api/admin/jobs/etf_label_historical_replay/run?days=180")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "running"
+    assert payload["details"]["queued"] is True
+    assert payload["details"]["batch_size"] == 25
 
 
 @pytest.mark.asyncio

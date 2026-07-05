@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from statistics import mean, median, pstdev
 from typing import Any, cast
@@ -1088,6 +1088,7 @@ _LABEL_VALIDATION_RULE_VERSION = "label_validation_v1"
 VALIDATION_MODE_FORWARD_LIVE = "forward_live"
 VALIDATION_MODE_HISTORICAL_REPLAY = "historical_replay"
 _LABEL_REPLAY_DEFAULT_DAYS = 180
+_LABEL_REPLAY_DEFAULT_BATCH_SIZE = 25
 _LABEL_REPLAY_MIN_SAMPLES = 30
 _LABEL_REPLAY_SUFFICIENT_SAMPLES = 100
 _LABEL_REPLAY_SCOPE_ALL_ELIGIBLE = "all_eligible"
@@ -1423,64 +1424,78 @@ async def _label_validation_summary(
     return await _label_outcome_summary(session, as_of_date)
 
 
-def _summarize_replay_bucket(
-    rows: list[EtfLabelReplaySample],
-    total_rows: int,
-) -> dict[str, Any]:
-    completed_rows = [item for item in rows if item.status == "completed" and item.forward_return is not None]
-    excluded_count = sum(1 for item in rows if item.status == "excluded")
-    if not completed_rows:
+@dataclass
+class _ReplayBucketStats:
+    total_count: int = 0
+    excluded_count: int = 0
+    returns: list[float] = field(default_factory=list)
+    drawdowns: list[float] = field(default_factory=list)
+    excursions: list[float] = field(default_factory=list)
+    recent_returns: list[tuple[date, float]] = field(default_factory=list)
+    exclusion_reasons: dict[str, int] = field(default_factory=dict)
+
+    def add(self, sample: EtfLabelReplaySample) -> None:
+        self.total_count += 1
+        if sample.status == "completed" and sample.forward_return is not None:
+            forward_return = float(sample.forward_return)
+            self.returns.append(forward_return)
+            self.drawdowns.append(float(sample.adverse_drawdown or 0.0))
+            self.excursions.append(float(sample.favorable_excursion or 0.0))
+            self.recent_returns.append((sample.replay_date, forward_return))
+            self.recent_returns.sort(key=lambda item: item[0], reverse=True)
+            del self.recent_returns[30:]
+            return
+
+        self.excluded_count += 1
+        if sample.exclusion_reason:
+            self.exclusion_reasons[sample.exclusion_reason] = self.exclusion_reasons.get(sample.exclusion_reason, 0) + 1
+
+    def summary(self) -> dict[str, Any]:
+        if not self.returns:
+            return {
+                "sample_count": 0,
+                "excluded_count": self.excluded_count,
+                "pending_count": 0,
+                "coverage": 0.0,
+                "avg_return": None,
+                "median_return": None,
+                "worst_forward_drawdown": None,
+                "favorable_excursion_median": None,
+                "win_rate": None,
+                "confidence": "insufficient",
+                "confidence_label": "样本不足",
+                "insufficient_sample": True,
+                "validation_mode": VALIDATION_MODE_HISTORICAL_REPLAY,
+            }
+
+        recent_return_values = [item[1] for item in self.recent_returns]
+        all_median = median(self.returns)
+        recent_median = median(recent_return_values) if recent_return_values else None
+        coverage = len(self.returns) / self.total_count if self.total_count else 0.0
+        confidence = _replay_validation_confidence(
+            len(self.returns),
+            coverage=coverage,
+            recent_median=recent_median,
+            all_median=all_median,
+        )
         return {
-            "sample_count": 0,
-            "excluded_count": excluded_count,
+            "sample_count": len(self.returns),
+            "excluded_count": self.excluded_count,
             "pending_count": 0,
-            "coverage": 0.0,
-            "avg_return": None,
-            "median_return": None,
-            "worst_forward_drawdown": None,
-            "favorable_excursion_median": None,
-            "win_rate": None,
-            "confidence": "insufficient",
-            "confidence_label": "样本不足",
-            "insufficient_sample": True,
+            "coverage": round(coverage, 4),
+            "avg_return": round(mean(self.returns), 6),
+            "median_return": round(all_median, 6),
+            "worst_forward_drawdown": round(min(self.drawdowns), 6),
+            "favorable_excursion_median": round(median(self.excursions), 6),
+            "win_rate": round(sum(1 for item in self.returns if item > 0) / len(self.returns), 4),
+            "confidence": confidence,
+            "confidence_label": _validation_confidence_label(confidence),
+            "insufficient_sample": confidence == "insufficient",
+            "recent_median_return": round(recent_median, 6) if recent_median is not None else None,
+            "exclusion_reasons": self.exclusion_reasons,
             "validation_mode": VALIDATION_MODE_HISTORICAL_REPLAY,
+            "price_source": "verified_daily_close",
         }
-    returns = [float(item.forward_return or 0.0) for item in completed_rows]
-    drawdowns = [float(item.adverse_drawdown or 0.0) for item in completed_rows]
-    excursions = [float(item.favorable_excursion or 0.0) for item in completed_rows]
-    latest_rows = sorted(completed_rows, key=lambda item: item.replay_date, reverse=True)
-    recent_returns = [float(item.forward_return or 0.0) for item in latest_rows[: min(30, len(latest_rows))]]
-    all_median = median(returns)
-    recent_median = median(recent_returns) if recent_returns else None
-    coverage = len(completed_rows) / total_rows if total_rows else 0.0
-    confidence = _replay_validation_confidence(
-        len(completed_rows),
-        coverage=coverage,
-        recent_median=recent_median,
-        all_median=all_median,
-    )
-    exclusion_reasons: dict[str, int] = {}
-    for item in rows:
-        if item.exclusion_reason:
-            exclusion_reasons[item.exclusion_reason] = exclusion_reasons.get(item.exclusion_reason, 0) + 1
-    return {
-        "sample_count": len(completed_rows),
-        "excluded_count": excluded_count,
-        "pending_count": 0,
-        "coverage": round(coverage, 4),
-        "avg_return": round(mean(returns), 6),
-        "median_return": round(all_median, 6),
-        "worst_forward_drawdown": round(min(drawdowns), 6),
-        "favorable_excursion_median": round(median(excursions), 6),
-        "win_rate": round(sum(1 for item in returns if item > 0) / len(returns), 4),
-        "confidence": confidence,
-        "confidence_label": _validation_confidence_label(confidence),
-        "insufficient_sample": confidence == "insufficient",
-        "recent_median_return": round(recent_median, 6) if recent_median is not None else None,
-        "exclusion_reasons": exclusion_reasons,
-        "validation_mode": VALIDATION_MODE_HISTORICAL_REPLAY,
-        "price_source": "verified_daily_close",
-    }
 
 
 def _replay_sample(
@@ -1549,9 +1564,11 @@ async def run_etf_label_historical_replay(
     *,
     days: int = _LABEL_REPLAY_DEFAULT_DAYS,
     max_assets: int | None = None,
+    batch_size: int = _LABEL_REPLAY_DEFAULT_BATCH_SIZE,
 ) -> EtfSignalValidationRun:
     started_at = utcnow()
     horizons = list(_LABEL_VALIDATION_WINDOWS)
+    effective_batch_size = max(1, batch_size)
     universe_scope = _LABEL_REPLAY_SCOPE_ALL_ELIGIBLE if max_assets is None else _LABEL_REPLAY_SCOPE_LIMITED
     run = EtfSignalValidationRun(
         status=RUN_STATUS_RUNNING,
@@ -1565,6 +1582,7 @@ async def run_etf_label_historical_replay(
             "windows": horizons,
             "days": days,
             "max_assets": max_assets,
+            "batch_size": effective_batch_size,
             "universe_scope": universe_scope,
             "price_source": "verified_daily_close",
             "research_only": True,
@@ -1573,6 +1591,7 @@ async def run_etf_label_historical_replay(
     )
     session.add(run)
     await session.flush()
+    await session.commit()
 
     etf_stmt = (
         select(TradableEtf)
@@ -1582,15 +1601,44 @@ async def run_etf_label_historical_replay(
     if max_assets is not None:
         etf_stmt = etf_stmt.limit(max_assets)
     etfs = list((await session.scalars(etf_stmt)).all())
-    buckets: dict[tuple[str, str, int], list[EtfLabelReplaySample]] = {}
+    bucket_stats: dict[tuple[str, str, int], _ReplayBucketStats] = {}
     completed_samples = 0
     excluded_samples = 0
     evaluated_assets = 0
+    processed_assets = 0
     replay_start: date | None = None
     replay_end: date | None = None
     exclusion_reasons: dict[str, int] = {}
 
-    for etf in etfs:
+    def progress_summary() -> dict[str, Any]:
+        percent = round(processed_assets / len(etfs), 4) if etfs else 1.0
+        return {
+            "validation_mode": VALIDATION_MODE_HISTORICAL_REPLAY,
+            "generated_at": utcnow().isoformat(),
+            "status": RUN_STATUS_RUNNING,
+            "asset_type": ASSET_TYPE_ETF,
+            "rule_version": _LABEL_VALIDATION_RULE_VERSION,
+            "outcome_source": VALIDATION_MODE_HISTORICAL_REPLAY,
+            "price_source": "verified_daily_close",
+            "asset_count": len(etfs),
+            "evaluated_asset_count": evaluated_assets,
+            "processed_asset_count": processed_assets,
+            "progress": {
+                "processed_assets": processed_assets,
+                "total_assets": len(etfs),
+                "batch_size": effective_batch_size,
+                "percent": percent,
+            },
+            "universe_scope": universe_scope,
+            "max_assets": max_assets,
+            "batch_size": effective_batch_size,
+            "completed_samples": completed_samples,
+            "excluded_samples": excluded_samples,
+            "exclusion_reasons": exclusion_reasons,
+            "windows": horizons,
+        }
+
+    for processed_assets, etf in enumerate(etfs, start=1):
         rows = await _etf_price_rows_until(
             session,
             etf.code,
@@ -1652,13 +1700,17 @@ async def run_etf_label_historical_replay(
                     excluded_samples += 1
                     if sample.exclusion_reason:
                         exclusion_reasons[sample.exclusion_reason] = exclusion_reasons.get(sample.exclusion_reason, 0) + 1
-                buckets.setdefault((sample.label, sample.entry_timing_label, horizon), []).append(sample)
+                bucket_stats.setdefault((sample.label, sample.entry_timing_label, horizon), _ReplayBucketStats()).add(sample)
                 session.add(sample)
 
+        if processed_assets % effective_batch_size == 0:
+            run.summary_json = progress_summary()
+            await session.commit()
+
     groups: list[dict[str, Any]] = []
-    by_label: dict[tuple[str, str], dict[int, list[EtfLabelReplaySample]]] = {}
-    for (label, entry_label, horizon), samples in buckets.items():
-        by_label.setdefault((label, entry_label), {})[horizon] = samples
+    by_label: dict[tuple[str, str], dict[int, _ReplayBucketStats]] = {}
+    for (label, entry_label, horizon), stats in bucket_stats.items():
+        by_label.setdefault((label, entry_label), {})[horizon] = stats
     for (label, entry_label), windows in sorted(by_label.items()):
         groups.append(
             {
@@ -1666,7 +1718,7 @@ async def run_etf_label_historical_replay(
                 "entry_timing_label": entry_label,
                 "key": f"{label} / {entry_label}",
                 "windows": {
-                    str(window): _summarize_replay_bucket(windows.get(window, []), len(windows.get(window, [])))
+                    str(window): windows.get(window, _ReplayBucketStats()).summary()
                     for window in horizons
                 },
             }
@@ -1683,8 +1735,16 @@ async def run_etf_label_historical_replay(
         "price_source": "verified_daily_close",
         "asset_count": len(etfs),
         "evaluated_asset_count": evaluated_assets,
+        "processed_asset_count": processed_assets,
         "universe_scope": universe_scope,
         "max_assets": max_assets,
+        "batch_size": effective_batch_size,
+        "progress": {
+            "processed_assets": processed_assets,
+            "total_assets": len(etfs),
+            "batch_size": effective_batch_size,
+            "percent": 1.0,
+        },
         "universe_source": "current_tradable_etfs_short_term_eligible",
         "universe_bias_note": "历史回放基于当前仍可用的 ETF 池，可能存在幸存者偏差。",
         "completed_samples": completed_samples,

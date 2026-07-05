@@ -238,8 +238,14 @@ async def etf_label_historical_replay_job(
     *,
     days: int = 180,
     max_assets: int | None = None,
+    batch_size: int = 25,
 ) -> dict[str, Any]:
-    run = await run_etf_label_historical_replay(session, days=days, max_assets=max_assets)
+    run = await run_etf_label_historical_replay(
+        session,
+        days=days,
+        max_assets=max_assets,
+        batch_size=batch_size,
+    )
     summary = dict(run.summary_json or {})
     return {
         "run_id": run.id,
@@ -249,6 +255,7 @@ async def etf_label_historical_replay_job(
         "rule_version": run.rule_version,
         "days": days,
         "max_assets": max_assets,
+        "batch_size": summary.get("batch_size", batch_size),
         "universe_scope": summary.get("universe_scope"),
         "replay_start_date": summary.get("replay_start_date"),
         "replay_end_date": summary.get("replay_end_date"),

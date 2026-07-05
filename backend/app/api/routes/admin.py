@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.db import get_db_session
 from app.models.entities import JobRun, NewsItem, NewsSummary
 from app.services.intraday_etf.jobs import intraday_etf_cleanup_job
-from app.services.job_runner import run_job
+from app.services.job_runner import run_job, start_background_job
 from app.services.jobs import (
     daily_asset_recommendations_job,
     daily_fund_nav_job,
@@ -211,14 +211,23 @@ async def run_job_by_name(
     if job_name == "daily_etf_signal_validation":
         return await run_job(request.app.state.db.session, job_name, daily_etf_signal_validation_job)
     if job_name == "etf_label_historical_replay":
-        return await run_job(
+        batch_size = 25
+        return await start_background_job(
             request.app.state.db.session,
             job_name,
             lambda tracked_session: etf_label_historical_replay_job(
                 tracked_session,
                 days=days,
                 max_assets=max_assets,
+                batch_size=batch_size,
             ),
+            details={
+                "queued": True,
+                "days": days,
+                "max_assets": max_assets,
+                "batch_size": batch_size,
+                "universe_scope": "all_eligible" if max_assets is None else "eligible_limited",
+            },
         )
     if job_name == "etf_portfolio_backtest":
         return await run_job(
