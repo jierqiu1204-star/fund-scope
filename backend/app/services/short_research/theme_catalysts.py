@@ -416,7 +416,10 @@ def build_asset_opportunity_payload(
         sentiment_score = float(matched_snapshot.sentiment_heat_score)
         events = list(matched_snapshot.key_events_json or [])
         catalyst_summary = events[0]["summary"] if events else "主题催化事件已记录，但缺少摘要。"
-        limitations = list(matched_snapshot.limitations_json or [])
+        limitations = [
+            *(matched_snapshot.limitations_json or []),
+            "热度分为主题事件热度，非实时舆情热度。",
+        ]
         status = matched_snapshot.status
         catalyst_theme_key = matched_snapshot.theme_key
         catalyst_theme_name = matched_snapshot.theme_name
@@ -453,6 +456,7 @@ def build_asset_opportunity_payload(
             "catalyst_summary": catalyst_summary,
             "catalyst_events": events,
             "catalyst_limitations": list(dict.fromkeys(limitations)),
+            "catalyst_status": status,
             "catalyst_theme_key": catalyst_theme_key,
             "catalyst_theme_name": catalyst_theme_name,
             "opportunity_score_version": OPPORTUNITY_SCORE_VERSION,

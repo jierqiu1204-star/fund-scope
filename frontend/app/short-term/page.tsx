@@ -524,6 +524,14 @@ function opportunityScoreText(asset: ShortResearchAsset | null | undefined) {
   return `综合关注 ${formatOptionalScore(asset.opportunity_score)} 分`;
 }
 
+function opportunityStatusText(asset: ShortResearchAsset | null | undefined) {
+  const label = asset?.opportunity_label ?? "暂无主题催化";
+  if (!asset?.opportunity_score && asset?.opportunity_score !== 0) {
+    return label;
+  }
+  return `${label} · ${opportunityScoreText(asset)}`;
+}
+
 function catalystSummaryText(asset: ShortResearchAsset | null | undefined) {
   return asset?.catalyst_summary || "暂无主题催化数据，先按技术结构观察。";
 }
@@ -2505,7 +2513,7 @@ function ShortTermClient() {
               <div className="rounded-[8px] bg-paper px-4 py-3 sm:col-span-2">
                 <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">主题催化</p>
                 <p className="mt-2 text-base font-semibold text-ink">
-                  {selectedAsset.opportunity_label ?? "技术优先"} · {opportunityScoreText(selectedAsset)}
+                  {opportunityStatusText(selectedAsset)}
                 </p>
                 <p className="mt-2 text-sm leading-6 text-ink/65">{catalystSummaryText(selectedAsset)}</p>
               </div>
@@ -3534,14 +3542,14 @@ function ShortTermClient() {
                       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                         <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">主题催化</p>
                         <p className="text-sm font-semibold text-ink">
-                          {selectedAsset.opportunity_label ?? "技术优先"} · {opportunityScoreText(selectedAsset)}
+                          {opportunityStatusText(selectedAsset)}
                         </p>
                       </div>
                       <p className="mt-2 text-sm leading-6 text-ink/65">{catalystSummaryText(selectedAsset)}</p>
                       <div className="mt-3 grid gap-2 sm:grid-cols-3">
                         <StatPill label="技术分" value={formatOptionalScore(selectedAsset.technical_score ?? selectedAsset.total_score)} tone="bg-paper text-ink" />
                         <StatPill label="催化分" value={formatOptionalScore(selectedAsset.catalyst_score)} tone="bg-paper text-ink" />
-                        <StatPill label="热度分" value={formatOptionalScore(selectedAsset.sentiment_heat_score)} tone="bg-paper text-ink" />
+                        <StatPill label="事件热度" value={formatOptionalScore(selectedAsset.sentiment_heat_score)} tone="bg-paper text-ink" />
                       </div>
                       {selectedAsset.catalyst_limitations?.length ? (
                         <p className="mt-2 text-xs leading-5 text-ink/50">

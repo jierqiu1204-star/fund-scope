@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from statistics import mean, median, pstdev
@@ -457,6 +458,18 @@ def _int_metric(value: Any) -> int | None:
         except ValueError:
             return None
     return None
+
+
+def has_unavailable_theme_catalyst(metrics: Mapping[str, Any]) -> bool:
+    status = str(metrics.get("catalyst_status") or "").lower()
+    if status == "unavailable":
+        return True
+    limitations = metrics.get("catalyst_limitations") or []
+    if isinstance(limitations, list | tuple):
+        if any("主题催化数据不可用" in str(item) for item in limitations):
+            return True
+    summary = str(metrics.get("catalyst_summary") or "")
+    return "暂无可用于评分的主题催化事件" in summary
 
 
 async def _metadata_map_for_signal_items(
@@ -2406,7 +2419,12 @@ def _matches_filters(
 def _sort_key(asset: ComputedAsset, sort: str) -> tuple[float, str]:
     metrics = asset.metrics
     if sort == "opportunity":
-        return (float(metrics.get("opportunity_score") or asset.total_score), asset.metadata.code)
+        if has_unavailable_theme_catalyst(metrics):
+            return (-999.0, asset.metadata.code)
+        opportunity_score = metrics.get("opportunity_score")
+        if not isinstance(opportunity_score, int | float):
+            return (-999.0, asset.metadata.code)
+        return (float(opportunity_score), asset.metadata.code)
     if sort == "return_5d":
         return (float(metrics.get("return_5d") or -999), asset.metadata.code)
     if sort == "return_20d":
@@ -2485,26 +2503,39 @@ async def get_asset_detail(
     as_of_date: date | None = None,
 ) -> tuple[ComputedAsset, list[dict[str, Any]], dict[str, str]]:
     await ensure_short_research_universe(session)
-    metadata = SHORT_RESEARCH_ASSET_BY_KEY.get((asset_type, code))
-    if metadata is None:
-        if asset_type == ASSET_TYPE_FUND:
-            fund = await session.scalar(select(Fund).where(Fund.code == code))
-            if fund is None:
-                raise ValueError("未找到这只基金")
-            metadata = _metadata(asset_type, code, fund.name)
-        elif asset_type == ASSET_TYPE_ETF:
+    if asset_type == ASSET_TYPE_ETF:
+        if SHORT_RESEARCH_ASSET_BY_KEY.get((asset_type, code)) is None:
             etf = await session.scalar(select(TradableEtf).where(TradableEtf.code == code))
             if etf is None:
                 raise ValueError("未找到这只 ETF")
-            metadata = _metadata(asset_type, code, etf.name)
-        else:
-            raise ValueError("资产类型只支持 fund 或 etf")
-    computed = await compute_asset(session, metadata, as_of_date=as_of_date)
-    if metadata.asset_type == ASSET_TYPE_ETF:
-        detail_date = as_of_date or await latest_data_date(session) or date.today()
-        computed = _with_final_score_v2([computed])[0]
-        computed = (await _with_opportunity_scores(session, [computed], detail_date))[0]
-    series = await _series_for_asset(session, metadata, as_of_date or await latest_data_date(session))
+        run = await latest_signal_run(session, asset_type=ASSET_TYPE_ETF)
+        if run is None:
+            raise ValueError("等待 ETF 信号生成后再查看当前评分")
+        cached_assets, _total = await cached_signal_assets(
+            session,
+            run,
+            asset_type=ASSET_TYPE_ETF,
+            codes=[code],
+            sort="score",
+            universe=UNIVERSE_ALL,
+            limit=1,
+        )
+        if not cached_assets:
+            raise ValueError("等待 ETF 信号生成后再查看当前评分")
+        computed = cached_assets[0]
+    else:
+        metadata = SHORT_RESEARCH_ASSET_BY_KEY.get((asset_type, code))
+        if metadata is None:
+            if asset_type == ASSET_TYPE_FUND:
+                fund = await session.scalar(select(Fund).where(Fund.code == code))
+                if fund is None:
+                    raise ValueError("未找到这只基金")
+                metadata = _metadata(asset_type, code, fund.name)
+            else:
+                raise ValueError("资产类型只支持 fund 或 etf")
+        computed = await compute_asset(session, metadata, as_of_date=as_of_date)
+    detail_date = as_of_date or computed.latest_date or await latest_data_date(session)
+    series = await _series_for_asset(session, computed.metadata, detail_date)
     recent = series[-240:]
     drawdowns = _drawdown_series(recent)
     chart = [
@@ -2518,12 +2549,19 @@ async def get_asset_detail(
         }
         for index, item in enumerate(recent)
     ]
+    key_reason = str(
+        computed.rationale.get("key_reason")
+        or computed.rationale.get("entry_timing_reason")
+        or "使用最新短线信号缓存展示当前评分。"
+    )
+    risk_explanation = str(computed.rationale.get("risk_explanation") or "风险说明请结合买点、回撤和数据质量查看。")
+    opposing_view = str(computed.rationale.get("opposing_view") or "暂无额外反方说明。")
     sections = {
-        "投资方向": metadata.investment_direction,
-        "为什么上榜": str(computed.rationale["key_reason"]),
+        "投资方向": computed.metadata.investment_direction,
+        "为什么上榜": key_reason,
         "今日买点": computed.entry_timing_reason,
-        "主要风险": str(computed.rationale["risk_explanation"]),
-        "反方提醒": str(computed.rationale["opposing_view"]),
+        "主要风险": risk_explanation,
+        "反方提醒": opposing_view,
         "数据说明": f"{computed.source_note}，最新日期 {computed.latest_date.isoformat() if computed.latest_date else '暂无'}。",
     }
     return computed, chart, sections

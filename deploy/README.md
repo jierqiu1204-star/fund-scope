@@ -37,6 +37,10 @@ The runner list should include an `online` runner named `fundscope-vps`.
 
 Pushes to the GitHub `codex-strategy-lab` branch trigger `.github/workflows/deploy.yml`.
 
+Use this as the normal release path: commit locally, push to GitHub, then let
+GitHub Actions deploy on the VPS runner. Do not SSH to the server for routine
+code deployment after every change.
+
 The workflow runs on the `fundscope-vps` GitHub self-hosted runner installed on
 the VPS. It checks out the pushed commit, syncs it to `/srv/fundscope`, preserves
 server-local configuration files, then runs Compose from `/srv/fundscope/deploy`.
@@ -129,5 +133,10 @@ After deployment, verify these items before calling the release ready:
 
 - Manual job trigger: `POST /api/admin/jobs/{job_name}/run`
 - Logs: `docker compose logs -f backend nginx`
-- Rebuild after pulling a new revision: `docker compose up -d --build`
+- Routine code deploy: push to GitHub and wait for the `deploy.yml` workflow.
+- SSH/manual Compose is reserved for incident response, first-time setup, runner
+  maintenance, migrations or one-off production jobs that are not part of the
+  normal deploy workflow.
+- Manual rebuild only when intentionally bypassing the GitHub runner:
+  `docker compose up -d --build`
 - Rollback: check out the previous commit, rebuild, and restore the latest known-good database dump if needed.

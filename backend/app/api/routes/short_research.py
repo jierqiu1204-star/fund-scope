@@ -85,6 +85,7 @@ from app.services.short_research.service import (
     cached_signal_assets,
     etf_observation_portfolio,
     get_asset_detail,
+    has_unavailable_theme_catalyst,
     latest_signal_run,
     latest_signal_validation_run,
     latest_validation_evidence_by_label,
@@ -134,6 +135,7 @@ def _asset_out(
     observation_portfolio: dict[str, Any] | None = None,
 ) -> ShortResearchAssetOut:
     metrics = dict(asset.metrics or {})
+    catalyst_unavailable = asset.metadata.asset_type == "etf" and has_unavailable_theme_catalyst(metrics)
     theme_profile = dict(
         metrics.get("theme_profile")
         or asset.rationale.get("theme_profile")
@@ -179,10 +181,26 @@ def _asset_out(
         rank=asset.rank,
         total_score=round(asset.total_score, 2),
         technical_score=round(float(metrics["technical_score"]), 2) if isinstance(metrics.get("technical_score"), (int, float)) else None,
-        opportunity_score=round(float(metrics["opportunity_score"]), 2) if isinstance(metrics.get("opportunity_score"), (int, float)) else None,
-        opportunity_label=str(metrics.get("opportunity_label")) if metrics.get("opportunity_label") else None,
-        catalyst_score=round(float(metrics["catalyst_score"]), 2) if isinstance(metrics.get("catalyst_score"), (int, float)) else None,
-        sentiment_heat_score=round(float(metrics["sentiment_heat_score"]), 2) if isinstance(metrics.get("sentiment_heat_score"), (int, float)) else None,
+        opportunity_score=None
+        if catalyst_unavailable
+        else round(float(metrics["opportunity_score"]), 2)
+        if isinstance(metrics.get("opportunity_score"), (int, float))
+        else None,
+        opportunity_label="暂无主题催化"
+        if catalyst_unavailable
+        else str(metrics.get("opportunity_label"))
+        if metrics.get("opportunity_label")
+        else None,
+        catalyst_score=None
+        if catalyst_unavailable
+        else round(float(metrics["catalyst_score"]), 2)
+        if isinstance(metrics.get("catalyst_score"), (int, float))
+        else None,
+        sentiment_heat_score=None
+        if catalyst_unavailable
+        else round(float(metrics["sentiment_heat_score"]), 2)
+        if isinstance(metrics.get("sentiment_heat_score"), (int, float))
+        else None,
         catalyst_summary=str(metrics.get("catalyst_summary")) if metrics.get("catalyst_summary") else None,
         catalyst_events=list(metrics.get("catalyst_events") or []),
         catalyst_limitations=list(metrics.get("catalyst_limitations") or []),

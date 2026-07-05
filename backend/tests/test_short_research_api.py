@@ -326,6 +326,101 @@ async def _seed_opportunity_signal_run(app) -> None:
         await session.commit()
 
 
+async def _seed_unavailable_opportunity_sort_run(app) -> None:
+    async with app.state.db.session() as session:
+        session.add_all(
+            [
+                TradableEtf(
+                    code="159010",
+                    name="可用催化ETF测试",
+                    exchange="SZ",
+                    theme_tags_json=["机器人"],
+                    trading_rule_label="证券账户 T+1 ETF",
+                    asset_class="sector",
+                    is_short_term_eligible=True,
+                    is_watchlist=True,
+                ),
+                TradableEtf(
+                    code="159011",
+                    name="无催化ETF测试",
+                    exchange="SZ",
+                    theme_tags_json=["宽基"],
+                    trading_rule_label="证券账户 T+1 ETF",
+                    asset_class="broad_index",
+                    is_short_term_eligible=True,
+                    is_watchlist=True,
+                ),
+            ]
+        )
+        run = ShortResearchSignalRun(
+            status="success",
+            as_of_date=date(2026, 7, 3),
+            config_json={"asset_type": "etf", "language": "research_only"},
+            summary_json={"item_count": 2, "score_version": "final_score_v2"},
+        )
+        session.add(run)
+        await session.flush()
+        session.add_all(
+            [
+                ShortResearchSignalItem(
+                    run_id=run.id,
+                    asset_type="etf",
+                    asset_code="159010",
+                    rank=1,
+                    total_score=65,
+                    conclusion="短线观察",
+                    score_breakdown_json={"opportunity_score_v1": {"opportunity_score": 65}},
+                    risk_flags_json=[],
+                    rationale_json={"entry_timing_reason": "可用催化测试。"},
+                    metrics_json={
+                        "entry_timing_label": "健康回踩",
+                        "entry_timing_reason": "可用催化测试。",
+                        "latest_date": "2026-07-03",
+                        "latest_value": 1.1,
+                        "usable_days": 120,
+                        "default_display_eligible": True,
+                        "technical_score": 65,
+                        "opportunity_score": 65,
+                        "opportunity_label": "常规观察",
+                        "catalyst_score": 80,
+                        "sentiment_heat_score": 63,
+                        "catalyst_summary": "可用主题催化。",
+                        "catalyst_events": [{"summary": "可用主题催化。"}],
+                        "catalyst_limitations": [],
+                    },
+                ),
+                ShortResearchSignalItem(
+                    run_id=run.id,
+                    asset_type="etf",
+                    asset_code="159011",
+                    rank=2,
+                    total_score=90,
+                    conclusion="高位观察",
+                    score_breakdown_json={"opportunity_score_v1": {"opportunity_score": 99}},
+                    risk_flags_json=[],
+                    rationale_json={"entry_timing_reason": "无催化测试。"},
+                    metrics_json={
+                        "entry_timing_label": "趋势延续",
+                        "entry_timing_reason": "无催化测试。",
+                        "latest_date": "2026-07-03",
+                        "latest_value": 1.2,
+                        "usable_days": 120,
+                        "default_display_eligible": True,
+                        "technical_score": 90,
+                        "opportunity_score": 99,
+                        "opportunity_label": "技术优先",
+                        "catalyst_score": 50,
+                        "sentiment_heat_score": 50,
+                        "catalyst_summary": "暂无可用于评分的主题催化事件。",
+                        "catalyst_events": [],
+                        "catalyst_limitations": ["主题催化数据不可用。"],
+                    },
+                ),
+            ]
+        )
+        await session.commit()
+
+
 async def _seed_observation_price_series(
     app,
     *,
@@ -441,6 +536,49 @@ async def test_short_research_assets_return_opportunity_score_without_hiding_ris
     assert first["catalyst_summary"] == "宇树科技 IPO 催化机器人主题。"
     assert first["entry_timing_label"] == "冲高别追"
     assert any("冲高别追" in item for item in first["catalyst_limitations"])
+
+
+@pytest.mark.asyncio
+async def test_short_research_asset_detail_uses_cached_etf_signal_scores(client, app) -> None:
+    await _seed_opportunity_signal_run(app)
+
+    response = await client.get("/api/short-research/assets/etf/159001")
+
+    assert response.status_code == 200
+    asset = response.json()["asset"]
+    assert asset["code"] == "159001"
+    assert asset["total_score"] == 70
+    assert asset["technical_score"] == 70
+    assert asset["opportunity_score"] == 80
+    assert asset["catalyst_score"] == 90
+    assert asset["sentiment_heat_score"] == 80
+
+
+@pytest.mark.asyncio
+async def test_short_research_assets_hide_unavailable_catalyst_scores(client, app) -> None:
+    await _seed_opportunity_signal_run(app)
+
+    response = await client.get("/api/short-research/assets?asset_type=etf&sort=opportunity&universe=all")
+
+    assert response.status_code == 200
+    items = {item["code"]: item for item in response.json()["items"]}
+    unavailable = items["159002"]
+    assert unavailable["opportunity_score"] is None
+    assert unavailable["catalyst_score"] is None
+    assert unavailable["sentiment_heat_score"] is None
+    assert any("主题催化数据不可用" in item for item in unavailable["catalyst_limitations"])
+
+
+@pytest.mark.asyncio
+async def test_short_research_opportunity_sort_puts_unavailable_catalyst_last(client, app) -> None:
+    await _seed_unavailable_opportunity_sort_run(app)
+
+    response = await client.get("/api/short-research/assets?asset_type=etf&sort=opportunity&universe=all")
+
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert [item["code"] for item in items] == ["159010", "159011"]
+    assert items[1]["opportunity_score"] is None
 
 
 @pytest.mark.asyncio
