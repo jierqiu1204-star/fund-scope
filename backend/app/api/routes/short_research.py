@@ -683,6 +683,7 @@ async def run_etf_exit_credibility_endpoint(
         days=payload.days,
         max_assets=payload.max_assets,
         execution_model=payload.execution_model,
+        universe_scope=payload.universe_scope,
     )
     return await etf_exit_credibility_payload(session, run)
 
@@ -703,7 +704,7 @@ async def get_latest_etf_exit_credibility(
 async def run_short_research_validation(
     validation_mode: str = Query(default=VALIDATION_MODE_FORWARD_LIVE),
     days: int = Query(default=180, ge=30, le=730),
-    max_assets: int = Query(default=300, ge=1, le=2000),
+    max_assets: int | None = Query(default=None, ge=1, le=2000),
     session: AsyncSession = Depends(get_db_session),
 ) -> EtfSignalValidationRunOut:
     if validation_mode == VALIDATION_MODE_HISTORICAL_REPLAY:
@@ -718,7 +719,7 @@ async def run_short_research_validation(
 @router.post("/validation/historical-replay/run", response_model=EtfSignalValidationRunOut)
 async def run_short_research_historical_replay(
     days: int = Query(default=180, ge=30, le=730),
-    max_assets: int = Query(default=300, ge=1, le=2000),
+    max_assets: int | None = Query(default=None, ge=1, le=2000),
     session: AsyncSession = Depends(get_db_session),
 ) -> EtfSignalValidationRunOut:
     run = await run_etf_label_historical_replay(session, days=days, max_assets=max_assets)

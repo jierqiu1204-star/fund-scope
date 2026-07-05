@@ -237,7 +237,7 @@ async def etf_label_historical_replay_job(
     session: AsyncSession,
     *,
     days: int = 180,
-    max_assets: int = 300,
+    max_assets: int | None = None,
 ) -> dict[str, Any]:
     run = await run_etf_label_historical_replay(session, days=days, max_assets=max_assets)
     summary = dict(run.summary_json or {})
@@ -249,6 +249,7 @@ async def etf_label_historical_replay_job(
         "rule_version": run.rule_version,
         "days": days,
         "max_assets": max_assets,
+        "universe_scope": summary.get("universe_scope"),
         "replay_start_date": summary.get("replay_start_date"),
         "replay_end_date": summary.get("replay_end_date"),
         "processed_etfs": summary.get("asset_count", 0),
@@ -383,14 +384,16 @@ async def etf_exit_signal_credibility_job(
     session: AsyncSession,
     *,
     days: int = 730,
-    max_assets: int = 300,
+    max_assets: int = 50,
     execution_model: str = "intraday_alert",
+    universe_scope: str = "latest_opportunity_top",
 ) -> dict[str, Any]:
     run = await run_etf_exit_credibility(
         session,
         days=days,
         max_assets=max_assets,
         execution_model=execution_model,
+        universe_scope=universe_scope,
     )
     summary = dict(run.summary_json or {})
     return {
@@ -402,6 +405,11 @@ async def etf_exit_signal_credibility_job(
         "exit_rule_version": run.exit_rule_version,
         "contract_hash": run.contract_hash,
         "evidence_status": run.evidence_status,
+        "universe_scope": summary.get("universe_scope"),
+        "ranking_sort": summary.get("ranking_sort"),
+        "requested_top_n": summary.get("requested_top_n"),
+        "source_signal_run_id": summary.get("source_signal_run_id"),
+        "selected_codes": summary.get("selected_codes", []),
         "asset_count": int(summary.get("asset_count", 0)),
         "event_count": int(summary.get("event_count", 0)),
         "verified_signal_count": int(summary.get("verified_signal_count", 0)),

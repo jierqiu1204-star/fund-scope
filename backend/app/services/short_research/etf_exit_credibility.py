@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.defaults.short_research import ASSET_TYPE_ETF
 from app.models.entities import (
     EtfExitSignalCredibilityEvent,
     EtfExitSignalCredibilityItem,
@@ -17,16 +18,19 @@ from app.models.entities import (
     EtfIntradayQuote,
     EtfPriceHistory,
     EtfThemeProfile,
+    ShortResearchSignalItem,
     TradableEtf,
     utcnow,
 )
 from app.services.short_research.dynamic_thresholds import clamp
+from app.services.short_research.service import has_available_opportunity_score, latest_signal_run
 
 SIGNAL_VERSION = "short_research_v1"
 EXIT_RULE_VERSION = "risk_alerts_v1"
 CREDIBILITY_RULE_VERSION = "etf_exit_signal_credibility_v1"
 EXECUTION_INTRADAY = "intraday_alert"
 EXECUTION_DAILY = "daily_close"
+UNIVERSE_SCOPE_LATEST_OPPORTUNITY_TOP = "latest_opportunity_top"
 
 EXIT_SIGNALS = (
     "hard_stop",
@@ -65,6 +69,13 @@ class CredibilitySeries:
     asset_bucket: str
     theme_group: str
     points: list[CredibilityPricePoint]
+
+
+@dataclass(frozen=True)
+class CredibilityUniverse:
+    codes: list[str]
+    metadata: dict[str, Any]
+    score_by_code: dict[str, float]
 
 
 @dataclass(frozen=True)
@@ -328,24 +339,83 @@ def _group_events(events: list[ExitSignalEvent]) -> list[dict[str, Any]]:
     return summaries
 
 
+class CredibilityUniverseUnavailableError(ValueError):
+    pass
+
+
+async def _latest_opportunity_universe(
+    session: AsyncSession,
+    *,
+    max_assets: int,
+) -> CredibilityUniverse:
+    source_run = await latest_signal_run(session, asset_type=ASSET_TYPE_ETF)
+    if source_run is None:
+        raise CredibilityUniverseUnavailableError("等待信号生成：没有最新成功 ETF 信号 run。")
+
+    items = (
+        await session.scalars(
+            select(ShortResearchSignalItem)
+            .where(
+                ShortResearchSignalItem.run_id == source_run.id,
+                ShortResearchSignalItem.asset_type == ASSET_TYPE_ETF,
+            )
+            .order_by(ShortResearchSignalItem.rank.asc(), ShortResearchSignalItem.asset_code.asc())
+        )
+    ).all()
+    ranked: list[tuple[float, str]] = []
+    unavailable_count = 0
+    for item in items:
+        metrics = dict(item.metrics_json or {})
+        score = metrics.get("opportunity_score")
+        if not isinstance(score, int | float) or not has_available_opportunity_score(metrics):
+            unavailable_count += 1
+            continue
+        ranked.append((float(score), item.asset_code))
+
+    ranked.sort(key=lambda row: (-row[0], row[1]))
+    selected = ranked[:max_assets]
+    if not selected:
+        raise CredibilityUniverseUnavailableError(
+            f"等待信号生成：最新 ETF 信号 run {source_run.id} 没有可用综合关注评分。"
+        )
+
+    codes = [code for _score, code in selected]
+    score_by_code = {code: score for score, code in selected}
+    metadata = {
+        "universe_scope": UNIVERSE_SCOPE_LATEST_OPPORTUNITY_TOP,
+        "ranking_sort": "opportunity",
+        "requested_top_n": max_assets,
+        "source_signal_run_id": source_run.id,
+        "source_signal_as_of_date": source_run.as_of_date.isoformat(),
+        "source_signal_item_count": len(items),
+        "selected_codes": codes,
+        "selected_count": len(codes),
+        "excluded_unavailable_opportunity_count": unavailable_count,
+    }
+    return CredibilityUniverse(codes=codes, metadata=metadata, score_by_code=score_by_code)
+
+
 async def _load_daily_series(
     session: AsyncSession,
     *,
     start_date: date,
     end_date: date,
-    max_assets: int,
+    codes: list[str],
 ) -> tuple[list[CredibilitySeries], datetime | None]:
     etf_rows = (
         await session.execute(
             select(TradableEtf, EtfThemeProfile)
             .outerjoin(EtfThemeProfile, EtfThemeProfile.etf_code == TradableEtf.code)
-            .where(TradableEtf.is_short_term_eligible.is_(True))
+            .where(
+                TradableEtf.is_short_term_eligible.is_(True),
+                TradableEtf.code.in_(codes),
+            )
             .order_by(TradableEtf.code.asc())
-            .limit(max_assets)
         )
     ).all()
-    codes = [row[0].code for row in etf_rows]
-    if not codes:
+    row_by_code = {row[0].code: row for row in etf_rows}
+    ordered_rows = [row_by_code[code] for code in codes if code in row_by_code]
+    if not ordered_rows:
         return [], None
     price_rows = (
         await session.scalars(
@@ -367,7 +437,7 @@ async def _load_daily_series(
                 quote_time=datetime.combine(row.trade_date, time(hour=15)),
             )
         )
-    series = _series_from_rows(etf_rows, by_code)
+    series = _series_from_rows(ordered_rows, by_code)
     cutoff = datetime.combine(end_date, time(hour=15)) if series else None
     return series, cutoff
 
@@ -377,19 +447,22 @@ async def _load_intraday_series(
     *,
     start_date: date,
     end_date: date,
-    max_assets: int,
+    codes: list[str],
 ) -> tuple[list[CredibilitySeries], datetime | None]:
     etf_rows = (
         await session.execute(
             select(TradableEtf, EtfThemeProfile)
             .outerjoin(EtfThemeProfile, EtfThemeProfile.etf_code == TradableEtf.code)
-            .where(TradableEtf.is_short_term_eligible.is_(True))
+            .where(
+                TradableEtf.is_short_term_eligible.is_(True),
+                TradableEtf.code.in_(codes),
+            )
             .order_by(TradableEtf.code.asc())
-            .limit(max_assets)
         )
     ).all()
-    codes = [row[0].code for row in etf_rows]
-    if not codes:
+    row_by_code = {row[0].code: row for row in etf_rows}
+    ordered_rows = [row_by_code[code] for code in codes if code in row_by_code]
+    if not ordered_rows:
         return [], None
     quote_rows = (
         await session.scalars(
@@ -413,7 +486,7 @@ async def _load_intraday_series(
         )
         by_code.setdefault(row.etf_code, []).append(point)
         cutoff = row.quote_time if cutoff is None or row.quote_time > cutoff else cutoff
-    return _series_from_rows(etf_rows, by_code), cutoff
+    return _series_from_rows(ordered_rows, by_code), cutoff
 
 
 def _series_from_rows(
@@ -441,11 +514,14 @@ async def run_etf_exit_credibility(
     session: AsyncSession,
     *,
     days: int = 730,
-    max_assets: int = 300,
+    max_assets: int = 50,
     execution_model: str = EXECUTION_INTRADAY,
+    universe_scope: str = UNIVERSE_SCOPE_LATEST_OPPORTUNITY_TOP,
 ) -> EtfExitSignalCredibilityRun:
     if execution_model not in {EXECUTION_INTRADAY, EXECUTION_DAILY}:
         raise ValueError("execution_model 只支持 intraday_alert 或 daily_close")
+    if universe_scope != UNIVERSE_SCOPE_LATEST_OPPORTUNITY_TOP:
+        raise ValueError("universe_scope 只支持 latest_opportunity_top")
 
     latest_date = await session.scalar(
         select(EtfPriceHistory.trade_date).order_by(desc(EtfPriceHistory.trade_date)).limit(1)
@@ -456,7 +532,14 @@ async def run_etf_exit_credibility(
         ) or latest_date
     as_of_date = latest_date or date.today()
     start_date = as_of_date - timedelta(days=days)
-    data_window = {"start_date": start_date.isoformat(), "end_date": as_of_date.isoformat(), "days": days}
+    data_window = {
+        "start_date": start_date.isoformat(),
+        "end_date": as_of_date.isoformat(),
+        "days": days,
+        "universe_scope": universe_scope,
+        "ranking_sort": "opportunity",
+        "requested_top_n": max_assets,
+    }
     run = EtfExitSignalCredibilityRun(
         status="running",
         started_at=utcnow(),
@@ -475,13 +558,18 @@ async def run_etf_exit_credibility(
     await session.flush()
 
     try:
+        universe = await _latest_opportunity_universe(session, max_assets=max_assets)
+        data_window = {**data_window, **universe.metadata}
+        run.data_window_json = data_window
+        run.contract_hash = contract_hash(execution_model=execution_model, data_window=data_window)
+
         if execution_model == EXECUTION_INTRADAY:
             series, cutoff = await _load_intraday_series(
-                session, start_date=start_date, end_date=as_of_date, max_assets=max_assets
+                session, start_date=start_date, end_date=as_of_date, codes=universe.codes
             )
         else:
             series, cutoff = await _load_daily_series(
-                session, start_date=start_date, end_date=as_of_date, max_assets=max_assets
+                session, start_date=start_date, end_date=as_of_date, codes=universe.codes
             )
         events = [event for item in series for event in generate_exit_events(item)]
         summaries = _group_events(events)
@@ -528,6 +616,11 @@ async def run_etf_exit_credibility(
                     max_adverse_return=primary.get("max_adverse_return"),
                     context_json={
                         **event.context,
+                        "universe_scope": universe.metadata["universe_scope"],
+                        "source_signal_run_id": universe.metadata["source_signal_run_id"],
+                        "ranking_sort": universe.metadata["ranking_sort"],
+                        "requested_top_n": universe.metadata["requested_top_n"],
+                        "source_opportunity_score": universe.score_by_code.get(event.code),
                         "asset_bucket": event.asset_bucket,
                         "theme_group": event.theme_group,
                         "thresholds": event.thresholds,
@@ -552,6 +645,7 @@ async def run_etf_exit_credibility(
         run.evidence_status = "同源已验证" if verified_signals else "样本不足"
         run.insufficiency_reasons_json = insufficient_reasons
         run.summary_json = {
+            **universe.metadata,
             "execution_model": execution_model,
             "signal_version": SIGNAL_VERSION,
             "exit_rule_version": EXIT_RULE_VERSION,
@@ -560,6 +654,25 @@ async def run_etf_exit_credibility(
             "event_count": len(events),
             "signal_sample_counts": signal_sample_counts,
             "verified_signal_count": verified_signals,
+            "research_only": True,
+            "no_trade_instruction": True,
+            "no_email_sent": True,
+            "no_tracked_position_mutation": True,
+        }
+    except CredibilityUniverseUnavailableError as exc:
+        message = str(exc)
+        run.status = "failed"
+        run.finished_at = utcnow()
+        run.evidence_status = "等待信号生成"
+        run.error_message = message
+        run.insufficiency_reasons_json = [message]
+        run.summary_json = {
+            "execution_model": execution_model,
+            "universe_scope": universe_scope,
+            "ranking_sort": "opportunity",
+            "requested_top_n": max_assets,
+            "asset_count": 0,
+            "event_count": 0,
             "research_only": True,
             "no_trade_instruction": True,
             "no_email_sent": True,

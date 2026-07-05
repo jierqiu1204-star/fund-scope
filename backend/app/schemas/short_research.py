@@ -508,8 +508,9 @@ class EtfExitHyperoptRunOut(BaseModel):
 
 class EtfExitCredibilityRequest(BaseModel):
     days: int = Field(default=730, ge=30, le=1500)
-    max_assets: int = Field(default=300, ge=1, le=2000)
+    max_assets: int = Field(default=50, ge=1, le=2000)
     execution_model: Literal["intraday_alert", "daily_close"] = "intraday_alert"
+    universe_scope: Literal["latest_opportunity_top"] = "latest_opportunity_top"
 
 
 class EtfExitCredibilityEventOut(BaseModel):

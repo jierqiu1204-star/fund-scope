@@ -996,6 +996,51 @@ async def test_etf_label_historical_replay_uses_only_past_data(client, app) -> N
 
 
 @pytest.mark.asyncio
+async def test_etf_label_historical_replay_defaults_to_all_eligible_etfs(client, app) -> None:
+    latest_date = date(2026, 7, 3)
+    start = latest_date - timedelta(days=34)
+    async with app.state.db.session() as session:
+        for index in range(301):
+            code = f"589{index:03d}"
+            session.add(
+                TradableEtf(
+                    code=code,
+                    name=f"全量回放ETF{index}",
+                    exchange="SH",
+                    theme_tags_json=["全量回放"],
+                    trading_rule_label="证券账户 T+1 ETF",
+                    asset_class="sector",
+                    is_short_term_eligible=True,
+                    is_watchlist=True,
+                )
+            )
+            for offset in range(35):
+                close = 1.0 + offset * 0.002 + index * 0.000001
+                previous = 1.0 + (offset - 1) * 0.002 + index * 0.000001 if offset else close
+                session.add(
+                    EtfPriceHistory(
+                        etf_code=code,
+                        trade_date=start + timedelta(days=offset),
+                        open=close * 0.995,
+                        high=close * 1.01,
+                        low=close * 0.99,
+                        close=close,
+                        volume=2_000_000,
+                        turnover=180_000_000,
+                        pct_change=0.0 if offset == 0 else (close / previous - 1.0) * 100,
+                    )
+                )
+        await session.commit()
+
+    response = await client.post("/api/short-research/validation/historical-replay/run?days=30")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"]["universe_scope"] == "all_eligible"
+    assert body["summary"]["asset_count"] == 301
+
+
+@pytest.mark.asyncio
 async def test_etf_label_historical_replay_api_separates_tracks_and_does_not_notify(client, app) -> None:
     await _seed_observation_portfolio_signal_run(
         app,

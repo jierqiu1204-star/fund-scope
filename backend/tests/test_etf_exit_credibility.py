@@ -9,6 +9,8 @@ from app.models.entities import (
     EtfIntradayQuote,
     EtfPriceHistory,
     NotificationLog,
+    ShortResearchSignalItem,
+    ShortResearchSignalRun,
     TrackedPosition,
     TrackedPositionAlert,
     TradableEtf,
@@ -99,6 +101,32 @@ async def _seed_daily_only_etf(app) -> None:
                     pct_change=1.0,
                 )
             )
+        run = ShortResearchSignalRun(
+            status="success",
+            as_of_date=date(2026, 7, 3),
+            config_json={"asset_type": "etf", "language": "research_only"},
+            summary_json={"item_count": 1},
+        )
+        session.add(run)
+        await session.flush()
+        session.add(
+            ShortResearchSignalItem(
+                run_id=run.id,
+                asset_type="etf",
+                asset_code="560101",
+                rank=1,
+                total_score=80.0,
+                conclusion="短线观察",
+                score_breakdown_json={},
+                risk_flags_json=[],
+                rationale_json={},
+                metrics_json={
+                    "opportunity_score": 80.0,
+                    "catalyst_summary": "可用主题催化。",
+                    "catalyst_limitations": [],
+                },
+            )
+        )
         await session.commit()
 
 
@@ -134,6 +162,109 @@ async def _seed_intraday_etf(app) -> None:
                     raw_json={},
                 )
             )
+        run = ShortResearchSignalRun(
+            status="success",
+            as_of_date=date(2026, 7, 3),
+            config_json={"asset_type": "etf", "language": "research_only"},
+            summary_json={"item_count": 1},
+        )
+        session.add(run)
+        await session.flush()
+        session.add(
+            ShortResearchSignalItem(
+                run_id=run.id,
+                asset_type="etf",
+                asset_code="560102",
+                rank=1,
+                total_score=80.0,
+                conclusion="短线观察",
+                score_breakdown_json={},
+                risk_flags_json=[],
+                rationale_json={},
+                metrics_json={
+                    "opportunity_score": 80.0,
+                    "catalyst_summary": "可用主题催化。",
+                    "catalyst_limitations": [],
+                },
+            )
+        )
+        await session.commit()
+
+
+async def _seed_opportunity_ranked_intraday_etfs(app, *, include_signal_run: bool = True) -> None:
+    start = date(2026, 1, 1)
+    rows = [
+        ("159001", "低分代码靠前ETF", 10.0, True),
+        ("159002", "不可用综合关注ETF", 99.0, False),
+        ("588888", "高分综合关注ETF", 95.0, True),
+        ("588889", "次高综合关注ETF", 90.0, True),
+    ]
+    async with app.state.db.session() as session:
+        for code, name, _score, _available in rows:
+            session.add(
+                TradableEtf(
+                    code=code,
+                    name=name,
+                    exchange="SH",
+                    theme_tags_json=["综合关注取样"],
+                    trading_rule_label="证券账户 T+1 ETF",
+                    asset_class="sector",
+                    is_short_term_eligible=True,
+                    is_watchlist=True,
+                )
+            )
+            for index in range(36):
+                current_date = start + timedelta(days=index)
+                price = 1.0 + index * 0.01
+                session.add(
+                    EtfIntradayQuote(
+                        etf_code=code,
+                        quote_time=datetime.combine(current_date, datetime.min.time()) + timedelta(hours=10),
+                        trade_date=current_date,
+                        latest_price=price,
+                        change_percent=0.0,
+                        volume=1_000_000,
+                        turnover=100_000_000,
+                        source="test",
+                        freshness_status="fresh",
+                        raw_json={},
+                    )
+                )
+        if include_signal_run:
+            run = ShortResearchSignalRun(
+                status="success",
+                as_of_date=date(2026, 7, 3),
+                config_json={"asset_type": "etf", "language": "research_only"},
+                summary_json={"item_count": len(rows)},
+            )
+            session.add(run)
+            await session.flush()
+            for index, (code, _name, score, available) in enumerate(rows):
+                session.add(
+                    ShortResearchSignalItem(
+                        run_id=run.id,
+                        asset_type="etf",
+                        asset_code=code,
+                        rank=index + 1,
+                        total_score=score,
+                        conclusion="短线观察",
+                        score_breakdown_json={},
+                        risk_flags_json=[],
+                        rationale_json={},
+                        metrics_json={
+                            "opportunity_score": score,
+                            "technical_score": score,
+                            "catalyst_score": 80 if available else 50,
+                            "sentiment_heat_score": 63 if available else 50,
+                            "catalyst_summary": (
+                                "可用主题催化。"
+                                if available
+                                else "暂无可用于评分的主题催化事件。"
+                            ),
+                            "catalyst_limitations": [] if available else ["主题催化数据不可用。"],
+                        },
+                    )
+                )
         await session.commit()
 
 
@@ -152,6 +283,46 @@ async def test_intraday_credibility_does_not_fall_back_to_daily_close(client, ap
     assert body["summary"]["asset_count"] == 0
     assert body["summary"]["event_count"] == 0
     assert any("缺少盘中历史行情" in reason for reason in body["insufficiency_reasons"])
+
+
+@pytest.mark.asyncio
+async def test_credibility_uses_latest_opportunity_top_not_code_order(app) -> None:
+    await _seed_opportunity_ranked_intraday_etfs(app)
+
+    async with app.state.db.session() as session:
+        run = await run_etf_exit_credibility(
+            session,
+            days=120,
+            max_assets=2,
+            execution_model=EXECUTION_INTRADAY,
+            universe_scope="latest_opportunity_top",
+        )
+
+    assert run.status == "success"
+    assert run.summary_json["universe_scope"] == "latest_opportunity_top"
+    assert run.summary_json["ranking_sort"] == "opportunity"
+    assert run.summary_json["requested_top_n"] == 2
+    assert run.summary_json["selected_codes"] == ["588888", "588889"]
+    assert run.summary_json["excluded_unavailable_opportunity_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_credibility_without_signal_run_does_not_fall_back_to_code_order(app) -> None:
+    await _seed_opportunity_ranked_intraday_etfs(app, include_signal_run=False)
+
+    async with app.state.db.session() as session:
+        run = await run_etf_exit_credibility(
+            session,
+            days=120,
+            max_assets=2,
+            execution_model=EXECUTION_INTRADAY,
+            universe_scope="latest_opportunity_top",
+        )
+
+    assert run.status == "failed"
+    assert run.summary_json["asset_count"] == 0
+    assert run.summary_json["universe_scope"] == "latest_opportunity_top"
+    assert "等待信号生成" in (run.error_message or "")
 
 
 @pytest.mark.asyncio

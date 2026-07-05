@@ -151,6 +151,7 @@ async def run_job_by_name(
     request: Request,
     days: int = Query(default=180, ge=30, le=1095),
     max_assets: int | None = Query(default=None, ge=1, le=2000),
+    universe_scope: str = Query(default="latest_opportunity_top"),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, object]:
     llm_client = LLMClient(request.app.state.settings)
@@ -216,7 +217,7 @@ async def run_job_by_name(
             lambda tracked_session: etf_label_historical_replay_job(
                 tracked_session,
                 days=days,
-                max_assets=effective_max_assets,
+                max_assets=max_assets,
             ),
         )
     if job_name == "etf_portfolio_backtest":
@@ -262,7 +263,8 @@ async def run_job_by_name(
             lambda tracked_session: etf_exit_signal_credibility_job(
                 tracked_session,
                 days=min(days, 1095),
-                max_assets=effective_max_assets,
+                max_assets=max_assets or 50,
+                universe_scope=universe_scope,
             ),
         )
     if job_name == "daily_etf_label_outcome_review":

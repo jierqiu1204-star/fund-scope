@@ -1090,7 +1090,8 @@ VALIDATION_MODE_HISTORICAL_REPLAY = "historical_replay"
 _LABEL_REPLAY_DEFAULT_DAYS = 180
 _LABEL_REPLAY_MIN_SAMPLES = 30
 _LABEL_REPLAY_SUFFICIENT_SAMPLES = 100
-_LABEL_REPLAY_MAX_ASSETS = 300
+_LABEL_REPLAY_SCOPE_ALL_ELIGIBLE = "all_eligible"
+_LABEL_REPLAY_SCOPE_LIMITED = "eligible_limited"
 
 
 def _forward_drawdown(series: list[PricePoint]) -> float | None:
@@ -1547,10 +1548,11 @@ async def run_etf_label_historical_replay(
     session: AsyncSession,
     *,
     days: int = _LABEL_REPLAY_DEFAULT_DAYS,
-    max_assets: int = _LABEL_REPLAY_MAX_ASSETS,
+    max_assets: int | None = None,
 ) -> EtfSignalValidationRun:
     started_at = utcnow()
     horizons = list(_LABEL_VALIDATION_WINDOWS)
+    universe_scope = _LABEL_REPLAY_SCOPE_ALL_ELIGIBLE if max_assets is None else _LABEL_REPLAY_SCOPE_LIMITED
     run = EtfSignalValidationRun(
         status=RUN_STATUS_RUNNING,
         started_at=started_at,
@@ -1563,6 +1565,7 @@ async def run_etf_label_historical_replay(
             "windows": horizons,
             "days": days,
             "max_assets": max_assets,
+            "universe_scope": universe_scope,
             "price_source": "verified_daily_close",
             "research_only": True,
         },
@@ -1571,16 +1574,14 @@ async def run_etf_label_historical_replay(
     session.add(run)
     await session.flush()
 
-    etfs = list(
-        (
-            await session.scalars(
-                select(TradableEtf)
-                .where(TradableEtf.is_short_term_eligible.is_(True))
-                .order_by(TradableEtf.code.asc())
-                .limit(max_assets)
-            )
-        ).all()
+    etf_stmt = (
+        select(TradableEtf)
+        .where(TradableEtf.is_short_term_eligible.is_(True))
+        .order_by(TradableEtf.code.asc())
     )
+    if max_assets is not None:
+        etf_stmt = etf_stmt.limit(max_assets)
+    etfs = list((await session.scalars(etf_stmt)).all())
     buckets: dict[tuple[str, str, int], list[EtfLabelReplaySample]] = {}
     completed_samples = 0
     excluded_samples = 0
@@ -1682,6 +1683,8 @@ async def run_etf_label_historical_replay(
         "price_source": "verified_daily_close",
         "asset_count": len(etfs),
         "evaluated_asset_count": evaluated_assets,
+        "universe_scope": universe_scope,
+        "max_assets": max_assets,
         "universe_source": "current_tradable_etfs_short_term_eligible",
         "universe_bias_note": "历史回放基于当前仍可用的 ETF 池，可能存在幸存者偏差。",
         "completed_samples": completed_samples,
