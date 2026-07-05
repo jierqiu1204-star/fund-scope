@@ -83,6 +83,7 @@ from app.services.short_research.ranking import (
     apply_label_evidence,
     build_final_score_breakdowns,
 )
+from app.services.short_research.sector_trends import build_sector_trend_payloads
 from app.services.short_research.theme_catalysts import (
     build_asset_opportunity_payload,
     latest_theme_catalyst_snapshots_by_key,
@@ -470,6 +471,17 @@ def has_unavailable_theme_catalyst(metrics: Mapping[str, Any]) -> bool:
             return True
     summary = str(metrics.get("catalyst_summary") or "")
     return "暂无可用于评分的主题催化事件" in summary
+
+
+def has_available_opportunity_score(metrics: Mapping[str, Any]) -> bool:
+    if not isinstance(metrics.get("opportunity_score"), int | float):
+        return False
+    if not has_unavailable_theme_catalyst(metrics):
+        return True
+    return str(metrics.get("sector_trend_status") or "") == "success" and isinstance(
+        metrics.get("sector_trend_score"),
+        int | float,
+    )
 
 
 async def _metadata_map_for_signal_items(
@@ -2186,6 +2198,36 @@ def _with_final_score_v2(assets: list[ComputedAsset]) -> list[ComputedAsset]:
     return updated
 
 
+def _with_sector_trend_scores(assets: list[ComputedAsset]) -> list[ComputedAsset]:
+    etf_assets = [asset for asset in assets if asset.metadata.asset_type == ASSET_TYPE_ETF]
+    if not etf_assets:
+        return assets
+    payloads = build_sector_trend_payloads(etf_assets)
+    updated: list[ComputedAsset] = []
+    for asset in assets:
+        if asset.metadata.asset_type != ASSET_TYPE_ETF:
+            updated.append(asset)
+            continue
+        payload = payloads.get(asset.metadata.code)
+        if not payload:
+            updated.append(asset)
+            continue
+        metrics = {**asset.metrics, **dict(payload["metrics"])}
+        breakdown = dict(payload["breakdown"])
+        updated.append(
+            replace(
+                asset,
+                metrics=metrics,
+                score_breakdown={**asset.score_breakdown, "sector_trend_v1": breakdown},
+                rationale={
+                    **asset.rationale,
+                    "sector_trend_summary": metrics.get("sector_trend_summary"),
+                },
+            )
+        )
+    return updated
+
+
 async def _with_opportunity_scores(
     session: AsyncSession,
     assets: list[ComputedAsset],
@@ -2215,7 +2257,7 @@ async def _with_opportunity_scores(
             replace(
                 asset,
                 metrics={**asset.metrics, **opportunity_metrics},
-                score_breakdown={**asset.score_breakdown, "opportunity_score_v1": payload["breakdown"]},
+                score_breakdown={**asset.score_breakdown, "opportunity_score_v2": payload["breakdown"]},
                 rationale={
                     **asset.rationale,
                     "catalyst_summary": catalyst_summary,
@@ -2419,12 +2461,9 @@ def _matches_filters(
 def _sort_key(asset: ComputedAsset, sort: str) -> tuple[float, str]:
     metrics = asset.metrics
     if sort == "opportunity":
-        if has_unavailable_theme_catalyst(metrics):
+        if not has_available_opportunity_score(metrics):
             return (-999.0, asset.metadata.code)
-        opportunity_score = metrics.get("opportunity_score")
-        if not isinstance(opportunity_score, int | float):
-            return (-999.0, asset.metadata.code)
-        return (float(opportunity_score), asset.metadata.code)
+        return (float(metrics["opportunity_score"]), asset.metadata.code)
     if sort == "return_5d":
         return (float(metrics.get("return_5d") or -999), asset.metadata.code)
     if sort == "return_20d":
@@ -2479,6 +2518,7 @@ async def list_computed_assets(
     computed = [await compute_asset(session, item, as_of_date=effective_date) for item in candidates]
     if asset_type == ASSET_TYPE_ETF or any(item.metadata.asset_type == ASSET_TYPE_ETF for item in computed):
         computed = _with_final_score_v2(computed)
+        computed = _with_sector_trend_scores(computed)
         computed = await _with_opportunity_scores(session, computed, effective_date)
     if asset_type == ASSET_TYPE_ETF and universe == UNIVERSE_DEFAULT and not codes:
         computed = [item for item in computed if bool(item.metrics.get("default_display_eligible"))]
@@ -2600,6 +2640,7 @@ async def run_signal_generation(
             validation_by_label = await latest_forward_validation_evidence_by_label(session)
             if validation_by_label:
                 assets = [_asset_with_validation_evidence(asset, validation_by_label) for asset in assets]
+                assets = _with_sector_trend_scores(assets)
                 assets = await _with_opportunity_scores(session, assets, effective_date)
                 assets.sort(key=lambda item: _sort_key(item, "score"), reverse=True)
                 assets = [replace(asset, rank=index) for index, asset in enumerate(assets, start=1)]

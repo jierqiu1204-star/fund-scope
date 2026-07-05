@@ -421,6 +421,119 @@ async def _seed_unavailable_opportunity_sort_run(app) -> None:
         await session.commit()
 
 
+async def _seed_sector_trend_opportunity_run(app) -> None:
+    async with app.state.db.session() as session:
+        session.add_all(
+            [
+                TradableEtf(
+                    code="159101",
+                    name="创新药ETF测试",
+                    exchange="SZ",
+                    theme_tags_json=["创新药"],
+                    trading_rule_label="证券账户 T+1 ETF",
+                    asset_class="sector",
+                    is_short_term_eligible=True,
+                    is_watchlist=True,
+                ),
+                TradableEtf(
+                    code="159102",
+                    name="无主题ETF测试",
+                    exchange="SZ",
+                    theme_tags_json=["宽基"],
+                    trading_rule_label="证券账户 T+1 ETF",
+                    asset_class="broad_index",
+                    is_short_term_eligible=True,
+                    is_watchlist=True,
+                ),
+            ]
+        )
+        run = ShortResearchSignalRun(
+            status="success",
+            as_of_date=date(2026, 7, 3),
+            config_json={"asset_type": "etf", "language": "research_only"},
+            summary_json={"item_count": 2, "score_version": "final_score_v2"},
+        )
+        session.add(run)
+        await session.flush()
+        session.add_all(
+            [
+                ShortResearchSignalItem(
+                    run_id=run.id,
+                    asset_type="etf",
+                    asset_code="159101",
+                    rank=1,
+                    total_score=76,
+                    conclusion="短线观察",
+                    score_breakdown_json={
+                        "opportunity_score_v2": {
+                            "opportunity_score": 78,
+                            "weights": {"technical": 0.75, "sector_trend": 0.25},
+                        },
+                        "sector_trend_v1": {"score_version": "sector_trend_v1"},
+                    },
+                    risk_flags_json=[],
+                    rationale_json={"entry_timing_reason": "创新药板块趋势强。"},
+                    metrics_json={
+                        "entry_timing_label": "趋势延续",
+                        "entry_timing_reason": "创新药板块趋势强。",
+                        "latest_date": "2026-07-03",
+                        "latest_value": 1.2,
+                        "usable_days": 120,
+                        "default_display_eligible": True,
+                        "technical_score": 76,
+                        "sector_trend_score": 84,
+                        "sector_trend_label": "板块强势",
+                        "sector_trend_summary": "创新药上涨家数占优，板块趋势强。",
+                        "sector_peer_count": 4,
+                        "sector_trend_status": "success",
+                        "opportunity_score": 78,
+                        "opportunity_label": "板块强但等催化",
+                        "opportunity_score_version": "opportunity_score_v2_sector_only",
+                        "catalyst_score": 50,
+                        "sentiment_heat_score": 50,
+                        "catalyst_status": "unavailable",
+                        "catalyst_summary": "暂无可用于评分的主题催化事件，先按技术结构观察。",
+                        "catalyst_events": [],
+                        "catalyst_limitations": ["主题催化数据不可用。"],
+                    },
+                ),
+                ShortResearchSignalItem(
+                    run_id=run.id,
+                    asset_type="etf",
+                    asset_code="159102",
+                    rank=2,
+                    total_score=90,
+                    conclusion="高位观察",
+                    score_breakdown_json={},
+                    risk_flags_json=[],
+                    rationale_json={"entry_timing_reason": "无主题综合关注。"},
+                    metrics_json={
+                        "entry_timing_label": "趋势延续",
+                        "entry_timing_reason": "无主题综合关注。",
+                        "latest_date": "2026-07-03",
+                        "latest_value": 1.2,
+                        "usable_days": 120,
+                        "default_display_eligible": True,
+                        "technical_score": 90,
+                        "sector_trend_score": None,
+                        "sector_trend_status": "unavailable",
+                        "sector_trend_reason": "未分类主题无法计算板块趋势。",
+                        "opportunity_score": None,
+                        "opportunity_label": "暂无综合关注",
+                        "opportunity_score_version": "opportunity_score_v2_unavailable",
+                        "catalyst_score": 50,
+                        "sentiment_heat_score": 50,
+                        "catalyst_status": "unavailable",
+                        "catalyst_summary": "暂无可用于评分的主题催化事件，先按技术结构观察。",
+                        "catalyst_events": [],
+                        "catalyst_limitations": ["主题催化数据不可用。"],
+                    },
+                ),
+            ]
+        )
+        await session.commit()
+
+
 async def _seed_observation_price_series(
     app,
     *,
@@ -579,6 +692,43 @@ async def test_short_research_opportunity_sort_puts_unavailable_catalyst_last(cl
     items = response.json()["items"]
     assert [item["code"] for item in items] == ["159010", "159011"]
     assert items[1]["opportunity_score"] is None
+
+
+@pytest.mark.asyncio
+async def test_short_research_assets_keep_sector_only_opportunity_score(client, app) -> None:
+    await _seed_sector_trend_opportunity_run(app)
+
+    response = await client.get("/api/short-research/assets?asset_type=etf&sort=opportunity&universe=all")
+
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert [item["code"] for item in items] == ["159101", "159102"]
+    sector_only = items[0]
+    assert sector_only["opportunity_score"] == 78
+    assert sector_only["opportunity_label"] == "板块强但等催化"
+    assert sector_only["sector_trend_score"] == 84
+    assert sector_only["sector_trend_label"] == "板块强势"
+    assert sector_only["sector_peer_count"] == 4
+    assert sector_only["opportunity_score_version"] == "opportunity_score_v2_sector_only"
+    assert sector_only["catalyst_score"] is None
+    assert sector_only["sentiment_heat_score"] is None
+    assert items[1]["opportunity_score"] is None
+
+
+@pytest.mark.asyncio
+async def test_short_research_asset_detail_returns_cached_sector_trend_scores(client, app) -> None:
+    await _seed_sector_trend_opportunity_run(app)
+
+    response = await client.get("/api/short-research/assets/etf/159101")
+
+    assert response.status_code == 200
+    asset = response.json()["asset"]
+    assert asset["code"] == "159101"
+    assert asset["technical_score"] == 76
+    assert asset["sector_trend_score"] == 84
+    assert asset["sector_trend_summary"] == "创新药上涨家数占优，板块趋势强。"
+    assert asset["opportunity_score"] == 78
+    assert asset["opportunity_score_version"] == "opportunity_score_v2_sector_only"
 
 
 @pytest.mark.asyncio

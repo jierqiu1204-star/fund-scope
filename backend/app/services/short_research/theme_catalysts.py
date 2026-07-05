@@ -11,10 +11,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.entities import EtfThemeCatalystEvent, EtfThemeCatalystSnapshot, utcnow
 
 CATALYST_SCORE_VERSION = "theme_catalyst_v1"
-OPPORTUNITY_SCORE_VERSION = "opportunity_score_v1"
+OPPORTUNITY_SCORE_VERSION = "opportunity_score_v2_catalyst_only"
+OPPORTUNITY_SCORE_FULL_VERSION = "opportunity_score_v2_full"
+OPPORTUNITY_SCORE_SECTOR_ONLY_VERSION = "opportunity_score_v2_sector_only"
+OPPORTUNITY_SCORE_UNAVAILABLE_VERSION = "opportunity_score_v2_unavailable"
 TECHNICAL_WEIGHT = 0.70
 CATALYST_WEIGHT = 0.20
 SENTIMENT_WEIGHT = 0.10
+FULL_TECHNICAL_WEIGHT = 0.60
+FULL_SECTOR_WEIGHT = 0.20
+FULL_CATALYST_WEIGHT = 0.15
+FULL_SENTIMENT_WEIGHT = 0.05
+SECTOR_ONLY_TECHNICAL_WEIGHT = 0.75
+SECTOR_ONLY_WEIGHT = 0.25
 NEUTRAL_COMPONENT_SCORE = 50.0
 RISK_ENTRY_LABELS = {"冲高别追", "跌破等待", "放量转弱"}
 DATA_LIMITING_RISKS = {"数据不足", "数据滞后", "流动性不足"}
@@ -376,6 +385,8 @@ def theme_keys_for_asset(
     keys: list[str] = []
     if any(keyword in text for keyword in ("机器人", "具身智能")):
         keys.append("机器人")
+    if any(keyword in text for keyword in ("创新药", "生物药", "生物医药", "港股创新药", "医药创新")):
+        keys.append("创新药")
     if any(keyword in text for keyword in ("半导体", "芯片", "集成电路")):
         keys.append("半导体")
     if any(keyword in text for keyword in ("光模块", "CPO", "光通信")):
@@ -425,22 +436,89 @@ def build_asset_opportunity_payload(
         catalyst_theme_name = matched_snapshot.theme_name
         catalyst_breakdown = dict(matched_snapshot.score_breakdown_json or {})
 
-    opportunity_score = _clamp(
-        float(technical_score) * TECHNICAL_WEIGHT
-        + catalyst_score * CATALYST_WEIGHT
-        + sentiment_score * SENTIMENT_WEIGHT
-    )
+    sector_score_raw = metrics.get("sector_trend_score")
+    sector_score = float(sector_score_raw) if isinstance(sector_score_raw, int | float) else None
+    sector_available = str(metrics.get("sector_trend_status") or "") == "success" and sector_score is not None
+    catalyst_available = status == "success"
     risk_set = set(risk_flags)
     entry_label = str(metrics.get("entry_timing_label") or "")
     default_display_eligible = bool(metrics.get("default_display_eligible", True))
-    if risk_set.intersection(DATA_LIMITING_RISKS) or not default_display_eligible:
+    data_limited = bool(risk_set.intersection(DATA_LIMITING_RISKS) or not default_display_eligible)
+
+    opportunity_score: float | None
+    opportunity_version: str
+    components: dict[str, dict[str, float | None]]
+    weights: dict[str, float]
+    if data_limited:
+        opportunity_score = None
+        opportunity_version = OPPORTUNITY_SCORE_UNAVAILABLE_VERSION
+        components = {}
+        weights = {}
+    elif sector_available and catalyst_available:
+        opportunity_score = _clamp(
+            float(technical_score) * FULL_TECHNICAL_WEIGHT
+            + float(sector_score) * FULL_SECTOR_WEIGHT
+            + catalyst_score * FULL_CATALYST_WEIGHT
+            + sentiment_score * FULL_SENTIMENT_WEIGHT
+        )
+        opportunity_version = OPPORTUNITY_SCORE_FULL_VERSION
+        components = {
+            "technical": {"score": round(float(technical_score), 2), "weight": FULL_TECHNICAL_WEIGHT},
+            "sector_trend": {"score": round(float(sector_score), 2), "weight": FULL_SECTOR_WEIGHT},
+            "theme_catalyst": {"score": round(catalyst_score, 2), "weight": FULL_CATALYST_WEIGHT},
+            "news_sentiment_heat": {"score": round(sentiment_score, 2), "weight": FULL_SENTIMENT_WEIGHT},
+        }
+        weights = {
+            "technical": FULL_TECHNICAL_WEIGHT,
+            "sector_trend": FULL_SECTOR_WEIGHT,
+            "theme_catalyst": FULL_CATALYST_WEIGHT,
+            "news_sentiment_heat": FULL_SENTIMENT_WEIGHT,
+        }
+    elif sector_available:
+        opportunity_score = _clamp(
+            float(technical_score) * SECTOR_ONLY_TECHNICAL_WEIGHT + float(sector_score) * SECTOR_ONLY_WEIGHT
+        )
+        opportunity_version = OPPORTUNITY_SCORE_SECTOR_ONLY_VERSION
+        components = {
+            "technical": {"score": round(float(technical_score), 2), "weight": SECTOR_ONLY_TECHNICAL_WEIGHT},
+            "sector_trend": {"score": round(float(sector_score), 2), "weight": SECTOR_ONLY_WEIGHT},
+        }
+        weights = {"technical": SECTOR_ONLY_TECHNICAL_WEIGHT, "sector_trend": SECTOR_ONLY_WEIGHT}
+    elif catalyst_available:
+        opportunity_score = _clamp(
+            float(technical_score) * TECHNICAL_WEIGHT
+            + catalyst_score * CATALYST_WEIGHT
+            + sentiment_score * SENTIMENT_WEIGHT
+        )
+        opportunity_version = OPPORTUNITY_SCORE_VERSION
+        components = {
+            "technical": {"score": round(float(technical_score), 2), "weight": TECHNICAL_WEIGHT},
+            "theme_catalyst": {"score": round(catalyst_score, 2), "weight": CATALYST_WEIGHT},
+            "news_sentiment_heat": {"score": round(sentiment_score, 2), "weight": SENTIMENT_WEIGHT},
+        }
+        weights = {
+            "technical": TECHNICAL_WEIGHT,
+            "theme_catalyst": CATALYST_WEIGHT,
+            "news_sentiment_heat": SENTIMENT_WEIGHT,
+        }
+    else:
+        opportunity_score = None
+        opportunity_version = OPPORTUNITY_SCORE_UNAVAILABLE_VERSION
+        components = {}
+        weights = {}
+
+    if data_limited:
         opportunity_label = "等待数据"
         limitations = [*limitations, "数据或流动性限制未解除，催化不能提高到决策状态。"]
-    elif entry_label in RISK_ENTRY_LABELS and catalyst_score >= 70:
+    elif entry_label in RISK_ENTRY_LABELS and (catalyst_score >= 70 or (sector_score or 0) >= 75):
         opportunity_label = "主题强但等买点"
         limitations = [*limitations, f"当前买点为{entry_label}，主题催化不能覆盖追高风险。"]
-    elif catalyst_score >= 75 and opportunity_score >= 70:
+    elif catalyst_available and catalyst_score >= 75 and opportunity_score is not None and opportunity_score >= 70:
         opportunity_label = "重点观察"
+    elif sector_available and not catalyst_available:
+        opportunity_label = "板块强但等催化" if (sector_score or 0) >= 70 else "板块观察"
+    elif opportunity_score is None:
+        opportunity_label = "暂无综合关注"
     elif status == "unavailable":
         opportunity_label = "技术优先"
     else:
@@ -459,21 +537,18 @@ def build_asset_opportunity_payload(
             "catalyst_status": status,
             "catalyst_theme_key": catalyst_theme_key,
             "catalyst_theme_name": catalyst_theme_name,
-            "opportunity_score_version": OPPORTUNITY_SCORE_VERSION,
+            "opportunity_score_version": opportunity_version,
         },
         "breakdown": {
-            "score_version": OPPORTUNITY_SCORE_VERSION,
+            "score_version": opportunity_version,
             "opportunity_score": opportunity_score,
             "opportunity_label": opportunity_label,
-            "components": {
-                "technical": {"score": round(float(technical_score), 2), "weight": TECHNICAL_WEIGHT},
-                "theme_catalyst": {"score": round(catalyst_score, 2), "weight": CATALYST_WEIGHT},
-                "news_sentiment_heat": {"score": round(sentiment_score, 2), "weight": SENTIMENT_WEIGHT},
-            },
-            "weights": {
-                "technical": TECHNICAL_WEIGHT,
-                "theme_catalyst": CATALYST_WEIGHT,
-                "news_sentiment_heat": SENTIMENT_WEIGHT,
+            "components": components,
+            "weights": weights,
+            "sector_trend": {
+                "score": round(float(sector_score), 2) if sector_score is not None else None,
+                "status": str(metrics.get("sector_trend_status") or "unavailable"),
+                "label": metrics.get("sector_trend_label"),
             },
             "catalyst": catalyst_breakdown,
             "limitations": list(dict.fromkeys(limitations)),

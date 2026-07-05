@@ -146,6 +146,8 @@ const assetModes: Record<
 const fallbackThemes = [
   "科技",
   "AI",
+  "机器人",
+  "创新药",
   "芯片",
   "半导体",
   "新能源",
@@ -530,6 +532,29 @@ function opportunityStatusText(asset: ShortResearchAsset | null | undefined) {
     return label;
   }
   return `${label} · ${opportunityScoreText(asset)}`;
+}
+
+function opportunityVersionText(asset: ShortResearchAsset | null | undefined) {
+  switch (asset?.opportunity_score_version) {
+    case "opportunity_score_v2_full":
+      return "口径：技术 60% + 板块 20% + 催化 15% + 事件 5%";
+    case "opportunity_score_v2_sector_only":
+      return "口径：技术 75% + 板块 25%";
+    case "opportunity_score_v2_catalyst_only":
+    case "opportunity_score_v1":
+      return "口径：技术 70% + 催化 20% + 事件 10%";
+    default:
+      return "暂无综合关注口径";
+  }
+}
+
+function sectorTrendText(asset: ShortResearchAsset | null | undefined) {
+  if (asset?.sector_trend_score === null || asset?.sector_trend_score === undefined) {
+    return asset?.sector_trend_reason || "暂无板块趋势数据";
+  }
+  const label = asset.sector_trend_label || "板块趋势";
+  const peers = asset.sector_peer_count ? ` · ${asset.sector_peer_count}只样本` : "";
+  return `${label} ${formatOptionalScore(asset.sector_trend_score)} 分${peers}`;
 }
 
 function catalystSummaryText(asset: ShortResearchAsset | null | undefined) {
@@ -2420,9 +2445,16 @@ function ShortTermClient() {
                         {validationEvidenceText(item as ShortResearchAsset)}
                       </span>
                       {item.asset_type === "etf" ? (
-                        <span className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
-                          主题催化：{catalystSummaryText(item)}
-                        </span>
+                        <>
+                          {item.sector_trend_score !== null && item.sector_trend_score !== undefined ? (
+                            <span className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                              板块趋势：{sectorTrendText(item)}
+                            </span>
+                          ) : null}
+                          <span className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                            主题催化：{catalystSummaryText(item)}
+                          </span>
+                        </>
                       ) : null}
                       <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
                         最新日涨跌：{percentMetric(item.metrics, "today_return_pct")}
@@ -2511,10 +2543,12 @@ function ShortTermClient() {
             </div>
             {selectedAsset.asset_type === "etf" ? (
               <div className="rounded-[8px] bg-paper px-4 py-3 sm:col-span-2">
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">主题催化</p>
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">综合关注</p>
                 <p className="mt-2 text-base font-semibold text-ink">
                   {opportunityStatusText(selectedAsset)}
                 </p>
+                <p className="mt-1 text-xs text-ink/50">{opportunityVersionText(selectedAsset)}</p>
+                <p className="mt-2 text-sm leading-6 text-ink/65">板块趋势：{sectorTrendText(selectedAsset)}</p>
                 <p className="mt-2 text-sm leading-6 text-ink/65">{catalystSummaryText(selectedAsset)}</p>
               </div>
             ) : null}
@@ -3540,14 +3574,19 @@ function ShortTermClient() {
                   {selectedAsset.asset_type === "etf" ? (
                     <div className="mt-3 rounded-[10px] border border-accent/20 bg-white p-4">
                       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">主题催化</p>
+                        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">综合关注</p>
                         <p className="text-sm font-semibold text-ink">
                           {opportunityStatusText(selectedAsset)}
                         </p>
                       </div>
+                      <p className="mt-1 text-xs text-ink/50">{opportunityVersionText(selectedAsset)}</p>
+                      <p className="mt-2 text-sm leading-6 text-ink/65">
+                        板块趋势：{selectedAsset.sector_trend_summary || sectorTrendText(selectedAsset)}
+                      </p>
                       <p className="mt-2 text-sm leading-6 text-ink/65">{catalystSummaryText(selectedAsset)}</p>
-                      <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                      <div className="mt-3 grid gap-2 sm:grid-cols-4">
                         <StatPill label="技术分" value={formatOptionalScore(selectedAsset.technical_score ?? selectedAsset.total_score)} tone="bg-paper text-ink" />
+                        <StatPill label="板块趋势" value={formatOptionalScore(selectedAsset.sector_trend_score)} tone="bg-paper text-ink" />
                         <StatPill label="催化分" value={formatOptionalScore(selectedAsset.catalyst_score)} tone="bg-paper text-ink" />
                         <StatPill label="事件热度" value={formatOptionalScore(selectedAsset.sentiment_heat_score)} tone="bg-paper text-ink" />
                       </div>

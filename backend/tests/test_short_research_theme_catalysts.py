@@ -102,6 +102,87 @@ def test_opportunity_score_lifts_attention_without_removing_chase_risk() -> None
     assert any("冲高别追" in item for item in payload["metrics"]["catalyst_limitations"])
 
 
+def test_opportunity_score_uses_full_evidence_with_sector_trend() -> None:
+    snapshot = SimpleNamespace(
+        theme_key="机器人",
+        theme_name="机器人/具身智能",
+        status="success",
+        catalyst_score=90.0,
+        sentiment_heat_score=60.0,
+        key_events_json=[{"summary": "机器人主题催化。"}],
+        limitations_json=[],
+        score_breakdown_json={"score_version": "theme_catalyst_v1"},
+    )
+
+    payload = build_asset_opportunity_payload(
+        asset_name="机器人ETF",
+        theme_tags=["机器人"],
+        metrics={
+            "entry_timing_label": "趋势延续",
+            "theme_profile": {"primary_theme": "机器人"},
+            "default_display_eligible": True,
+            "sector_trend_score": 80.0,
+            "sector_trend_label": "板块强势",
+            "sector_trend_status": "success",
+        },
+        risk_flags=[],
+        technical_score=70,
+        snapshots_by_key={"机器人": snapshot},
+    )
+
+    assert payload["metrics"]["opportunity_score"] == 74.5
+    assert payload["metrics"]["opportunity_score_version"] == "opportunity_score_v2_full"
+    assert payload["breakdown"]["weights"] == {
+        "technical": 0.60,
+        "sector_trend": 0.20,
+        "theme_catalyst": 0.15,
+        "news_sentiment_heat": 0.05,
+    }
+
+
+def test_opportunity_score_uses_sector_trend_when_catalyst_is_unavailable() -> None:
+    payload = build_asset_opportunity_payload(
+        asset_name="创新药ETF",
+        theme_tags=["创新药"],
+        metrics={
+            "entry_timing_label": "趋势延续",
+            "theme_profile": {"primary_theme": "创新药"},
+            "default_display_eligible": True,
+            "sector_trend_score": 84.0,
+            "sector_trend_label": "板块强势",
+            "sector_trend_status": "success",
+        },
+        risk_flags=[],
+        technical_score=76,
+        snapshots_by_key={},
+    )
+
+    assert payload["metrics"]["opportunity_score"] == 78.0
+    assert payload["metrics"]["opportunity_label"] == "板块强但等催化"
+    assert payload["metrics"]["catalyst_status"] == "unavailable"
+    assert payload["metrics"]["opportunity_score_version"] == "opportunity_score_v2_sector_only"
+    assert payload["breakdown"]["weights"] == {"technical": 0.75, "sector_trend": 0.25}
+
+
+def test_opportunity_score_is_unavailable_without_sector_or_catalyst_evidence() -> None:
+    payload = build_asset_opportunity_payload(
+        asset_name="普通ETF",
+        theme_tags=["宽基"],
+        metrics={
+            "entry_timing_label": "趋势延续",
+            "theme_profile": {"primary_theme": "宽基"},
+            "default_display_eligible": True,
+        },
+        risk_flags=[],
+        technical_score=88,
+        snapshots_by_key={},
+    )
+
+    assert payload["metrics"]["opportunity_score"] is None
+    assert payload["metrics"]["opportunity_label"] == "暂无综合关注"
+    assert payload["metrics"]["opportunity_score_version"] == "opportunity_score_v2_unavailable"
+
+
 def test_opportunity_score_waits_when_data_or_liquidity_is_limited() -> None:
     payload = build_asset_opportunity_payload(
         asset_name="机器人ETF",

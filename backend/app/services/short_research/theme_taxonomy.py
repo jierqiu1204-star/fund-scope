@@ -53,10 +53,12 @@ _MANUAL_OVERRIDES: dict[str, tuple[str, str, str, list[str], str]] = {
 
 _KEYWORD_RULES: list[tuple[tuple[str, ...], str, str, str, list[str]]] = [
     (("半导体", "芯片", "集成电路"), "equity", "technology", "半导体", ["芯片", "科技"]),
-    (("人工智能", "AI", "机器人", "云计算", "软件", "计算机"), "equity", "technology", "人工智能", ["AI", "科技"]),
+    (("机器人", "具身智能", "人形机器人", "工业机器人"), "equity", "technology", "机器人", ["高端制造", "人工智能"]),
+    (("人工智能", "AI", "云计算", "软件", "计算机"), "equity", "technology", "人工智能", ["AI", "科技"]),
     (("科技", "科创", "创业板", "双创"), "equity", "technology", "科技", ["成长"]),
     (("新能源", "光伏", "电池", "储能", "电力设备"), "equity", "energy", "新能源", ["电力设备"]),
-    (("医药", "医疗", "创新药", "生物"), "equity", "healthcare", "生物医药", ["医药"]),
+    (("创新药", "生物药", "生物医药", "港股创新药", "医药创新"), "equity", "healthcare", "创新药", ["医药"]),
+    (("医药", "医疗", "生物"), "equity", "healthcare", "生物医药", ["医药"]),
     (("证券", "券商"), "equity", "financial", "证券", ["金融"]),
     (("银行",), "equity", "financial", "银行", ["金融"]),
     (("红利", "低波", "股息"), "equity", "dividend", "红利", ["低波动"]),

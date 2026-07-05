@@ -559,6 +559,13 @@ export type ShortResearchAsset = {
   technical_score?: number | null;
   opportunity_score?: number | null;
   opportunity_label?: string | null;
+  opportunity_score_version?: string | null;
+  sector_trend_score?: number | null;
+  sector_trend_label?: string | null;
+  sector_trend_summary?: string | null;
+  sector_trend_reason?: string | null;
+  sector_trend_status?: string | null;
+  sector_peer_count?: number | null;
   catalyst_score?: number | null;
   sentiment_heat_score?: number | null;
   catalyst_summary?: string | null;

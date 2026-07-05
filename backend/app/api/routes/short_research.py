@@ -85,6 +85,7 @@ from app.services.short_research.service import (
     cached_signal_assets,
     etf_observation_portfolio,
     get_asset_detail,
+    has_available_opportunity_score,
     has_unavailable_theme_catalyst,
     latest_signal_run,
     latest_signal_validation_run,
@@ -133,9 +134,14 @@ def _asset_out(
     signal_run: ShortResearchSignalRun | None = None,
     validation_evidence: dict[str, Any] | None = None,
     observation_portfolio: dict[str, Any] | None = None,
-) -> ShortResearchAssetOut:
+    ) -> ShortResearchAssetOut:
     metrics = dict(asset.metrics or {})
     catalyst_unavailable = asset.metadata.asset_type == "etf" and has_unavailable_theme_catalyst(metrics)
+    opportunity_score = metrics.get("opportunity_score") if has_available_opportunity_score(metrics) else None
+    opportunity_label = str(metrics.get("opportunity_label")) if metrics.get("opportunity_label") else None
+    if opportunity_score is None and catalyst_unavailable and opportunity_label not in {"等待数据"}:
+        opportunity_label = "暂无综合关注"
+    sector_trend_score = metrics.get("sector_trend_score")
     theme_profile = dict(
         metrics.get("theme_profile")
         or asset.rationale.get("theme_profile")
@@ -181,16 +187,21 @@ def _asset_out(
         rank=asset.rank,
         total_score=round(asset.total_score, 2),
         technical_score=round(float(metrics["technical_score"]), 2) if isinstance(metrics.get("technical_score"), (int, float)) else None,
-        opportunity_score=None
-        if catalyst_unavailable
-        else round(float(metrics["opportunity_score"]), 2)
-        if isinstance(metrics.get("opportunity_score"), (int, float))
+        opportunity_score=round(float(opportunity_score), 2)
+        if isinstance(opportunity_score, int | float)
         else None,
-        opportunity_label="暂无主题催化"
-        if catalyst_unavailable
-        else str(metrics.get("opportunity_label"))
-        if metrics.get("opportunity_label")
+        opportunity_label=opportunity_label,
+        opportunity_score_version=str(metrics.get("opportunity_score_version"))
+        if metrics.get("opportunity_score_version")
         else None,
+        sector_trend_score=round(float(sector_trend_score), 2)
+        if isinstance(sector_trend_score, int | float)
+        else None,
+        sector_trend_label=str(metrics.get("sector_trend_label")) if metrics.get("sector_trend_label") else None,
+        sector_trend_summary=str(metrics.get("sector_trend_summary")) if metrics.get("sector_trend_summary") else None,
+        sector_trend_reason=str(metrics.get("sector_trend_reason")) if metrics.get("sector_trend_reason") else None,
+        sector_trend_status=str(metrics.get("sector_trend_status")) if metrics.get("sector_trend_status") else None,
+        sector_peer_count=int(metrics["sector_peer_count"]) if isinstance(metrics.get("sector_peer_count"), int | float) else None,
         catalyst_score=None
         if catalyst_unavailable
         else round(float(metrics["catalyst_score"]), 2)

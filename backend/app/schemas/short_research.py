@@ -123,6 +123,13 @@ class ShortResearchAssetOut(BaseModel):
     technical_score: float | None = None
     opportunity_score: float | None = None
     opportunity_label: str | None = None
+    opportunity_score_version: str | None = None
+    sector_trend_score: float | None = None
+    sector_trend_label: str | None = None
+    sector_trend_summary: str | None = None
+    sector_trend_reason: str | None = None
+    sector_trend_status: str | None = None
+    sector_peer_count: int | None = None
     catalyst_score: float | None = None
     sentiment_heat_score: float | None = None
     catalyst_summary: str | None = None
