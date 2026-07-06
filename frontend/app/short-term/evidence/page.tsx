@@ -73,6 +73,19 @@ function metadataString(metadata: Record<string, unknown>, key: string) {
   return typeof value === "string" ? value : null;
 }
 
+function policyLevelLabel(value: string | null) {
+  if (value === "high") {
+    return "高可信";
+  }
+  if (value === "medium") {
+    return "中等可信";
+  }
+  if (value === "low") {
+    return "样本不足/仅供观察";
+  }
+  return value ?? "暂无";
+}
+
 function metadataNumber(metadata: Record<string, unknown>, key: string) {
   const value = metadata[key];
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -320,7 +333,9 @@ export default function EtfEvidencePage() {
           days: 730,
           objective: "stability_first",
           execution_model: "intraday_alert",
-          manual_delay_minutes: 3
+          manual_delay_minutes: 3,
+          universe_scope: "all_eligible",
+          batch_size: 100
         })
       ).data,
     onSuccess: async () => {
@@ -332,8 +347,9 @@ export default function EtfEvidencePage() {
       (
         await api.post<EtfExitCredibility>("/api/short-research/etf-exit-credibility/run", {
           days: 730,
-          max_assets: 300,
-          execution_model: "intraday_alert"
+          max_assets: 50,
+          execution_model: "intraday_alert",
+          universe_scope: "latest_opportunity_top"
         })
       ).data,
     onSuccess: async () => {
@@ -398,14 +414,14 @@ export default function EtfEvidencePage() {
               disabled={runExitHyperopt.isPending}
               onClick={() => runExitHyperopt.mutate()}
             >
-              参数优化
+              生成止盈止损优化证据
             </button>
             <button
               className="rounded-[6px] bg-ink px-3 py-2 text-sm font-semibold text-white transition hover:bg-ink/85 disabled:opacity-60"
               disabled={runExitCredibility.isPending}
               onClick={() => runExitCredibility.mutate()}
             >
-              退出信号验证
+              验证止盈止损规则
             </button>
           </div>
         </div>
@@ -421,7 +437,7 @@ export default function EtfEvidencePage() {
       <Panel>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
-            <p className="text-sm font-semibold text-ink">退出信号可信度</p>
+            <p className="text-sm font-semibold text-ink">止盈止损规则验证</p>
             <p className="mt-1 text-xs text-ink/55">
               {exitCredibility.data
                 ? `${exitCredibility.data.execution_model} · ${exitCredibility.data.evidence_status}`
@@ -492,7 +508,7 @@ export default function EtfEvidencePage() {
           </>
         ) : (
           <p className="mt-4 rounded-[8px] border border-dashed border-border bg-paper px-3 py-4 text-sm text-ink/55">
-            暂无退出信号可信度报告。可以点击“退出信号验证”运行一次，或等待服务器夜间任务。
+            暂无止盈止损规则验证。可以点击“验证止盈止损规则”运行一次，或等待服务器夜间任务。
           </p>
         )}
       </Panel>
@@ -691,7 +707,7 @@ export default function EtfEvidencePage() {
           <div>
             <p className="text-sm font-semibold text-ink">参数优化证据</p>
             <p className="mt-1 text-xs text-ink/55">
-              当前邮件规则不自动改变；候选参数必须人工确认后才可能进入生效规则。
+              研究证据，不自动改变提醒；候选参数必须人工确认后才可能进入生效规则。
             </p>
           </div>
           <span className="w-fit rounded-full bg-paper px-2.5 py-1 text-xs text-ink/60">
@@ -723,8 +739,18 @@ export default function EtfEvidencePage() {
             <div className="mt-3 grid gap-3 md:grid-cols-2">
               <EvidenceStat label="校准版本" value={exitHyperopt.data.calibration_rule_version ?? "旧口径"} />
               <EvidenceStat
+                label="证据版本"
+                value={metadataString(exitHyperopt.data.summary, "policy_validation_version") ?? "旧口径"}
+              />
+            </div>
+            <div className="mt-3 grid gap-3 md:grid-cols-2">
+              <EvidenceStat
                 label="合同 hash"
                 value={exitHyperopt.data.contract_hash ? exitHyperopt.data.contract_hash.slice(0, 10) : "暂无"}
+              />
+              <EvidenceStat
+                label="样本口径"
+                value={metadataString(exitHyperopt.data.summary, "universe_scope") ?? "旧口径"}
               />
             </div>
             <div className="mt-4 grid gap-3 lg:grid-cols-2">
@@ -758,7 +784,9 @@ export default function EtfEvidencePage() {
                     <span>覆盖：{item.coverage_status ?? "旧口径"}</span>
                     <span>未成交：{metricInteger(item.out_of_sample_metrics, "unfilled_count")}</span>
                     <span>延迟：{item.manual_delay_minutes ?? "暂无"} 分钟</span>
-                    <span>置信度：{metadataString(item.confidence, "level") ?? "暂无"}</span>
+                    <span>
+                      证据等级：{policyLevelLabel(metadataString(item.confidence, "policy_evidence_level"))}
+                    </span>
                     <span>数据源：{item.source_reliability ?? "旧口径"}</span>
                   </div>
                   {item.rejection_reason ? (
@@ -772,7 +800,7 @@ export default function EtfEvidencePage() {
           </>
         ) : (
           <p className="mt-4 rounded-[8px] border border-dashed border-border bg-paper px-3 py-4 text-sm text-ink/55">
-            暂无参数优化证据。可以点击“参数优化”运行一次，或等待服务器夜间任务。
+            暂无参数优化证据。可以点击“生成止盈止损优化证据”运行一次，或等待服务器夜间任务。
           </p>
         )}
       </Panel>

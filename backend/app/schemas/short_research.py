@@ -459,6 +459,8 @@ class EtfExitHyperoptRequest(BaseModel):
     objective: str = "stability_first"
     execution_model: Literal["intraday_alert", "daily_close"] = "intraday_alert"
     manual_delay_minutes: int = Field(default=3, ge=0, le=60)
+    universe_scope: Literal["all_eligible", "latest_opportunity_top"] = "all_eligible"
+    batch_size: int = Field(default=100, ge=20, le=500)
 
 
 class EtfExitHyperoptItemOut(BaseModel):

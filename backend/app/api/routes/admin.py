@@ -285,6 +285,8 @@ async def run_job_by_name(
                 max_assets=max_assets,
                 execution_model="intraday_alert",
                 manual_delay_minutes=3,
+                universe_scope="all_eligible",
+                batch_size=100,
             ),
         )
     if job_name == "etf_exit_signal_credibility":

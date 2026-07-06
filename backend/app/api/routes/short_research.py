@@ -658,6 +658,8 @@ async def run_etf_exit_hyperopt_endpoint(
         objective=payload.objective,
         execution_model=payload.execution_model,
         manual_delay_minutes=payload.manual_delay_minutes,
+        universe_scope=payload.universe_scope,
+        batch_size=payload.batch_size,
     )
     return await etf_exit_hyperopt_payload(session, run)
 

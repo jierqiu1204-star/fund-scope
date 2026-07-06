@@ -386,6 +386,8 @@ async def etf_exit_hyperopt_job(
     max_assets: int | None = None,
     execution_model: str = "intraday_alert",
     manual_delay_minutes: int = 3,
+    universe_scope: str = "all_eligible",
+    batch_size: int = 100,
 ) -> dict[str, Any]:
     run = await run_etf_exit_hyperopt(
         session,
@@ -393,6 +395,8 @@ async def etf_exit_hyperopt_job(
         max_assets=max_assets,
         execution_model=execution_model,
         manual_delay_minutes=manual_delay_minutes,
+        universe_scope=universe_scope,
+        batch_size=batch_size,
     )
     summary = dict(run.summary_json or {})
     coverage = dict(summary.get("coverage") or summary.get("coverage_funnel") or {})
@@ -410,12 +414,15 @@ async def etf_exit_hyperopt_job(
         "evidence_insufficient_count": int(summary.get("evidence_insufficient_count", 0)),
         "coverage": coverage,
         "sampled": bool(summary.get("sampled", False)),
+        "universe_scope": summary.get("universe_scope"),
         "max_assets": summary.get("max_assets"),
+        "batch_size": int(summary.get("batch_size", batch_size)),
         "final_optimized_count": int(summary.get("final_optimized_count", 0)),
         "enough_daily_history_count": int(summary.get("enough_daily_history_count", 0)),
         "enough_intraday_history_count": int(summary.get("enough_intraday_history_count", 0)),
         "manual_delay_minutes": int(summary.get("manual_delay_minutes", manual_delay_minutes)),
         "calibration_rule_version": summary.get("calibration_rule_version"),
+        "policy_validation_version": summary.get("policy_validation_version"),
         "contract_hash": summary.get("contract_hash"),
         "auto_applied": False,
         "research_only": True,
