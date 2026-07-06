@@ -552,9 +552,9 @@ function formatOptionalScore(value: number | null | undefined) {
 
 function opportunityScoreText(asset: ShortResearchAsset | null | undefined) {
   if (!asset?.opportunity_score && asset?.opportunity_score !== 0) {
-    return "暂无综合关注";
+    return "暂无主题辅助";
   }
-  return `综合关注 ${formatOptionalScore(asset.opportunity_score)} 分`;
+  return `主题辅助 ${formatOptionalScore(asset.opportunity_score)} 分`;
 }
 
 function opportunityStatusText(asset: ShortResearchAsset | null | undefined) {
@@ -572,7 +572,7 @@ function opportunityVersionText(asset: ShortResearchAsset | null | undefined) {
     case "etf_factor_profile_v1_degraded":
       return "口径：ETF 多因子降级口径";
     case "etf_factor_profile_v1_unavailable":
-      return "暂无综合关注口径";
+      return "暂无主题辅助口径";
     case "opportunity_score_v2_full":
       return "口径：技术 60% + 板块 20% + 催化 15% + 事件 5%";
     case "opportunity_score_v2_sector_only":
@@ -581,7 +581,7 @@ function opportunityVersionText(asset: ShortResearchAsset | null | undefined) {
     case "opportunity_score_v1":
       return "口径：技术 70% + 催化 20% + 事件 10%";
     default:
-      return "暂无综合关注口径";
+      return "暂无主题辅助口径";
   }
 }
 
@@ -2672,7 +2672,7 @@ function ShortTermClient() {
             <div className="rounded-[8px] bg-paper px-4 py-3">
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">当前结论</p>
               <p className="mt-2 text-lg font-semibold text-ink">
-                {selectedAsset.conclusion} · 技术分 {selectedAsset.total_score.toFixed(1)}
+                {selectedAsset.conclusion} · 综合分 {selectedAsset.total_score.toFixed(1)}
               </p>
               <p className="mt-2 text-sm leading-6 text-ink/65">
                 {rationaleText(selectedAsset, "key_reason", "暂无")}
@@ -2691,7 +2691,7 @@ function ShortTermClient() {
             </div>
             {selectedAsset.asset_type === "etf" ? (
               <div className="rounded-[8px] bg-paper px-4 py-3 sm:col-span-2">
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">综合关注</p>
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">主题/板块辅助</p>
                 <p className="mt-2 text-base font-semibold text-ink">
                   {opportunityStatusText(selectedAsset)}
                 </p>
@@ -3521,7 +3521,7 @@ function ShortTermClient() {
               ) : null}
               <p className="text-xs leading-5 text-ink/50">
                 窗口：{formatDate(String(scoreBucketValidation.replay_start_date ?? ""))} - {formatDate(String(scoreBucketValidation.replay_end_date ?? ""))}；
-                排序字段：metrics_json.opportunity_score；缺失真实综合关注分或主题数据不可用的 ETF 已排除。
+                排序字段：final_score_v2 最终决策分；缺失真实综合关注分的 ETF 已排除。
               </p>
             </div>
           ) : (
@@ -3778,7 +3778,7 @@ function ShortTermClient() {
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <span className="rounded-full bg-ink px-4 py-2 text-sm font-semibold text-white">
-                      技术分 {selectedAsset.total_score.toFixed(1)}
+                      综合分 {selectedAsset.total_score.toFixed(1)}
                     </span>
                     {selectedAsset.asset_type === "etf" && selectedAsset.opportunity_score !== null && selectedAsset.opportunity_score !== undefined ? (
                       <span className="rounded-full bg-accent px-4 py-2 text-sm font-semibold text-white">
@@ -3814,7 +3814,7 @@ function ShortTermClient() {
                     <div className="rounded-[10px] bg-paper p-4">
                       <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">当前结论</p>
                       <p className="mt-2 text-lg font-semibold text-ink">
-                        {selectedAsset.conclusion} · 技术分 {selectedAsset.total_score.toFixed(1)}
+                        {selectedAsset.conclusion} · 综合分 {selectedAsset.total_score.toFixed(1)}
                       </p>
                       <p className="mt-2 text-sm leading-7 text-ink/65">
                         {rationaleText(selectedAsset, "key_reason", "按近期趋势、回撤、波动、成交额和数据质量综合生成。")}
@@ -3833,7 +3833,7 @@ function ShortTermClient() {
                   {selectedAsset.asset_type === "etf" ? (
                     <div className="mt-3 rounded-[10px] border border-accent/20 bg-white p-4">
                       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">综合关注</p>
+                        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">主题/板块辅助</p>
                         <p className="text-sm font-semibold text-ink">
                           {opportunityStatusText(selectedAsset)}
                         </p>
@@ -3846,7 +3846,7 @@ function ShortTermClient() {
                       </p>
                       <p className="mt-2 text-sm leading-6 text-ink/65">{catalystSummaryText(selectedAsset)}</p>
                       <div className="mt-3 grid gap-2 sm:grid-cols-5">
-                        <StatPill label="技术分" value={formatOptionalScore(selectedAsset.technical_score ?? selectedAsset.total_score)} tone="bg-paper text-ink" />
+                        <StatPill label="技术分" value={formatOptionalScore(selectedAsset.technical_score)} tone="bg-paper text-ink" />
                         <StatPill label="因子综合" value={formatOptionalScore(selectedAsset.factor_profile_score)} tone="bg-paper text-ink" />
                         <StatPill label="板块趋势" value={formatOptionalScore(selectedAsset.sector_trend_score)} tone="bg-paper text-ink" />
                         <StatPill label="催化分" value={formatOptionalScore(selectedAsset.catalyst_score)} tone="bg-paper text-ink" />

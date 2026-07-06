@@ -11,7 +11,7 @@ from app.services.short_research.ranking import (
     build_final_score_breakdowns,
     percentile_rank,
 )
-from app.services.short_research.service import _cached_asset_from_signal_item
+from app.services.short_research.service import _cached_asset_from_signal_item, _sort_key
 
 
 def _record(
@@ -154,3 +154,64 @@ def test_legacy_cached_signal_is_marked_as_old_scoring() -> None:
 
     assert asset.metrics["score_version"] == "legacy"
     assert asset.score_breakdown["final_score_v2"]["score_version"] == "legacy"
+
+
+def test_opportunity_sort_uses_final_decision_score_not_theme_heat() -> None:
+    metadata = ShortResearchAsset(
+        ASSET_TYPE_ETF,
+        "510300",
+        "沪深300ETF",
+        "broad_index",
+        ("宽基",),
+        "沪深300",
+        "T+1股票ETF",
+        exchange="SH",
+    )
+    hot_theme = _cached_asset_from_signal_item(
+        ShortResearchSignalItem(
+            asset_type=ASSET_TYPE_ETF,
+            asset_code="510301",
+            rank=1,
+            total_score=50,
+            conclusion="高位观察",
+            score_breakdown_json={"final_score_v2": {"final_score": 50, "score_version": FINAL_SCORE_VERSION}},
+            risk_flags_json=[],
+            rationale_json={},
+            metrics_json={
+                "opportunity_score": 95,
+                "opportunity_score_version": "opportunity_score_v2_full",
+                "entry_timing_label": "冲高别追",
+                "entry_timing_reason": "主题热但买点不好",
+                "latest_date": "2026-06-30",
+                "latest_value": 1.23,
+                "usable_days": 120,
+            },
+        ),
+        metadata,
+        as_of_date=date(2026, 6, 30),
+    )
+    safer_final = _cached_asset_from_signal_item(
+        ShortResearchSignalItem(
+            asset_type=ASSET_TYPE_ETF,
+            asset_code="510302",
+            rank=2,
+            total_score=80,
+            conclusion="短线观察",
+            score_breakdown_json={"final_score_v2": {"final_score": 80, "score_version": FINAL_SCORE_VERSION}},
+            risk_flags_json=[],
+            rationale_json={},
+            metrics_json={
+                "opportunity_score": 60,
+                "opportunity_score_version": "opportunity_score_v2_full",
+                "entry_timing_label": "健康回踩",
+                "entry_timing_reason": "最终分更好",
+                "latest_date": "2026-06-30",
+                "latest_value": 1.23,
+                "usable_days": 120,
+            },
+        ),
+        metadata,
+        as_of_date=date(2026, 6, 30),
+    )
+
+    assert _sort_key(safer_final, "opportunity") > _sort_key(hot_theme, "opportunity")

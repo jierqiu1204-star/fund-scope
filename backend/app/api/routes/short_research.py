@@ -142,7 +142,7 @@ def _asset_out(
     opportunity_score = metrics.get("opportunity_score") if has_available_opportunity_score(metrics) else None
     opportunity_label = str(metrics.get("opportunity_label")) if metrics.get("opportunity_label") else None
     if opportunity_score is None and catalyst_unavailable and opportunity_label not in {"等待数据"}:
-        opportunity_label = "暂无综合关注"
+        opportunity_label = "暂无主题辅助"
     sector_trend_score = metrics.get("sector_trend_score")
     theme_profile = dict(
         metrics.get("theme_profile")

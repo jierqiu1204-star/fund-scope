@@ -518,7 +518,7 @@ def build_asset_opportunity_payload(
     elif sector_available and not catalyst_available:
         opportunity_label = "板块强但等催化" if (sector_score or 0) >= 70 else "板块观察"
     elif opportunity_score is None:
-        opportunity_label = "暂无综合关注"
+        opportunity_label = "暂无主题辅助"
     elif status == "unavailable":
         opportunity_label = "技术优先"
     else:

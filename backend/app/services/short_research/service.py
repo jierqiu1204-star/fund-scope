@@ -495,6 +495,24 @@ def has_available_opportunity_score(metrics: Mapping[str, Any]) -> bool:
     )
 
 
+def _final_decision_score_from_breakdown(
+    score_breakdown: Mapping[str, Any] | None,
+    fallback: float | int | None,
+) -> float | None:
+    final_breakdown = (score_breakdown or {}).get("final_score_v2")
+    if isinstance(final_breakdown, Mapping):
+        final_score = final_breakdown.get("final_score")
+        if isinstance(final_score, int | float):
+            return float(final_score)
+    if isinstance(fallback, int | float):
+        return float(fallback)
+    return None
+
+
+def _final_decision_score(asset: ComputedAsset) -> float | None:
+    return _final_decision_score_from_breakdown(asset.score_breakdown, asset.total_score)
+
+
 async def _metadata_map_for_signal_items(
     session: AsyncSession,
     items: list[ShortResearchSignalItem],
@@ -1955,12 +1973,11 @@ async def _score_bucket_signal_items(
     scored: list[tuple[ShortResearchSignalItem, float]] = []
     excluded_codes: list[str] = []
     for item in rows:
-        metrics = dict(item.metrics_json or {})
-        score = metrics.get("opportunity_score")
-        if not has_available_opportunity_score(metrics) or not isinstance(score, int | float):
+        score = _final_decision_score_from_breakdown(item.score_breakdown_json or {}, item.total_score)
+        if score is None:
             excluded_codes.append(item.asset_code)
             continue
-        scored.append((item, float(score)))
+        scored.append((item, score))
     scored.sort(key=lambda pair: (-pair[1], pair[0].rank or 999999, pair[0].asset_code))
     return scored, excluded_codes
 
@@ -2013,7 +2030,8 @@ async def run_etf_score_bucket_validation(
         "validation_mode": VALIDATION_MODE_SCORE_BUCKET_REPLAY,
         "days": days,
         "score_basis": score_basis,
-        "score_field": "metrics_json.opportunity_score",
+        "score_field": "score_breakdown_json.final_score_v2.final_score",
+        "score_meaning": "综合关注最终决策分",
         "top_n": requested_top_n,
         "windows": horizons,
         "baseline": _SCORE_BUCKET_BASELINE,
@@ -2036,7 +2054,7 @@ async def run_etf_score_bucket_validation(
     if score_basis != _SCORE_BUCKET_SCORE_BASIS:
         run.status = RUN_STATUS_FAILED
         run.finished_at = utcnow()
-        run.error_message = "score_basis 只支持 opportunity。"
+        run.error_message = "score_basis 只支持 opportunity（综合关注最终决策分）。"
         run.summary_json = {**config, "status": RUN_STATUS_FAILED, "groups": []}
         await session.commit()
         await session.refresh(run)
@@ -2066,7 +2084,7 @@ async def run_etf_score_bucket_validation(
     selected_codes_by_group: dict[tuple[str, str], list[str]] = {
         (spec["label"], spec["entry_timing_label"]): [] for spec in group_specs
     }
-    excluded_codes: dict[str, list[str]] = {"unavailable_opportunity_score": []}
+    excluded_codes: dict[str, list[str]] = {"unavailable_final_decision_score": []}
     source_signal_run_ids: list[int] = []
     source_dates: list[str] = []
     scored_item_count = 0
@@ -2082,7 +2100,7 @@ async def run_etf_score_bucket_validation(
         scored_items, unavailable_codes = await _score_bucket_signal_items(session, source_run)
         if unavailable_codes:
             excluded_unavailable_score_count += len(unavailable_codes)
-            _append_unique_codes(excluded_codes["unavailable_opportunity_score"], unavailable_codes)
+            _append_unique_codes(excluded_codes["unavailable_final_decision_score"], unavailable_codes)
         if not scored_items:
             continue
         source_signal_run_ids.append(source_run.id)
@@ -2120,7 +2138,7 @@ async def run_etf_score_bucket_validation(
                     metrics = {
                         **payload,
                         "score_basis": score_basis,
-                        "opportunity_score": score,
+                        "final_decision_score": score,
                         "source_signal_run_id": source_run.id,
                         "source_signal_as_of_date": source_run.as_of_date.isoformat(),
                         "asset_code": item.asset_code,
@@ -2139,7 +2157,7 @@ async def run_etf_score_bucket_validation(
             **config,
             "status": RUN_STATUS_FAILED,
             "generated_at": utcnow().isoformat(),
-            "unavailable_reason": "no_available_opportunity_score",
+            "unavailable_reason": "no_available_final_decision_score",
             "source_signal_run_count": len(source_runs),
             "excluded_unavailable_score_count": excluded_unavailable_score_count,
             "excluded_codes": excluded_codes,
@@ -2197,7 +2215,7 @@ async def run_etf_score_bucket_validation(
         "excluded_samples": excluded_samples,
         "pending_samples": pending_samples,
         "sample_policy": (
-            "每天只取最新成功 ETF signal run，按缓存 metrics_json.opportunity_score 排序；"
+            "每天只取最新成功 ETF signal run，按缓存 final_score_v2 最终决策分排序；"
             "缺失真实综合关注分或主题数据不可用的 ETF 排除；未来收益只读取 signal 日期之后的已保存 ETF 日线。"
         ),
         "research_only": True,
@@ -3010,9 +3028,10 @@ def _matches_filters(
 def _sort_key(asset: ComputedAsset, sort: str) -> tuple[float, str]:
     metrics = asset.metrics
     if sort == "opportunity":
-        if not has_available_opportunity_score(metrics):
+        final_score = _final_decision_score(asset)
+        if final_score is None:
             return (-999.0, asset.metadata.code)
-        return (float(metrics["opportunity_score"]), asset.metadata.code)
+        return (final_score, asset.metadata.code)
     if sort == "return_5d":
         return (float(metrics.get("return_5d") or -999), asset.metadata.code)
     if sort == "return_20d":
