@@ -23,13 +23,19 @@ from app.models.entities import (
     utcnow,
 )
 from app.services.etf_research_evidence import (
+    BUCKET_THRESHOLD_CONTRACT_VERSION,
     EVIDENCE_STATUS_LEGACY,
     EVIDENCE_STATUS_SAME_CONTRACT,
     EVIDENCE_STATUS_WAITING,
     EXECUTION_MODEL_DAILY_CLOSE,
     EXECUTION_MODEL_INTRADAY_ALERT,
+    EXIT_ACTION_CONTRACT_VERSION,
+    EXIT_V2_EVIDENCE_CONTRACT_VERSION,
     FEE_MODEL_SIMPLE_RATE,
+    REENTRY_CONTRACT_VERSION,
     build_evidence_summary,
+    build_exit_v2_baseline_comparison,
+    build_exit_v2_evidence_contract,
     build_replay_contract,
 )
 from app.services.portfolio_allocation import (
@@ -84,6 +90,7 @@ BACKTEST_ALLOCATION_VERSION = "etf_portfolio_allocation_v3_layered"
 BACKTEST_EXIT_RULE_VERSION = "risk_alerts_daily_v1"
 INTRADAY_BACKTEST_EXIT_RULE_VERSION = "risk_alerts_intraday_v1"
 STRATEGY_COMPARISON_RULE_VERSION = "etf_strategy_comparison_v1"
+EXIT_V2_STRATEGY_COMPARISON_VERSION = "etf_exit_v2_strategy_comparison_v1"
 DEFAULT_BACKTEST_DAYS = 180
 DEFAULT_BACKTEST_FEE_RATE = 0.001
 DEFAULT_BACKTEST_INITIAL_CASH = 10000.0
@@ -92,6 +99,8 @@ MAX_BACKTEST_HOLDINGS = 6
 MIN_WEIGHTABLE_HOLDINGS = 4
 LABEL_HORIZONS = (1, 3, 5, 10)
 BENCHMARK_CODES = ("510300", "159919", "510500", "512880", "588000")
+WEAK_ENTRY_LABELS = {"跌破等待", "放量转弱", "数据不足", "行情滞后"}
+EXIT_V2_COOLDOWN_DAYS = 3
 
 
 @dataclass
@@ -1737,6 +1746,12 @@ def _comparison_target_weights(strategy_key: str, assets: list[ComputedAsset]) -
     if strategy_key == "current_workbench":
         weights, mode, _context = _generate_target_weights(assets)
         return weights, mode
+    if strategy_key == "topn_fixed_hold":
+        selected = assets[:4]
+        if not selected:
+            return {}, PORTFOLIO_MODE_CASH_WAIT
+        weight = round(min(1.0 / len(selected), PORTFOLIO_SINGLE_WEIGHT_CAP), 4)
+        return {asset.metadata.code: weight for asset in selected}, PORTFOLIO_MODE_RISK_ON
     if strategy_key == "equal_weight_benchmark":
         benchmark_assets = [asset for asset in assets if asset.metadata.code in BENCHMARK_CODES][:4]
         selected = benchmark_assets or assets[:4]
@@ -1772,6 +1787,170 @@ def _comparison_target_weights(strategy_key: str, assets: list[ComputedAsset]) -
         )
     weight = round(min(1.0 / len(selected), PORTFOLIO_SINGLE_WEIGHT_CAP), 4)
     return {asset.metadata.code: weight for asset in selected}, PORTFOLIO_MODE_RISK_ON
+
+
+def _comparison_asset_by_code(assets: list[ComputedAsset]) -> dict[str, ComputedAsset]:
+    return {asset.metadata.code: asset for asset in assets}
+
+
+def _is_weak_for_exit(asset: ComputedAsset | None) -> bool:
+    if asset is None:
+        return True
+    entry_label = str(asset.entry_timing_label or asset.metrics.get("entry_timing_label") or "")
+    today_return = asset.metrics.get("today_return_pct")
+    return_5d = asset.metrics.get("return_5d")
+    if entry_label in WEAK_ENTRY_LABELS:
+        return True
+    if isinstance(today_return, (int, float)) and float(today_return) <= -0.03:
+        return True
+    if isinstance(return_5d, (int, float)) and float(return_5d) <= -0.025:
+        return True
+    return False
+
+
+def _comparison_apply_exit_variant(
+    strategy_key: str,
+    *,
+    base_weights: dict[str, float],
+    previous_weights: dict[str, float],
+    assets_by_code: dict[str, ComputedAsset],
+    suspended_until: dict[str, date],
+    trade_date: date,
+) -> dict[str, float]:
+    if strategy_key in {
+        "current_workbench",
+        "momentum_top_n",
+        "momentum_volatility_weighted",
+        "momentum_regime_cash_filter",
+        "optimized_min_volatility",
+        "optimized_risk_parity",
+        "equal_weight_benchmark",
+        "topn_fixed_hold",
+    }:
+        return base_weights
+
+    if strategy_key == "guard_only":
+        guarded = dict(previous_weights)
+        for code, weight in base_weights.items():
+            if code in previous_weights:
+                guarded[code] = weight
+                continue
+            if _is_weak_for_exit(assets_by_code.get(code)):
+                continue
+            guarded[code] = weight
+        return guarded
+
+    if strategy_key == "current_live_exit_rules":
+        live_weights = dict(base_weights)
+        for code, previous_weight in previous_weights.items():
+            if code in live_weights:
+                continue
+            if _is_weak_for_exit(assets_by_code.get(code)):
+                live_weights[code] = round(previous_weight * 0.5, 4)
+        return {code: weight for code, weight in live_weights.items() if weight > 0.0001}
+
+    if strategy_key == "exit_v2_reentry":
+        v2_weights: dict[str, float] = {}
+        for code, previous_weight in previous_weights.items():
+            if code in base_weights and trade_date >= suspended_until.get(code, date.min):
+                v2_weights[code] = base_weights[code]
+                continue
+            asset = assets_by_code.get(code)
+            if _is_weak_for_exit(asset):
+                v2_weights[code] = round(previous_weight * 0.5, 4)
+                suspended_until[code] = max(suspended_until.get(code, date.min), trade_date + timedelta(days=EXIT_V2_COOLDOWN_DAYS))
+            elif code in base_weights:
+                v2_weights[code] = base_weights[code]
+            else:
+                v2_weights[code] = previous_weight
+        for code, weight in base_weights.items():
+            if code in v2_weights:
+                continue
+            if trade_date < suspended_until.get(code, date.min):
+                continue
+            if _is_weak_for_exit(assets_by_code.get(code)):
+                continue
+            v2_weights[code] = weight
+        return {code: weight for code, weight in v2_weights.items() if weight > 0.0001}
+
+    return base_weights
+
+
+def _future_returns_after_exit(
+    *,
+    code: str,
+    exit_date: date,
+    exit_price: float,
+    trading_dates: list[date],
+    price_map: dict[str, dict[date, float]],
+    horizon: int = 10,
+) -> tuple[float | None, float | None]:
+    if exit_price <= 0:
+        return None, None
+    try:
+        start_index = trading_dates.index(exit_date)
+    except ValueError:
+        return None, None
+    future_dates = trading_dates[start_index + 1 : start_index + 1 + horizon]
+    returns = [
+        price_map.get(code, {}).get(item) / exit_price - 1.0
+        for item in future_dates
+        if price_map.get(code, {}).get(item)
+    ]
+    if not returns:
+        return None, None
+    return max(returns), min(returns)
+
+
+def _comparison_exit_quality_metrics(
+    *,
+    exit_events: list[dict[str, Any]],
+    reentry_count: int,
+    average_time_out_days: float | None,
+    trading_dates: list[date],
+    price_map: dict[str, dict[date, float]],
+) -> dict[str, Any]:
+    if not exit_events:
+        return {
+            "exit_event_count": 0,
+            "missed_upside_rate": None,
+            "avg_missed_upside": None,
+            "protection_success_rate": None,
+            "false_exit_count": 0,
+            "reentry_count": reentry_count,
+            "average_time_out_days": average_time_out_days,
+            "alert_count": 0,
+        }
+
+    missed: list[float] = []
+    protected = 0
+    false_exit_count = 0
+    for event in exit_events:
+        future_max, future_min = _future_returns_after_exit(
+            code=str(event["code"]),
+            exit_date=event["date"],
+            exit_price=float(event["price"]),
+            trading_dates=trading_dates,
+            price_map=price_map,
+        )
+        if future_max is not None and future_max >= 0.03:
+            missed.append(future_max)
+        if future_min is not None and future_min <= -0.03:
+            protected += 1
+        if future_max is not None and future_max >= 0.03 and (future_min is None or future_min > -0.03):
+            false_exit_count += 1
+
+    event_count = len(exit_events)
+    return {
+        "exit_event_count": event_count,
+        "missed_upside_rate": round(len(missed) / event_count, 4),
+        "avg_missed_upside": round(mean(missed), 4) if missed else None,
+        "protection_success_rate": round(protected / event_count, 4),
+        "false_exit_count": false_exit_count,
+        "reentry_count": reentry_count,
+        "average_time_out_days": round(average_time_out_days, 2) if average_time_out_days is not None else None,
+        "alert_count": event_count,
+    }
 
 
 def _comparison_metrics(
@@ -1821,6 +2000,12 @@ def _simulate_comparison_strategy(
     equity = initial_cash
     high_watermark = initial_cash
     previous_weights: dict[str, float] = {}
+    suspended_until: dict[str, date] = {}
+    exited_codes: set[str] = set()
+    out_of_market_since: dict[str, date] = {}
+    exit_events: list[dict[str, Any]] = []
+    time_out_days: list[int] = []
+    reentry_count = 0
     total_fees = 0.0
     turnover = 0.0
     trade_count = 0
@@ -1837,7 +2022,41 @@ def _simulate_comparison_strategy(
                     day_return += weight * (current_price / previous_price - 1.0)
             equity *= 1.0 + day_return
         assets = _build_daily_assets(metadata_by_code, series_by_code, trade_date)
-        target_weights, portfolio_mode = _comparison_target_weights(strategy_key, assets)
+        assets_by_code = _comparison_asset_by_code(assets)
+        target_strategy_key = "current_workbench" if strategy_key in {"current_live_exit_rules", "guard_only", "exit_v2_reentry"} else strategy_key
+        base_weights, portfolio_mode = _comparison_target_weights(target_strategy_key, assets)
+        target_weights = _comparison_apply_exit_variant(
+            strategy_key,
+            base_weights=base_weights,
+            previous_weights=previous_weights,
+            assets_by_code=assets_by_code,
+            suspended_until=suspended_until,
+            trade_date=trade_date,
+        )
+        for code, previous_weight in previous_weights.items():
+            current_weight = target_weights.get(code, 0.0)
+            if previous_weight - current_weight <= 0.05:
+                continue
+            event_price = price_map.get(code, {}).get(trade_date)
+            if not event_price:
+                continue
+            exit_events.append(
+                {
+                    "date": trade_date,
+                    "code": code,
+                    "price": event_price,
+                    "from_weight": previous_weight,
+                    "to_weight": current_weight,
+                }
+            )
+            exited_codes.add(code)
+            out_of_market_since.setdefault(code, trade_date)
+        for code, current_weight in target_weights.items():
+            if current_weight <= 0.0001 or code not in exited_codes or code in previous_weights:
+                continue
+            reentry_count += 1
+            if code in out_of_market_since:
+                time_out_days.append(max(0, (trade_date - out_of_market_since.pop(code)).days))
         weight_change = sum(abs(target_weights.get(code, 0.0) - previous_weights.get(code, 0.0)) for code in set(target_weights) | set(previous_weights))
         if weight_change > 0.0001:
             fee = equity * weight_change * fee_rate
@@ -1859,10 +2078,30 @@ def _simulate_comparison_strategy(
                 "portfolio_mode": portfolio_mode,
             }
         )
+    exit_quality = _comparison_exit_quality_metrics(
+        exit_events=exit_events,
+        reentry_count=reentry_count,
+        average_time_out_days=mean(time_out_days) if time_out_days else None,
+        trading_dates=trading_dates,
+        price_map=price_map,
+    )
+    metrics = _comparison_metrics(
+        curve,
+        initial_cash=initial_cash,
+        turnover=turnover,
+        total_fees=total_fees,
+        trade_count=trade_count,
+        cash_wait_days=cash_wait_days,
+    )
+    metrics.update(exit_quality)
     return {
         "strategy_key": strategy_key,
         "strategy_label": {
+            "topn_fixed_hold": "TopN 固定持有",
             "current_workbench": "当前 ETF 工作台策略",
+            "current_live_exit_rules": "当前退出规则",
+            "guard_only": "只暂停加仓 Guard",
+            "exit_v2_reentry": "Exit V2 减仓 + 再入场",
             "momentum_top_n": "动量 Top N 等权",
             "momentum_volatility_weighted": "动量 + 波动率权重",
             "momentum_regime_cash_filter": "动量 + 大盘过滤",
@@ -1870,14 +2109,7 @@ def _simulate_comparison_strategy(
             "optimized_risk_parity": "优化组合：风险平价",
             "equal_weight_benchmark": "宽基等权对照",
         }.get(strategy_key, strategy_key),
-        "metrics": _comparison_metrics(
-            curve,
-            initial_cash=initial_cash,
-            turnover=turnover,
-            total_fees=total_fees,
-            trade_count=trade_count,
-            cash_wait_days=cash_wait_days,
-        ),
+        "metrics": metrics,
         "equity_curve": curve[:: max(1, len(curve) // 120)] if len(curve) > 120 else curve,
         "caveats": ["策略对照使用日线收盘价复盘，不模拟盘中成交和券商盘口。"],
     }
@@ -1941,6 +2173,10 @@ async def run_etf_strategy_comparison_backtest(
                 fee_rate=fee_rate,
             )
             for strategy_key in (
+                "topn_fixed_hold",
+                "current_live_exit_rules",
+                "guard_only",
+                "exit_v2_reentry",
                 "current_workbench",
                 "momentum_top_n",
                 "momentum_volatility_weighted",
@@ -1954,6 +2190,29 @@ async def run_etf_strategy_comparison_backtest(
             strategies,
             key=lambda item: float((item.get("metrics") or {}).get("return_drawdown_ratio") or -999.0),
         )
+        strategy_by_key = {item["strategy_key"]: item for item in strategies}
+        exit_v2_comparison = build_exit_v2_baseline_comparison(
+            topn_hold=strategy_by_key.get("topn_fixed_hold", {}).get("metrics") or {},
+            current_exit=strategy_by_key.get("current_live_exit_rules", {}).get("metrics") or {},
+            guard_only=strategy_by_key.get("guard_only", {}).get("metrics") or {},
+            exit_v2=strategy_by_key.get("exit_v2_reentry", {}).get("metrics") or {},
+        )
+        exit_v2_contract = build_exit_v2_evidence_contract(
+            validation_run_id=run.id,
+            signal_contract_hash=build_replay_contract(
+                replay_run_id=run.id,
+                signal_rule_version=BACKTEST_RANKING_VERSION,
+                allocation_version=BACKTEST_ALLOCATION_VERSION,
+                execution_model=EXECUTION_MODEL_DAILY_CLOSE,
+                fee_model=FEE_MODEL_SIMPLE_RATE,
+                start_date=trading_dates[0],
+                end_date=trading_dates[-1],
+                data_cutoff=trading_dates[-1],
+            )["contract_hash"],
+            signal_rule_version=BACKTEST_RANKING_VERSION,
+            execution_model=EXECUTION_MODEL_DAILY_CLOSE,
+            data_cutoff=trading_dates[-1],
+        )
         run.status = "success"
         run.finished_at = utcnow()
         run.metrics_json = {
@@ -1961,6 +2220,7 @@ async def run_etf_strategy_comparison_backtest(
             "strategy_count": len(strategies),
             "best_strategy": best["strategy_key"],
             "strategies": strategies,
+            "exit_v2_baseline_comparison": exit_v2_comparison,
         }
         run.data_coverage_json = {
             "start_date": trading_dates[0].isoformat(),
@@ -1973,6 +2233,16 @@ async def run_etf_strategy_comparison_backtest(
             "策略对照只用于比较不同规则在同一历史数据中的表现，不代表未来收益。",
             "当前工作台策略和页面组合使用同一目标权重生成逻辑。",
         ]
+        run.config_json = {
+            "run_kind": "strategy_comparison",
+            "max_assets": max_assets,
+            "exit_v2_evidence_contract": exit_v2_contract,
+            "exit_action_version": EXIT_ACTION_CONTRACT_VERSION,
+            "reentry_rule_version": REENTRY_CONTRACT_VERSION,
+            "bucket_threshold_version": BUCKET_THRESHOLD_CONTRACT_VERSION,
+            "exit_v2_contract_version": EXIT_V2_EVIDENCE_CONTRACT_VERSION,
+            "research_only": True,
+        }
         await session.commit()
         await session.refresh(run)
         return run
@@ -2002,5 +2272,7 @@ def strategy_comparison_payload(run: EtfPortfolioBacktestRun) -> dict[str, Any]:
         "caveats": list(run.caveats_json or []),
         "strategies": list((run.metrics_json or {}).get("strategies") or []),
         "best_strategy": (run.metrics_json or {}).get("best_strategy"),
+        "exit_v2_baseline_comparison": (run.metrics_json or {}).get("exit_v2_baseline_comparison"),
+        "exit_v2_evidence_contract": (run.config_json or {}).get("exit_v2_evidence_contract"),
         "error_message": run.error_message,
     }

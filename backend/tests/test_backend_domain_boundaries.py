@@ -64,6 +64,18 @@ def test_short_research_layer_does_not_import_tracking_or_notification() -> None
         _assert_no_forbidden_imports(path, forbidden)
 
 
+def test_risk_alerts_layer_stays_pure_rule_logic() -> None:
+    _assert_no_forbidden_imports(
+        ROOT / "risk_alerts.py",
+        (
+            "app.api",
+            "app.services.notifier",
+            "app.services.tracked_positions",
+            "app.services.short_research",
+        ),
+    )
+
+
 def test_workflows_are_allowed_to_orchestrate_multiple_domains() -> None:
     workflow_text = "\n".join(_text(path) for path in (ROOT / "workflows").glob("*.py"))
 

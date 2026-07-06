@@ -54,6 +54,12 @@ function metricInteger(metrics: Record<string, unknown> | undefined, key: string
   return value === null ? "暂无" : String(Math.round(value));
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
 function formatNullableRate(value: number | null | undefined) {
   return value === null || value === undefined ? "暂无" : formatPercent(value * 100);
 }
@@ -286,6 +292,30 @@ function labelEvidenceConclusion(row: LabelEvidenceRow) {
   return "样本有限";
 }
 
+type ExitV2BaselineRow = {
+  key: string;
+  label: string;
+  metrics: Record<string, unknown>;
+};
+
+function exitV2BaselineRows(data: EtfStrategyComparison | null | undefined) {
+  const comparison = asRecord(data?.exit_v2_baseline_comparison);
+  const baselines = asRecord(comparison?.baselines);
+  if (!baselines) {
+    return [];
+  }
+  const keys: Array<[string, string]> = [
+    ["topn_fixed_hold", "TopN 固定持有"],
+    ["current_live_exit_rules", "当前退出规则"],
+    ["guard_only", "只暂停加仓 Guard"],
+    ["exit_v2_reentry", "Exit V2 减仓 + 再入场"]
+  ];
+  return keys.flatMap(([key, label]): ExitV2BaselineRow[] => {
+    const metrics = asRecord(baselines[key]);
+    return metrics ? [{ key, label, metrics }] : [];
+  });
+}
+
 export default function EtfEvidencePage() {
   const queryClient = useQueryClient();
 
@@ -414,6 +444,9 @@ export default function EtfEvidencePage() {
   const isIntradayBacktest = backtestExecutionModel(detail) === "intraday_alert_v1";
   const optimized = observationPortfolio.data?.optimized_allocation ?? optimizedAllocation.data ?? null;
   const labelEvidenceRows = useMemo(() => buildLabelEvidenceRows(detail?.label_summaries ?? []), [detail?.label_summaries]);
+  const exitV2Rows = useMemo(() => exitV2BaselineRows(strategyComparison.data), [strategyComparison.data]);
+  const exitV2Comparison = asRecord(strategyComparison.data?.exit_v2_baseline_comparison);
+  const exitV2Conclusion = metadataString(exitV2Comparison ?? {}, "conclusion") ?? "等待 V2 对照";
   const healthcheckIssue = healthcheckEvidenceIssue(strategyHealthcheck.data);
   const healthcheckItems = visibleHealthcheckItems(strategyHealthcheck.data);
   const exitCredibilityGroups = useMemo(
@@ -702,6 +735,42 @@ export default function EtfEvidencePage() {
             </span>
           </div>
           <div className="mt-4 grid gap-3">
+            {exitV2Rows.length ? (
+              <div className="overflow-x-auto rounded-[10px] border border-border">
+                <div className="flex flex-col gap-1 border-b border-border bg-paper px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+                  <p className="text-xs font-semibold text-ink">Exit V2 对照基准</p>
+                  <p className="text-xs text-ink/55">{exitV2Conclusion}</p>
+                </div>
+                <table className="min-w-[820px] w-full border-collapse text-left text-xs">
+                  <thead className="bg-paper text-ink/55">
+                    <tr>
+                      <th className="px-3 py-2 font-medium">策略基线</th>
+                      <th className="px-3 py-2 font-medium">累计收益</th>
+                      <th className="px-3 py-2 font-medium">最大回撤</th>
+                      <th className="px-3 py-2 font-medium">卖飞率</th>
+                      <th className="px-3 py-2 font-medium">保护率</th>
+                      <th className="px-3 py-2 font-medium">错误退出</th>
+                      <th className="px-3 py-2 font-medium">再入场</th>
+                      <th className="px-3 py-2 font-medium">提醒次数</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {exitV2Rows.map((row) => (
+                      <tr key={row.key} className="border-t border-border align-top">
+                        <td className="px-3 py-2 font-semibold text-ink">{row.label}</td>
+                        <td className="px-3 py-2 text-ink/65">{metricPercent(row.metrics, "cumulative_return")}</td>
+                        <td className="px-3 py-2 text-ink/65">{metricPercent(row.metrics, "max_drawdown")}</td>
+                        <td className="px-3 py-2 text-ink/65">{metricPercent(row.metrics, "missed_upside_rate")}</td>
+                        <td className="px-3 py-2 text-ink/65">{metricPercent(row.metrics, "protection_success_rate")}</td>
+                        <td className="px-3 py-2 text-ink/65">{metricInteger(row.metrics, "false_exit_count")}</td>
+                        <td className="px-3 py-2 text-ink/65">{metricInteger(row.metrics, "reentry_count")}</td>
+                        <td className="px-3 py-2 text-ink/65">{metricInteger(row.metrics, "alert_count")}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
             {strategyComparison.data?.strategies.map((strategy) => (
               <div key={strategy.strategy_key} className="rounded-[8px] border border-border bg-paper/40 p-3">
                 <div className="flex items-start justify-between gap-3">

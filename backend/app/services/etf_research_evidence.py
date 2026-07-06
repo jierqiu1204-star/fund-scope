@@ -11,6 +11,10 @@ SIGNAL_CONTRACT_VERSION = "short_research_signal_v1"
 ALLOCATION_CONTRACT_VERSION = "etf_portfolio_allocation_contract_v1"
 REPLAY_CONTRACT_VERSION = "etf_replay_contract_v1"
 EXIT_CALIBRATION_CONTRACT_VERSION = "etf_exit_calibration_contract_v1"
+EXIT_ACTION_CONTRACT_VERSION = "etf_exit_action_v2"
+REENTRY_CONTRACT_VERSION = "etf_reentry_rule_v1"
+BUCKET_THRESHOLD_CONTRACT_VERSION = "etf_bucket_threshold_v1"
+EXIT_V2_EVIDENCE_CONTRACT_VERSION = "etf_exit_v2_evidence_contract_v1"
 EXECUTION_MODEL_DAILY_CLOSE = "daily_close_v1"
 EXECUTION_MODEL_INTRADAY_ALERT = "intraday_alert_v1"
 FEE_MODEL_SIMPLE_RATE = "simple_fee_rate_v1"
@@ -110,6 +114,25 @@ class ExitCalibrationContract:
     data_window: dict[str, str | None]
     evidence_schema_version: str = EVIDENCE_SCHEMA_VERSION
     calibration_contract_version: str = EXIT_CALIBRATION_CONTRACT_VERSION
+
+    def to_dict(self) -> dict[str, Any]:
+        return _with_hash(asdict(self))
+
+
+@dataclass(frozen=True)
+class ExitV2EvidenceContract:
+    validation_run_id: int | None
+    signal_contract_hash: str | None
+    signal_rule_version: str
+    exit_action_version: str
+    reentry_version: str
+    bucket_threshold_version: str
+    execution_model: str
+    data_cutoff: str | None
+    research_only: bool = True
+    approved_for_live: bool = False
+    evidence_schema_version: str = EVIDENCE_SCHEMA_VERSION
+    exit_v2_contract_version: str = EXIT_V2_EVIDENCE_CONTRACT_VERSION
 
     def to_dict(self) -> dict[str, Any]:
         return _with_hash(asdict(self))
@@ -236,6 +259,68 @@ def build_exit_calibration_contract(
             "end_date": end_date.isoformat() if end_date else None,
         },
     ).to_dict()
+
+
+def build_exit_v2_evidence_contract(
+    *,
+    validation_run_id: int | None,
+    signal_contract_hash: str | None,
+    signal_rule_version: str,
+    execution_model: str,
+    data_cutoff: date | datetime | None,
+    exit_action_version: str = EXIT_ACTION_CONTRACT_VERSION,
+    reentry_version: str = REENTRY_CONTRACT_VERSION,
+    bucket_threshold_version: str = BUCKET_THRESHOLD_CONTRACT_VERSION,
+    research_only: bool = True,
+    approved_for_live: bool = False,
+) -> dict[str, Any]:
+    return ExitV2EvidenceContract(
+        validation_run_id=validation_run_id,
+        signal_contract_hash=signal_contract_hash,
+        signal_rule_version=signal_rule_version,
+        exit_action_version=exit_action_version,
+        reentry_version=reentry_version,
+        bucket_threshold_version=bucket_threshold_version,
+        execution_model=execution_model,
+        data_cutoff=str(_canonical(data_cutoff)) if data_cutoff is not None else None,
+        research_only=research_only,
+        approved_for_live=approved_for_live,
+    ).to_dict()
+
+
+def build_exit_v2_baseline_comparison(
+    *,
+    topn_hold: dict[str, Any],
+    current_exit: dict[str, Any],
+    guard_only: dict[str, Any],
+    exit_v2: dict[str, Any],
+) -> dict[str, Any]:
+    baselines = {
+        "topn_fixed_hold": topn_hold,
+        "current_live_exit_rules": current_exit,
+        "guard_only": guard_only,
+        "exit_v2_reentry": exit_v2,
+    }
+    topn_return = float(
+        topn_hold.get("total_return_pct") or topn_hold.get("return_pct") or topn_hold.get("cumulative_return") or 0.0
+    )
+    v2_return = float(
+        exit_v2.get("total_return_pct") or exit_v2.get("return_pct") or exit_v2.get("cumulative_return") or 0.0
+    )
+    topn_drawdown = abs(float(topn_hold.get("max_drawdown_pct") or topn_hold.get("max_drawdown") or 0.0))
+    v2_drawdown = abs(float(exit_v2.get("max_drawdown_pct") or exit_v2.get("max_drawdown") or 0.0))
+    drawdown_improvement = topn_drawdown - v2_drawdown
+    meaningful_drawdown_improvement = 1.0 if max(topn_drawdown, v2_drawdown) > 1.0 else 0.01
+    v2_underperforms_hold = v2_return < topn_return and drawdown_improvement < meaningful_drawdown_improvement
+    return {
+        "baselines": baselines,
+        "v2_underperforms_hold": v2_underperforms_hold,
+        "drawdown_improvement_pct": round(drawdown_improvement, 4),
+        "meaningful_drawdown_improvement_pct": meaningful_drawdown_improvement,
+        "approved_for_live": False,
+        "research_only": True,
+        "conclusion": "V2 暂不适合升级为实时规则" if v2_underperforms_hold else "V2 可继续作为候选研究",
+    }
 
 
 def classify_evidence_status(

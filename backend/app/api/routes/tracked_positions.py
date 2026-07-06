@@ -90,6 +90,9 @@ async def _position_out(
         analysis.exit_signal,
         trend_weakening=bool(analysis.technical_metrics.get('trend_weakening')),
     )
+    analysis.exit_signal.position_action = sizing.action
+    analysis.exit_signal.action_version = sizing.action_version
+    analysis.exit_signal.reentry_rule_version = sizing.reentry_rule_version
     return TrackedPositionOut(
         id=row.id,
         asset_type=row.asset_type,
@@ -120,6 +123,11 @@ async def _position_out(
         recommended_trade_amount=sizing.recommended_trade_amount,
         recommended_trade_shares=sizing.recommended_trade_shares,
         position_sizing_reason=sizing.reason,
+        action_class=sizing.action_class,
+        exit_action_version=sizing.action_version,
+        reentry_state=sizing.reentry_state,
+        reentry_reason=sizing.reentry_reason,
+        reentry_rule_version=sizing.reentry_rule_version,
         max_profit_pct=analysis.max_profit_pct,
         profit_giveback_pct=analysis.profit_giveback_pct,
         holding_days=analysis.holding_days,

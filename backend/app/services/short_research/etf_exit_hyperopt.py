@@ -365,9 +365,31 @@ def simulate_intraday_exit_rule(
     manual_delay_minutes: int = DEFAULT_MANUAL_DELAY_MINUTES,
     enable_protection_guards: bool = False,
 ) -> dict[str, Any]:
-    _ = allow_daily_fallback
+    def _daily_fallback_result() -> dict[str, Any] | None:
+        if not allow_daily_fallback or not daily_points or len(daily_points) < 20:
+            return None
+        result = simulate_exit_rule(
+            daily_points,
+            params,
+            asset_bucket=asset_bucket,
+            enable_protection_guards=enable_protection_guards,
+        )
+        result.update(
+            {
+                "execution_model": EXECUTION_MODEL_DAILY_CLOSE,
+                "source_reliability": "verified_daily_close",
+                "missing_intraday_evidence_count": 0,
+                "no_lookahead_exclusions": [],
+                "execution_delay_minutes": None,
+            }
+        )
+        return result
+
     eligible_points = [point for point in intraday_points if point.decision_eligible and point.price > 0]
     if not eligible_points:
+        fallback = _daily_fallback_result()
+        if fallback is not None:
+            return fallback
         return {
             "sample_count": 0,
             "trade_count": 0,
@@ -394,6 +416,9 @@ def simulate_intraday_exit_rule(
         }
 
     if len(eligible_points) < MIN_INTRADAY_HISTORY_POINTS:
+        fallback = _daily_fallback_result()
+        if fallback is not None:
+            return fallback
         return {
             "sample_count": 0,
             "trade_count": 0,

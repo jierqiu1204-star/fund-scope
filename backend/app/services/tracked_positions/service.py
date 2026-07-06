@@ -109,6 +109,7 @@ from app.services.risk_alerts import (
     ETF_TRAILING_PROFIT_START_MAX_PCT,
     ETF_TRAILING_PROFIT_START_MIN_PCT,
     ETF_TRAILING_PROFIT_START_VOL_MULTIPLIER,
+    EXIT_ACTION_VERSION,
     HARD_STOP_LOSS_PCT,
     TAKE_PROFIT_WATCH_COOLDOWN_DAYS,
     TAKE_PROFIT_WATCH_PCT,
@@ -118,6 +119,7 @@ from app.services.risk_alerts import (
     AlertDecision,
     PositionSizingRecommendation,
     calculate_position_sizing,
+    evaluate_reentry_state,
 )
 from app.services.short_research.advisor import (
     ACTION_EXIT,
@@ -1636,6 +1638,31 @@ async def _latest_etf_observation_target(
     )
 
 
+def _rank_bucket(rank_order: int | None) -> str | None:
+    if rank_order is None or rank_order <= 0:
+        return None
+    if rank_order <= 5:
+        return "top5"
+    if rank_order <= 10:
+        return "top10"
+    if rank_order <= 20:
+        return "top20"
+    if rank_order <= 50:
+        return "top50"
+    return "outside"
+
+
+def _parse_action_date(value: Any) -> date | None:
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
 async def _owner_etf_protection_guard_context(
     session: AsyncSession,
     user_id: int,
@@ -1715,6 +1742,7 @@ async def position_sizing_recommendation(
 ) -> PositionSizingRecommendation:
     target_weight = None
     entry_timing_label = None
+    target = None
     if alert_type is not None:
         effective_alert_type = alert_type
     elif exit_signal is not None:
@@ -1747,6 +1775,31 @@ async def position_sizing_recommendation(
                 current_account_weight=recommendation.current_account_weight,
                 target_account_weight=recommendation.current_account_weight,
                 reason="；".join(guard_context["reasons"]),
+            )
+    if position.asset_type == ASSET_TYPE_ETF and effective_alert_type is None and recommendation.action == "hold":
+        state = dict(position.exit_state_json or {})
+        action_context = dict(state.get("latest_position_action") or {})
+        reentry = evaluate_reentry_state(
+            last_action=action_context.get("position_action"),
+            last_action_date=_parse_action_date(action_context.get("action_date")),
+            today=date.today(),
+            ranking_bucket=_rank_bucket(target.rank_order if target is not None else None),
+            entry_timing_label=entry_timing_label,
+            theme_trend=(target.metrics_json or {}).get("theme_trend") if target is not None else None,
+            data_reliability=snapshot.data_reliability,
+        )
+        if reentry.state != "not_applicable":
+            return PositionSizingRecommendation(
+                action=reentry.action,
+                label=reentry.label,
+                current_market_value=recommendation.current_market_value,
+                current_account_weight=recommendation.current_account_weight,
+                target_account_weight=recommendation.target_account_weight,
+                reason=recommendation.reason,
+                action_class=recommendation.action_class,
+                reentry_state=reentry.state,
+                reentry_reason=reentry.reason,
+                reentry_rule_version=reentry.rule_version,
             )
     return recommendation
 
@@ -2342,6 +2395,20 @@ async def create_alert_if_needed(
         email_status="pending",
     )
     alert.threshold_context_json = _alert_threshold_context(position, alert, decision, position_sizing)
+    if position_sizing.action in {"trim", "reduce", "exit"}:
+        state = dict(position.exit_state_json or {})
+        state["latest_position_action"] = {
+            "position_action": position_sizing.action,
+            "recommended_action_label": position_sizing.label,
+            "trigger_signal": decision.alert_type,
+            "action_date": signal_date.isoformat(),
+            "action_time": utcnow().isoformat(),
+            "reference_price": snapshot.current_price,
+            "cooldown_end": (signal_date + timedelta(days=3)).isoformat(),
+            "exit_action_version": EXIT_ACTION_VERSION,
+            "reentry_rule_version": position_sizing.reentry_rule_version,
+        }
+        position.exit_state_json = state
     session.add(alert)
     await session.commit()
     await session.refresh(alert)

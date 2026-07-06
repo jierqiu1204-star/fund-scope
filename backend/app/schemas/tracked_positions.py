@@ -69,6 +69,9 @@ class TrackedPositionExitSignal(BaseModel):
     email_eligible: bool = False
     email_eligibility_reason: str | None = None
     data_reliability: str | None = None
+    position_action: str | None = None
+    action_version: str | None = None
+    reentry_rule_version: str | None = None
 
 
 class TrackedPositionAlertOut(BaseModel):
@@ -165,6 +168,11 @@ class TrackedPositionOut(BaseModel):
     recommended_trade_amount: float | None = None
     recommended_trade_shares: float | None = None
     position_sizing_reason: str | None = None
+    action_class: str | None = None
+    exit_action_version: str | None = None
+    reentry_state: str = "not_applicable"
+    reentry_reason: str | None = None
+    reentry_rule_version: str | None = None
     max_profit_pct: float | None = None
     profit_giveback_pct: float | None = None
     holding_days: int | None = None

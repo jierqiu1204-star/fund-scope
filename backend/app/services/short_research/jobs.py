@@ -328,14 +328,48 @@ async def etf_strategy_comparison_backtest_job(
     max_assets: int = 180,
 ) -> dict[str, Any]:
     run = await run_etf_strategy_comparison_backtest(session, days=days, max_assets=max_assets)
+    metrics = dict(run.metrics_json or {})
+    data_coverage = dict(run.data_coverage_json or {})
+    strategies = list(metrics.get("strategies") or [])
+    exit_v2_comparison = dict(metrics.get("exit_v2_baseline_comparison") or {})
+    exit_v2_baselines = dict(exit_v2_comparison.get("baselines") or {})
+    rejected_count = 1 if exit_v2_comparison.get("v2_underperforms_hold") is True else 0
+    exit_event_count = 0
+    for strategy in strategies:
+        if not isinstance(strategy, dict):
+            continue
+        strategy_metrics = strategy.get("metrics")
+        if isinstance(strategy_metrics, dict):
+            exit_event_count += int(strategy_metrics.get("exit_event_count") or 0)
     return {
         "run_id": run.id,
         "status": run.status,
         "start_date": run.start_date.isoformat(),
         "end_date": run.end_date.isoformat(),
-        "best_strategy": (run.metrics_json or {}).get("best_strategy"),
-        "strategy_count": len((run.metrics_json or {}).get("strategies") or []),
-        "data_coverage": dict(run.data_coverage_json or {}),
+        "best_strategy": metrics.get("best_strategy"),
+        "strategy_count": len(strategies),
+        "data_coverage": data_coverage,
+        "selected_universe": {
+            "asset_type": "etf",
+            "days": days,
+            "max_assets": max_assets,
+            "strategy_keys": [strategy.get("strategy_key") for strategy in strategies if isinstance(strategy, dict)],
+        },
+        "coverage_funnel": {
+            "asset_count": data_coverage.get("asset_count"),
+            "trading_days": data_coverage.get("trading_days"),
+            "priced_asset_count": data_coverage.get("priced_asset_count"),
+            "signal_count": data_coverage.get("signal_count"),
+        },
+        "samples": {
+            "strategy_count": len(strategies),
+            "baseline_count": len(exit_v2_baselines),
+            "exit_event_count": exit_event_count,
+        },
+        "candidate_count": len(strategies),
+        "rejected_count": rejected_count,
+        "run_ids": {"strategy_comparison": run.id},
+        "research_only": True,
         "error_message": run.error_message,
     }
 

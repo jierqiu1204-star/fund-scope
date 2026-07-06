@@ -966,6 +966,8 @@ export type EtfStrategyComparison = {
   caveats: string[];
   strategies: EtfStrategyComparisonStrategy[];
   best_strategy: string | null;
+  exit_v2_baseline_comparison?: Record<string, unknown> | null;
+  exit_v2_evidence_contract?: Record<string, unknown> | null;
   error_message: string | null;
 };
 
@@ -1108,6 +1110,9 @@ export type TrackedPositionExitSignal = {
   label: string;
   level: "none" | "watch" | "warning" | "urgent";
   action_class: "none" | "actionable_exit" | "soft_watch" | "guard_only" | "data_waiting" | "research_only";
+  position_action: string | null;
+  action_version: string | null;
+  reentry_rule_version: string | null;
   guard_state: string | null;
   guard_reasons: string[];
   threshold_context: Record<string, unknown>;
@@ -1214,6 +1219,11 @@ export type TrackedPosition = {
   exit_signal: TrackedPositionExitSignal;
   position_action: string;
   recommended_action_label: string;
+  action_class: string | null;
+  exit_action_version: string | null;
+  reentry_state: string;
+  reentry_reason: string | null;
+  reentry_rule_version: string | null;
   current_market_value: number | null;
   current_account_weight: number | null;
   target_account_weight: number | null;

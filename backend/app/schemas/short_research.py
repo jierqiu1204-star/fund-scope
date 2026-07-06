@@ -450,6 +450,8 @@ class EtfStrategyComparisonOut(BaseModel):
     caveats: list[str] = Field(default_factory=list)
     strategies: list[dict[str, Any]] = Field(default_factory=list)
     best_strategy: str | None = None
+    exit_v2_baseline_comparison: dict[str, Any] | None = None
+    exit_v2_evidence_contract: dict[str, Any] | None = None
     error_message: str | None = None
 
 

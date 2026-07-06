@@ -204,6 +204,39 @@ async def test_admin_etf_score_bucket_validation_uses_background_job(
 
 
 @pytest.mark.asyncio
+async def test_admin_etf_exit_v2_validation_uses_background_job(
+    monkeypatch: pytest.MonkeyPatch,
+    client,
+) -> None:
+    async def fake_run_job(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("exit V2 validation must use background job")
+
+    async def fake_start_background_job(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        details = kwargs["details"]
+        return {
+            "id": 101,
+            "job_name": "etf_exit_v2_validation",
+            "status": "running",
+            "started_at": "2026-07-05T15:30:00",
+            "finished_at": None,
+            "error_message": None,
+            "details": details,
+        }
+
+    monkeypatch.setattr(admin_routes, "run_job", fake_run_job)
+    monkeypatch.setattr(admin_routes, "start_background_job", fake_start_background_job, raising=False)
+
+    response = await client.post("/api/admin/jobs/etf_exit_v2_validation/run?days=180")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "running"
+    assert payload["details"]["queued"] is True
+    assert payload["details"]["top_buckets"] == [5, 10, 20, 50]
+    assert payload["details"]["research_only"] is True
+
+
+@pytest.mark.asyncio
 async def test_fund_nav_backfill_job_writes_range_and_is_idempotent(
     monkeypatch: pytest.MonkeyPatch,
     client,

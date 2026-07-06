@@ -20,6 +20,7 @@ from app.services.short_research.backtest import (
     _risk_action,
     backtest_summary_payload,
     run_etf_portfolio_backtest,
+    run_etf_strategy_comparison_backtest,
 )
 from app.services.short_research.service import (
     ComputedAsset,
@@ -214,6 +215,30 @@ async def test_etf_portfolio_backtest_api_create_list_and_detail(client, app) ->
     assert detail_body["equity_curve"]
     assert detail_body["trades"]
     assert detail_body["label_summaries"]
+
+
+@pytest.mark.asyncio
+async def test_etf_strategy_comparison_includes_exit_v2_evidence(app) -> None:
+    codes = [f"57{index:04d}" for index in range(24)]
+    await _seed_backtest_etfs(app, codes=codes, days=150)
+
+    async with app.state.db.session() as session:
+        run = await run_etf_strategy_comparison_backtest(session, days=120, max_assets=80)
+
+    assert run.status == "success", run.error_message
+    metrics = run.metrics_json or {}
+    baselines = metrics["exit_v2_baseline_comparison"]["baselines"]
+
+    assert {"topn_fixed_hold", "current_live_exit_rules", "guard_only", "exit_v2_reentry"} <= set(baselines)
+    assert run.config_json["exit_v2_evidence_contract"]["research_only"] is True
+    assert run.config_json["exit_action_version"]
+    assert run.config_json["reentry_rule_version"]
+    for strategy in metrics["strategies"]:
+        strategy_metrics = strategy["metrics"]
+        assert "missed_upside_rate" in strategy_metrics
+        assert "protection_success_rate" in strategy_metrics
+        assert "reentry_count" in strategy_metrics
+        assert "alert_count" in strategy_metrics
 
 
 @pytest.mark.asyncio

@@ -2937,7 +2937,17 @@ function ShortTermClient() {
   };
 
   const renderPositionSizingRows = (item: TrackedPosition) => {
-    const tradeVerb = item.position_action === "add" ? "建议买入" : "建议卖出";
+    const tradeVerb = ["add", "reentry_candidate"].includes(item.position_action)
+      ? "建议买入"
+      : ["trim", "reduce", "exit"].includes(item.position_action)
+        ? "建议卖出"
+        : null;
+    const reentryLabels: Record<string, string> = {
+      waiting_cooldown: "冷却期内",
+      blocked: "暂不适合重新入场",
+      candidate: "可重新观察入场",
+      not_applicable: "无"
+    };
     return (
       <>
         <span>
@@ -2950,10 +2960,14 @@ function ShortTermClient() {
           目标占比：{item.target_account_weight === null ? "暂无" : (item.target_account_weight * 100).toFixed(1) + "%"}
         </span>
         <span>建议动作：{item.recommended_action_label}</span>
-        {item.recommended_trade_amount !== null ? (
+        {tradeVerb && item.recommended_trade_amount !== null ? (
           <span>{tradeVerb}：{formatCurrency(item.recommended_trade_amount)}</span>
         ) : null}
-        {item.recommended_trade_shares !== null ? <span>建议份额：约 {item.recommended_trade_shares.toFixed(0)} 份</span> : null}
+        {tradeVerb && item.recommended_trade_shares !== null ? <span>建议份额：约 {item.recommended_trade_shares.toFixed(0)} 份</span> : null}
+        {item.reentry_state && item.reentry_state !== "not_applicable" ? (
+          <span>重新入场：{reentryLabels[item.reentry_state] ?? item.reentry_state}</span>
+        ) : null}
+        {item.reentry_reason ? <span>重入说明：{item.reentry_reason}</span> : null}
         {item.position_sizing_reason ? <span>仓位说明：{item.position_sizing_reason}</span> : null}
       </>
     );
