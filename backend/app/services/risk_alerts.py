@@ -11,13 +11,21 @@ ALERT_RISK_WARNING = "risk_warning"
 ALERT_TAKE_PROFIT_WATCH = "take_profit_watch"
 ALERT_TRAILING_TAKE_PROFIT = "trailing_take_profit"
 ALERT_TREND_WEAKENING = "trend_weakening"
+ALERT_CONFIRMED_TREND_WEAKENING = "confirmed_trend_weakening"
 ALERT_HARD_STOP = "hard_stop"
+
+ACTION_CLASS_NONE = "none"
+ACTION_CLASS_ACTIONABLE_EXIT = "actionable_exit"
+ACTION_CLASS_SOFT_WATCH = "soft_watch"
+ACTION_CLASS_GUARD_ONLY = "guard_only"
+ACTION_CLASS_DATA_WAITING = "data_waiting"
+ACTION_CLASS_RESEARCH_ONLY = "research_only"
 
 EMAIL_ALERT_TYPES = {
     ALERT_EXIT_WATCH,
     ALERT_TAKE_PROFIT_WATCH,
     ALERT_TRAILING_TAKE_PROFIT,
-    ALERT_TREND_WEAKENING,
+    ALERT_CONFIRMED_TREND_WEAKENING,
     ALERT_HARD_STOP,
 }
 
@@ -46,7 +54,7 @@ SELL_ALERT_TYPES = {
     ALERT_EXIT_WATCH,
     ALERT_TAKE_PROFIT_WATCH,
     ALERT_TRAILING_TAKE_PROFIT,
-    ALERT_TREND_WEAKENING,
+    ALERT_CONFIRMED_TREND_WEAKENING,
     ALERT_HARD_STOP,
 }
 
@@ -149,10 +157,12 @@ def calculate_position_sizing(
         action = POSITION_ACTION_EXIT if trend_weakening and allow_full_exit else POSITION_ACTION_REDUCE
         target_weight = 0.0 if trend_weakening and allow_full_exit else current_weight * 0.5
         reason = "触发移动止盈，先保护已获得利润；若趋势也转弱则允许清仓。"
-    elif alert_type == ALERT_TREND_WEAKENING:
+    elif alert_type == ALERT_CONFIRMED_TREND_WEAKENING:
         action = POSITION_ACTION_REDUCE
         target_weight = current_weight * 0.5
-        reason = "触发趋势转弱，按半仓处理参考降低暴露。"
+        reason = "趋势转弱已被亏损、回吐或市场环境确认，按半仓处理参考降低暴露。"
+    elif alert_type == ALERT_TREND_WEAKENING:
+        reason = "趋势转弱当前只是风险警戒，不作为卖出或减仓金额建议。"
     elif alert_type == ALERT_TAKE_PROFIT_WATCH:
         action = POSITION_ACTION_TRIM
         target_weight = current_weight * 0.7

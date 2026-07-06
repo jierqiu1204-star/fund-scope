@@ -6,6 +6,7 @@ from app.services.short_research.etf_exit_hyperopt import (
     EXECUTION_MODEL_DAILY_CLOSE,
     HyperoptPricePoint,
     HyperoptSeries,
+    PROTECTION_GUARD_VERSION,
     best_candidate_for_bucket,
     policy_evidence_level,
     simulate_intraday_exit_rule,
@@ -48,9 +49,21 @@ def test_policy_validation_compares_hold_default_and_candidate() -> None:
 
     validation = candidate["confidence"]["policy_validation"]
     assert validation["version"] == "exit_policy_validation_v2"
-    assert set(validation["policies"]) == {"hold_baseline", "current_default", "candidate_params"}
+    assert validation["policy_class"] == "exit_risk_validation"
+    assert validation["protection_guard_version"] == PROTECTION_GUARD_VERSION
+    assert validation["research_only"] is True
+    assert validation["approved_for_live"] is False
+    assert validation["approval_status"] == "candidate"
+    assert set(validation["policies"]) == {
+        "hold_baseline",
+        "current_default",
+        "candidate_params",
+        "guard_enabled_policy",
+    }
     assert validation["policies"]["current_default"]["parameters"] == DEFAULT_LIVE_PARAMS
     assert validation["policies"]["candidate_params"]["parameters"] == candidate["params"]
+    assert validation["policies"]["guard_enabled_policy"]["parameters"] == candidate["params"]
+    assert validation["policies"]["guard_enabled_policy"]["protection_guard_version"] == PROTECTION_GUARD_VERSION
     assert validation["policies"]["hold_baseline"]["metrics"]["trade_count"] == 0
 
 
@@ -94,3 +107,28 @@ def test_intraday_policy_validation_does_not_fallback_to_daily_close() -> None:
     assert result["source_reliability"] == "unavailable"
     assert result["missing_intraday_evidence_count"] == 1
     assert result["sample_count"] == 0
+
+
+def test_candidate_policy_remains_research_only_not_approved() -> None:
+    trend = [1 + index * 0.0015 for index in range(100)]
+    series = [
+        HyperoptSeries(
+            code="159915",
+            name="创业板ETF",
+            asset_bucket="equity",
+            theme_group="growth",
+            points=_points(trend),
+        )
+    ]
+
+    candidate = best_candidate_for_bucket(
+        series,
+        execution_model=EXECUTION_MODEL_DAILY_CLOSE,
+        manual_delay_minutes=3,
+    )
+
+    assert candidate["status"] in {"candidate", "rejected", "evidence_insufficient"}
+    assert candidate["confidence"]["approved_for_live"] is False
+    assert candidate["confidence"]["approval_status"] == "candidate"
+    assert candidate["confidence"]["policy_validation"]["auto_applied"] is False
+    assert candidate["confidence"]["policy_validation"]["research_only"] is True

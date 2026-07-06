@@ -276,7 +276,7 @@ async def run_job_by_name(
     if job_name == "etf_optimized_allocation":
         return await run_job(request.app.state.db.session, job_name, etf_optimized_allocation_job)
     if job_name == "etf_exit_hyperopt":
-        return await run_job(
+        return await start_background_job(
             request.app.state.db.session,
             job_name,
             lambda tracked_session: etf_exit_hyperopt_job(
@@ -288,9 +288,17 @@ async def run_job_by_name(
                 universe_scope="all_eligible",
                 batch_size=100,
             ),
+            details={
+                "days": min(days, 1095),
+                "max_assets": max_assets,
+                "execution_model": "intraday_alert",
+                "universe_scope": "all_eligible",
+                "batch_size": 100,
+                "research_only": True,
+            },
         )
     if job_name == "etf_exit_signal_credibility":
-        return await run_job(
+        return await start_background_job(
             request.app.state.db.session,
             job_name,
             lambda tracked_session: etf_exit_signal_credibility_job(
@@ -299,6 +307,13 @@ async def run_job_by_name(
                 max_assets=max_assets or 50,
                 universe_scope=universe_scope,
             ),
+            details={
+                "days": min(days, 1095),
+                "max_assets": max_assets or 50,
+                "universe_scope": universe_scope,
+                "ranking_sort": "opportunity",
+                "research_only": True,
+            },
         )
     if job_name == "daily_etf_label_outcome_review":
         return await run_job(request.app.state.db.session, job_name, daily_etf_label_outcome_review_job)

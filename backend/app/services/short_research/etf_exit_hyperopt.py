@@ -28,6 +28,7 @@ from app.services.short_research.service import has_available_opportunity_score,
 RULE_VERSION = "etf_exit_hyperopt_v1"
 CALIBRATION_RULE_VERSION = "etf_exit_calibration_v1"
 POLICY_VALIDATION_VERSION = "exit_policy_validation_v2"
+PROTECTION_GUARD_VERSION = "etf_exit_protection_guards_v1"
 EXECUTION_MODEL_DAILY_CLOSE = "daily_close"
 EXECUTION_MODEL_INTRADAY_ALERT = "intraday_alert"
 OBJECTIVE_STABILITY_FIRST = "stability_first"
@@ -192,6 +193,7 @@ def simulate_exit_rule(
     params: dict[str, float | int],
     *,
     asset_bucket: str = "unknown",
+    enable_protection_guards: bool = False,
 ) -> dict[str, Any]:
     valid = [point for point in points if point.close > 0]
     if len(valid) < 20:
@@ -207,6 +209,10 @@ def simulate_exit_rule(
             "unfilled_count": 0,
             "false_exit_count": 0,
             "protected_exit_count": 0,
+            "guard_suppressed_alert_count": 0,
+            "guard_only_trend_count": 0,
+            "cooldown_suppressed_count": 0,
+            "repeated_stop_guard_count": 0,
             "missed_upside_rate": None,
             "protected_exit_rate": None,
         }
@@ -223,6 +229,12 @@ def simulate_exit_rule(
     alert_count = 0
     false_exit_count = 0
     protected_exit_count = 0
+    guard_suppressed_alert_count = 0
+    guard_only_trend_count = 0
+    cooldown_suppressed_count = 0
+    repeated_stop_guard_count = 0
+    cooldown_until_index = -1
+    hard_stop_indexes: list[int] = []
     watch_alert_active = False
     negative_streak = 0
     index = 1
@@ -258,9 +270,35 @@ def simulate_exit_rule(
             watch_alert_active = True
 
         if exit_reason is not None:
+            if enable_protection_guards:
+                recent_hard_stops = [value for value in hard_stop_indexes if index - value <= 40]
+                trend_confirmed = (
+                    profit_pct <= min(-1.0, thresholds["hard_stop_pct"] / 2)
+                    or giveback_pct >= thresholds["trailing_giveback_pct"] * 0.75
+                )
+                if index < cooldown_until_index:
+                    alert_count += 1
+                    guard_suppressed_alert_count += 1
+                    cooldown_suppressed_count += 1
+                    index += 1
+                    continue
+                if exit_reason == "trend_weakening" and not trend_confirmed:
+                    alert_count += 1
+                    guard_suppressed_alert_count += 1
+                    guard_only_trend_count += 1
+                    index += 1
+                    continue
+                if exit_reason != "hard_stop" and len(recent_hard_stops) >= 2:
+                    alert_count += 1
+                    guard_suppressed_alert_count += 1
+                    repeated_stop_guard_count += 1
+                    index += 1
+                    continue
             realized = current / entry_price - 1.0
             trade_returns.append(realized)
             alert_count += 1
+            if exit_reason == "hard_stop":
+                hard_stop_indexes.append(index)
             future = valid[index + 1 : index + 6]
             if future:
                 max_future_return = max(point.close / current - 1.0 for point in future)
@@ -271,6 +309,8 @@ def simulate_exit_rule(
                     protected_exit_count += 1
             equity *= 1.0 + realized
             peak_equity = max(peak_equity, equity)
+            if enable_protection_guards:
+                cooldown_until_index = index + 3
             index += 1
             if index >= len(valid):
                 break
@@ -298,10 +338,15 @@ def simulate_exit_rule(
         "unfilled_count": 0,
         "false_exit_count": false_exit_count,
         "protected_exit_count": protected_exit_count,
+        "guard_suppressed_alert_count": guard_suppressed_alert_count,
+        "guard_only_trend_count": guard_only_trend_count,
+        "cooldown_suppressed_count": cooldown_suppressed_count,
+        "repeated_stop_guard_count": repeated_stop_guard_count,
         "missed_upside_rate": false_exit_count / trade_count if trade_count else None,
         "protected_exit_rate": protected_exit_count / trade_count if trade_count else None,
         "volatility_unit_pct": vol_pct,
         "thresholds": thresholds,
+        "protection_guard_version": PROTECTION_GUARD_VERSION if enable_protection_guards else None,
     }
 
 
@@ -313,6 +358,7 @@ def simulate_intraday_exit_rule(
     daily_points: list[HyperoptPricePoint] | None = None,
     allow_daily_fallback: bool = False,
     manual_delay_minutes: int = DEFAULT_MANUAL_DELAY_MINUTES,
+    enable_protection_guards: bool = False,
 ) -> dict[str, Any]:
     _ = allow_daily_fallback
     eligible_points = [point for point in intraday_points if point.decision_eligible and point.price > 0]
@@ -329,6 +375,10 @@ def simulate_intraday_exit_rule(
             "unfilled_count": 0,
             "false_exit_count": 0,
             "protected_exit_count": 0,
+            "guard_suppressed_alert_count": 0,
+            "guard_only_trend_count": 0,
+            "cooldown_suppressed_count": 0,
+            "repeated_stop_guard_count": 0,
             "missed_upside_rate": None,
             "protected_exit_rate": None,
             "execution_model": EXECUTION_MODEL_INTRADAY_ALERT,
@@ -351,6 +401,10 @@ def simulate_intraday_exit_rule(
             "unfilled_count": 0,
             "false_exit_count": 0,
             "protected_exit_count": 0,
+            "guard_suppressed_alert_count": 0,
+            "guard_only_trend_count": 0,
+            "cooldown_suppressed_count": 0,
+            "repeated_stop_guard_count": 0,
             "missed_upside_rate": None,
             "protected_exit_rate": None,
             "execution_model": EXECUTION_MODEL_INTRADAY_ALERT,
@@ -379,6 +433,12 @@ def simulate_intraday_exit_rule(
     unfilled_count = 0
     false_exit_count = 0
     protected_exit_count = 0
+    guard_suppressed_alert_count = 0
+    guard_only_trend_count = 0
+    cooldown_suppressed_count = 0
+    repeated_stop_guard_count = 0
+    cooldown_until_index = -1
+    hard_stop_indexes: list[int] = []
     watch_alert_active = False
     negative_streak = 0
     index = 1
@@ -412,6 +472,30 @@ def simulate_intraday_exit_rule(
             watch_alert_active = True
 
         if exit_reason is not None:
+            if enable_protection_guards:
+                recent_hard_stops = [value for value in hard_stop_indexes if index - value <= 80]
+                trend_confirmed = (
+                    profit_pct <= min(-1.0, thresholds["hard_stop_pct"] / 2)
+                    or giveback_pct >= thresholds["trailing_giveback_pct"] * 0.75
+                )
+                if index < cooldown_until_index:
+                    alert_count += 1
+                    guard_suppressed_alert_count += 1
+                    cooldown_suppressed_count += 1
+                    index += 1
+                    continue
+                if exit_reason == "trend_weakening" and not trend_confirmed:
+                    alert_count += 1
+                    guard_suppressed_alert_count += 1
+                    guard_only_trend_count += 1
+                    index += 1
+                    continue
+                if exit_reason != "hard_stop" and len(recent_hard_stops) >= 2:
+                    alert_count += 1
+                    guard_suppressed_alert_count += 1
+                    repeated_stop_guard_count += 1
+                    index += 1
+                    continue
             alert_count += 1
             execute_after = point.quote_time + delay
             fill_index: int | None = None
@@ -427,6 +511,8 @@ def simulate_intraday_exit_rule(
             fill = eligible_points[fill_index]
             realized = fill.price / entry_price - 1.0
             trade_returns.append(realized)
+            if exit_reason == "hard_stop":
+                hard_stop_indexes.append(index)
             future = eligible_points[fill_index + 1 : fill_index + 6]
             if future:
                 max_future_return = max(point.price / fill.price - 1.0 for point in future)
@@ -437,6 +523,8 @@ def simulate_intraday_exit_rule(
                     protected_exit_count += 1
             equity *= 1.0 + realized
             peak_equity = max(peak_equity, equity)
+            if enable_protection_guards:
+                cooldown_until_index = fill_index + 12
             index = fill_index + 1
             if index >= len(eligible_points):
                 break
@@ -465,6 +553,10 @@ def simulate_intraday_exit_rule(
         "unfilled_count": unfilled_count,
         "false_exit_count": false_exit_count,
         "protected_exit_count": protected_exit_count,
+        "guard_suppressed_alert_count": guard_suppressed_alert_count,
+        "guard_only_trend_count": guard_only_trend_count,
+        "cooldown_suppressed_count": cooldown_suppressed_count,
+        "repeated_stop_guard_count": repeated_stop_guard_count,
         "missed_upside_rate": false_exit_count / trade_count if trade_count else None,
         "protected_exit_rate": protected_exit_count / trade_count if trade_count else None,
         "volatility_unit_pct": vol_pct,
@@ -474,6 +566,7 @@ def simulate_intraday_exit_rule(
         "missing_intraday_evidence_count": 0,
         "no_lookahead_exclusions": [],
         "execution_delay_minutes": manual_delay_minutes,
+        "protection_guard_version": PROTECTION_GUARD_VERSION if enable_protection_guards else None,
     }
 
 
@@ -492,6 +585,10 @@ def aggregate_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
             "unfilled_count": 0,
             "false_exit_count": 0,
             "protected_exit_count": 0,
+            "guard_suppressed_alert_count": 0,
+            "guard_only_trend_count": 0,
+            "cooldown_suppressed_count": 0,
+            "repeated_stop_guard_count": 0,
             "missed_upside_rate": None,
             "protected_exit_rate": None,
         }
@@ -501,6 +598,10 @@ def aggregate_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
     unfilled_count = sum(int(item.get("unfilled_count") or 0) for item in usable)
     false_exit_count = sum(int(item.get("false_exit_count") or 0) for item in usable)
     protected_exit_count = sum(int(item.get("protected_exit_count") or 0) for item in usable)
+    guard_suppressed_alert_count = sum(int(item.get("guard_suppressed_alert_count") or 0) for item in usable)
+    guard_only_trend_count = sum(int(item.get("guard_only_trend_count") or 0) for item in usable)
+    cooldown_suppressed_count = sum(int(item.get("cooldown_suppressed_count") or 0) for item in usable)
+    repeated_stop_guard_count = sum(int(item.get("repeated_stop_guard_count") or 0) for item in usable)
     total_returns = [float(item["total_return"]) for item in usable if item.get("total_return") is not None]
     avg_trade_returns = [
         float(item["avg_trade_return"]) for item in usable if item.get("avg_trade_return") is not None
@@ -524,6 +625,10 @@ def aggregate_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
         "unfilled_count": unfilled_count,
         "false_exit_count": false_exit_count,
         "protected_exit_count": protected_exit_count,
+        "guard_suppressed_alert_count": guard_suppressed_alert_count,
+        "guard_only_trend_count": guard_only_trend_count,
+        "cooldown_suppressed_count": cooldown_suppressed_count,
+        "repeated_stop_guard_count": repeated_stop_guard_count,
         "missed_upside_rate": false_exit_count / trade_count if trade_count else None,
         "protected_exit_rate": protected_exit_count / trade_count if trade_count else None,
     }
@@ -655,6 +760,7 @@ def policy_validation_summary(
     hold_metrics: dict[str, Any],
     default_metrics: dict[str, Any],
     candidate_metrics: dict[str, Any],
+    guard_enabled_metrics: dict[str, Any],
     candidate_params: dict[str, float | int],
     rolling_metrics: dict[str, Any],
     baseline_comparison: dict[str, Any],
@@ -664,8 +770,12 @@ def policy_validation_summary(
     level = policy_evidence_level(candidate_metrics, rolling_metrics, baseline_comparison)
     return {
         "version": POLICY_VALIDATION_VERSION,
+        "policy_class": "exit_risk_validation",
+        "protection_guard_version": PROTECTION_GUARD_VERSION,
         "level": level,
         "research_only": True,
+        "approved_for_live": False,
+        "approval_status": "candidate",
         "auto_applied": False,
         "execution_model": execution_model,
         "manual_delay_minutes": manual_delay_minutes,
@@ -683,6 +793,12 @@ def policy_validation_summary(
                 "description": "参数搜索得到的研究候选，不自动生效。",
                 "parameters": candidate_params,
                 "metrics": candidate_metrics,
+            },
+            "guard_enabled_policy": {
+                "description": "候选参数叠加保护层：未确认趋势只警戒，退出后冷却，连续止损后压制非硬止损动作。",
+                "parameters": candidate_params,
+                "protection_guard_version": PROTECTION_GUARD_VERSION,
+                "metrics": guard_enabled_metrics,
             },
         },
         "baseline_comparison": baseline_comparison,
@@ -853,6 +969,7 @@ def evaluate_parameter_set(
     *,
     execution_model: str = EXECUTION_MODEL_INTRADAY_ALERT,
     manual_delay_minutes: int = DEFAULT_MANUAL_DELAY_MINUTES,
+    enable_protection_guards: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     train_results: list[dict[str, Any]] = []
     oos_results: list[dict[str, Any]] = []
@@ -867,6 +984,7 @@ def evaluate_parameter_set(
                     asset_bucket=item.asset_bucket,
                     daily_points=train_points,
                     manual_delay_minutes=manual_delay_minutes,
+                    enable_protection_guards=enable_protection_guards,
                 )
             )
             if len(oos_intraday) >= MIN_INTRADAY_HISTORY_POINTS:
@@ -877,12 +995,27 @@ def evaluate_parameter_set(
                         asset_bucket=item.asset_bucket,
                         daily_points=oos_points,
                         manual_delay_minutes=manual_delay_minutes,
+                        enable_protection_guards=enable_protection_guards,
                     )
                 )
         else:
-            train_results.append(simulate_exit_rule(train_points, params, asset_bucket=item.asset_bucket))
+            train_results.append(
+                simulate_exit_rule(
+                    train_points,
+                    params,
+                    asset_bucket=item.asset_bucket,
+                    enable_protection_guards=enable_protection_guards,
+                )
+            )
             if len(oos_points) >= 20:
-                oos_results.append(simulate_exit_rule(oos_points, params, asset_bucket=item.asset_bucket))
+                oos_results.append(
+                    simulate_exit_rule(
+                        oos_points,
+                        params,
+                        asset_bucket=item.asset_bucket,
+                        enable_protection_guards=enable_protection_guards,
+                    )
+                )
     return aggregate_metrics(train_results), aggregate_metrics(oos_results)
 
 
@@ -1055,6 +1188,13 @@ def best_candidate_for_bucket(
         execution_model=execution_model,
         manual_delay_minutes=manual_delay_minutes,
     )
+    _guard_train_metrics, guard_oos_metrics = evaluate_parameter_set(
+        series,
+        best["params"],
+        execution_model=execution_model,
+        manual_delay_minutes=manual_delay_minutes,
+        enable_protection_guards=True,
+    )
     status, conclusion = classify_hyperopt_candidate(
         best["train_metrics"],
         best["out_of_sample_metrics"],
@@ -1077,6 +1217,7 @@ def best_candidate_for_bucket(
         hold_metrics=hold_oos_metrics,
         default_metrics=baseline_oos_metrics,
         candidate_metrics=best["out_of_sample_metrics"],
+        guard_enabled_metrics=guard_oos_metrics,
         candidate_params=best["params"],
         rolling_metrics=best["rolling_metrics"],
         baseline_comparison=best["baseline_comparison"],
@@ -1089,7 +1230,12 @@ def best_candidate_for_bucket(
             "baseline_comparison": best["baseline_comparison"],
             "hold_baseline_metrics": hold_oos_metrics,
             "policy_validation": policy_validation,
+            "guard_enabled_metrics": guard_oos_metrics,
+            "protection_guard_version": PROTECTION_GUARD_VERSION,
             "policy_evidence_level": policy_validation["level"],
+            "policy_class": policy_validation["policy_class"],
+            "approval_status": policy_validation["approval_status"],
+            "approved_for_live": False,
             "rejection_reason": best["rejection_reason"],
             "execution_model": execution_model,
             "manual_delay_minutes": manual_delay_minutes,
@@ -1442,6 +1588,10 @@ async def run_etf_exit_hyperopt(
             "rule_version": RULE_VERSION,
             "calibration_rule_version": CALIBRATION_RULE_VERSION,
             "policy_validation_version": POLICY_VALIDATION_VERSION,
+            "protection_guard_version": PROTECTION_GUARD_VERSION,
+            "policy_class": "exit_risk_validation",
+            "approved_for_live": False,
+            "approval_status": "research_only",
             "execution_model": execution_model,
             "contract_hash": run.contract_hash,
             "asset_count": len(series),
@@ -1543,6 +1693,11 @@ async def etf_exit_hyperopt_payload(session: AsyncSession, run: EtfExitHyperoptR
                 "rejection_reason": (item.confidence_json or {}).get("rejection_reason"),
                 "coverage_status": coverage_status,
                 "manual_delay_minutes": (item.confidence_json or {}).get("manual_delay_minutes"),
+                "policy_class": (item.confidence_json or {}).get("policy_class"),
+                "approval_status": (item.confidence_json or {}).get("approval_status"),
+                "approved_for_live": bool((item.confidence_json or {}).get("approved_for_live") is True),
+                "protection_guard_version": (item.confidence_json or {}).get("protection_guard_version"),
+                "guard_enabled_metrics": dict((item.confidence_json or {}).get("guard_enabled_metrics") or {}),
                 "confidence": dict(item.confidence_json or {}),
                 "source_reliability": item.source_reliability,
                 "score": item.score,

@@ -25,6 +25,7 @@ import type {
   EtfPortfolioBacktestList,
   EtfStrategyComparison,
   EtfStrategyHealthcheck,
+  JobRun,
   ShortResearchObservationPortfolio
 } from "@/lib/types";
 
@@ -61,7 +62,8 @@ function signalLabel(value: string) {
   const labels: Record<string, string> = {
     hard_stop: "硬止损",
     trailing_take_profit: "移动止盈",
-    trend_weakening: "趋势转弱",
+    trend_weakening: "趋势警戒",
+    confirmed_trend_weakening: "确认趋势转弱",
     take_profit_watch: "止盈观察",
     exit_watch: "退出观察"
   };
@@ -75,10 +77,10 @@ function metadataString(metadata: Record<string, unknown>, key: string) {
 
 function policyLevelLabel(value: string | null) {
   if (value === "high") {
-    return "高可信";
+    return "高证据";
   }
   if (value === "medium") {
-    return "中等可信";
+    return "中等证据";
   }
   if (value === "low") {
     return "样本不足/仅供观察";
@@ -329,31 +331,27 @@ export default function EtfEvidencePage() {
   const runExitHyperopt = useMutation({
     mutationFn: async () =>
       (
-        await api.post<EtfExitHyperopt>("/api/short-research/etf-exit-hyperopt/run", {
-          days: 730,
-          objective: "stability_first",
-          execution_model: "intraday_alert",
-          manual_delay_minutes: 3,
-          universe_scope: "all_eligible",
-          batch_size: 100
-        })
+        await api.post<JobRun>("/api/admin/jobs/etf_exit_hyperopt/run?days=730")
       ).data,
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["short-research", "etf-exit-hyperopt"] });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["short-research", "etf-exit-hyperopt"] }),
+        queryClient.invalidateQueries({ queryKey: ["admin", "jobs"] })
+      ]);
     }
   });
   const runExitCredibility = useMutation({
     mutationFn: async () =>
       (
-        await api.post<EtfExitCredibility>("/api/short-research/etf-exit-credibility/run", {
-          days: 730,
-          max_assets: 50,
-          execution_model: "intraday_alert",
-          universe_scope: "latest_opportunity_top"
-        })
+        await api.post<JobRun>(
+          "/api/admin/jobs/etf_exit_signal_credibility/run?days=730&max_assets=50&universe_scope=latest_opportunity_top"
+        )
       ).data,
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["short-research", "etf-exit-credibility"] });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["short-research", "etf-exit-credibility"] }),
+        queryClient.invalidateQueries({ queryKey: ["admin", "jobs"] })
+      ]);
     }
   });
 
@@ -742,6 +740,14 @@ export default function EtfEvidencePage() {
                 label="证据版本"
                 value={metadataString(exitHyperopt.data.summary, "policy_validation_version") ?? "旧口径"}
               />
+              <EvidenceStat
+                label="保护层版本"
+                value={metadataString(exitHyperopt.data.summary, "protection_guard_version") ?? "暂无"}
+              />
+              <EvidenceStat
+                label="生效状态"
+                value={exitHyperopt.data.summary.approved_for_live === true ? "已批准生效" : "研究候选，未生效"}
+              />
             </div>
             <div className="mt-3 grid gap-3 md:grid-cols-2">
               <EvidenceStat
@@ -787,6 +793,10 @@ export default function EtfEvidencePage() {
                     <span>
                       证据等级：{policyLevelLabel(metadataString(item.confidence, "policy_evidence_level"))}
                     </span>
+                    <span>策略类型：{item.policy_class ?? "旧口径"}</span>
+                    <span>批准状态：{item.approved_for_live ? "已批准生效" : item.approval_status ?? "研究候选"}</span>
+                    <span>保护层：{item.protection_guard_version ?? "暂无"}</span>
+                    <span>Guard 压制：{metricInteger(item.guard_enabled_metrics, "guard_suppressed_alert_count")}</span>
                     <span>数据源：{item.source_reliability ?? "旧口径"}</span>
                   </div>
                   {item.rejection_reason ? (

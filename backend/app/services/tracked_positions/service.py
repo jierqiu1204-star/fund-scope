@@ -89,6 +89,12 @@ from app.services.market_data import (
 )
 from app.services.notifier import Notifier
 from app.services.risk_alerts import (
+    ACTION_CLASS_ACTIONABLE_EXIT,
+    ACTION_CLASS_DATA_WAITING,
+    ACTION_CLASS_GUARD_ONLY,
+    ACTION_CLASS_NONE,
+    ACTION_CLASS_SOFT_WATCH,
+    ALERT_CONFIRMED_TREND_WEAKENING,
     ALERT_EXIT_WATCH,
     ALERT_HARD_STOP,
     ALERT_RISK_WARNING,
@@ -724,6 +730,12 @@ def _exit_signal(
     alert_type: str | None = None,
     label: str = "暂无卖出/减仓提醒",
     level: str = "none",
+    action_class: str = ACTION_CLASS_NONE,
+    guard_state: str | None = None,
+    guard_reasons: list[str] | None = None,
+    threshold_context: dict[str, Any] | None = None,
+    approved_for_live: bool = False,
+    no_alert_reason: str | None = None,
     reasons: list[str] | None = None,
     email_eligible: bool = False,
     email_eligibility_reason: str | None = None,
@@ -734,6 +746,12 @@ def _exit_signal(
         alert_type=alert_type,
         label=label,
         level=cast(Any, level),
+        action_class=cast(Any, action_class),
+        guard_state=guard_state,
+        guard_reasons=guard_reasons or [],
+        threshold_context=threshold_context or {},
+        approved_for_live=approved_for_live,
+        no_alert_reason=no_alert_reason,
         reason=reason_list[0] if reason_list else None,
         reasons=reason_list,
         email_eligible=email_eligible,
@@ -747,13 +765,24 @@ def _alert_type_label(alert_type: str) -> str:
         ALERT_EXIT_WATCH: "卖出/减仓提醒",
         ALERT_TAKE_PROFIT_WATCH: "止盈观察提醒",
         ALERT_TRAILING_TAKE_PROFIT: "盈利回吐提醒 / 卖出减仓提醒",
-        ALERT_TREND_WEAKENING: "卖出/减仓提醒",
+        ALERT_TREND_WEAKENING: "趋势警戒",
+        ALERT_CONFIRMED_TREND_WEAKENING: "确认趋势转弱提醒",
         ALERT_HARD_STOP: "止损提醒",
     }.get(alert_type, "网页风险提示")
 
 
 def _should_send_email(alert_type: str) -> bool:
     return alert_type in EMAIL_ALERT_TYPES
+
+
+def _action_class_for_alert_type(alert_type: str | None) -> str:
+    if alert_type in {ALERT_HARD_STOP, ALERT_TRAILING_TAKE_PROFIT, ALERT_CONFIRMED_TREND_WEAKENING, ALERT_EXIT_WATCH}:
+        return ACTION_CLASS_ACTIONABLE_EXIT
+    if alert_type == ALERT_TAKE_PROFIT_WATCH:
+        return ACTION_CLASS_SOFT_WATCH
+    if alert_type in {ALERT_TREND_WEAKENING, ALERT_RISK_WARNING}:
+        return ACTION_CLASS_GUARD_ONLY
+    return ACTION_CLASS_NONE
 
 
 def _is_fresh_intraday_snapshot(snapshot: TrackedEtfIntradaySnapshotOut | None) -> bool:
@@ -790,6 +819,10 @@ def _annotate_exit_signal_email_eligibility(
         signal.email_eligible = False
         signal.email_eligibility_reason = "暂无明确持仓处理信号。"
         return signal
+    if signal.action_class in {ACTION_CLASS_GUARD_ONLY, ACTION_CLASS_DATA_WAITING}:
+        signal.email_eligible = False
+        signal.email_eligibility_reason = signal.email_eligibility_reason or "这是风险警戒或等待数据状态，仅在网页展示。"
+        return signal
     if not _should_send_email(signal.alert_type):
         signal.email_eligible = False
         signal.email_eligibility_reason = "数据质量或结构提示只在网页展示，不发送邮件。"
@@ -822,6 +855,8 @@ def _decision_email_data_eligible(
 def _web_only_message(alert_type: str) -> str:
     if alert_type == ALERT_RISK_WARNING:
         return "仅网页提示：这是数据质量或盘中结构提示，不是明确卖出/减仓信号。"
+    if alert_type == ALERT_TREND_WEAKENING:
+        return "仅网页提示：趋势转弱当前只是风险警戒，未被亏损、回吐或榜单转弱确认。"
     if alert_type == ALERT_TAKE_PROFIT_WATCH:
         return "仅网页提示：止盈观察用于提醒你关注利润，不是明确卖出/减仓信号。"
     return "仅网页提示：不是明确卖出/减仓信号。"
@@ -839,6 +874,8 @@ def _performance_analysis(
     if not chart:
         exit_signal = _exit_signal(
             reasons=["等待公开净值或 ETF 日线数据，暂不能计算卖出/减仓提醒。"],
+            action_class=ACTION_CLASS_DATA_WAITING,
+            no_alert_reason="等待公开净值或 ETF 日线数据。",
             data_reliability=RELIABILITY_MISSING if position.asset_type == ASSET_TYPE_ETF else "unavailable",
         )
         return PositionAnalysis(
@@ -858,6 +895,8 @@ def _performance_analysis(
     if current_pnl_pct is None or not pnl_points:
         exit_signal = _exit_signal(
             reasons=["缺少买入净值或估算份额，暂不能计算卖出/减仓提醒。"],
+            action_class=ACTION_CLASS_DATA_WAITING,
+            no_alert_reason="缺少买入净值或估算份额。",
             data_reliability=RELIABILITY_MISSING if position.asset_type == ASSET_TYPE_ETF else "unavailable",
         )
         return PositionAnalysis(
@@ -919,6 +958,16 @@ def _performance_analysis(
         and return_5d_pct < 0
     )
     trend_weakening = dynamic_thresholds.trend_weakening if dynamic_thresholds else rule_trend_weakening
+    trend_confirmed_by_loss = current_pnl_pct <= min(-1.0, hard_stop_pct / 2)
+    trend_confirmed_by_giveback = (
+        trailing_threshold is not None
+        and profit_giveback_pct >= max(1.0, trailing_threshold * 0.75)
+    )
+    trend_confirmed_by_ranking = current_label in {"不适合短线", "数据不足"}
+    confirmed_trend_weakening = bool(
+        trend_weakening
+        and (trend_confirmed_by_loss or trend_confirmed_by_giveback or trend_confirmed_by_ranking)
+    )
     trend_distances = []
     if ma5:
         trend_distances.append((current_point.price / ma5 - 1.0) * 100)
@@ -954,6 +1003,9 @@ def _performance_analysis(
             }
         )
     source_message = _quote_source_message(intraday_snapshot)
+    ma5_text = f"{ma5:.4f}" if ma5 is not None else "暂无"
+    ma10_text = f"{ma10:.4f}" if ma10 is not None else "暂无"
+    return_5d_text = f"{return_5d_pct:.2f}%" if return_5d_pct is not None else "暂无"
 
     technical_metrics: dict[str, Any] = {
         "current_pnl_pct": _round_or_none(current_pnl_pct),
@@ -968,6 +1020,17 @@ def _performance_analysis(
         "trailing_threshold_pct": _round_or_none(trailing_threshold),
         "trailing_stop_pnl_pct": _round_or_none(trailing_stop_pnl_pct),
         "trend_weakening": trend_weakening,
+        "confirmed_trend_weakening": confirmed_trend_weakening,
+        "trend_guard_only": bool(trend_weakening and not confirmed_trend_weakening),
+        "trend_confirmation_reasons": [
+            reason
+            for reason, enabled in [
+                ("当前亏损已确认趋势风险", trend_confirmed_by_loss),
+                ("盈利回吐已确认趋势风险", trend_confirmed_by_giveback),
+                ("最新榜单标签已转弱", trend_confirmed_by_ranking),
+            ]
+            if enabled
+        ],
         "threshold_source": dynamic_thresholds.threshold_source if dynamic_thresholds else "fixed_rule",
         "threshold_rule_version": dynamic_thresholds.rule_version if dynamic_thresholds else "fixed_exit_v1",
         "distance_to_hard_stop_pct": _round_or_none(distance_to_hard_stop_pct),
@@ -983,6 +1046,7 @@ def _performance_analysis(
             alert_type=ALERT_HARD_STOP,
             label="硬止损提醒",
             level="urgent",
+            action_class=ACTION_CLASS_ACTIONABLE_EXIT,
             reasons=[f"当前估算亏损 {current_pnl_pct:.2f}%，已达到 -4% 的硬止损检查线。"],
         )
     elif trailing_threshold is not None and profit_giveback_pct >= trailing_threshold:
@@ -990,20 +1054,37 @@ def _performance_analysis(
             alert_type=ALERT_TRAILING_TAKE_PROFIT,
             label="盈利回吐提醒",
             level="warning",
+            action_class=ACTION_CLASS_ACTIONABLE_EXIT,
             reasons=[
                 f"最高盈利 {max_profit_pct:.2f}%，当前盈利 {current_pnl_pct:.2f}%，已从高点回吐 {profit_giveback_pct:.2f} 个百分点。",
                 f"移动止盈阈值为 {trailing_threshold:.2f} 个百分点，建议人工考虑卖出或减仓。",
             ],
         )
+    elif confirmed_trend_weakening:
+        exit_signal = _exit_signal(
+            alert_type=ALERT_CONFIRMED_TREND_WEAKENING,
+            label="确认趋势转弱提醒",
+            level="warning",
+            action_class=ACTION_CLASS_ACTIONABLE_EXIT,
+            reasons=[
+                f"最新价格 {current_point.price:.4f} 已低于短均线，5 日均线 {ma5_text}，10 日均线 {ma10_text}。",
+                f"近 5 日收益 {return_5d_text}，且亏损、回吐或榜单转弱已确认趋势风险。",
+            ],
+        )
     elif trend_weakening:
+        guard_reasons = [
+            f"最新价格 {current_point.price:.4f} 已低于短均线，近 5 日收益 {return_5d_text}。",
+            "趋势转弱当前只是风险警戒：可用于暂不加仓或降低关注强度，不单独触发卖出邮件。",
+        ]
         exit_signal = _exit_signal(
             alert_type=ALERT_TREND_WEAKENING,
-            label="趋势转弱提醒",
-            level="warning",
-            reasons=[
-                f"最新价格 {current_point.price:.4f} 已同时低于 5 日均线 {ma5:.4f} 和 10 日均线 {ma10:.4f}。",
-                f"近 5 日收益 {return_5d_pct:.2f}%，上涨趋势开始转弱。",
-            ],
+            label="趋势警戒（仅网页）",
+            level="watch",
+            action_class=ACTION_CLASS_GUARD_ONLY,
+            guard_state="trend_weakening_unconfirmed",
+            guard_reasons=guard_reasons,
+            no_alert_reason="趋势转弱未被亏损、盈利回吐或榜单转弱确认。",
+            reasons=guard_reasons,
         )
     elif current_pnl_pct >= take_profit_watch_threshold:
         risk_text = (
@@ -1014,6 +1095,7 @@ def _performance_analysis(
             alert_type=ALERT_TAKE_PROFIT_WATCH,
             label="止盈观察提醒",
             level="watch",
+            action_class=ACTION_CLASS_SOFT_WATCH,
             reasons=[
                 f"当前估算盈利 {current_pnl_pct:.2f}%，且触发 {risk_text}，说明利润已有但追高风险也在上升。",
                 "这不是立即卖出指令，只是提醒你别贪最高点，可以开始考虑止盈或减仓。",
@@ -1022,6 +1104,7 @@ def _performance_analysis(
     else:
         exit_signal = _exit_signal(
             reasons=["暂无卖出/减仓提醒；继续按每日公开数据观察。"],
+            no_alert_reason="阈值未触发。",
         )
 
     if exit_signal.alert_type == ALERT_HARD_STOP:
@@ -1038,11 +1121,11 @@ def _performance_analysis(
             f"动态启动线 {profit_start_pct:.2f}%，动态回吐线 {trailing_threshold:.2f} 个百分点；当前价 {current_point.price:.4f}；{source_message}",
         ]
         exit_signal.reason = exit_signal.reasons[0]
-    elif exit_signal.alert_type == ALERT_TREND_WEAKENING:
-        exit_signal.label = "趋势转弱提醒"
+    elif exit_signal.alert_type == ALERT_CONFIRMED_TREND_WEAKENING:
+        exit_signal.label = "确认趋势转弱提醒"
         exit_signal.reasons = [
-            f"最新价 {current_point.price:.4f} 已低于 5 日均线 {ma5:.4f} 和 10 日均线 {ma10:.4f}。",
-            f"近 5 日收益 {return_5d_pct:.2f}%，趋势开始转弱；{source_message}",
+            f"最新价 {current_point.price:.4f} 已低于短均线，5 日均线 {ma5_text}，10 日均线 {ma10_text}。",
+            f"近 5 日收益 {return_5d_text}，且亏损、回吐或榜单转弱已确认；{source_message}",
         ]
         exit_signal.reason = exit_signal.reasons[0]
     elif exit_signal.alert_type == ALERT_TAKE_PROFIT_WATCH:
@@ -1060,9 +1143,26 @@ def _performance_analysis(
             alert_type=ALERT_RISK_WARNING,
             label="盘中结构风险提醒",
             level="watch",
+            action_class=ACTION_CLASS_GUARD_ONLY,
+            guard_state="data_quality_warning",
+            guard_reasons=warnings,
             reasons=warnings,
         )
 
+    exit_signal.threshold_context = {
+        "hard_stop_pct": _round_or_none(hard_stop_pct),
+        "profit_start_pct": _round_or_none(profit_start_pct),
+        "take_profit_watch_threshold_pct": _round_or_none(take_profit_watch_threshold),
+        "trailing_giveback_pct": _round_or_none(trailing_threshold),
+        "current_pnl_pct": _round_or_none(current_pnl_pct),
+        "max_profit_pct": _round_or_none(max_profit_pct),
+        "profit_giveback_pct": _round_or_none(profit_giveback_pct),
+        "trend_weakening": bool(trend_weakening),
+        "confirmed_trend_weakening": confirmed_trend_weakening,
+        "threshold_source": dynamic_thresholds.threshold_source if dynamic_thresholds else "fixed_rule",
+        "approved_for_live": bool(dynamic_thresholds and dynamic_thresholds.calibration_candidate_id),
+    }
+    exit_signal.approved_for_live = bool(dynamic_thresholds and dynamic_thresholds.calibration_candidate_id)
     exit_signal = _annotate_exit_signal_email_eligibility(position, exit_signal, intraday_snapshot)
 
     return PositionAnalysis(
@@ -1250,6 +1350,11 @@ def merge_exit_state(position: TrackedPosition, analysis: PositionAnalysis) -> N
         state["holding_days"] = analysis.holding_days
     if analysis.dynamic_thresholds is not None:
         state["dynamic_thresholds"] = analysis.dynamic_thresholds.model_dump(mode="json")
+    state["action_class"] = analysis.exit_signal.action_class
+    state["guard_state"] = analysis.exit_signal.guard_state
+    state["guard_reasons"] = analysis.exit_signal.guard_reasons
+    state["no_alert_reason"] = analysis.exit_signal.no_alert_reason
+    state["exit_signal_threshold_context"] = analysis.exit_signal.threshold_context
     if analysis.intraday_snapshot is not None:
         state["latest_price_source"] = analysis.intraday_snapshot.price_source
         if analysis.intraday_snapshot.quote_time is not None:
@@ -1531,6 +1636,67 @@ async def _latest_etf_observation_target(
     )
 
 
+async def _owner_etf_protection_guard_context(
+    session: AsyncSession,
+    user_id: int,
+) -> dict[str, Any]:
+    since = date.today() - timedelta(days=14)
+    repeated_stop_count = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(TrackedPositionAlert)
+            .join(TrackedPosition, TrackedPosition.id == TrackedPositionAlert.tracked_position_id)
+            .where(
+                TrackedPosition.user_id == user_id,
+                TrackedPosition.asset_type == ASSET_TYPE_ETF,
+                TrackedPositionAlert.alert_type.in_([ALERT_HARD_STOP, ALERT_CONFIRMED_TREND_WEAKENING]),
+                TrackedPositionAlert.alert_date >= since,
+            )
+        )
+        or 0
+    )
+    active_positions = (
+        await session.scalars(
+            select(TrackedPosition).where(
+                TrackedPosition.user_id == user_id,
+                TrackedPosition.asset_type == ASSET_TYPE_ETF,
+                TrackedPosition.status == ACTIVE_STATUS,
+            )
+        )
+    ).all()
+    pnl_values: list[float] = []
+    low_profit_count = 0
+    for active in active_positions:
+        state = dict(active.exit_state_json or {})
+        threshold_context = dict(state.get("exit_signal_threshold_context") or {})
+        current_pnl_pct = threshold_context.get("current_pnl_pct")
+        if isinstance(current_pnl_pct, (int, float)):
+            pnl_values.append(float(current_pnl_pct))
+            if float(current_pnl_pct) <= 0:
+                low_profit_count += 1
+    portfolio_drawdown_pct = sum(pnl_values) / len(pnl_values) if pnl_values else None
+    active_guards: list[str] = []
+    reasons: list[str] = []
+    if repeated_stop_count >= 2:
+        active_guards.append("repeated_stop_loss_guard")
+        reasons.append(f"近 14 天已有 {repeated_stop_count} 次硬止损/确认趋势转弱，暂停加仓参考。")
+    if portfolio_drawdown_pct is not None and portfolio_drawdown_pct <= -5.0:
+        active_guards.append("portfolio_drawdown_guard")
+        reasons.append(f"当前追踪 ETF 平均盈亏 {portfolio_drawdown_pct:.2f}%，触发组合回撤保护。")
+    if len(active_positions) >= 3 and low_profit_count >= max(2, len(active_positions) // 2):
+        active_guards.append("low_profit_etf_guard")
+        reasons.append(f"{low_profit_count} 只追踪 ETF 盈亏不佳，暂停低质量重复加仓。")
+    return {
+        "version": "etf_exit_protection_guards_v1",
+        "active": bool(active_guards),
+        "active_guards": active_guards,
+        "reasons": reasons,
+        "repeated_stop_count": repeated_stop_count,
+        "portfolio_drawdown_pct": _round_or_none(portfolio_drawdown_pct),
+        "low_profit_count": low_profit_count,
+    }
+
+
 def _exit_state_trend_weakening(position: TrackedPosition) -> bool:
     state = dict(position.exit_state_json or {})
     thresholds = dict(state.get("dynamic_thresholds") or {})
@@ -1560,7 +1726,7 @@ async def position_sizing_recommendation(
         if target is not None:
             target_weight = target.target_weight
             entry_timing_label = target.entry_timing_label
-    return calculate_position_sizing(
+    recommendation = calculate_position_sizing(
         asset_type=position.asset_type,
         alert_type=effective_alert_type,
         current_market_value=snapshot.estimated_value,
@@ -1571,6 +1737,18 @@ async def position_sizing_recommendation(
         entry_timing_label=entry_timing_label,
         trend_weakening=_exit_state_trend_weakening(position) if trend_weakening is None else trend_weakening,
     )
+    if position.asset_type == ASSET_TYPE_ETF and recommendation.action == "add":
+        guard_context = await _owner_etf_protection_guard_context(session, user.id)
+        if guard_context["active"]:
+            return PositionSizingRecommendation(
+                action="hold",
+                label="继续观察",
+                current_market_value=recommendation.current_market_value,
+                current_account_weight=recommendation.current_account_weight,
+                target_account_weight=recommendation.current_account_weight,
+                reason="；".join(guard_context["reasons"]),
+            )
+    return recommendation
 
 
 def _alert_threshold_context(
@@ -1600,6 +1778,10 @@ def _alert_threshold_context(
         "explanation": dynamic_thresholds.get("explanation") or [],
         "alert_type": decision.alert_type,
         "alert_source": decision.alert_source,
+        "action_class": _action_class_for_alert_type(decision.alert_type),
+        "guard_state": state.get("guard_state"),
+        "guard_reasons": state.get("guard_reasons") or [],
+        "no_alert_reason": state.get("no_alert_reason"),
     }
     if position_sizing is not None:
         context["position_sizing"] = position_sizing.as_context()
@@ -1716,6 +1898,8 @@ def _audit_decision_context(
     return {
         "evaluation_mode": evaluation_mode,
         "outcome": outcome,
+        "action_class": _action_class_for_alert_type(decision.alert_type),
+        "guard_state": dict(position.exit_state_json or {}).get("guard_state"),
         "email_eligible": email_eligible,
         "email_eligibility_reason": email_eligibility_reason,
         "alert_level": decision.alert_level,

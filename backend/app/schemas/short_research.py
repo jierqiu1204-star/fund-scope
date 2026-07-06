@@ -478,6 +478,11 @@ class EtfExitHyperoptItemOut(BaseModel):
     rejection_reason: str | None = None
     coverage_status: str | None = None
     manual_delay_minutes: int | None = None
+    policy_class: str | None = None
+    approval_status: str | None = None
+    approved_for_live: bool = False
+    protection_guard_version: str | None = None
+    guard_enabled_metrics: dict[str, Any] = Field(default_factory=dict)
     confidence: dict[str, Any] = Field(default_factory=dict)
     source_reliability: str | None = None
     score: float

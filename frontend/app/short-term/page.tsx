@@ -1032,8 +1032,11 @@ function alertTypeLabel(alertType: string) {
   if (alertType === "trailing_take_profit") {
     return "卖出/减仓提醒";
   }
+  if (alertType === "confirmed_trend_weakening") {
+    return "确认趋势转弱提醒";
+  }
   if (alertType === "trend_weakening") {
-    return "卖出/减仓提醒";
+    return "趋势警戒";
   }
   if (alertType === "hard_stop") {
     return "止损提醒";
@@ -1041,7 +1044,7 @@ function alertTypeLabel(alertType: string) {
   return alertType;
 }
 
-const EXIT_ALERT_TYPES = new Set(["exit_watch", "take_profit_watch", "trailing_take_profit", "trend_weakening", "hard_stop"]);
+const EXIT_ALERT_TYPES = new Set(["exit_watch", "take_profit_watch", "trailing_take_profit", "confirmed_trend_weakening", "hard_stop"]);
 
 function isEmailExitAlert(alertType: string) {
   return EXIT_ALERT_TYPES.has(alertType);
@@ -3071,7 +3074,25 @@ function ShortTermClient() {
             <div className={`mt-4 rounded-[8px] p-3 text-sm leading-6 ${exitSignalTone(item.exit_signal.level)}`}>
               <p className="text-xs font-semibold opacity-75">持仓处理状态</p>
               <p className="font-semibold">{item.exit_signal.label}</p>
+              <p className="mt-1 text-xs opacity-75">
+                {item.exit_signal.action_class === "actionable_exit"
+                  ? "行动信号"
+                  : item.exit_signal.action_class === "soft_watch"
+                    ? "软提醒"
+                    : item.exit_signal.action_class === "guard_only"
+                      ? "风险警戒，仅网页展示"
+                      : item.exit_signal.action_class === "data_waiting"
+                        ? "等待数据"
+                        : "观察状态"}
+                {item.exit_signal.guard_state ? ` · ${item.exit_signal.guard_state}` : ""}
+              </p>
               <p className="mt-1">{item.exit_signal.reason ?? "暂无持仓处理原因，继续观察公开数据。"}</p>
+              {item.exit_signal.guard_reasons.length > 0 ? (
+                <p className="mt-1 text-xs opacity-75">{item.exit_signal.guard_reasons[0]}</p>
+              ) : null}
+              {item.exit_signal.no_alert_reason ? (
+                <p className="mt-1 text-xs opacity-75">未发提醒原因：{item.exit_signal.no_alert_reason}</p>
+              ) : null}
               <p className="mt-1 text-xs opacity-75">
                 {item.exit_signal.email_eligible ? "满足邮件提醒条件" : "不会发邮件"}
                 {item.exit_signal.email_eligibility_reason ? `：${item.exit_signal.email_eligibility_reason}` : ""}

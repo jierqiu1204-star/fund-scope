@@ -984,6 +984,11 @@ export type EtfExitHyperoptItem = {
     rejection_reason: string | null;
     coverage_status: string | null;
     manual_delay_minutes: number | null;
+    policy_class: string | null;
+    approval_status: string | null;
+    approved_for_live: boolean;
+    protection_guard_version: string | null;
+    guard_enabled_metrics: Record<string, unknown>;
     confidence: Record<string, unknown>;
   source_reliability: string | null;
   score: number;
@@ -1091,6 +1096,12 @@ export type TrackedPositionExitSignal = {
   alert_type: string | null;
   label: string;
   level: "none" | "watch" | "warning" | "urgent";
+  action_class: "none" | "actionable_exit" | "soft_watch" | "guard_only" | "data_waiting" | "research_only";
+  guard_state: string | null;
+  guard_reasons: string[];
+  threshold_context: Record<string, unknown>;
+  approved_for_live: boolean;
+  no_alert_reason: string | null;
   reason: string | null;
   reasons: string[];
   email_eligible: boolean;

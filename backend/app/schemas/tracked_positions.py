@@ -58,6 +58,12 @@ class TrackedPositionExitSignal(BaseModel):
     alert_type: str | None = None
     label: str = "暂无卖出/减仓提醒"
     level: Literal["none", "watch", "warning", "urgent"] = "none"
+    action_class: Literal["none", "actionable_exit", "soft_watch", "guard_only", "data_waiting", "research_only"] = "none"
+    guard_state: str | None = None
+    guard_reasons: list[str] = Field(default_factory=list)
+    threshold_context: dict[str, Any] = Field(default_factory=dict)
+    approved_for_live: bool = False
+    no_alert_reason: str | None = None
     reason: str | None = None
     reasons: list[str] = Field(default_factory=list)
     email_eligible: bool = False
