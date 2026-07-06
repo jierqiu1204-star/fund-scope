@@ -88,6 +88,61 @@ function policyLevelLabel(value: string | null) {
   return value ?? "暂无";
 }
 
+function policyStatusLabel(value: string | null | undefined) {
+  const labels: Record<string, string> = {
+    approved_live: "已批准生效",
+    research_only_verified: "研究证据",
+    candidate_research_only: "候选研究",
+    sample_insufficient: "样本不足",
+    not_current_contract: "非当前口径",
+    verified: "已验证"
+  };
+  return labels[value ?? ""] ?? value ?? "旧口径";
+}
+
+function policyGroupDescription(value: string | null | undefined) {
+  const descriptions: Record<string, string> = {
+    insurance_stop: "止损线主要检验是否减少继续下探，不按“卖后一定下跌”评价。",
+    profit_protection: "止盈线主要检验是否保护已有浮盈，同时观察卖飞成本。",
+    trend_guard: "趋势警戒默认只是风控辅助，不单独作为卖出指令。",
+    portfolio_exit: "退出观察主要检验组合或标签退化后的降暴露效果。",
+    research_only: "旧口径或候选证据，只能作为研究参考。"
+  };
+  return descriptions[value ?? ""] ?? "候选证据仅供研究，不自动影响实时邮件规则。";
+}
+
+type KpiMetric = {
+  key: string;
+  label: string;
+  value: number | null;
+  format?: string;
+};
+
+function kpiMetrics(summary: Record<string, unknown> | undefined) {
+  const metrics = summary?.metrics;
+  return Array.isArray(metrics) ? (metrics as KpiMetric[]) : [];
+}
+
+function kpiText(metric: KpiMetric) {
+  if (typeof metric.value !== "number" || !Number.isFinite(metric.value)) {
+    return "暂无";
+  }
+  return metric.format === "percent" ? formatPercent(metric.value * 100) : String(metric.value);
+}
+
+function groupedCredibilityItems(items: EtfExitCredibility["items"]) {
+  const groups = new Map<string, EtfExitCredibility["items"]>();
+  for (const item of items.filter((entry) => entry.group_type === "signal")) {
+    const key = item.policy_class ?? "research_only";
+    groups.set(key, [...(groups.get(key) ?? []), item]);
+  }
+  return Array.from(groups.entries()).map(([policyClass, groupItems]) => ({
+    policyClass,
+    label: groupItems[0]?.policy_class_label ?? policyClass,
+    items: groupItems
+  }));
+}
+
 function metadataNumber(metadata: Record<string, unknown>, key: string) {
   const value = metadata[key];
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -361,6 +416,10 @@ export default function EtfEvidencePage() {
   const labelEvidenceRows = useMemo(() => buildLabelEvidenceRows(detail?.label_summaries ?? []), [detail?.label_summaries]);
   const healthcheckIssue = healthcheckEvidenceIssue(strategyHealthcheck.data);
   const healthcheckItems = visibleHealthcheckItems(strategyHealthcheck.data);
+  const exitCredibilityGroups = useMemo(
+    () => groupedCredibilityItems(exitCredibility.data?.items ?? []),
+    [exitCredibility.data?.items]
+  );
   const hyperoptCoverageRaw = exitHyperopt.data?.summary.coverage ?? exitHyperopt.data?.summary.coverage_funnel;
   const hyperoptCoverage =
     typeof hyperoptCoverageRaw === "object" && hyperoptCoverageRaw !== null
@@ -461,47 +520,58 @@ export default function EtfEvidencePage() {
                 {exitCredibility.data.insufficiency_reasons.join("；")}
               </div>
             ) : null}
-            <div className="mt-4 grid gap-3 lg:grid-cols-2">
-              {exitCredibility.data.items
-                .filter((item) => item.group_type === "signal")
-                .map((item) => (
-                  <div key={item.id} className="rounded-[8px] border border-border bg-paper/40 p-3">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <p className="text-sm font-semibold text-ink">{signalLabel(item.signal_type)}</p>
-                        <p className="mt-1 text-xs text-ink/55">
-                          {item.evidence_level} · 样本 {item.sample_count}
-                        </p>
-                      </div>
-                      <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-ink/55">
-                        {formatNullableRate(item.success_avoidance_rate)}
-                      </span>
+            <div className="mt-4 space-y-4">
+              {exitCredibilityGroups.map((group) => (
+                <div key={group.policyClass} className="rounded-[8px] border border-border bg-paper/40 p-3">
+                  <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
+                    <div>
+                      <p className="text-sm font-semibold text-ink">{group.label}</p>
+                      <p className="mt-1 text-xs text-ink/55">{policyGroupDescription(group.policyClass)}</p>
                     </div>
-                    <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-ink/60">
-                      <span>成功避险：{formatNullableRate(item.success_avoidance_rate)}</span>
-                      <span>错杀率：{formatNullableRate(item.false_stop_rate)}</span>
-                      <span>卖飞率：{formatNullableRate(item.sold_too_early_rate)}</span>
-                      <span>
-                        平均后续收益：{item.avg_forward_return === null ? "暂无" : formatPercent(item.avg_forward_return * 100)}
-                      </span>
-                      <span>
-                        平均少亏：{item.avg_avoided_drawdown === null ? "暂无" : formatPercent(item.avg_avoided_drawdown * 100)}
-                      </span>
-                      <span>
-                        平均错过上涨：{item.avg_missed_upside === null ? "暂无" : formatPercent(item.avg_missed_upside * 100)}
-                      </span>
-                    </div>
-                    {item.events.length ? (
-                      <div className="mt-3 space-y-1 border-t border-border pt-3 text-xs text-ink/50">
-                        {item.events.slice(0, 2).map((event) => (
-                          <p key={event.id}>
-                            {event.etf_name ?? event.etf_code} · {formatDate(event.signal_date)} · {event.outcome}
-                          </p>
-                        ))}
-                      </div>
-                    ) : null}
+                    <span className="w-fit rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-ink/55">
+                      {group.items.length} 类信号
+                    </span>
                   </div>
-                ))}
+                  <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                    {group.items.map((item) => (
+                      <div key={item.id} className="rounded-[8px] border border-border bg-white p-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-semibold text-ink">{signalLabel(item.signal_type)}</p>
+                            <p className="mt-1 text-xs text-ink/55">
+                              {item.evidence_level} · 样本 {item.sample_count} · {policyStatusLabel(item.evidence_status)}
+                            </p>
+                          </div>
+                          <span className="rounded-full bg-paper px-2.5 py-1 text-[11px] font-semibold text-ink/60">
+                            {item.strong_conclusion_allowed ? "可参考" : "弱证据"}
+                          </span>
+                        </div>
+                        <p className="mt-2 text-xs text-ink/55">
+                          {typeof item.kpi_summary?.focus === "string"
+                            ? item.kpi_summary.focus
+                            : item.recommended_usage ?? "仅供研究参考。"}
+                        </p>
+                        <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-ink/60">
+                          {kpiMetrics(item.kpi_summary).map((metric) => (
+                            <span key={metric.key}>
+                              {metric.label}：{kpiText(metric)}
+                            </span>
+                          ))}
+                        </div>
+                        {item.events.length ? (
+                          <div className="mt-3 space-y-1 border-t border-border pt-3 text-xs text-ink/50">
+                            {item.events.slice(0, 2).map((event) => (
+                              <p key={event.id}>
+                                {event.etf_name ?? event.etf_code} · {formatDate(event.signal_date)} · {event.outcome}
+                              </p>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
             </div>
           </>
         ) : (
@@ -793,12 +863,16 @@ export default function EtfEvidencePage() {
                     <span>
                       证据等级：{policyLevelLabel(metadataString(item.confidence, "policy_evidence_level"))}
                     </span>
-                    <span>策略类型：{item.policy_class ?? "旧口径"}</span>
+                    <span>策略类型：{item.policy_class_label ?? item.policy_class ?? "旧口径"}</span>
+                    <span>证据状态：{policyStatusLabel(item.evidence_status)}</span>
                     <span>批准状态：{item.approved_for_live ? "已批准生效" : item.approval_status ?? "研究候选"}</span>
                     <span>保护层：{item.protection_guard_version ?? "暂无"}</span>
                     <span>Guard 压制：{metricInteger(item.guard_enabled_metrics, "guard_suppressed_alert_count")}</span>
                     <span>数据源：{item.source_reliability ?? "旧口径"}</span>
                   </div>
+                  <p className="mt-2 rounded-[6px] bg-white px-2 py-1 text-xs text-ink/55">
+                    {item.recommended_usage ?? "候选参数只作为研究证据，不自动改变邮件规则。"}
+                  </p>
                   {item.rejection_reason ? (
                     <p className="mt-2 rounded-[6px] bg-white px-2 py-1 text-xs text-ink/55">
                       未采用原因：{item.rejection_reason}

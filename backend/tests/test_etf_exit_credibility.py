@@ -22,6 +22,15 @@ from app.services.short_research.etf_exit_credibility import (
     generate_exit_events,
     run_etf_exit_credibility,
 )
+from app.services.short_research.etf_exit_policy_validation import (
+    POLICY_INSURANCE_STOP,
+    POLICY_PROFIT_PROTECTION,
+    POLICY_TREND_GUARD,
+    evidence_status_for_policy,
+    kpi_summary_for_item,
+    policy_class_for_signal,
+    strong_conclusion_allowed,
+)
 
 
 def _points(values: list[float]) -> list[CredibilityPricePoint]:
@@ -40,6 +49,48 @@ def _series(values: list[float]) -> CredibilitySeries:
         theme_group="科技",
         points=_points(values),
     )
+
+
+def test_exit_policy_classifies_signal_purpose() -> None:
+    assert policy_class_for_signal("hard_stop") == POLICY_INSURANCE_STOP
+    assert policy_class_for_signal("trailing_take_profit") == POLICY_PROFIT_PROTECTION
+    assert policy_class_for_signal("take_profit_watch") == POLICY_PROFIT_PROTECTION
+    assert policy_class_for_signal("trend_weakening") == POLICY_TREND_GUARD
+
+
+def test_exit_policy_blocks_strong_conclusion_when_sample_is_insufficient() -> None:
+    assert (
+        evidence_status_for_policy(
+            sample_count=3,
+            evidence_level="样本不足",
+            run_evidence_status="同源已验证",
+            research_only=True,
+        )
+        == "sample_insufficient"
+    )
+    assert not strong_conclusion_allowed(
+        sample_count=3,
+        evidence_level="样本不足",
+        run_evidence_status="同源已验证",
+    )
+
+
+def test_profit_protection_kpis_separate_missed_upside_from_stop_success() -> None:
+    summary = kpi_summary_for_item(
+        signal_type="trailing_take_profit",
+        sample_count=12,
+        success_avoidance_rate=0.42,
+        false_stop_rate=0.1,
+        sold_too_early_rate=0.33,
+        avg_avoided_drawdown=-0.03,
+        avg_missed_upside=0.05,
+        avg_forward_return=-0.01,
+    )
+    assert summary["policy_class"] == POLICY_PROFIT_PROTECTION
+    metric_labels = {item["label"] for item in summary["metrics"]}
+    assert "浮盈保护有效率" in metric_labels
+    assert "卖飞率" in metric_labels
+    assert "错杀率" not in metric_labels
 
 
 def test_trailing_take_profit_credibility_distinguishes_decline_and_rally() -> None:

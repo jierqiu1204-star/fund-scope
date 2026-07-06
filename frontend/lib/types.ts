@@ -985,8 +985,12 @@ export type EtfExitHyperoptItem = {
     coverage_status: string | null;
     manual_delay_minutes: number | null;
     policy_class: string | null;
+    policy_class_label?: string | null;
+    evidence_status?: string | null;
+    recommended_usage?: string | null;
     approval_status: string | null;
     approved_for_live: boolean;
+    is_live_rule_evidence?: boolean;
     protection_guard_version: string | null;
     guard_enabled_metrics: Record<string, unknown>;
     confidence: Record<string, unknown>;
@@ -1042,6 +1046,12 @@ export type EtfExitCredibilityItem = {
   signal_type: string;
   group_type: string;
   group_key: string;
+  policy_class?: string | null;
+  policy_class_label?: string | null;
+  evidence_status?: string | null;
+  recommended_usage?: string | null;
+  strong_conclusion_allowed?: boolean;
+  is_live_rule_evidence?: boolean;
   evidence_level: string;
   sample_count: number;
   success_avoidance_rate: number | null;
@@ -1051,6 +1061,7 @@ export type EtfExitCredibilityItem = {
   avg_missed_upside: number | null;
   avg_forward_return: number | null;
   metrics: Record<string, unknown>;
+  kpi_summary?: Record<string, unknown>;
   events: EtfExitCredibilityEvent[];
   created_at: string;
 };

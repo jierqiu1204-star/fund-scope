@@ -23,6 +23,11 @@ from app.models.entities import (
     utcnow,
 )
 from app.services.short_research.dynamic_thresholds import clamp
+from app.services.short_research.etf_exit_policy_validation import (
+    evidence_status_for_policy,
+    policy_class_label,
+    recommended_usage_for_policy,
+)
 from app.services.short_research.service import has_available_opportunity_score, latest_signal_run
 
 RULE_VERSION = "etf_exit_hyperopt_v1"
@@ -1657,6 +1662,53 @@ async def etf_exit_hyperopt_payload(session: AsyncSession, run: EtfExitHyperoptR
     ).all()
     summary = dict(run.summary_json or {})
     coverage_status = "sampled" if summary.get("sampled") else "full_universe"
+
+    def item_payload(item: EtfExitHyperoptItem) -> dict[str, Any]:
+        confidence = dict(item.confidence_json or {})
+        policy_class = str(confidence.get("policy_class") or "research_only")
+        approved_for_live = bool(confidence.get("approved_for_live") is True)
+        evidence_status = evidence_status_for_policy(
+            sample_count=item.sample_count,
+            evidence_level=str(confidence.get("policy_evidence_level") or ""),
+            run_evidence_status="同源已验证" if run.status == "success" else run.status,
+            approved_for_live=approved_for_live,
+            research_only=not approved_for_live,
+        )
+        if not approved_for_live and item.status == STATUS_CANDIDATE:
+            evidence_status = "candidate_research_only"
+        return {
+            "id": item.id,
+            "bucket_type": item.bucket_type,
+            "bucket_key": item.bucket_key,
+            "status": item.status,
+            "conclusion": item.conclusion,
+            "parameters": dict(item.parameter_json or {}),
+            "train_metrics": dict(item.train_metrics_json or {}),
+            "out_of_sample_metrics": dict(item.out_of_sample_metrics_json or {}),
+            "rolling_metrics": dict(item.rolling_metrics_json or {}),
+            "baseline_metrics": dict(confidence.get("baseline_metrics") or {}),
+            "baseline_comparison": dict(confidence.get("baseline_comparison") or {}),
+            "rejection_reason": confidence.get("rejection_reason"),
+            "coverage_status": coverage_status,
+            "manual_delay_minutes": confidence.get("manual_delay_minutes"),
+            "policy_class": policy_class,
+            "policy_class_label": policy_class_label(policy_class),
+            "evidence_status": evidence_status,
+            "recommended_usage": recommended_usage_for_policy(policy_class),
+            "approval_status": confidence.get("approval_status"),
+            "approved_for_live": approved_for_live,
+            "is_live_rule_evidence": approved_for_live,
+            "protection_guard_version": confidence.get("protection_guard_version"),
+            "guard_enabled_metrics": dict(confidence.get("guard_enabled_metrics") or {}),
+            "confidence": confidence,
+            "source_reliability": item.source_reliability,
+            "score": item.score,
+            "sample_count": item.sample_count,
+            "trade_count": item.trade_count,
+            "approved_at": item.approved_at,
+            "created_at": item.created_at,
+        }
+
     return {
         "id": run.id,
         "status": run.status,
@@ -1677,35 +1729,5 @@ async def etf_exit_hyperopt_payload(session: AsyncSession, run: EtfExitHyperoptR
         "error_message": run.error_message,
         "research_only": True,
         "no_trade_instruction": True,
-        "items": [
-            {
-                "id": item.id,
-                "bucket_type": item.bucket_type,
-                "bucket_key": item.bucket_key,
-                "status": item.status,
-                "conclusion": item.conclusion,
-                "parameters": dict(item.parameter_json or {}),
-                "train_metrics": dict(item.train_metrics_json or {}),
-                "out_of_sample_metrics": dict(item.out_of_sample_metrics_json or {}),
-                "rolling_metrics": dict(item.rolling_metrics_json or {}),
-                "baseline_metrics": dict((item.confidence_json or {}).get("baseline_metrics") or {}),
-                "baseline_comparison": dict((item.confidence_json or {}).get("baseline_comparison") or {}),
-                "rejection_reason": (item.confidence_json or {}).get("rejection_reason"),
-                "coverage_status": coverage_status,
-                "manual_delay_minutes": (item.confidence_json or {}).get("manual_delay_minutes"),
-                "policy_class": (item.confidence_json or {}).get("policy_class"),
-                "approval_status": (item.confidence_json or {}).get("approval_status"),
-                "approved_for_live": bool((item.confidence_json or {}).get("approved_for_live") is True),
-                "protection_guard_version": (item.confidence_json or {}).get("protection_guard_version"),
-                "guard_enabled_metrics": dict((item.confidence_json or {}).get("guard_enabled_metrics") or {}),
-                "confidence": dict(item.confidence_json or {}),
-                "source_reliability": item.source_reliability,
-                "score": item.score,
-                "sample_count": item.sample_count,
-                "trade_count": item.trade_count,
-                "approved_at": item.approved_at,
-                "created_at": item.created_at,
-            }
-            for item in rows
-        ],
+        "items": [item_payload(item) for item in rows],
     }

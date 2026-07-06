@@ -23,6 +23,14 @@ from app.models.entities import (
     utcnow,
 )
 from app.services.short_research.dynamic_thresholds import clamp
+from app.services.short_research.etf_exit_policy_validation import (
+    evidence_status_for_policy,
+    kpi_summary_for_item,
+    policy_class_for_signal,
+    policy_class_label,
+    recommended_usage_for_policy,
+    strong_conclusion_allowed,
+)
 from app.services.short_research.service import has_available_opportunity_score, latest_signal_run
 
 SIGNAL_VERSION = "short_research_v1"
@@ -732,6 +740,74 @@ async def etf_exit_credibility_payload(
     for event in events:
         if event.item_id is not None:
             events_by_item.setdefault(event.item_id, []).append(event)
+
+    def item_payload(item: EtfExitSignalCredibilityItem) -> dict[str, Any]:
+        policy_class = policy_class_for_signal(item.signal_type)
+        evidence_status = evidence_status_for_policy(
+            sample_count=item.sample_count,
+            evidence_level=item.evidence_level,
+            run_evidence_status=run.evidence_status,
+            research_only=True,
+            min_samples=MIN_SIGNAL_SAMPLES,
+        )
+        kpi_summary = kpi_summary_for_item(
+            signal_type=item.signal_type,
+            sample_count=item.sample_count,
+            success_avoidance_rate=item.success_avoidance_rate,
+            false_stop_rate=item.false_stop_rate,
+            sold_too_early_rate=item.sold_too_early_rate,
+            avg_avoided_drawdown=item.avg_avoided_drawdown,
+            avg_missed_upside=item.avg_missed_upside,
+            avg_forward_return=item.avg_forward_return,
+            metrics=dict(item.metrics_json or {}),
+        )
+        return {
+            "id": item.id,
+            "signal_type": item.signal_type,
+            "group_type": item.group_type,
+            "group_key": item.group_key,
+            "policy_class": policy_class,
+            "policy_class_label": policy_class_label(policy_class),
+            "evidence_status": evidence_status,
+            "recommended_usage": recommended_usage_for_policy(policy_class),
+            "strong_conclusion_allowed": strong_conclusion_allowed(
+                sample_count=item.sample_count,
+                evidence_level=item.evidence_level,
+                run_evidence_status=run.evidence_status,
+                min_samples=MIN_SIGNAL_SAMPLES,
+            ),
+            "is_live_rule_evidence": False,
+            "evidence_level": item.evidence_level,
+            "sample_count": item.sample_count,
+            "success_avoidance_rate": item.success_avoidance_rate,
+            "false_stop_rate": item.false_stop_rate,
+            "sold_too_early_rate": item.sold_too_early_rate,
+            "avg_avoided_drawdown": item.avg_avoided_drawdown,
+            "avg_missed_upside": item.avg_missed_upside,
+            "avg_forward_return": item.avg_forward_return,
+            "metrics": dict(item.metrics_json or {}),
+            "kpi_summary": kpi_summary,
+            "events": [
+                {
+                    "id": event.id,
+                    "etf_code": event.etf_code,
+                    "etf_name": event.etf_name,
+                    "signal_type": event.signal_type,
+                    "signal_time": event.signal_time,
+                    "signal_date": event.signal_date,
+                    "signal_price": event.signal_price,
+                    "outcome": event.outcome,
+                    "forward_window_days": event.forward_window_days,
+                    "forward_return": event.forward_return,
+                    "max_favorable_return": event.max_favorable_return,
+                    "max_adverse_return": event.max_adverse_return,
+                    "context": dict(event.context_json or {}),
+                }
+                for event in events_by_item.get(item.id, [])[:EVENT_SAMPLE_LIMIT]
+            ],
+            "created_at": item.created_at,
+        }
+
     return {
         "id": run.id,
         "status": run.status,
@@ -750,41 +826,5 @@ async def etf_exit_credibility_payload(
         "error_message": run.error_message,
         "research_only": True,
         "no_trade_instruction": True,
-        "items": [
-            {
-                "id": item.id,
-                "signal_type": item.signal_type,
-                "group_type": item.group_type,
-                "group_key": item.group_key,
-                "evidence_level": item.evidence_level,
-                "sample_count": item.sample_count,
-                "success_avoidance_rate": item.success_avoidance_rate,
-                "false_stop_rate": item.false_stop_rate,
-                "sold_too_early_rate": item.sold_too_early_rate,
-                "avg_avoided_drawdown": item.avg_avoided_drawdown,
-                "avg_missed_upside": item.avg_missed_upside,
-                "avg_forward_return": item.avg_forward_return,
-                "metrics": dict(item.metrics_json or {}),
-                "events": [
-                    {
-                        "id": event.id,
-                        "etf_code": event.etf_code,
-                        "etf_name": event.etf_name,
-                        "signal_type": event.signal_type,
-                        "signal_time": event.signal_time,
-                        "signal_date": event.signal_date,
-                        "signal_price": event.signal_price,
-                        "outcome": event.outcome,
-                        "forward_window_days": event.forward_window_days,
-                        "forward_return": event.forward_return,
-                        "max_favorable_return": event.max_favorable_return,
-                        "max_adverse_return": event.max_adverse_return,
-                        "context": dict(event.context_json or {}),
-                    }
-                    for event in events_by_item.get(item.id, [])[:EVENT_SAMPLE_LIMIT]
-                ],
-                "created_at": item.created_at,
-            }
-            for item in items
-        ],
+        "items": [item_payload(item) for item in items],
     }
