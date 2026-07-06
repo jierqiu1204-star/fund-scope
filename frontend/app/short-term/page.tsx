@@ -78,7 +78,7 @@ const labelFilterGroups: Array<{
   options: string[];
 }> = [
   { key: "observation", title: "买入观察", options: ["短线观察", "高位观察", "谨慎观察", "不适合短线", "数据不足"] },
-  { key: "entry", title: "今日买点", options: ["健康回踩", "趋势延续", "冲高别追", "跌破等待", "放量转弱", "休市", "行情滞后", "数据不足"] },
+  { key: "entry", title: "今日买点", options: ["健康回踩", "趋势延续", "冲高别追", "跌破等待", "放量转弱", "午休", "休市", "行情滞后", "数据不足"] },
   { key: "tracking", title: "持仓状态", options: ["我已持仓", "触发提醒", "仅网页提示"] }
 ];
 
@@ -686,6 +686,12 @@ function intradayChangeDisplay(
   marketStatus?: string | null,
 ) {
   if (!quote) {
+    if (marketStatus === "lunch_break") {
+      return { value: "午休，等待下午开盘", time: "暂无行情时间" };
+    }
+    if (marketStatus && marketStatus !== "open") {
+      return { value: "休市，暂无最近行情", time: "暂无行情时间" };
+    }
     return { value: "等待盘中行情", time: "暂无行情时间" };
   }
   const changeValue =
@@ -693,7 +699,8 @@ function intradayChangeDisplay(
       ? null
       : formatPercent(quote.change_percent);
   if (marketStatus && marketStatus !== "open") {
-    return { value: changeValue ? `${changeValue}（最近行情）` : "休市，最近行情", time: formatDateTime(quote.quote_time) };
+    const suffix = marketStatus === "lunch_break" ? "午休最近行情" : "最近行情";
+    return { value: changeValue ? `${changeValue}（${suffix}）` : suffix, time: formatDateTime(quote.quote_time) };
   }
   if (!quote.decision_eligible) {
     return { value: changeValue ? `${changeValue}（仅网页参考）` : "仅网页参考", time: formatDateTime(quote.quote_time) };
@@ -771,10 +778,13 @@ function itemEntryTimingDisplay(item: RankedAssetItem, marketStatus?: string | n
     };
   }
   if (marketStatus !== "open") {
+    const isLunchBreak = marketStatus === "lunch_break";
     return {
       title: "盘中买点状态",
-      label: "休市",
-      reason: "当前非交易时段，不输出盘中买点；休市后盘中行情正常不再刷新，只展示最近公开行情和日线买点参考。",
+      label: isLunchBreak ? "午休" : "休市",
+      reason: isLunchBreak
+        ? "当前是午休时段，不产生新的盘中买点；页面展示上午最近行情，下午开盘后继续刷新。"
+        : "当前非交易时段，不输出盘中买点；休市后盘中行情正常不再刷新，只展示最近公开行情和日线买点参考。",
     };
   }
   if (item.quote?.is_stale) {
@@ -1230,6 +1240,9 @@ function advisorSourceLabel(source: string | null | undefined) {
 function marketStatusLabel(value: string | undefined) {
   if (value === "open") {
     return "交易中";
+  }
+  if (value === "lunch_break") {
+    return "午休";
   }
   if (value === "closed") {
     return "非交易时段";
@@ -1981,9 +1994,13 @@ function ShortTermClient() {
       : null;
     const selectedLivePrice = selectedLiveQuote?.latest_price;
     const quoteStatus = !selectedLiveQuote
-      ? "等待盘中行情"
+      ? etfLiveData?.market_status === "lunch_break"
+        ? "午休，等待下午开盘"
+        : "等待盘中行情"
       : etfLiveData?.market_status !== "open"
-      ? "休市，使用最近公开行情"
+      ? etfLiveData?.market_status === "lunch_break"
+        ? "午休，使用上午最近行情"
+        : "休市，使用最近公开行情"
       : selectedLiveQuote.is_stale
       ? "行情滞后，仅网页参考"
       : selectedLiveQuote.decision_eligible

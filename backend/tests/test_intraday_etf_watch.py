@@ -172,7 +172,10 @@ async def _seed_price_history_from_closes(
 
 def test_current_market_state_uses_half_open_trading_sessions() -> None:
     assert current_market_state(datetime(2026, 6, 17, 11, 29, 59, tzinfo=ASIA_SHANGHAI)).status == "open"
-    assert current_market_state(datetime(2026, 6, 17, 11, 30, 0, tzinfo=ASIA_SHANGHAI)).status == "closed"
+    lunch_state = current_market_state(datetime(2026, 6, 17, 11, 30, 0, tzinfo=ASIA_SHANGHAI))
+    assert lunch_state.status == "lunch_break"
+    assert lunch_state.session == "lunch"
+    assert current_market_state(datetime(2026, 6, 17, 12, 59, 59, tzinfo=ASIA_SHANGHAI)).status == "lunch_break"
     assert current_market_state(datetime(2026, 6, 17, 14, 59, 59, tzinfo=ASIA_SHANGHAI)).status == "open"
     assert current_market_state(datetime(2026, 6, 17, 15, 0, 0, tzinfo=ASIA_SHANGHAI)).status == "closed"
 

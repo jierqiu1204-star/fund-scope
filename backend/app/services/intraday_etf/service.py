@@ -147,6 +147,8 @@ def current_market_state(now: datetime | None = None) -> MarketState:
     current = local_now.time()
     if time(9, 30) <= current < time(11, 30):
         return MarketState("open", "morning", local_now)
+    if time(11, 30) <= current < time(13, 0):
+        return MarketState("lunch_break", "lunch", local_now)
     if time(13, 0) <= current < time(15, 0):
         return MarketState("open", "afternoon", local_now)
     return MarketState("closed", None, local_now)

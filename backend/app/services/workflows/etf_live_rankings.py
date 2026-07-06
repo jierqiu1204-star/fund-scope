@@ -43,6 +43,7 @@ TRACKING_STATE_ACTIVE = "我已持仓"
 TRACKING_STATE_ALERT = "触发提醒"
 TRACKING_STATE_WEB_ONLY = "仅网页提示"
 ENTRY_STATE_CLOSED = "休市"
+ENTRY_STATE_LUNCH_BREAK = "午休"
 ENTRY_STATE_STALE = "行情滞后"
 
 
@@ -163,6 +164,8 @@ def _entry_filter_labels(
     labels = {live_label, daily_label}
     if not is_open:
         labels.add(ENTRY_STATE_CLOSED)
+        if live_label == ENTRY_STATE_LUNCH_BREAK:
+            labels.add(ENTRY_STATE_LUNCH_BREAK)
     elif quote_is_stale:
         labels.add(ENTRY_STATE_STALE)
     return {label for label in labels if label}
@@ -303,7 +306,11 @@ async def live_rankings(
         score_contribution_reasons: list[str] = []
         if base_score is not None:
             score_contribution_reasons.append(f"日线基础分 {base_score:.1f}")
-        if not is_open or not market_data.is_fresh_etf_decision_quote(quote, now):
+        if state.status == "lunch_break":
+            live_label = ENTRY_STATE_LUNCH_BREAK
+            live_reason = "当前是午休时段，不产生新的盘中买点；页面展示上午最近行情，日线买点只作参考。"
+            score_contribution_reasons.append("午休时段，仅使用日线基础分和上午最近行情展示。")
+        elif not is_open or not market_data.is_fresh_etf_decision_quote(quote, now):
             live_label = LIVE_LABEL_DATA_INSUFFICIENT
             live_reason = _INTRADAY_RANKING_DATA_INSUFFICIENT_REASON
             score_contribution_reasons.append("休市或行情不新鲜，仅使用日线基础分。")
