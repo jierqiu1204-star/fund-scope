@@ -74,6 +74,7 @@ jobs:
 
           cd "$deploy_dir/deploy"
           sudo docker compose -f "$COMPOSE_FILE" down --remove-orphans
+          sudo docker rm -f deploy-frontend-static-builder-1 2>/dev/null || true
           sudo docker compose -f "$COMPOSE_FILE" up -d --build
           sudo docker compose -f "$COMPOSE_FILE" exec -T backend alembic upgrade head
           sudo docker image prune -f
