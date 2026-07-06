@@ -1087,12 +1087,18 @@ _LABEL_VALIDATION_MIN_SAMPLES = 10
 _LABEL_VALIDATION_RULE_VERSION = "label_validation_v1"
 VALIDATION_MODE_FORWARD_LIVE = "forward_live"
 VALIDATION_MODE_HISTORICAL_REPLAY = "historical_replay"
+VALIDATION_MODE_SCORE_BUCKET_REPLAY = "score_bucket_replay"
 _LABEL_REPLAY_DEFAULT_DAYS = 180
 _LABEL_REPLAY_DEFAULT_BATCH_SIZE = 25
 _LABEL_REPLAY_MIN_SAMPLES = 30
 _LABEL_REPLAY_SUFFICIENT_SAMPLES = 100
 _LABEL_REPLAY_SCOPE_ALL_ELIGIBLE = "all_eligible"
 _LABEL_REPLAY_SCOPE_LIMITED = "eligible_limited"
+_SCORE_BUCKET_VALIDATION_RULE_VERSION = "score_bucket_replay_v1"
+_SCORE_BUCKET_DEFAULT_DAYS = 180
+_SCORE_BUCKET_DEFAULT_TOP_N = (5, 10, 20, 50)
+_SCORE_BUCKET_SCORE_BASIS = "opportunity"
+_SCORE_BUCKET_BASELINE = "all_scored"
 
 
 def _forward_drawdown(series: list[PricePoint]) -> float | None:
@@ -1184,6 +1190,35 @@ async def _etf_price_rows_from(
             )
         ).all()
     )
+
+
+async def _etf_price_rows_by_code_from(
+    session: AsyncSession,
+    codes: list[str],
+    signal_date: date,
+    *,
+    max_horizon: int,
+) -> dict[str, list[EtfPriceHistory]]:
+    if not codes:
+        return {}
+    by_code: dict[str, list[EtfPriceHistory]] = {code: [] for code in codes}
+    cutoff = signal_date + timedelta(days=max_horizon * 4 + 14)
+    for index in range(0, len(codes), 400):
+        chunk = codes[index : index + 400]
+        rows = (
+            await session.scalars(
+                select(EtfPriceHistory)
+                .where(
+                    EtfPriceHistory.etf_code.in_(chunk),
+                    EtfPriceHistory.trade_date >= signal_date,
+                    EtfPriceHistory.trade_date <= cutoff,
+                )
+                .order_by(EtfPriceHistory.etf_code.asc(), EtfPriceHistory.trade_date.asc())
+            )
+        ).all()
+        for row in rows:
+            by_code.setdefault(row.etf_code, []).append(row)
+    return by_code
 
 
 def _price_points_from_rows(rows: list[EtfPriceHistory]) -> list[PricePoint]:
@@ -1498,6 +1533,97 @@ class _ReplayBucketStats:
         }
 
 
+@dataclass
+class _ScoreBucketStats:
+    total_count: int = 0
+    excluded_count: int = 0
+    pending_count: int = 0
+    returns: list[float] = field(default_factory=list)
+    drawdowns: list[float] = field(default_factory=list)
+    excursions: list[float] = field(default_factory=list)
+    recent_returns: list[tuple[date, float]] = field(default_factory=list)
+    exclusion_reasons: dict[str, int] = field(default_factory=dict)
+
+    def add(self, *, signal_date: date, status: str, payload: dict[str, Any]) -> None:
+        self.total_count += 1
+        if status == "completed" and isinstance(payload.get("forward_return"), int | float):
+            forward_return = float(payload["forward_return"])
+            self.returns.append(forward_return)
+            self.drawdowns.append(float(payload.get("adverse_drawdown") or 0.0))
+            self.excursions.append(float(payload.get("favorable_excursion") or 0.0))
+            self.recent_returns.append((signal_date, forward_return))
+            self.recent_returns.sort(key=lambda item: item[0], reverse=True)
+            del self.recent_returns[30:]
+            return
+
+        if status == "pending":
+            self.pending_count += 1
+        else:
+            self.excluded_count += 1
+        reason = payload.get("exclusion_reason")
+        if reason:
+            key = str(reason)
+            self.exclusion_reasons[key] = self.exclusion_reasons.get(key, 0) + 1
+
+    def summary(self) -> dict[str, Any]:
+        if not self.returns:
+            return {
+                "sample_count": 0,
+                "excluded_count": self.excluded_count,
+                "pending_count": self.pending_count,
+                "coverage": 0.0,
+                "avg_return": None,
+                "median_return": None,
+                "worst_forward_drawdown": None,
+                "favorable_excursion_median": None,
+                "win_rate": None,
+                "confidence": "insufficient",
+                "confidence_label": "样本不足",
+                "insufficient_sample": True,
+                "validation_mode": VALIDATION_MODE_SCORE_BUCKET_REPLAY,
+                "price_source": "verified_daily_close",
+                "exclusion_reasons": self.exclusion_reasons,
+            }
+
+        recent_return_values = [item[1] for item in self.recent_returns]
+        all_median = median(self.returns)
+        recent_median = median(recent_return_values) if recent_return_values else None
+        coverage = len(self.returns) / self.total_count if self.total_count else 0.0
+        confidence = _replay_validation_confidence(
+            len(self.returns),
+            coverage=coverage,
+            recent_median=recent_median,
+            all_median=all_median,
+        )
+        return {
+            "sample_count": len(self.returns),
+            "excluded_count": self.excluded_count,
+            "pending_count": self.pending_count,
+            "coverage": round(coverage, 4),
+            "avg_return": round(mean(self.returns), 6),
+            "median_return": round(all_median, 6),
+            "worst_forward_drawdown": round(min(self.drawdowns), 6),
+            "favorable_excursion_median": round(median(self.excursions), 6),
+            "win_rate": round(sum(1 for item in self.returns if item > 0) / len(self.returns), 4),
+            "confidence": confidence,
+            "confidence_label": _validation_confidence_label(confidence),
+            "insufficient_sample": confidence == "insufficient",
+            "recent_median_return": round(recent_median, 6) if recent_median is not None else None,
+            "exclusion_reasons": self.exclusion_reasons,
+            "validation_mode": VALIDATION_MODE_SCORE_BUCKET_REPLAY,
+            "price_source": "verified_daily_close",
+        }
+
+
+def _append_unique_codes(target: list[str], codes: list[str]) -> None:
+    seen = set(target)
+    for code in codes:
+        if code in seen:
+            continue
+        target.append(code)
+        seen.add(code)
+
+
 def _replay_sample(
     *,
     validation_run_id: int,
@@ -1785,6 +1911,326 @@ async def run_etf_label_historical_replay(
     return run
 
 
+async def _latest_etf_signal_runs_by_date(
+    session: AsyncSession,
+    *,
+    from_date: date,
+) -> list[ShortResearchSignalRun]:
+    etf_run_ids = (
+        select(ShortResearchSignalItem.run_id)
+        .where(ShortResearchSignalItem.asset_type == ASSET_TYPE_ETF)
+        .distinct()
+    )
+    rows = (
+        await session.scalars(
+            select(ShortResearchSignalRun)
+            .where(
+                ShortResearchSignalRun.status == RUN_STATUS_SUCCESS,
+                ShortResearchSignalRun.as_of_date >= from_date,
+                ShortResearchSignalRun.id.in_(etf_run_ids),
+            )
+            .order_by(ShortResearchSignalRun.as_of_date.desc(), ShortResearchSignalRun.id.desc())
+        )
+    ).all()
+    by_date: dict[date, ShortResearchSignalRun] = {}
+    for run in rows:
+        by_date.setdefault(run.as_of_date, run)
+    return list(by_date.values())
+
+
+async def _score_bucket_signal_items(
+    session: AsyncSession,
+    run: ShortResearchSignalRun,
+) -> tuple[list[tuple[ShortResearchSignalItem, float]], list[str]]:
+    rows = (
+        await session.scalars(
+            select(ShortResearchSignalItem)
+            .where(
+                ShortResearchSignalItem.run_id == run.id,
+                ShortResearchSignalItem.asset_type == ASSET_TYPE_ETF,
+            )
+            .order_by(ShortResearchSignalItem.rank.asc(), ShortResearchSignalItem.asset_code.asc())
+        )
+    ).all()
+    scored: list[tuple[ShortResearchSignalItem, float]] = []
+    excluded_codes: list[str] = []
+    for item in rows:
+        metrics = dict(item.metrics_json or {})
+        score = metrics.get("opportunity_score")
+        if not has_available_opportunity_score(metrics) or not isinstance(score, int | float):
+            excluded_codes.append(item.asset_code)
+            continue
+        scored.append((item, float(score)))
+    scored.sort(key=lambda pair: (-pair[1], pair[0].rank or 999999, pair[0].asset_code))
+    return scored, excluded_codes
+
+
+def _score_bucket_group_specs(top_n: list[int]) -> list[dict[str, Any]]:
+    specs: list[dict[str, Any]] = [
+        {
+            "label": _SCORE_BUCKET_BASELINE,
+            "entry_timing_label": "baseline",
+            "group_type": "baseline",
+            "start": 0,
+            "end": None,
+        }
+    ]
+    for value in top_n:
+        specs.append(
+            {
+                "label": f"Top {value}",
+                "entry_timing_label": "cumulative",
+                "group_type": "cumulative",
+                "start": 0,
+                "end": value,
+            }
+        )
+    marginal_bounds = [(1, 5), (6, 10), (11, 20), (21, 50)]
+    for start_rank, end_rank in marginal_bounds:
+        specs.append(
+            {
+                "label": f"{start_rank}-{end_rank}",
+                "entry_timing_label": "marginal",
+                "group_type": "marginal",
+                "start": start_rank - 1,
+                "end": end_rank,
+            }
+        )
+    return specs
+
+
+async def run_etf_score_bucket_validation(
+    session: AsyncSession,
+    *,
+    days: int = _SCORE_BUCKET_DEFAULT_DAYS,
+    score_basis: str = _SCORE_BUCKET_SCORE_BASIS,
+    top_n: list[int] | None = None,
+) -> EtfSignalValidationRun:
+    started_at = utcnow()
+    horizons = list(_LABEL_VALIDATION_WINDOWS)
+    requested_top_n = sorted(set(top_n or list(_SCORE_BUCKET_DEFAULT_TOP_N)))
+    config = {
+        "validation_mode": VALIDATION_MODE_SCORE_BUCKET_REPLAY,
+        "days": days,
+        "score_basis": score_basis,
+        "score_field": "metrics_json.opportunity_score",
+        "top_n": requested_top_n,
+        "windows": horizons,
+        "baseline": _SCORE_BUCKET_BASELINE,
+        "price_source": "verified_daily_close",
+        "research_only": True,
+    }
+    run = EtfSignalValidationRun(
+        status=RUN_STATUS_RUNNING,
+        started_at=started_at,
+        as_of_date=date.today(),
+        asset_type=ASSET_TYPE_ETF,
+        validation_mode=VALIDATION_MODE_SCORE_BUCKET_REPLAY,
+        rule_version=_SCORE_BUCKET_VALIDATION_RULE_VERSION,
+        config_json=config,
+        summary_json={},
+    )
+    session.add(run)
+    await session.flush()
+
+    if score_basis != _SCORE_BUCKET_SCORE_BASIS:
+        run.status = RUN_STATUS_FAILED
+        run.finished_at = utcnow()
+        run.error_message = "score_basis 只支持 opportunity。"
+        run.summary_json = {**config, "status": RUN_STATUS_FAILED, "groups": []}
+        await session.commit()
+        await session.refresh(run)
+        return run
+
+    source_runs = await _latest_etf_signal_runs_by_date(
+        session,
+        from_date=date.today() - timedelta(days=days),
+    )
+    if not source_runs:
+        run.status = RUN_STATUS_FAILED
+        run.finished_at = utcnow()
+        run.error_message = "暂无历史 ETF 短线排序快照，无法做综合关注分层验证。"
+        run.summary_json = {
+            **config,
+            "status": RUN_STATUS_FAILED,
+            "generated_at": utcnow().isoformat(),
+            "unavailable_reason": "waiting_signal_generation",
+            "groups": [],
+        }
+        await session.commit()
+        await session.refresh(run)
+        return run
+
+    group_specs = _score_bucket_group_specs(requested_top_n)
+    bucket_stats: dict[tuple[str, str, int], _ScoreBucketStats] = {}
+    selected_codes_by_group: dict[tuple[str, str], list[str]] = {
+        (spec["label"], spec["entry_timing_label"]): [] for spec in group_specs
+    }
+    excluded_codes: dict[str, list[str]] = {"unavailable_opportunity_score": []}
+    source_signal_run_ids: list[int] = []
+    source_dates: list[str] = []
+    scored_item_count = 0
+    excluded_unavailable_score_count = 0
+    completed_samples = 0
+    excluded_samples = 0
+    pending_samples = 0
+    replay_start: date | None = None
+    replay_end: date | None = None
+    max_horizon = max(horizons)
+
+    for source_run in source_runs:
+        scored_items, unavailable_codes = await _score_bucket_signal_items(session, source_run)
+        if unavailable_codes:
+            excluded_unavailable_score_count += len(unavailable_codes)
+            _append_unique_codes(excluded_codes["unavailable_opportunity_score"], unavailable_codes)
+        if not scored_items:
+            continue
+        source_signal_run_ids.append(source_run.id)
+        source_dates.append(source_run.as_of_date.isoformat())
+        scored_item_count += len(scored_items)
+        replay_start = source_run.as_of_date if replay_start is None else min(replay_start, source_run.as_of_date)
+        replay_end = source_run.as_of_date if replay_end is None else max(replay_end, source_run.as_of_date)
+        rows_by_code = await _etf_price_rows_by_code_from(
+            session,
+            [item.asset_code for item, _score in scored_items],
+            source_run.as_of_date,
+            max_horizon=max_horizon,
+        )
+        for spec in group_specs:
+            group_items = scored_items[spec["start"] : spec["end"]]
+            group_key = (spec["label"], spec["entry_timing_label"])
+            _append_unique_codes(
+                selected_codes_by_group[group_key],
+                [item.asset_code for item, _score in group_items],
+            )
+            for item, score in group_items:
+                rows = rows_by_code.get(item.asset_code, [])
+                for horizon in horizons:
+                    if not rows or rows[0].trade_date != source_run.as_of_date:
+                        status = "pending"
+                        payload = {"exclusion_reason": "missing_signal_price"}
+                    else:
+                        status, payload = _completed_outcome_payload(rows, horizon)
+                    if status == "completed":
+                        completed_samples += 1
+                    elif status == "pending":
+                        pending_samples += 1
+                    else:
+                        excluded_samples += 1
+                    metrics = {
+                        **payload,
+                        "score_basis": score_basis,
+                        "opportunity_score": score,
+                        "source_signal_run_id": source_run.id,
+                        "source_signal_as_of_date": source_run.as_of_date.isoformat(),
+                        "asset_code": item.asset_code,
+                        "ranking_sort": "opportunity",
+                    }
+                    bucket_stats.setdefault(
+                        (spec["label"], spec["entry_timing_label"], horizon),
+                        _ScoreBucketStats(),
+                    ).add(signal_date=source_run.as_of_date, status=status, payload=metrics)
+
+    if not source_signal_run_ids:
+        run.status = RUN_STATUS_FAILED
+        run.finished_at = utcnow()
+        run.error_message = "历史 ETF signal run 没有可用真实综合关注分。"
+        run.summary_json = {
+            **config,
+            "status": RUN_STATUS_FAILED,
+            "generated_at": utcnow().isoformat(),
+            "unavailable_reason": "no_available_opportunity_score",
+            "source_signal_run_count": len(source_runs),
+            "excluded_unavailable_score_count": excluded_unavailable_score_count,
+            "excluded_codes": excluded_codes,
+            "groups": [],
+        }
+        await session.commit()
+        await session.refresh(run)
+        return run
+
+    groups: list[dict[str, Any]] = []
+    for spec in group_specs:
+        label = spec["label"]
+        entry_label = spec["entry_timing_label"]
+        group_key = (label, entry_label)
+        groups.append(
+            {
+                "label": label,
+                "entry_timing_label": entry_label,
+                "key": f"{label} / {entry_label}",
+                "group_type": spec["group_type"],
+                "score_basis": score_basis,
+                "ranking_sort": "opportunity",
+                "rank_start": None if spec["group_type"] == "baseline" else spec["start"] + 1,
+                "rank_end": spec["end"],
+                "selected_codes": selected_codes_by_group.get(group_key, []),
+                "selected_count": len(selected_codes_by_group.get(group_key, [])),
+                "windows": {
+                    str(window): bucket_stats.get(
+                        (label, entry_label, window),
+                        _ScoreBucketStats(),
+                    ).summary()
+                    for window in horizons
+                },
+            }
+        )
+
+    summary = {
+        **config,
+        "status": RUN_STATUS_SUCCESS,
+        "generated_at": utcnow().isoformat(),
+        "as_of_date": (replay_end or date.today()).isoformat(),
+        "replay_start_date": replay_start.isoformat() if replay_start else None,
+        "replay_end_date": replay_end.isoformat() if replay_end else None,
+        "source_signal_run_count": len(source_signal_run_ids),
+        "source_signal_run_ids": source_signal_run_ids,
+        "source_signal_as_of_dates": source_dates,
+        "ranking_sort": "opportunity",
+        "requested_top_n": requested_top_n,
+        "top_n": requested_top_n,
+        "baseline": _SCORE_BUCKET_BASELINE,
+        "scored_item_count": scored_item_count,
+        "excluded_unavailable_score_count": excluded_unavailable_score_count,
+        "excluded_codes": excluded_codes,
+        "completed_samples": completed_samples,
+        "excluded_samples": excluded_samples,
+        "pending_samples": pending_samples,
+        "sample_policy": (
+            "每天只取最新成功 ETF signal run，按缓存 metrics_json.opportunity_score 排序；"
+            "缺失真实综合关注分或主题数据不可用的 ETF 排除；未来收益只读取 signal 日期之后的已保存 ETF 日线。"
+        ),
+        "research_only": True,
+        "no_trade_instruction": True,
+        "groups": groups,
+    }
+    run.status = RUN_STATUS_SUCCESS
+    run.finished_at = utcnow()
+    run.as_of_date = replay_end or date.today()
+    run.source_signal_run_id = source_signal_run_ids[0]
+    run.summary_json = summary
+    for item in _validation_items_from_summary(summary):
+        session.add(
+            EtfSignalValidationItem(
+                run_id=run.id,
+                label=item["label"],
+                entry_timing_label=item["entry_timing_label"],
+                horizon_days=item["horizon_days"],
+                sample_count=item["sample_count"],
+                excluded_count=item["excluded_count"],
+                avg_return=item["avg_return"],
+                median_return=item["median_return"],
+                win_rate=item["win_rate"],
+                worst_forward_drawdown=item["worst_forward_drawdown"],
+                confidence=item["confidence"],
+                metrics_json=item["metrics"],
+            )
+        )
+    await session.commit()
+    await session.refresh(run)
+    return run
+
+
 def _validation_items_from_summary(summary: dict[str, Any]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for group in summary.get("groups", []):
@@ -2029,6 +2475,19 @@ async def latest_label_validation_summary(session: AsyncSession) -> dict[str, An
             "summary": dict(forward_run.summary_json or {}),
         }
     summary["evidence_tracks"] = tracks
+    return summary
+
+
+async def latest_score_bucket_validation_summary(session: AsyncSession) -> dict[str, Any]:
+    run = await latest_signal_validation_run(session, validation_mode=VALIDATION_MODE_SCORE_BUCKET_REPLAY)
+    if run is None:
+        return {}
+    summary = dict(run.summary_json or {})
+    summary["run_id"] = run.id
+    summary["validation_mode"] = run.validation_mode or VALIDATION_MODE_SCORE_BUCKET_REPLAY
+    summary["rule_version"] = run.rule_version
+    summary["generated_at"] = summary.get("generated_at") or run.created_at.isoformat()
+    summary["created_at"] = run.created_at.isoformat()
     return summary
 
 
@@ -2868,6 +3327,13 @@ async def status_summary(session: AsyncSession, *, include_health: bool = False)
             label_validation_generated_at = datetime.fromisoformat(str(label_validation["generated_at"]))
         except ValueError:
             label_validation_generated_at = None
+    score_bucket_validation = await latest_score_bucket_validation_summary(session)
+    score_bucket_validation_generated_at = None
+    if isinstance(score_bucket_validation, dict) and score_bucket_validation.get("generated_at"):
+        try:
+            score_bucket_validation_generated_at = datetime.fromisoformat(str(score_bucket_validation["generated_at"]))
+        except ValueError:
+            score_bucket_validation_generated_at = None
     theme_coverage = await theme_coverage_summary(session)
     return {
         "latest_data_date": latest,
@@ -2875,6 +3341,8 @@ async def status_summary(session: AsyncSession, *, include_health: bool = False)
         "theme_coverage": theme_coverage,
         "label_validation": label_validation if isinstance(label_validation, dict) else {},
         "label_validation_generated_at": label_validation_generated_at,
+        "score_bucket_validation": score_bucket_validation if isinstance(score_bucket_validation, dict) else {},
+        "score_bucket_validation_generated_at": score_bucket_validation_generated_at,
         "asset_count": len(DEFAULT_SHORT_RESEARCH_ASSETS),
         "fund_count": len(DEFAULT_SHORT_RESEARCH_FUND_CODES),
         "etf_count": len(DEFAULT_SHORT_RESEARCH_ETF_CODES),

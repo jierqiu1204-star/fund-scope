@@ -43,6 +43,7 @@ from app.services.short_research.jobs import (
     etf_label_historical_replay_job,
     etf_optimized_allocation_job,
     etf_portfolio_backtest_job,
+    etf_score_bucket_validation_job,
     etf_strategy_comparison_backtest_job,
     etf_strategy_healthcheck_job,
     post_close_etf_data_job,
@@ -227,6 +228,27 @@ async def run_job_by_name(
                 "max_assets": max_assets,
                 "batch_size": batch_size,
                 "universe_scope": "all_eligible" if max_assets is None else "eligible_limited",
+            },
+        )
+    if job_name == "etf_score_bucket_validation":
+        top_n = [5, 10, 20, 50]
+        return await start_background_job(
+            request.app.state.db.session,
+            job_name,
+            lambda tracked_session: etf_score_bucket_validation_job(
+                tracked_session,
+                days=days,
+                score_basis="opportunity",
+                top_n=top_n,
+            ),
+            details={
+                "queued": True,
+                "days": days,
+                "validation_mode": "score_bucket_replay",
+                "score_basis": "opportunity",
+                "top_n": top_n,
+                "baseline": "all_scored",
+                "research_only": True,
             },
         )
     if job_name == "etf_portfolio_backtest":

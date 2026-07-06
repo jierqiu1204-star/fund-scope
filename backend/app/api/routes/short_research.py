@@ -81,6 +81,7 @@ from app.services.short_research.optimized_allocation import (
 from app.services.short_research.service import (
     VALIDATION_MODE_FORWARD_LIVE,
     VALIDATION_MODE_HISTORICAL_REPLAY,
+    VALIDATION_MODE_SCORE_BUCKET_REPLAY,
     ComputedAsset,
     cached_signal_assets,
     etf_observation_portfolio,
@@ -91,6 +92,7 @@ from app.services.short_research.service import (
     latest_signal_validation_run,
     latest_validation_evidence_by_label,
     run_etf_label_historical_replay,
+    run_etf_score_bucket_validation,
     run_etf_signal_validation,
     run_signal_generation,
     status_summary,
@@ -709,10 +711,15 @@ async def run_short_research_validation(
 ) -> EtfSignalValidationRunOut:
     if validation_mode == VALIDATION_MODE_HISTORICAL_REPLAY:
         run = await run_etf_label_historical_replay(session, days=days, max_assets=max_assets)
+    elif validation_mode == VALIDATION_MODE_SCORE_BUCKET_REPLAY:
+        run = await run_etf_score_bucket_validation(session, days=days)
     elif validation_mode == VALIDATION_MODE_FORWARD_LIVE:
         run = await run_etf_signal_validation(session)
     else:
-        raise HTTPException(status_code=400, detail="validation_mode 只支持 forward_live 或 historical_replay")
+        raise HTTPException(
+            status_code=400,
+            detail="validation_mode 只支持 forward_live、historical_replay 或 score_bucket_replay",
+        )
     return await _validation_run_out(session, run)
 
 
@@ -723,6 +730,15 @@ async def run_short_research_historical_replay(
     session: AsyncSession = Depends(get_db_session),
 ) -> EtfSignalValidationRunOut:
     run = await run_etf_label_historical_replay(session, days=days, max_assets=max_assets)
+    return await _validation_run_out(session, run)
+
+
+@router.post("/validation/score-buckets/run", response_model=EtfSignalValidationRunOut)
+async def run_short_research_score_bucket_validation(
+    days: int = Query(default=180, ge=30, le=730),
+    session: AsyncSession = Depends(get_db_session),
+) -> EtfSignalValidationRunOut:
+    run = await run_etf_score_bucket_validation(session, days=days)
     return await _validation_run_out(session, run)
 
 
@@ -742,6 +758,16 @@ async def get_latest_short_research_historical_replay(
     session: AsyncSession = Depends(get_db_session),
 ) -> EtfSignalValidationRunOut | None:
     run = await latest_signal_validation_run(session, validation_mode=VALIDATION_MODE_HISTORICAL_REPLAY)
+    if run is None:
+        return None
+    return await _validation_run_out(session, run)
+
+
+@router.get("/validation/score-buckets/latest", response_model=EtfSignalValidationRunOut | None)
+async def get_latest_short_research_score_bucket_validation(
+    session: AsyncSession = Depends(get_db_session),
+) -> EtfSignalValidationRunOut | None:
+    run = await latest_signal_validation_run(session, validation_mode=VALIDATION_MODE_SCORE_BUCKET_REPLAY)
     if run is None:
         return None
     return await _validation_run_out(session, run)

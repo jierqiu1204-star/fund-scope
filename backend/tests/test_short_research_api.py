@@ -391,6 +391,147 @@ async def _seed_opportunity_signal_run(app) -> None:
         await session.commit()
 
 
+async def _seed_score_bucket_signal_runs(app) -> dict[str, Any]:
+    signal_date = date(2026, 7, 3)
+    available_codes = [f"5890{index:02d}" for index in range(1, 13)]
+    unavailable_code = "589098"
+    missing_score_code = "589099"
+    old_only_code = "589000"
+    async with app.state.db.session() as session:
+        session.add_all(
+            [
+                TradableEtf(
+                    code=code,
+                    name=f"综合关注分层{code}",
+                    exchange="SH",
+                    theme_tags_json=["分层验证"],
+                    trading_rule_label="证券账户 T+1 ETF",
+                    asset_class="sector",
+                    is_short_term_eligible=True,
+                    is_watchlist=True,
+                )
+                for code in [old_only_code, *available_codes, unavailable_code, missing_score_code]
+            ]
+        )
+        await session.flush()
+
+        for code_index, code in enumerate([old_only_code, *available_codes, unavailable_code, missing_score_code], start=1):
+            for offset in range(11):
+                close = 1.0 + (code_index * 0.001 * offset)
+                previous = 1.0 + (code_index * 0.001 * (offset - 1)) if offset else close
+                session.add(
+                    EtfPriceHistory(
+                        etf_code=code,
+                        trade_date=signal_date + timedelta(days=offset),
+                        open=close * 0.995,
+                        high=close * 1.01,
+                        low=close * 0.99,
+                        close=close,
+                        volume=2_000_000,
+                        turnover=180_000_000,
+                        pct_change=0.0 if offset == 0 else (close / previous - 1.0) * 100,
+                    )
+                )
+
+        old_run = ShortResearchSignalRun(
+            status="success",
+            as_of_date=signal_date,
+            config_json={"asset_type": "etf", "language": "research_only"},
+            summary_json={"item_count": 1},
+        )
+        latest_run = ShortResearchSignalRun(
+            status="success",
+            as_of_date=signal_date,
+            config_json={"asset_type": "etf", "language": "research_only"},
+            summary_json={"item_count": len(available_codes) + 2},
+        )
+        session.add_all([old_run, latest_run])
+        await session.flush()
+        session.add(
+            ShortResearchSignalItem(
+                run_id=old_run.id,
+                asset_type="etf",
+                asset_code=old_only_code,
+                rank=1,
+                total_score=100,
+                conclusion="短线观察",
+                score_breakdown_json={},
+                risk_flags_json=[],
+                rationale_json={},
+                metrics_json={
+                    "opportunity_score": 100,
+                    "factor_profile_version": "etf_factor_profile_v1",
+                    "factor_profile_score": 100,
+                    "catalyst_summary": "旧 run 不应进入分层验证。",
+                },
+            )
+        )
+        for index, code in enumerate(available_codes, start=1):
+            score = 100 - index
+            session.add(
+                ShortResearchSignalItem(
+                    run_id=latest_run.id,
+                    asset_type="etf",
+                    asset_code=code,
+                    rank=index,
+                    total_score=float(score),
+                    conclusion="短线观察",
+                    score_breakdown_json={},
+                    risk_flags_json=[],
+                    rationale_json={},
+                    metrics_json={
+                        "opportunity_score": score,
+                        "factor_profile_version": "etf_factor_profile_v1",
+                        "factor_profile_score": score,
+                        "catalyst_summary": "真实主题催化可用于综合关注排序。",
+                    },
+                )
+            )
+        session.add_all(
+            [
+                ShortResearchSignalItem(
+                    run_id=latest_run.id,
+                    asset_type="etf",
+                    asset_code=unavailable_code,
+                    rank=20,
+                    total_score=99,
+                    conclusion="高位观察",
+                    score_breakdown_json={},
+                    risk_flags_json=[],
+                    rationale_json={},
+                    metrics_json={
+                        "opportunity_score": 999,
+                        "catalyst_score": 50,
+                        "sentiment_heat_score": 50,
+                        "catalyst_summary": "暂无可用于评分的主题催化事件。",
+                        "catalyst_limitations": ["主题催化数据不可用。"],
+                    },
+                ),
+                ShortResearchSignalItem(
+                    run_id=latest_run.id,
+                    asset_type="etf",
+                    asset_code=missing_score_code,
+                    rank=21,
+                    total_score=80,
+                    conclusion="短线观察",
+                    score_breakdown_json={},
+                    risk_flags_json=[],
+                    rationale_json={},
+                    metrics_json={"catalyst_summary": "缺少综合关注分。"},
+                ),
+            ]
+        )
+        await session.commit()
+        return {
+            "latest_run_id": latest_run.id,
+            "old_run_id": old_run.id,
+            "available_codes": available_codes,
+            "unavailable_code": unavailable_code,
+            "missing_score_code": missing_score_code,
+            "old_only_code": old_only_code,
+        }
+
+
 async def _seed_unavailable_opportunity_sort_run(app) -> None:
     async with app.state.db.session() as session:
         session.add_all(
@@ -1082,6 +1223,52 @@ async def test_etf_label_historical_replay_api_separates_tracks_and_does_not_not
         alert_count = await session.scalar(select(func.count()).select_from(TrackedPositionAlert))
     assert notification_count == 0
     assert alert_count == 0
+
+
+@pytest.mark.asyncio
+async def test_etf_score_bucket_validation_uses_latest_signal_run_and_real_opportunity_scores(client, app) -> None:
+    seeded = await _seed_score_bucket_signal_runs(app)
+
+    response = await client.post("/api/short-research/validation/score-buckets/run?days=180")
+
+    assert response.status_code == 200
+    body = response.json()
+    summary = body["summary"]
+    assert body["validation_mode"] == "score_bucket_replay"
+    assert summary["score_basis"] == "opportunity"
+    assert summary["top_n"] == [5, 10, 20, 50]
+    assert summary["baseline"] == "all_scored"
+    assert summary["source_signal_run_ids"] == [seeded["latest_run_id"]]
+    assert seeded["old_run_id"] not in summary["source_signal_run_ids"]
+    assert summary["excluded_unavailable_score_count"] == 2
+    assert seeded["unavailable_code"] in summary["excluded_codes"]["unavailable_opportunity_score"]
+    assert seeded["missing_score_code"] in summary["excluded_codes"]["unavailable_opportunity_score"]
+
+    groups = {(item["label"], item["entry_timing_label"]): item for item in summary["groups"]}
+    available_codes = seeded["available_codes"]
+    assert groups[("Top 5", "cumulative")]["selected_codes"] == available_codes[:5]
+    assert groups[("Top 10", "cumulative")]["selected_codes"] == available_codes[:10]
+    assert groups[("1-5", "marginal")]["selected_codes"] == available_codes[:5]
+    assert groups[("6-10", "marginal")]["selected_codes"] == available_codes[5:10]
+    assert groups[("11-20", "marginal")]["selected_codes"] == available_codes[10:12]
+    assert groups[("all_scored", "baseline")]["selected_codes"] == available_codes
+    assert seeded["old_only_code"] not in groups[("Top 5", "cumulative")]["selected_codes"]
+
+    top5_window = groups[("Top 5", "cumulative")]["windows"]["5"]
+    assert top5_window["sample_count"] == 5
+    assert top5_window["win_rate"] == 1.0
+    assert top5_window["median_return"] > 0
+    assert groups[("Top 50", "cumulative")]["windows"]["10"]["sample_count"] == 12
+
+    latest = await client.get("/api/short-research/validation/score-buckets/latest")
+    assert latest.status_code == 200
+    assert latest.json()["id"] == body["id"]
+
+    status = await client.get("/api/short-research/status")
+    assert status.status_code == 200
+    status_body = status.json()
+    assert status_body["score_bucket_validation"]["validation_mode"] == "score_bucket_replay"
+    assert status_body["score_bucket_validation_generated_at"] is not None
 
 
 @pytest.mark.asyncio

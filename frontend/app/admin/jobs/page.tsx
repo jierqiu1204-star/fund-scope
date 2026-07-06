@@ -127,6 +127,12 @@ const jobGroups: Array<{ title: string; description: string; actions: JobAction[
         endpoint: "/api/admin/jobs/etf_label_historical_replay/run?days=180"
       },
       {
+        key: "etf_score_bucket_validation",
+        label: "验证综合关注 TopN",
+        description: "按历史最新 signal run 回放综合关注前 5/10/20/50 的未来表现，只生成研究证据。",
+        endpoint: "/api/admin/jobs/etf_score_bucket_validation/run?days=180"
+      },
+      {
         key: "intraday_etf_watch",
         label: "运行 ETF 盘中盯盘",
         description: "手动刷新前 20 ETF 和已追踪 ETF 的公开盘中行情，并检查是否需要发卖出/减仓提醒。",

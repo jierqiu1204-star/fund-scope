@@ -37,6 +37,8 @@ class ShortResearchStatusOut(BaseModel):
     data_health: list[ShortResearchDataHealthOut] = Field(default_factory=list)
     label_validation: dict[str, Any] = Field(default_factory=dict)
     label_validation_generated_at: datetime | None = None
+    score_bucket_validation: dict[str, Any] = Field(default_factory=dict)
+    score_bucket_validation_generated_at: datetime | None = None
     theme_coverage: dict[str, Any] = Field(default_factory=dict)
 
 

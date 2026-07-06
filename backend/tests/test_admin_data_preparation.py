@@ -169,6 +169,41 @@ async def test_admin_etf_label_replay_uses_background_job(monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
+async def test_admin_etf_score_bucket_validation_uses_background_job(
+    monkeypatch: pytest.MonkeyPatch,
+    client,
+) -> None:
+    async def fake_run_job(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("score bucket validation must use background job")
+
+    async def fake_start_background_job(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        details = kwargs["details"]
+        return {
+            "id": 100,
+            "job_name": "etf_score_bucket_validation",
+            "status": "running",
+            "started_at": "2026-07-05T15:30:00",
+            "finished_at": None,
+            "error_message": None,
+            "details": details,
+        }
+
+    monkeypatch.setattr(admin_routes, "run_job", fake_run_job)
+    monkeypatch.setattr(admin_routes, "start_background_job", fake_start_background_job, raising=False)
+
+    response = await client.post("/api/admin/jobs/etf_score_bucket_validation/run?days=180")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "running"
+    assert payload["details"]["queued"] is True
+    assert payload["details"]["validation_mode"] == "score_bucket_replay"
+    assert payload["details"]["score_basis"] == "opportunity"
+    assert payload["details"]["top_n"] == [5, 10, 20, 50]
+    assert payload["details"]["baseline"] == "all_scored"
+
+
+@pytest.mark.asyncio
 async def test_fund_nav_backfill_job_writes_range_and_is_idempotent(
     monkeypatch: pytest.MonkeyPatch,
     client,

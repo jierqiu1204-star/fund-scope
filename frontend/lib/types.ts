@@ -476,6 +476,8 @@ export type ShortResearchStatus = {
   data_health: ShortResearchDataHealth[];
   label_validation: Record<string, unknown>;
   label_validation_generated_at: string | null;
+  score_bucket_validation: Record<string, unknown>;
+  score_bucket_validation_generated_at: string | null;
 };
 
 export type ShortResearchChartPoint = {

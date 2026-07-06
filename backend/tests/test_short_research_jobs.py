@@ -296,6 +296,51 @@ async def test_etf_label_historical_replay_job_defaults_to_full_batched_run(monk
 
 
 @pytest.mark.asyncio
+async def test_etf_score_bucket_validation_job_defaults_to_opportunity_topn(monkeypatch) -> None:
+    calls: dict[str, Any] = {}
+
+    async def fake_run_etf_score_bucket_validation(
+        _session: object,
+        *,
+        days: int,
+        score_basis: str,
+        top_n: list[int],
+    ) -> SimpleNamespace:
+        calls["days"] = days
+        calls["score_basis"] = score_basis
+        calls["top_n"] = top_n
+        return SimpleNamespace(
+            id=31,
+            status="success",
+            validation_mode="score_bucket_replay",
+            as_of_date=date(2026, 7, 3),
+            rule_version="score_bucket_replay_v1",
+            summary_json={
+                "score_basis": "opportunity",
+                "top_n": [5, 10, 20, 50],
+                "baseline": "all_scored",
+                "source_signal_run_count": 7,
+                "groups": [
+                    {"label": "Top 5", "entry_timing_label": "cumulative"},
+                    {"label": "all_scored", "entry_timing_label": "baseline"},
+                ],
+            },
+        )
+
+    monkeypatch.setattr(jobs_module, "run_etf_score_bucket_validation", fake_run_etf_score_bucket_validation)
+
+    result = await jobs_module.etf_score_bucket_validation_job(object(), days=180)  # type: ignore[arg-type]
+
+    assert calls == {"days": 180, "score_basis": "opportunity", "top_n": [5, 10, 20, 50]}
+    assert result["validation_mode"] == "score_bucket_replay"
+    assert result["score_basis"] == "opportunity"
+    assert result["top_n"] == [5, 10, 20, 50]
+    assert result["baseline"] == "all_scored"
+    assert result["source_signal_runs"] == 7
+    assert result["groups"] == 2
+
+
+@pytest.mark.asyncio
 async def test_post_close_etf_signals_job_generates_only_etf_run(monkeypatch) -> None:
     calls: list[str] = []
 

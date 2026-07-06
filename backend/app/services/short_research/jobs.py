@@ -23,6 +23,7 @@ from app.services.short_research.optimized_allocation import run_etf_optimized_a
 from app.services.short_research.service import (
     run_etf_label_historical_replay,
     run_etf_observation_portfolio_optimization,
+    run_etf_score_bucket_validation,
     run_etf_signal_validation,
     run_signal_generation,
 )
@@ -263,6 +264,41 @@ async def etf_label_historical_replay_job(
         "evaluated_etfs": summary.get("evaluated_asset_count", 0),
         "completed_samples": summary.get("completed_samples", 0),
         "excluded_samples": summary.get("excluded_samples", 0),
+        "groups": len(summary.get("groups", [])),
+    }
+
+
+async def etf_score_bucket_validation_job(
+    session: AsyncSession,
+    *,
+    days: int = 180,
+    score_basis: str = "opportunity",
+    top_n: list[int] | None = None,
+) -> dict[str, Any]:
+    requested_top_n = top_n or [5, 10, 20, 50]
+    run = await run_etf_score_bucket_validation(
+        session,
+        days=days,
+        score_basis=score_basis,
+        top_n=requested_top_n,
+    )
+    summary = dict(run.summary_json or {})
+    return {
+        "run_id": run.id,
+        "status": run.status,
+        "validation_mode": run.validation_mode,
+        "as_of_date": run.as_of_date.isoformat(),
+        "rule_version": run.rule_version,
+        "days": days,
+        "score_basis": summary.get("score_basis", score_basis),
+        "top_n": summary.get("top_n", requested_top_n),
+        "baseline": summary.get("baseline"),
+        "source_signal_runs": summary.get("source_signal_run_count", 0),
+        "scored_items": summary.get("scored_item_count", 0),
+        "excluded_unavailable_score_count": summary.get("excluded_unavailable_score_count", 0),
+        "completed_samples": summary.get("completed_samples", 0),
+        "excluded_samples": summary.get("excluded_samples", 0),
+        "pending_samples": summary.get("pending_samples", 0),
         "groups": len(summary.get("groups", [])),
     }
 

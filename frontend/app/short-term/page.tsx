@@ -205,9 +205,20 @@ type LabelValidationGroup = {
   windows?: Record<string, LabelValidationWindow>;
 };
 
+type ScoreBucketValidationGroup = LabelValidationGroup & {
+  group_type?: string;
+  selected_count?: number;
+  selected_codes?: string[];
+};
+
 function labelValidationGroups(statusData: ShortResearchStatus | undefined): LabelValidationGroup[] {
   const validation = statusData?.label_validation as { groups?: unknown } | undefined;
   return Array.isArray(validation?.groups) ? (validation.groups as LabelValidationGroup[]) : [];
+}
+
+function scoreBucketValidationGroups(statusData: ShortResearchStatus | undefined): ScoreBucketValidationGroup[] {
+  const validation = statusData?.score_bucket_validation as { groups?: unknown } | undefined;
+  return Array.isArray(validation?.groups) ? (validation.groups as ScoreBucketValidationGroup[]) : [];
 }
 
 function labelValidationLine(group: LabelValidationGroup | undefined, window: "5" | "10") {
@@ -220,6 +231,26 @@ function labelValidationLine(group: LabelValidationGroup | undefined, window: "5
   const drawdown = drawdownValue === null || drawdownValue === undefined ? "暂无" : formatPercent(drawdownValue * 100);
   const winRate = item.win_rate === null || item.win_rate === undefined ? "暂无" : formatPercent(item.win_rate * 100);
   return `${window}日：样本 ${item.sample_count}，中位收益 ${median}，胜率 ${winRate}，最差回撤 ${drawdown}`;
+}
+
+function scoreBucketWindowText(group: ScoreBucketValidationGroup, window: "5" | "10") {
+  const item = group.windows?.[window];
+  if (!item || !item.sample_count) {
+    return "样本不足";
+  }
+  const median = item.median_return === null || item.median_return === undefined ? "暂无" : formatPercent(item.median_return * 100);
+  const winRate = item.win_rate === null || item.win_rate === undefined ? "暂无" : formatPercent(item.win_rate * 100);
+  return `${median} / ${winRate}`;
+}
+
+function scoreBucketSampleText(group: ScoreBucketValidationGroup) {
+  const window = group.windows?.["5"] ?? group.windows?.["10"] ?? group.windows?.["1"];
+  const selectedCount = group.selected_count ?? group.selected_codes?.length;
+  const sampleCount = window?.sample_count ?? 0;
+  if (selectedCount !== undefined) {
+    return `${sampleCount}/${selectedCount}`;
+  }
+  return `${sampleCount}`;
 }
 
 function validationConfidenceLabel(confidence: string | undefined) {
@@ -1839,6 +1870,19 @@ function ShortTermClient() {
       : null;
   const selectedAssetMetrics = selectedAsset?.metrics ?? {};
   const validationGroups = labelValidationGroups(statusData);
+  const scoreBucketGroups = scoreBucketValidationGroups(statusData);
+  const scoreBucketCumulativeGroups = scoreBucketGroups.filter((item) => item.group_type === "cumulative");
+  const scoreBucketMarginalGroups = scoreBucketGroups.filter((item) => item.group_type === "marginal");
+  const scoreBucketBaselineGroup = scoreBucketGroups.find((item) => item.group_type === "baseline");
+  const scoreBucketValidation = statusData?.score_bucket_validation ?? {};
+  const scoreBucketSourceRuns =
+    typeof scoreBucketValidation.source_signal_run_count === "number" ? scoreBucketValidation.source_signal_run_count : 0;
+  const scoreBucketScoredItems =
+    typeof scoreBucketValidation.scored_item_count === "number" ? scoreBucketValidation.scored_item_count : 0;
+  const scoreBucketExcludedItems =
+    typeof scoreBucketValidation.excluded_unavailable_score_count === "number"
+      ? scoreBucketValidation.excluded_unavailable_score_count
+      : 0;
   const selectedValidationEntryLabel = selectedDailyEntryTiming?.label ?? selectedEntryTiming.label;
   const selectedValidationGroup = selectedAsset
     ? validationGroups.find(
@@ -3284,6 +3328,12 @@ function ShortTermClient() {
             <WorkbenchMetric label="验证时间" value={formatUtcDateTime(statusData?.label_validation_generated_at)} tone="bg-white text-ink" />
           ) : null}
           {assetType === "etf" ? (
+            <WorkbenchMetric label="TopN验证" value={`${scoreBucketGroups.length} 组`} tone="bg-white text-ink" />
+          ) : null}
+          {assetType === "etf" ? (
+            <WorkbenchMetric label="TopN时间" value={formatUtcDateTime(statusData?.score_bucket_validation_generated_at)} tone="bg-white text-ink" />
+          ) : null}
+          {assetType === "etf" ? (
             <WorkbenchMetric label="日线缺口/失败" value={`${statusData?.etf_data_stale_count ?? 0} / ${statusData?.etf_failed_count ?? 0} 只`} tone="bg-amber-50 text-amber-900" />
           ) : null}
           {assetType !== "etf" ? (
@@ -3331,6 +3381,91 @@ function ShortTermClient() {
           {errorText(syncData.error ?? runSignals.error ?? runAdvisor.error ?? status.error ?? assets.error)}
         </p>
       )}
+
+      {assetType === "etf" ? (
+        <Panel className="rounded-[12px] bg-white">
+          <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+            <div>
+              <p className="text-sm font-semibold text-accent">综合关注分层验证</p>
+              <h2 className="mt-1 text-xl font-semibold text-ink">Top 5/10/20/50 未来表现</h2>
+              <p className="mt-2 text-sm leading-6 text-ink/60">
+                研究证据，不代表未来收益，不参与实时排序、持仓提醒或邮件。
+              </p>
+            </div>
+            <div className="grid gap-2 text-sm sm:grid-cols-3">
+              <StatPill label="来源 run" value={`${scoreBucketSourceRuns}`} tone="bg-paper text-ink" />
+              <StatPill label="可评分样本" value={`${scoreBucketScoredItems}`} tone="bg-paper text-ink" />
+              <StatPill label="排除缺失分" value={`${scoreBucketExcludedItems}`} tone="bg-paper text-ink" />
+            </div>
+          </div>
+          {scoreBucketGroups.length ? (
+            <div className="mt-4 space-y-4">
+              <div className="overflow-x-auto rounded-[8px] border border-ink/10">
+                <table className="min-w-full divide-y divide-ink/10 text-left text-sm">
+                  <thead className="bg-paper text-xs text-ink/55">
+                    <tr>
+                      <th className="px-3 py-2 font-semibold">累计组</th>
+                      <th className="px-3 py-2 font-semibold">5日中位/胜率</th>
+                      <th className="px-3 py-2 font-semibold">10日中位/胜率</th>
+                      <th className="px-3 py-2 font-semibold">样本/入选</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-ink/10">
+                    {scoreBucketCumulativeGroups.map((group) => (
+                      <tr key={`${group.label}-${group.entry_timing_label}`} className="bg-white">
+                        <td className="px-3 py-2 font-semibold text-ink">{group.label}</td>
+                        <td className="px-3 py-2 text-ink/65">{scoreBucketWindowText(group, "5")}</td>
+                        <td className="px-3 py-2 text-ink/65">{scoreBucketWindowText(group, "10")}</td>
+                        <td className="px-3 py-2 text-ink/65">{scoreBucketSampleText(group)}</td>
+                      </tr>
+                    ))}
+                    {scoreBucketBaselineGroup ? (
+                      <tr className="bg-paper/60">
+                        <td className="px-3 py-2 font-semibold text-ink">all_scored</td>
+                        <td className="px-3 py-2 text-ink/65">{scoreBucketWindowText(scoreBucketBaselineGroup, "5")}</td>
+                        <td className="px-3 py-2 text-ink/65">{scoreBucketWindowText(scoreBucketBaselineGroup, "10")}</td>
+                        <td className="px-3 py-2 text-ink/65">{scoreBucketSampleText(scoreBucketBaselineGroup)}</td>
+                      </tr>
+                    ) : null}
+                  </tbody>
+                </table>
+              </div>
+              {scoreBucketMarginalGroups.length ? (
+                <div className="overflow-x-auto rounded-[8px] border border-ink/10">
+                  <table className="min-w-full divide-y divide-ink/10 text-left text-sm">
+                    <thead className="bg-paper text-xs text-ink/55">
+                      <tr>
+                        <th className="px-3 py-2 font-semibold">边际组</th>
+                        <th className="px-3 py-2 font-semibold">5日中位/胜率</th>
+                        <th className="px-3 py-2 font-semibold">10日中位/胜率</th>
+                        <th className="px-3 py-2 font-semibold">样本/入选</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-ink/10">
+                      {scoreBucketMarginalGroups.map((group) => (
+                        <tr key={`${group.label}-${group.entry_timing_label}`} className="bg-white">
+                          <td className="px-3 py-2 font-semibold text-ink">{group.label}</td>
+                          <td className="px-3 py-2 text-ink/65">{scoreBucketWindowText(group, "5")}</td>
+                          <td className="px-3 py-2 text-ink/65">{scoreBucketWindowText(group, "10")}</td>
+                          <td className="px-3 py-2 text-ink/65">{scoreBucketSampleText(group)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
+              <p className="text-xs leading-5 text-ink/50">
+                窗口：{formatDate(String(scoreBucketValidation.replay_start_date ?? ""))} - {formatDate(String(scoreBucketValidation.replay_end_date ?? ""))}；
+                排序字段：metrics_json.opportunity_score；缺失真实综合关注分或主题数据不可用的 ETF 已排除。
+              </p>
+            </div>
+          ) : (
+            <div className="mt-4 rounded-[8px] border border-dashed border-ink/20 bg-paper px-4 py-5 text-sm text-ink/55">
+              暂无综合关注分层验证。
+            </div>
+          )}
+        </Panel>
+      ) : null}
 
       <div className="lg:hidden">
         <div className="rounded-[10px] bg-white p-1">
