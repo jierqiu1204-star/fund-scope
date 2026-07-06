@@ -1506,6 +1506,20 @@ function ShortTermClient() {
   });
   const shouldRefreshIntradayQueries =
     isEtfTradingPollWindow && isEtfLiveRanking && etfLiveData?.market_status === "open";
+  const selectedEtfLiveData = useQuery({
+    queryKey: ["etf-quotes", "selected-live-ranking", selected?.code],
+    enabled: assetType === "etf" && selected?.asset_type === "etf" && Boolean(selected?.code),
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      params.set("limit", "5");
+      params.set("q", selected?.code ?? "");
+      return (await api.get<IntradayEtfLiveRankingList>(`/api/etf-quotes/live-rankings?${params.toString()}`)).data;
+    },
+    refetchInterval: (query) => {
+      const data = query.state.data as IntradayEtfLiveRankingList | undefined;
+      return isEtfTradingPollWindow && data?.market_status === "open" ? 30_000 : false;
+    }
+  });
 
   const observationPortfolio = useQuery({
     queryKey: ["short-research", "observation-portfolio", "default"],
@@ -1865,23 +1879,36 @@ function ShortTermClient() {
   const selectedLiveItem = selectedAsset
     ? visibleAssets.find((item) => isLiveRankingItem(item) && item.etf_code === selectedAsset.code)
     : null;
-  const selectedLiveQuote = selectedLiveItem && isLiveRankingItem(selectedLiveItem) ? selectedLiveItem.quote : null;
-  const selectedIntradayChange = intradayChangeDisplay(selectedLiveQuote, etfLiveData?.market_status);
+  const selectedLiveFallbackItem =
+    selectedAsset?.asset_type === "etf"
+      ? selectedEtfLiveData.data?.items.find((item) => item.etf_code === selectedAsset.code) ?? null
+      : null;
+  const selectedLiveRankingItem =
+    selectedLiveItem && isLiveRankingItem(selectedLiveItem) ? selectedLiveItem : selectedLiveFallbackItem;
+  const selectedLiveQuote = selectedLiveRankingItem?.quote ?? null;
+  const selectedMarketStatus = etfLiveData?.market_status ?? selectedEtfLiveData.data?.market_status;
+  const selectedIntradayChange = intradayChangeDisplay(selectedLiveQuote, selectedMarketStatus);
   const selectedEntryTiming =
-    assetType === "etf" && selectedLiveItem && isLiveRankingItem(selectedLiveItem)
-      ? itemEntryTimingDisplay(selectedLiveItem, etfLiveData?.market_status)
+    assetType === "etf" && selectedLiveRankingItem
+      ? itemEntryTimingDisplay(selectedLiveRankingItem, selectedMarketStatus)
       : {
           title: "今日买点",
           label: selectedAsset?.entry_timing_label ?? "暂无",
           reason: selectedAsset?.entry_timing_reason ?? "暂无买点原因",
         };
   const selectedDailyEntryTiming =
-    assetType === "etf" && selectedLiveItem && isLiveRankingItem(selectedLiveItem)
+    assetType === "etf" && selectedLiveRankingItem
       ? {
           title: "日线买点参考",
-          label: selectedLiveItem.daily_entry_timing_label,
-          reason: dailyReferenceReason(selectedLiveItem.daily_entry_timing_reason, etfLiveData?.signal_as_of_date),
-          parts: dailyReferenceParts(selectedLiveItem.daily_entry_timing_reason, etfLiveData?.signal_as_of_date),
+          label: selectedLiveRankingItem.daily_entry_timing_label,
+          reason: dailyReferenceReason(
+            selectedLiveRankingItem.daily_entry_timing_reason,
+            etfLiveData?.signal_as_of_date ?? selectedEtfLiveData.data?.signal_as_of_date,
+          ),
+          parts: dailyReferenceParts(
+            selectedLiveRankingItem.daily_entry_timing_reason,
+            etfLiveData?.signal_as_of_date ?? selectedEtfLiveData.data?.signal_as_of_date,
+          ),
         }
       : null;
   const selectedAssetMetrics = selectedAsset?.metrics ?? {};
