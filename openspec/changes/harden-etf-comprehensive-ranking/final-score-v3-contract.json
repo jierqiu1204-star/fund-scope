@@ -1,0 +1,187 @@
+{
+  "schema_version": "etf_ranking_contract_v1",
+  "contract_id": "final_score_v3",
+  "selector": {
+    "target_score_version": "final_score_v3",
+    "score_field": "ranking_score",
+    "activation_state": "publication_gated",
+    "required_scope": "full",
+    "fallback_when_unavailable": "none",
+    "legacy_versions": ["final_score_v2"]
+  },
+  "calculation": {
+    "method": "single_pass_weighted_sum",
+    "apply_hard_limits": "after_aggregation",
+    "renormalize_missing_weights": false,
+    "missing_score_bearing_input": "score_unavailable",
+    "price_basis": "total_return_adjusted",
+    "components": [
+      {
+        "id": "technical_momentum_cross_section",
+        "weight": 0.3,
+        "score_bearing": true,
+        "required_inputs": [
+          "return_5d",
+          "return_10d",
+          "return_20d",
+          "distance_to_ma20",
+          "trend_consistency",
+          "eligible_peer_count",
+          "source_trade_date"
+        ],
+        "primitive_lineage": [
+          "return_5d",
+          "return_10d",
+          "return_20d",
+          "distance_to_ma20",
+          "trend_consistency"
+        ]
+      },
+      {
+        "id": "risk_quality_cross_section",
+        "weight": 0.2,
+        "score_bearing": true,
+        "required_inputs": [
+          "realized_volatility_20d",
+          "downside_volatility_20d",
+          "max_drawdown_20d",
+          "overextension_atr",
+          "eligible_peer_count",
+          "source_trade_date"
+        ],
+        "primitive_lineage": [
+          "realized_volatility_20d",
+          "downside_volatility_20d",
+          "max_drawdown_20d",
+          "overextension_atr"
+        ]
+      },
+      {
+        "id": "structure_liquidity",
+        "weight": 0.15,
+        "score_bearing": true,
+        "required_inputs": [
+          "average_turnover_20d",
+          "average_turnover_60d",
+          "spread_bps",
+          "structure_quality",
+          "source_trade_date"
+        ],
+        "primitive_lineage": [
+          "average_turnover_20d",
+          "average_turnover_60d",
+          "spread_bps",
+          "structure_quality"
+        ]
+      },
+      {
+        "id": "sector_trend",
+        "weight": 0.15,
+        "score_bearing": true,
+        "required_inputs": [
+          "sector_breadth_20d",
+          "sector_momentum_20d",
+          "sector_turnover_ratio_20_60",
+          "sector_eligible_peer_count",
+          "source_trade_date"
+        ],
+        "primitive_lineage": [
+          "sector_breadth_20d",
+          "sector_momentum_20d",
+          "sector_turnover_ratio_20_60"
+        ]
+      },
+      {
+        "id": "theme_catalyst",
+        "weight": 0.1,
+        "score_bearing": true,
+        "required_inputs": [
+          "catalyst_quality",
+          "catalyst_confidence",
+          "catalyst_effective_at",
+          "catalyst_expires_at",
+          "catalyst_source"
+        ],
+        "primitive_lineage": [
+          "catalyst_quality",
+          "catalyst_confidence"
+        ]
+      },
+      {
+        "id": "premium_discount",
+        "weight": 0.1,
+        "score_bearing": true,
+        "required_inputs": [
+          "premium_discount_bps",
+          "iopv_observed_at",
+          "premium_provider_consensus"
+        ],
+        "primitive_lineage": [
+          "premium_discount_bps",
+          "premium_provider_consensus"
+        ]
+      }
+    ]
+  },
+  "eligibility": {
+    "finite_score_inputs_required": true,
+    "decision_eligible_sources_required": true,
+    "same_trade_date_required": true,
+    "display_only_input_is_missing": true,
+    "neutral_or_zero_fill_allowed": false,
+    "component_profiles_must_match": true
+  },
+  "hard_limits": {
+    "stale_score_cap": 55,
+    "unavailable_score_cap": 45,
+    "risk_monotonicity": "adding_risk_cannot_increase_score",
+    "quality_gate_precedence": "cannot_be_undone_by_later_enrichment"
+  },
+  "asset_buckets": {
+    "comparable_bucket_ids": [
+      "broad_equity",
+      "sector_theme_equity",
+      "fixed_income",
+      "commodity",
+      "cross_border"
+    ],
+    "unknown_or_incompatible": "score_unavailable",
+    "cross_bucket_percentiles": false,
+    "clone_policy": "one_underlying_distribution_contribution"
+  },
+  "anti_double_count": {
+    "primitive_may_have_multiple_weighted_paths": false,
+    "composite_and_children_may_both_be_weighted": false,
+    "lineage_validation": "primitive_ids_unique_across_score_bearing_components"
+  },
+  "compatibility_aliases": {
+    "output_fields": {
+      "total_score": "ranking_score",
+      "rank": "global_rank",
+      "live_rank": "global_live_rank"
+    },
+    "sort_modes": {
+      "opportunity": "ranking_score"
+    },
+    "not_aliases": ["opportunity_score", "final_score_v2"]
+  },
+  "ordering": {
+    "missing_or_non_finite": "last",
+    "zero_is_valid": true,
+    "tie_break": [
+      "score_eligible_desc",
+      "ranking_score_desc",
+      "persisted_global_rank_asc",
+      "asset_code_asc"
+    ]
+  },
+  "explanatory_only": [
+    "label_validation",
+    "historical_performance",
+    "strategy_healthcheck",
+    "ai_prose",
+    "user_positions",
+    "alerts",
+    "notifications"
+  ]
+}

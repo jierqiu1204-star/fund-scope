@@ -71,6 +71,8 @@ Alternative considered: call the filtered position `rank` for compatibility. The
 
 ### 4. `final_score_v3` is a declared, single-pass component manifest
 
+The frozen target configuration is [`final-score-v3-contract.json`](./final-score-v3-contract.json). Its selector names the target canonical contract, but production readers remain behind the publication and cutover gates in this change; declaring the selector does not activate v3 or permit fallback to v2.
+
 The current order is replaced by one typed `RankingInput` flow:
 
 1. validate point-in-time market data and universe eligibility;
