@@ -64,5 +64,5 @@
 - [x] 8.2 Run `uv run pytest tests/test_backend_domain_boundaries.py`.
 - [x] 8.3 Run `uv run ruff check .`.
 - [x] 8.4 Run frontend typecheck for `/short-term` factor display changes.
-- [ ] 8.5 Manually verify robotics, innovative drug, semiconductor, optical-module proxy, broad-market, and no-theme ETFs in ranking and detail.
-- [ ] 8.6 After deployment, run ETF signal generation and confirm production API does not expose fallback `50/60` factor or comprehensive scores.
+- [ ] 8.5 Manually verify robotics, innovative drug, semiconductor, optical-module proxy, broad-market, and no-theme ETFs in ranking and detail. **PAUSED / BLOCKED:** resume only against one pinned, published, full-scope, fresh `final_score_v3` snapshot with exact contract, universe, and input identity plus a compatible price basis, consumed without fallback; incompatible or unavailable factor producers MUST remain unavailable.
+- [ ] 8.6 After deployment, run ETF signal generation and confirm production API does not expose fallback `50/60` factor or comprehensive scores. **PAUSED / BLOCKED:** resume only when deployment and recompute produce and consume a pinned, published, full-scope, fresh `final_score_v3` snapshot with exact contract, universe, and input identity plus a compatible price basis, preserving that identity without fallback.

@@ -43,5 +43,5 @@
 - [x] 6.2 Run `uv run pytest tests/test_backend_domain_boundaries.py`.
 - [x] 6.3 Run `uv run ruff check .`.
 - [x] 6.4 Run frontend typecheck for `/short-term` changes.
-- [ ] 6.5 Manually verify ETF detail and ranking consistency for robotics, innovative drug, semiconductor, optical-module proxy, and no-theme ETFs.
-- [ ] 6.6 After deployment, run the ETF signal generation job and confirm production API shows no fallback `50/60` comprehensive scores.
+- [ ] 6.5 Manually verify ETF detail and ranking consistency for robotics, innovative drug, semiconductor, optical-module proxy, and no-theme ETFs. **PAUSED / BLOCKED:** resume only through a pinned, published, full-scope, fresh `final_score_v3` production-path snapshot with exact contract, universe, and input identity plus a compatible price basis, consumed without fallback; do not validate the old opportunity profile as current ranking.
+- [ ] 6.6 After deployment, run the ETF signal generation job and confirm production API shows no fallback `50/60` comprehensive scores. **PAUSED / BLOCKED:** resume only when deployment and recompute produce and consume a pinned, published, full-scope, fresh `final_score_v3` snapshot with exact contract, universe, and input identity plus a compatible price basis, preserving that identity without fallback.

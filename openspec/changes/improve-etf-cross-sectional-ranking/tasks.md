@@ -62,8 +62,8 @@
 
 ## 9. Deployment And Data Refresh
 
-- [ ] 9.1 Deploy backend and frontend after tests pass.
-- [ ] 9.2 Run ETF data refresh if needed.
-- [ ] 9.3 Run ETF signal generation to create `final_score_v2` cached results.
-- [ ] 9.4 Run ETF observation portfolio generation after the new ranking cache exists.
-- [ ] 9.5 Verify `/short-term` shows new score breakdown, score version, data reliability limits, and non-misleading old-cache handling.
+- [ ] 9.1 Deploy backend and frontend after tests pass. **PAUSED / BLOCKED:** resume only when a pinned, published, full-scope, fresh `final_score_v3` snapshot exists with exact contract, universe, and input identity plus a compatible price basis, and deployed consumers preserve that identity without fallback.
+- [ ] 9.2 Run ETF data refresh if needed. Retained only to prepare traceable inputs under the v3 price-basis, trade-date, universe, and coverage contract; it MUST NOT publish, refresh, or promote a `final_score_v2` or legacy canonical ranking.
+- [ ] 9.3 Run ETF signal generation to create `final_score_v2` cached results. **PAUSED / BLOCKED:** this v2 production generation MUST NOT run or feed current consumers; resume only as v3 generation from a pinned, published, full-scope, fresh `final_score_v3` contract with exact contract, universe, and input identity plus a compatible price basis, consumed without fallback.
+- [ ] 9.4 Run ETF observation portfolio generation after the new ranking cache exists. **PAUSED / BLOCKED:** resume only when allocation consumes and preserves a pinned, published, full-scope, fresh `final_score_v3` snapshot with exact contract, universe, and input identity plus a compatible price basis, without fallback.
+- [ ] 9.5 Verify `/short-term` shows new score breakdown, score version, data reliability limits, and non-misleading old-cache handling. **PAUSED / BLOCKED:** production verification resumes only when `/short-term` consumes and preserves a pinned, published, full-scope, fresh `final_score_v3` snapshot with exact contract, universe, and input identity plus a compatible price basis, without v2/legacy fallback.

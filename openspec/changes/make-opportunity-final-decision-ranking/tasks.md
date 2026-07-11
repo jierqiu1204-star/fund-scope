@@ -18,9 +18,9 @@
 
 ## 4. Push, Deploy, And Recompute
 
-- [ ] 4.1 Commit with a concise Chinese message and push the branch.
-- [ ] 4.2 Deploy to `110.42.222.9`.
-- [ ] 4.3 Re-run ETF scoring with latest available data.
-- [ ] 4.4 Re-run ETF funds allocation reference.
-- [ ] 4.5 Re-run Top 5/10/20/50 historical outcome validation using the new comprehensive ranking.
-- [ ] 4.6 Report the Top 5/10/20/50 results to the user.
+- [ ] 4.1 Commit with a concise Chinese message and push the branch. Retained as version-control housekeeping only; it MUST NOT publish, deploy, recompute, or promote `final_score_v2` or legacy ranking results.
+- [ ] 4.2 Deploy to `110.42.222.9`. **PAUSED / BLOCKED:** resume only when a pinned, published, full-scope, fresh `final_score_v3` snapshot exists with exact contract, universe, and input identity plus a compatible price basis, and deployment consumers preserve that identity without fallback.
+- [ ] 4.3 Re-run ETF scoring with latest available data. **PAUSED / BLOCKED:** resume only when a pinned, published, full-scope, fresh `final_score_v3` snapshot exists with exact contract, universe, and input identity plus a compatible price basis, and the recompute consumes and preserves that identity without fallback.
+- [ ] 4.4 Re-run ETF funds allocation reference. **PAUSED / BLOCKED:** resume only when a pinned, published, full-scope, fresh `final_score_v3` snapshot exists with exact contract, universe, and input identity plus a compatible price basis, and allocation consumes and preserves that identity without fallback.
+- [ ] 4.5 Re-run Top 5/10/20/50 historical outcome validation using the new comprehensive ranking. **PAUSED / BLOCKED:** resume only against a pinned, published, full-scope, fresh `final_score_v3` snapshot with exact contract, universe, and input identity plus a compatible price basis; validation MUST consume that identity without v2/legacy fallback or evidence promotion.
+- [ ] 4.6 Report the Top 5/10/20/50 results to the user. **PAUSED / BLOCKED:** resume only for validation derived from a pinned, published, full-scope, fresh `final_score_v3` snapshot with exact contract, universe, and input identity plus a compatible price basis, consumed without fallback; v2/legacy evidence MUST NOT be promoted as current.

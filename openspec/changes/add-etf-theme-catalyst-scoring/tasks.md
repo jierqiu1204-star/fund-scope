@@ -43,4 +43,4 @@
 - [x] 6.2 Run `uv run pytest tests/test_backend_domain_boundaries.py`.
 - [x] 6.3 Run `uv run ruff check .`.
 - [x] 6.4 Run frontend typecheck/build for the updated `/short-term` workbench.
-- [ ] 6.5 On the server dataset, run catalyst refresh and ETF short-research signal generation, then verify robotics, semiconductor, and optical-module/proxy themes display expected catalyst states.
+- [ ] 6.5 On the server dataset, run catalyst refresh and ETF short-research signal generation, then verify robotics, semiconductor, and optical-module/proxy themes display expected catalyst states. **PAUSED / BLOCKED:** the bundled refresh/generation/verification task MUST NOT generate or validate a production ranking until it produces and consumes a pinned, published, full-scope, fresh `final_score_v3` snapshot with exact contract, universe, and input identity plus a compatible price basis, preserving that identity without fallback.
