@@ -25,24 +25,24 @@ The system SHALL record and display the prior weight source used by the Black-Li
 ### Requirement: Black-Litterman views are structured and reproducible
 The system SHALL derive Black-Litterman views from structured FundScope signals rather than AI prose.
 
-#### Scenario: ETF has strong structured evidence
-- **WHEN** an ETF has strong short-term score, valid labels, and positive evidence confidence
-- **THEN** the allocator converts those fields into a reproducible view with numeric direction and confidence
+#### Scenario: ETF has a compatible published ranking
+- **WHEN** an ETF has a compatible current short-term score, valid current labels, and decision-eligible market inputs
+- **THEN** the allocator converts only those current-contract fields into a reproducible view with numeric direction and confidence
 
 #### Scenario: AI explanation exists
 - **WHEN** an AI explanation exists for an ETF
 - **THEN** the allocator may display the explanation beside the result but MUST NOT use AI prose as a mathematical view input
 
-### Requirement: Confidence reflects evidence quality
-The system SHALL set Black-Litterman confidence according to label validation, strategy healthcheck, sample size, and data reliability.
+### Requirement: Validation evidence cannot change allocation confidence
+The system SHALL set Black-Litterman confidence from current decision-eligible data reliability and market-history coverage and SHALL keep label validation, replay, backtest, and strategy healthcheck evidence display-only.
 
 #### Scenario: Evidence is weak
 - **WHEN** label validation or strategy healthcheck indicates weak, unstable, or insufficient evidence
-- **THEN** the allocator lowers confidence and records the confidence reason
+- **THEN** the allocator displays the evidence state but leaves views, confidence, weights, and all other current decision outputs unchanged
 
 #### Scenario: Evidence is unavailable
 - **WHEN** there is no usable evidence for a candidate ETF
-- **THEN** the allocator either assigns minimal confidence or excludes the ETF according to the configured eligibility rules
+- **THEN** the allocator displays evidence as unavailable and continues to determine eligibility only from the published ranking and current market-input contract
 
 ### Requirement: Black-Litterman enforces FundScope allocation constraints
 The system SHALL apply FundScope ETF allocation constraints to Black-Litterman output.

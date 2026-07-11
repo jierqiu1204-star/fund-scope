@@ -1,6 +1,6 @@
 ## Why
 
-Current ETF allocation already has rule-based, minimum-volatility, and risk-parity style evidence, but it still lacks a formal way to combine market-implied prior weights with FundScope's own views and confidence. Black-Litterman can provide a more disciplined allocation comparison: it does not predict buy/sell points, but it can turn ETF ranking signals, label evidence, and confidence into explainable target weights.
+Current ETF allocation already has rule-based, minimum-volatility, and risk-parity style outputs, but it still lacks a formal way to combine market-implied prior weights with FundScope's published ranking views and data confidence. Label validation, backtest, and healthcheck evidence remain display-only and cannot become target-weight inputs.
 
 ## What Changes
 
@@ -8,7 +8,7 @@ Current ETF allocation already has rule-based, minimum-volatility, and risk-pari
 - Build market prior weights from reliable ETF proxies such as AUM, liquidity, or deterministic fallback priors when AUM is unavailable.
 - Convert FundScope views into Black-Litterman inputs:
   - short-term score and label state become directional views.
-  - label validation and strategy healthcheck evidence become confidence.
+  - data reliability and market-input coverage become confidence; label validation and strategy healthcheck evidence remain display-only.
   - stale, estimated, unavailable, or display-only data receives zero decision confidence.
 - Apply existing FundScope portfolio constraints:
   - long-only weights.

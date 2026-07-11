@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Comprehensive Focus Ranking Uses Final Decision Score
-The short-term research workbench SHALL treat `综合关注` as the final decision-support ranking for ETF research, using the current final score that combines cross-sectional strength, dynamic thresholds, label evidence, data reliability, liquidity, premium/discount risk, and theme or sector context.
+The short-term research workbench SHALL treat `综合关注` as the final decision-support ranking for ETF research, using a published `final_score_v3` whose score-bearing manifest excludes label validation, replay, backtest, and healthcheck evidence. Such evidence MAY be displayed separately but SHALL NOT alter the current score, label, rank, allocation, tracked position, alert, or notification.
 
 #### Scenario: User sorts ETFs by comprehensive focus
 - **WHEN** the user selects `综合关注` on `/short-term`

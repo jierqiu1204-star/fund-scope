@@ -4,7 +4,7 @@ FundScope already has ETF ranking, label validation, strategy healthcheck, and o
 
 - a neutral market prior,
 - FundScope's ranking and label views,
-- confidence derived from historical evidence and data reliability,
+- confidence derived from current market-data reliability and input coverage,
 - covariance and portfolio constraints.
 
 Black-Litterman fits this role as an allocation comparison model. It belongs in the `portfolio_allocation` layer. It must not decide intraday alerts, send emails, modify tracked positions, or override real user holdings.
@@ -75,8 +75,8 @@ Views should be derived from structured FundScope fields:
 - short-term score,
 - buy observation label,
 - entry timing label,
-- label validation result,
-- strategy healthcheck result,
+- display-only label validation result,
+- display-only strategy healthcheck result,
 - market regime and theme constraints.
 
 AI-generated explanation text can explain the result but cannot be an input to the math.
@@ -84,14 +84,14 @@ AI-generated explanation text can explain the result but cannot be an input to t
 Rationale:
 - Reproducibility matters more than rich language in financial calculations.
 
-### Decision 5: Confidence is capped by evidence and data reliability
+### Decision 5: Runtime confidence excludes validation evidence
 
 Confidence should be reduced or zeroed when:
 
 - price data is stale, estimated, display-only, or unavailable,
-- label validation has insufficient samples,
-- healthcheck says evidence is weak or unstable,
 - ETF history is too short for covariance.
+
+Label validation, backtest, and healthcheck results may be displayed beside the allocation but never change views, confidence, weights, or any other current decision output. They may motivate a separately proposed, human-reviewed future contract version only.
 
 Rationale:
 - Black-Litterman can look precise even when inputs are weak. Confidence must make uncertainty visible.

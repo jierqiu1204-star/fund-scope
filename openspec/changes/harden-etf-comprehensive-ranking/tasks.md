@@ -1,7 +1,7 @@
 ## 1. Reconcile Contracts And Lock Regression Baselines
 
 - [x] 1.1 Compare this change with `make-opportunity-final-decision-ranking`, `improve-etf-cross-sectional-ranking`, `add-etf-sector-trend-scoring`, `expand-etf-factor-library`, and `add-etf-theme-catalyst-scoring`, and record each overlapping task as retained, superseded, or blocked.
-- [ ] 1.2 Remove or supersede every active-change requirement that lets label or validation evidence contribute to a current score, label, rank, allocation, tracked position, alert, or notification.
+- [x] 1.2 Remove or supersede every active-change requirement that lets label or validation evidence contribute to a current score, label, rank, allocation, tracked position, alert, or notification.
 - [ ] 1.3 Pause pending deployment, production recompute, Top-N validation, allocation recompute, and evidence-promotion tasks from overlapping active changes until the v3 publication contract is ready.
 - [ ] 1.4 Freeze the `final_score_v3` component DAG/manifest, compatibility aliases, stale/unavailable caps, homogeneous asset buckets, anti-double-count lineage, and current score-version selector in one reviewed configuration contract.
 - [ ] 1.5 Convert the failing opportunity-order test into `test_comprehensive_sort_uses_final_decision_score_not_theme_heat`, preserving theme/catalyst evidence assertions.

@@ -7,8 +7,8 @@
 ## 2. Prior, Views, and Confidence
 
 - [x] 2.1 Implement market prior construction with documented source order: AUM/fund size, liquidity proxy, deterministic fallback prior.
-- [x] 2.2 Implement structured view generation from short-term score, buy observation label, entry timing label, label validation, strategy healthcheck, market regime, and theme metadata.
-- [x] 2.3 Implement confidence scaling from evidence quality, sample size, data reliability, and history coverage.
+- [x] 2.2 Supersede validation/healthcheck inputs; structured views use the published ranking contract, current labels, market regime, and theme metadata only.
+- [x] 2.3 Supersede evidence-driven confidence; runtime confidence uses data reliability and market-history coverage only.
 - [x] 2.4 Ensure AI prose is not used as a mathematical view or confidence input.
 
 ## 3. Black-Litterman Allocation Engine

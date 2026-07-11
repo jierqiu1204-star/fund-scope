@@ -4,7 +4,7 @@ FundScope 当前 ETF 排序主要由固定窗口收益、风险扣分和流动�
 
 - 不同主题和品种的正常波动水平不同，固定阈值会让高波动主题天然更容易高分或被惩罚。
 - 多个 ETF 的流动性分、风险分经常被截到相同上限，导致最终分数聚集。
-- 标签历史有效性、数据可信度、折溢价和流动性质量已经在系统里存在，但没有稳定地进入最终排序。
+- 数据可信度、折溢价和流动性质量已经在系统里存在，但没有稳定地进入最终排序；标签历史有效性属于只读研究证据，不是排序输入。
 
 本设计只整理 ETF 排序评分层。它遵守项目后端领域边界：行情数据只提供可信输入，短线研究只产出评分和标签，组合配置再读取排序结果，不反向调用持仓或通知。
 
@@ -12,9 +12,9 @@ FundScope 当前 ETF 排序主要由固定窗口收益、风险扣分和流动�
 
 **Goals:**
 
-- 把 ETF 最终排序升级为版本化 `final_score_v2`。
+- 保留 `final_score_v2` 作为已发布的历史旧口径，并把纠正后的当前排序定义为 `final_score_v3`。
 - 使用横截面分位比较，减少固定分数导致的同分和跨板块误判。
-- 将动态阈值、标签历史有效性、数据可信度、流动性和折溢价纳入同一个 score breakdown。
+- 将动态阈值、数据可信度、流动性和折溢价纳入当前 score breakdown，并把标签历史有效性保留为 display-only evidence summary。
 - 保持旧 `total_score`、观察标签、API URL 和前端主要字段兼容。
 - 确保 stale、estimated、unavailable、fallback 文本不能提高排名。
 - 为后续回测和标签验证提供清晰的 `score_version` 和证据来源。
@@ -29,21 +29,21 @@ FundScope 当前 ETF 排序主要由固定窗口收益、风险扣分和流动�
 
 ## Decisions
 
-### Decision 1: 保留 `total_score`，新增版本化评分拆解
+### Decision 1: `final_score_v2` 保留为历史契约，纠正行为使用 `final_score_v3`
 
-实现时继续返回旧 `total_score`，但其来源切换为 `final_score_v2`，并在 `score_breakdown_json` 中写入：
+`final_score_v2` 及其 `total_score` 兼容值保持历史原义，不得重新解释为当前分数。纠正后的当前排序使用 `final_score_v3`；当前 `score_breakdown_json` 可写入：
 
 - `score_version`
 - `final_score`
 - `cross_sectional_percentile_score`
 - `dynamic_threshold_score`
-- `label_evidence_score`
+- `label_evidence_summary`（仅展示，不参与分数、标签或排序）
 - `data_reliability_score`
 - `liquidity_premium_score`
 - `score_confidence`
 - `score_reasons`
 
-理由：前端和现有测试依赖 `total_score`，直接删除或改名会扩大破坏面。版本化拆解能让后续回测准确知道当时使用的规则。
+理由：前端和现有测试依赖 `total_score`，直接删除或改名会扩大破坏面。保留 v2 历史真值并为纠正行为使用 v3，能让后续回测准确知道当时使用的规则，也不会把旧证据反馈路径伪装成当前契约。
 
 备选方案是新增完全独立的排序接口，但会造成页面、组合和回测继续出现两套排序口径，不采用。
 
@@ -72,18 +72,18 @@ FundScope 当前 ETF 排序主要由固定窗口收益、风险扣分和流动�
 
 理由：动态阈值属于研究信号层，不能和 Position Tracking / Risk Alert 混在一起。
 
-### Decision 4: 标签历史有效性采用有上限的加减分
+### Decision 4: 标签历史有效性遵守单向只读证据边界
 
-标签验证结果只在满足以下条件时进入最终排序：
+标签验证、回放、回测和 healthcheck 只消费已发布排名证据。无论是否满足以下条件，结果都只能作为展示和研究摘要：
 
 - 规则版本或证据 contract hash 与当前排序版本兼容。
 - 样本数达到最低门槛。
 - 证据状态不是 stale / insufficient。
 - 使用的数据是 decision-eligible。
 
-有效证据只做小幅加权或降权，不能单独把低质量 ETF 推到前列，也不能单独触发买卖建议。
+正面、负面、充分、不充分或新鲜证据都不得修改当前 contract，也不得改变当前 score、label、rank、allocation、tracked position、alert 或 notification。证据可以促使研究人员提出未来的新 contract version，但该版本必须经过独立人工评审和发布，且不能在运行时自动更新当前 v3。
 
-理由：历史有效性有价值，但样本会滞后，也可能遇到市场风格切换。成熟量化项目通常把历史表现作为验证和权重输入，而不是唯一决策。
+理由：历史有效性有研究价值，但把同一策略的验证结果反馈到当前排序会形成自指和不可审计的运行时契约。严格单向边界能保留研究价值，同时保证当前输出不可被证据任务改写。
 
 ### Decision 5: 数据可信度是硬门槛，流动性/折溢价是惩罚项
 
@@ -105,8 +105,8 @@ FundScope 当前 ETF 排序主要由固定窗口收益、风险扣分和流动�
 - [Risk] 分位排名会让整体弱市里仍然有“相对第一名”。  
   Mitigation: 前端必须展示市场状态和数据可信度；组合层仍可选择防守或等待现金。
 
-- [Risk] 标签历史有效性样本不足时容易过拟合。  
-  Mitigation: 样本不足只能显示证据不足，不能加分；近期退化只能降权或提示。
+- [Risk] 标签历史有效性样本不足时容易被误读。
+  Mitigation: 样本不足只显示证据不足；近期退化只提示，不对当前分数、标签、排序或下游决策输出加减权。
 
 - [Risk] 评分拆解字段变多，前端可能更复杂。  
   Mitigation: 默认只展示五个维度摘要，完整 breakdown 放到展开区。
@@ -121,7 +121,7 @@ FundScope 当前 ETF 排序主要由固定窗口收益、风险扣分和流动�
 
 1. 增加评分版本和 score breakdown 结构，旧字段继续返回。
 2. 在信号生成任务中批量计算横截面分位和动态阈值评分。
-3. 接入标签历史有效性，但默认对样本不足的标签输出 `evidence_unavailable`。
+3. 接入 display-only 标签历史有效性摘要，但默认对样本不足的标签输出 `evidence_unavailable`，且不接入当前评分管线。
 4. 接入数据可信度、流动性和折溢价惩罚。
 5. 前端展示新评分拆解，旧缓存显示“旧口径”。
 6. 部署后重新运行 ETF 数据、信号和组合任务，生成新版本缓存。
@@ -131,4 +131,4 @@ Rollback 策略：保留旧 score_breakdown 字段兼容；如新评分异常，
 ## Open Questions
 
 - 折溢价数据源在所有 ETF 上是否稳定可用；不可用时第一版按“降低信心、不硬判失败”处理。
-- 标签历史有效性默认加减分幅度需要通过回测校准，第一版应使用保守上限。
+- 未来若研究证据支持调整非证据组件或参数，应另建人工评审的新 contract version；当前 v3 不接受运行时验证反馈。

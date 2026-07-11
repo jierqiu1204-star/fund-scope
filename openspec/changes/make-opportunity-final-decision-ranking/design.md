@@ -1,6 +1,6 @@
 ## Context
 
-`/short-term` 目前有两类分数：一类是更偏主题热度的 `opportunity_score`，另一类是已经引入横截面分位、动态阈值、标签证据、数据可信度、流动性/折溢价惩罚的 `final_score_breakdown.final_score`。前端“综合关注”排序当前指向 `opportunity_score`，导致用户把主题热度榜误认为最终最优榜单。
+`/short-term` 目前有两类分数：一类是更偏主题热度的 `opportunity_score`，另一类是历史 `final_score_v2` 口径的 `final_score_breakdown.final_score`。前端“综合关注”排序当前指向 `opportunity_score`，导致用户把主题热度榜误认为最终最优榜单；v2 曾包含标签证据反馈，因此只能保留为旧口径结果，不能定义当前排序。
 
 ## Goals / Non-Goals
 
@@ -8,7 +8,7 @@
 
 - 让“综合关注”成为最终决策参考榜，优先使用最终分。
 - 保留主题/板块热度作为辅助解释，不让它单独决定最终排序。
-- 保证风险标签、买点状态、数据可信度、流动性和历史标签证据能影响综合关注排名。
+- 保证当前 `final_score_v3` 的非证据组件决定综合关注排名；历史标签证据只作展示。
 - 部署后重新生成 ETF 分数、配置参考和 Top 5/10/20/50 历史表现验证。
 
 **Non-Goals:**
@@ -22,7 +22,7 @@
 
 1. **综合关注排序使用 `final_score_breakdown.final_score`**
 
-   这是当前系统里最接近“最终决策分”的口径，已经包含横截面、动态阈值、标签证据、数据可信度、流动性/折溢价惩罚等组件。相比继续调 `opportunity_score` 权重，直接使用 final score 改动更小，也更符合已有架构边界。
+   当前排序必须绑定已发布 `final_score_v3` 契约。历史 `final_score_v2` 及其标签证据组件保持旧口径原义，不得回退或重解释为 v3；标签验证、回测和 healthcheck 只读消费排名证据，不参与当前 score、label、rank 或任何下游决策输出。
 
 2. **`opportunity_score` 降级为主题热度/板块关注说明**
 

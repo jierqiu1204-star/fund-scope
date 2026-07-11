@@ -29,7 +29,7 @@ The system SHALL use only verified or alternate-provider real market data for la
 - **THEN** the system may use it for calculations while recording provider source and reliability level
 
 #### Scenario: Ranking component uses data
-- **WHEN** ETF final ranking computes cross-sectional percentile, dynamic threshold adjustment, label evidence adjustment, liquidity quality, or premium penalty
+- **WHEN** ETF final ranking computes cross-sectional percentile, dynamic threshold adjustment, liquidity quality, or premium penalty and separately displays label evidence
 - **THEN** each component records whether its input was decision-eligible, display-only, stale, or unavailable
 
 #### Scenario: Data is not decision-eligible

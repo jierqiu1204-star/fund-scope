@@ -20,13 +20,13 @@
 - [x] 3.3 Ensure high-volatility, bond-like, cross-border, and theme-specific ETFs use their own threshold context.
 - [x] 3.4 Add tests for high-volatility ETF, low-volatility ETF, and cross-border ETF threshold differences.
 
-## 4. Label Evidence Integration
+## 4. Label Evidence Integration (Superseded By One-Way Evidence Boundary)
 
-- [x] 4.1 Read current ETF label validation evidence through an evidence/query boundary, not by coupling ranking to validation internals.
-- [x] 4.2 Apply bounded positive adjustment only when sample count, freshness, rule version, contract hash, and data reliability are sufficient.
-- [x] 4.3 Apply bounded penalty when recent evidence weakens and sample count is sufficient.
+- [x] 4.1 Preserve current ETF label validation evidence as a display-only query; the former score-input behavior is superseded.
+- [x] 4.2 Supersede the former positive adjustment: sufficient evidence leaves all current decision outputs unchanged.
+- [x] 4.3 Supersede the former penalty: weakening evidence is displayed and leaves all current decision outputs unchanged.
 - [x] 4.4 Record evidence sample count, horizon, confidence, and limitation reason in score breakdown.
-- [x] 4.5 Add tests for sufficient evidence boost, insufficient evidence no-op, stale evidence no-op, and recent degradation penalty.
+- [x] 4.5 Treat former boost/penalty tests as legacy v2 coverage; corrected v3 behavior requires evidence changes to be no-op for all current decision outputs.
 
 ## 5. Data Reliability And Liquidity/Premium Penalties
 
