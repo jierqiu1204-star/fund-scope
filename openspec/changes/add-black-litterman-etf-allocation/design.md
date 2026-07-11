@@ -75,9 +75,9 @@ Views should be derived from structured FundScope fields:
 - short-term score,
 - buy observation label,
 - entry timing label,
-- display-only label validation result,
-- display-only strategy healthcheck result,
 - market regime and theme constraints.
+
+Label validation and strategy healthcheck results are research/display-only metadata. They are not inputs to mathematical views, posterior returns, or confidence.
 
 AI-generated explanation text can explain the result but cannot be an input to the math.
 
