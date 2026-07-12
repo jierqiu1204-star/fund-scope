@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
+from pathlib import Path
 
 from app.services.short_research.ranking_contract import (
+    RankingInput,
     build_ranking_contract,
+    parse_ranking_manifest,
     scope_kind_for_filters,
 )
 
@@ -49,3 +53,70 @@ def test_scope_kind_is_explicit_for_new_runs() -> None:
     assert scope_kind_for_filters(theme=None, codes=None) == "full"
     assert scope_kind_for_filters(theme="人工智能", codes=[]) == "theme"
     assert scope_kind_for_filters(theme="人工智能", codes=["510300"]) == "codes"
+
+
+def test_final_score_v3_manifest_has_typed_score_inputs_and_missing_policy() -> None:
+    contract_path = (
+        Path(__file__).resolve().parents[2]
+        / "openspec"
+        / "changes"
+        / "harden-etf-comprehensive-ranking"
+        / "final-score-v3-contract.json"
+    )
+    manifest = parse_ranking_manifest(json.loads(contract_path.read_text(encoding="utf-8")))
+
+    momentum = manifest.components["technical_momentum_cross_section"]
+    assert momentum.score_bearing is True
+    assert momentum.weight == 0.3
+    assert momentum.primitive_lineage == (
+        "return_5d",
+        "return_10d",
+        "return_20d",
+        "distance_to_ma20",
+        "trend_consistency",
+    )
+    assert momentum.units["return_5d"] == "ratio"
+    assert manifest.asset_buckets == ("broad-equity", "sector/theme-equity", "fixed-income", "commodity", "cross-border")
+    assert manifest.missing_data_behavior == "score_unavailable"
+    assert manifest.dag_edges[0].source == "technical_momentum_cross_section"
+    assert manifest.dag_edges[0].target == "weighted_aggregate"
+    assert manifest.acyclic_order[-1] == "ranking_score"
+    assert "label_validation" in manifest.explanatory_only
+
+
+def test_ranking_input_fails_closed_when_a_required_v3_input_is_missing() -> None:
+    contract_path = (
+        Path(__file__).resolve().parents[2]
+        / "openspec"
+        / "changes"
+        / "harden-etf-comprehensive-ranking"
+        / "final-score-v3-contract.json"
+    )
+    manifest = parse_ranking_manifest(json.loads(contract_path.read_text(encoding="utf-8")))
+    values = {
+        required
+        for component in manifest.components.values()
+        for required in component.required_inputs
+    }
+    input_values = {key: 1.0 for key in values}
+    input_values.update(
+        {
+            "source_trade_date": "2026-01-02",
+            "catalyst_effective_at": "2026-01-01T09:30:00",
+            "catalyst_expires_at": "2026-01-04T09:30:00",
+            "catalyst_source": "fixture",
+        }
+    )
+    ranking_input = RankingInput(
+        asset_code="510300",
+        asset_bucket="broad-equity",
+        price_basis="total_return_adjusted",
+        profile_version="final_score_v3",
+        values=input_values,
+    )
+
+    assert manifest.validate_input(ranking_input).score_eligible is True
+    input_values.pop("average_turnover_60d")
+    validation = manifest.validate_input(ranking_input)
+    assert validation.score_eligible is False
+    assert validation.missing_by_component == {"structure_liquidity": ("average_turnover_60d",)}
