@@ -176,6 +176,50 @@ async def test_coverage_barrier_reports_each_same_date_data_exclusion(app) -> No
 
 
 @pytest.mark.asyncio
+async def test_coverage_barrier_rejects_previous_trade_date_price(app) -> None:
+    await _seed_publishable_run(app, missing_price_code="510300")
+    async with app.state.db.session() as session:
+        session.add(
+            EtfPriceHistory(
+                etf_code="510300",
+                trade_date=date(2026, 1, 1),
+                open=1.0,
+                high=1.1,
+                low=0.9,
+                close=1.0,
+                volume=1_000_000,
+                turnover=100_000_000,
+                pct_change=0.0,
+                research_adjusted_value=1.0,
+                research_price_basis="total_return_adjusted",
+                decision_eligible=True,
+            )
+        )
+        await session.commit()
+        barrier = await build_etf_coverage_barrier(session, as_of_trade_date=date(2026, 1, 2))
+
+    assert barrier.excluded == [{"asset_code": "510300", "reason": "missing_trade_date_price"}]
+
+
+@pytest.mark.asyncio
+async def test_coverage_barrier_rejects_incompatible_provider_price_basis(app) -> None:
+    await _seed_publishable_run(app)
+    async with app.state.db.session() as session:
+        row = await session.scalar(
+            select(EtfPriceHistory).where(
+                EtfPriceHistory.etf_code == "510300",
+                EtfPriceHistory.trade_date == date(2026, 1, 2),
+            )
+        )
+        assert row is not None
+        row.research_price_basis = "raw_ohlc"
+        await session.commit()
+        barrier = await build_etf_coverage_barrier(session, as_of_trade_date=date(2026, 1, 2))
+
+    assert barrier.excluded == [{"asset_code": "510300", "reason": "incompatible_research_price_basis"}]
+
+
+@pytest.mark.asyncio
 async def test_published_snapshot_identity_and_item_ranks_are_immutable(app) -> None:
     run_id = await _seed_publishable_run(app)
 
