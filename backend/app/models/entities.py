@@ -551,6 +551,22 @@ class ShortEtfPaperEquityCurve(Base):
 
 class ShortResearchSignalRun(Base):
     __tablename__ = "short_research_signal_runs"
+    __table_args__ = (
+        SaIndex(
+            "ix_short_research_signal_runs_canonical_snapshot",
+            "scope_kind",
+            "score_version",
+            "ranking_contract_hash",
+            "as_of_trade_date",
+            "price_basis",
+            "publication_state",
+        ),
+        SaIndex(
+            "ux_short_research_signal_runs_idempotency_key",
+            "idempotency_key",
+            unique=True,
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     status: Mapped[str] = mapped_column(String(32))
@@ -560,6 +576,23 @@ class ShortResearchSignalRun(Base):
     config_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     summary_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scope_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    scope_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    universe_snapshot_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    input_snapshot_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    score_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    rule_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ranking_contract_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    score_field: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    data_cutoff: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    as_of_trade_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    price_basis: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    expected_item_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    eligible_item_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    coverage_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    publication_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
 class ShortResearchSignalItem(Base):
