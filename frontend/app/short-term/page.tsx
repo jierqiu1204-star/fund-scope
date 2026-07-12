@@ -1886,7 +1886,7 @@ function ShortTermClient() {
         await api.patch<TrackedPosition>(`/api/tracked-positions/${editingTrackingId}`, buildEditTrackingPayload())
       ).data;
     },
-    onSuccess: async (updated) => {
+    onSuccess: async () => {
       resetEditTracking();
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["tracked-positions"] }),
