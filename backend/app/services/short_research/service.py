@@ -2470,12 +2470,6 @@ async def latest_validation_evidence_by_label(session: AsyncSession) -> dict[tup
     return merged
 
 
-async def latest_forward_validation_evidence_by_label(session: AsyncSession) -> dict[tuple[str, str], dict[str, Any]]:
-    forward_run = await latest_signal_validation_run(session, validation_mode=VALIDATION_MODE_FORWARD_LIVE)
-    examples_by_label = await _recent_outcome_examples(session) if forward_run is not None else {}
-    return await _validation_evidence_for_run(session, forward_run, examples_by_label=examples_by_label)
-
-
 async def latest_label_validation_summary(session: AsyncSession) -> dict[str, Any]:
     historical_run = await latest_signal_validation_run(session, validation_mode=VALIDATION_MODE_HISTORICAL_REPLAY)
     forward_run = await latest_signal_validation_run(session, validation_mode=VALIDATION_MODE_FORWARD_LIVE)
@@ -3218,14 +3212,6 @@ async def run_signal_generation(
             universe=UNIVERSE_ALL if asset_type == ASSET_TYPE_ETF else UNIVERSE_DEFAULT,
         )
         has_etf_assets = any(asset.metadata.asset_type == ASSET_TYPE_ETF for asset in assets)
-        if has_etf_assets:
-            validation_by_label = await latest_forward_validation_evidence_by_label(session)
-            if validation_by_label:
-                assets = [_asset_with_validation_evidence(asset, validation_by_label) for asset in assets]
-                assets = _with_sector_trend_scores(assets)
-                assets = await _with_opportunity_scores(session, assets, effective_date)
-                assets.sort(key=lambda item: _sort_key(item, "score"), reverse=True)
-                assets = [replace(asset, rank=index) for index, asset in enumerate(assets, start=1)]
         for asset in assets:
             cached_metrics = {
                 **asset.metrics,
@@ -3549,28 +3535,6 @@ async def refresh_dynamic_etf_universe(session: AsyncSession) -> dict[str, Any]:
     return await refresh_etf_universe(session)
 
 
-def _asset_with_validation_evidence(
-    asset: ComputedAsset,
-    evidence_by_label: dict[tuple[str, str], dict[str, Any]],
-) -> ComputedAsset:
-    evidence = evidence_by_label.get((asset.conclusion, asset.entry_timing_label))
-    if not evidence:
-        return asset
-    metrics = dict(asset.metrics)
-    confidence = str(evidence.get("confidence", "insufficient"))
-    sample_count = int(evidence.get("sample_count") or 0)
-    median_return = evidence.get("median_return")
-    win_rate = evidence.get("win_rate")
-    metrics["validation_confidence"] = confidence
-    metrics["validation_sample_count"] = sample_count
-    metrics["validation_median_return"] = median_return
-    metrics["validation_win_rate"] = win_rate
-    return replace(
-        asset,
-        metrics=metrics,
-    )
-
-
 def _portfolio_exposure_for_asset(asset: ComputedAsset) -> float:
     exposure = _PORTFOLIO_SINGLE_WEIGHT_CAP
     if any(flag in asset.risk_flags for flag in _PORTFOLIO_RISK_FLAGS_REDUCE_WEIGHT):
@@ -3580,11 +3544,6 @@ def _portfolio_exposure_for_asset(asset: ComputedAsset) -> float:
     if (asset.metrics.get("max_drawdown_60d") or 0.0) < -0.12:
         exposure -= 0.03
     if not asset.metrics.get("default_display_eligible", False):
-        exposure -= 0.05
-    validation_confidence = asset.metrics.get("validation_confidence")
-    if validation_confidence == "limited":
-        exposure -= 0.03
-    elif validation_confidence == "insufficient":
         exposure -= 0.05
     return float(max(0.05, min(_PORTFOLIO_SINGLE_WEIGHT_CAP, exposure)))
 
@@ -4348,9 +4307,6 @@ async def etf_observation_portfolio(
         universe=universe,
         limit=max(50, min(limit * 10, 200)),
     )
-    validation_by_label = await latest_forward_validation_evidence_by_label(session)
-    if validation_by_label:
-        assets = [_asset_with_validation_evidence(asset, validation_by_label) for asset in assets]
     primary_candidates: list[ComputedAsset] = []
     satellite_candidates: list[tuple[ComputedAsset, str | None]] = []
     defensive_candidates: list[tuple[ComputedAsset, str | None]] = []

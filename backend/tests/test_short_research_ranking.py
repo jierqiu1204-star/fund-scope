@@ -13,7 +13,12 @@ from app.services.short_research.ranking import (
     build_final_score_breakdowns,
     percentile_rank,
 )
-from app.services.short_research.service import _cached_asset_from_signal_item, _sort_key
+from app.services.short_research.service import (
+    ComputedAsset,
+    _cached_asset_from_signal_item,
+    _portfolio_exposure_for_asset,
+    _sort_key,
+)
 
 
 def _record(
@@ -57,10 +62,52 @@ def _record(
     )
 
 
+def _portfolio_asset(*, validation_confidence: str | None = None) -> ComputedAsset:
+    metrics = {
+        "default_display_eligible": True,
+        "volatility_20d": 0.01,
+        "max_drawdown_60d": -0.04,
+    }
+    if validation_confidence is not None:
+        metrics["validation_confidence"] = validation_confidence
+    return ComputedAsset(
+        metadata=ShortResearchAsset(
+            asset_type=ASSET_TYPE_ETF,
+            code="510300",
+            name="沪深300ETF",
+            category="broad_index",
+            theme_tags=("宽基",),
+            investment_direction="沪深300",
+            trading_rule_label="T+1",
+        ),
+        rank=1,
+        total_score=80.0,
+        conclusion="短线观察",
+        latest_date=date(2026, 1, 2),
+        latest_value=1.0,
+        usable_days=120,
+        sample_level="充足",
+        metrics=metrics,
+        score_breakdown={},
+        risk_flags=[],
+        rationale={},
+        source_note="fixture",
+        entry_timing_label="趋势延续",
+        entry_timing_reason="fixture",
+    )
+
+
 def test_percentile_rank_is_tie_stable_and_null_safe() -> None:
     assert percentile_rank(None, [1, 2, 3]) is None
     assert percentile_rank(2, [1, 2, 2, 3]) == 50.0
     assert percentile_rank(3, [1, 2, 3], higher_is_better=False) == 0.0
+
+
+def test_validation_evidence_cannot_reduce_portfolio_exposure() -> None:
+    baseline = _portfolio_exposure_for_asset(_portfolio_asset())
+    evidence_tagged = _portfolio_exposure_for_asset(_portfolio_asset(validation_confidence="insufficient"))
+
+    assert evidence_tagged == baseline
 
 
 def test_final_score_v2_separates_similar_base_scores() -> None:
