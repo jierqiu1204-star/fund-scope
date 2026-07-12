@@ -12,7 +12,6 @@ MIN_PEER_SAMPLE_COUNT = 12
 @dataclass(frozen=True)
 class RankingRecord:
     code: str
-    base_score: float
     metrics: Mapping[str, Any]
     risk_flags: Sequence[str]
 

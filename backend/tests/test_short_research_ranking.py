@@ -39,7 +39,6 @@ def _record(
 ) -> RankingRecord:
     return RankingRecord(
         code=code,
-        base_score=70,
         risk_flags=risk_flags or [],
         metrics={
             "return_5d": return_20d / 4,
@@ -180,7 +179,7 @@ def test_hard_limits_survive_all_soft_component_inputs(
     assert unavailable["final_score"] <= 45
 
 
-def test_final_score_v2_separates_similar_base_scores() -> None:
+def test_final_score_v2_separates_metric_profiles() -> None:
     records = [
         _record("510001", return_20d=0.12, drawdown=-0.03, volatility=0.012, turnover=500_000_000),
         _record("510002", return_20d=0.04, drawdown=-0.12, volatility=0.035, turnover=60_000_000),

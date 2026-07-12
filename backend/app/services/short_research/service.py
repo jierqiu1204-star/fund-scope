@@ -2860,7 +2860,6 @@ def _with_final_score_v2(assets: list[ComputedAsset]) -> list[ComputedAsset]:
         [
             RankingRecord(
                 code=asset.metadata.code,
-                base_score=asset.total_score,
                 metrics=asset.metrics,
                 risk_flags=asset.risk_flags,
             )
