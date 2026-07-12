@@ -71,9 +71,9 @@
 - [x] 6.9 Keep unimplemented flow, fundamental, valuation, macro, or other factor groups explanatory/unavailable until a future manifest activates a point-in-time producer.
 - [x] 6.10 Add theme/catalyst maximum age and prevent a factor/profile pass from restoring a component rejected by data or quality gates.
 - [x] 6.11 Either incorporate `RankingRecord.base_score` explicitly in the v3 manifest or remove it and its now-dead callers; add a test documenting the chosen behavior.
-- [ ] 6.12 Derive observation labels and explanations from v3, apply final hard limits once, persist score breakdown and limitations, and reject NaN/Infinity at the boundary.
-- [ ] 6.13 Add production-path integration tests from computed market metrics through sector/factor/theme enrichment to final score, including all-missing MA20 and turnover cases.
-- [ ] 6.14 Add a shadow v2-versus-v3 comparison report for coverage, component availability, caps, rank correlation, top-N changes, and exclusion reasons without changing the canonical reader.
+- [x] 6.12 Derive observation labels and explanations from v3, apply final hard limits once, persist score breakdown and limitations, and reject NaN/Infinity at the boundary.
+- [x] 6.13 Add production-path integration tests from computed market metrics through sector/factor/theme enrichment to final score, including all-missing MA20 and turnover cases.
+- [x] 6.14 Add a shadow v2-versus-v3 comparison report for coverage, component availability, caps, rank correlation, top-N changes, and exclusion reasons without changing the canonical reader.
 
 ## 7. Correct Static, Detail, Live, And User-Scoped Ranking Semantics
 

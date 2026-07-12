@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from app.services.short_research.final_score_v3 import (
     build_final_score_v3_sector_inputs,
+    build_v3_shadow_comparison,
     score_final_score_v3,
 )
 from app.services.short_research.ranking_contract import RankingInput, parse_ranking_manifest
@@ -211,3 +213,65 @@ def test_v3_quality_gate_cannot_be_restored_by_later_enrichment() -> None:
 
     assert result.ranking_score is None
     assert result.missing_by_component["theme_catalyst"] == ("quality_gate_rejected",)
+
+
+def test_v3_applies_final_risk_cap_once_after_component_aggregation() -> None:
+    stale = _input("510300")
+    stale_values = dict(stale.values)
+    stale_values["risk_flags"] = ["数据滞后"]
+    stale = RankingInput(
+        asset_code=stale.asset_code,
+        asset_bucket=stale.asset_bucket,
+        price_basis=stale.price_basis,
+        profile_version=stale.profile_version,
+        values=stale_values,
+    )
+
+    result = score_final_score_v3([stale, _input("510500"), _input("510880")], manifest=_manifest())["510300"]
+
+    assert result.score_eligible is True
+    assert result.ranking_score is not None
+    assert result.ranking_score <= 55.0
+    assert result.limitation_reasons == ("旧数据不能提高最终排序。",)
+
+
+def test_v3_shadow_comparison_reports_coverage_components_and_rank_changes() -> None:
+    assets = [
+        SimpleNamespace(
+            metadata=SimpleNamespace(asset_type="etf", code="510300"),
+            total_score=90.0,
+            metrics={
+                "v3_score_eligible": True,
+                "v3_ranking_score": 80.0,
+                "v3_missing_by_component": {},
+                "v3_score_limitation_reasons": [],
+            },
+            score_breakdown={"final_score_v3_shadow": {"component_scores": {"technical_momentum_cross_section": 80.0}}},
+        ),
+        SimpleNamespace(
+            metadata=SimpleNamespace(asset_type="etf", code="510500"),
+            total_score=80.0,
+            metrics={
+                "v3_score_eligible": False,
+                "v3_ranking_score": None,
+                "v3_missing_by_component": {"premium_discount": ["premium_provider_consensus"]},
+                "v3_score_limitation_reasons": [
+                    "premium_discount:premium_provider_consensus",
+                    "数据不足不能形成高分排序。",
+                ],
+            },
+            score_breakdown={"final_score_v3_shadow": {"component_scores": {"technical_momentum_cross_section": 70.0}}},
+        ),
+    ]
+
+    comparison = build_v3_shadow_comparison(assets)
+
+    assert comparison["coverage"] == {"total": 2, "eligible": 1, "ratio": 0.5}
+    assert comparison["component_availability"]["technical_momentum_cross_section"] == {"available": 2, "total": 2}
+    assert comparison["component_availability"]["premium_discount"] == {"available": 0, "total": 2}
+    assert comparison["caps"] == {"applied_count": 1}
+    assert comparison["exclusion_reasons"] == {
+        "premium_discount:premium_provider_consensus": 1,
+        "数据不足不能形成高分排序。": 1,
+    }
+    assert comparison["top_n_changes"]["v2_only"] == ["510500"]

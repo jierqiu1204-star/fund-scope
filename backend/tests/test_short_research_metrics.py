@@ -10,6 +10,7 @@ from app.services.short_research.service import (
     _v3_premium_inputs,
     _v3_structure_inputs,
     _v3_theme_catalyst_inputs,
+    compute_asset_for_replay_from_series,
 )
 
 
@@ -74,6 +75,23 @@ def test_score_metrics_do_not_synthesize_ma20_or_premium_inputs() -> None:
     assert complete_metrics["premium_input_status"] == "unavailable"
     assert complete_metrics["component_source_dates"]["technical_momentum_cross_section"] == "2026-03-01"
     assert complete_metrics["component_reliability"]["theme_catalyst"] == "unavailable"
+
+
+def test_replay_production_path_persists_missing_v3_market_inputs() -> None:
+    asset = compute_asset_for_replay_from_series(
+        _etf_metadata(),
+        series=[
+            PricePoint(point_date=date(2026, 1, 1) + timedelta(days=index), value=1.0 + index * 0.01)
+            for index in range(19)
+        ],
+        as_of_date=date(2026, 1, 19),
+    )
+
+    assert asset.metrics["distance_to_ma20_pct"] is None
+    assert asset.metrics["average_turnover_20d"] is None
+    assert asset.metrics["average_turnover_60d"] is None
+    assert asset.metrics["effective_windows"]["ma20"]["close_count"] == 19
+    assert asset.metrics["effective_windows"]["average_turnover_60d"]["observation_count"] == 0
 
 
 def test_v3_premium_input_requires_a_fresh_same_day_decision_quote() -> None:

@@ -84,6 +84,7 @@ from app.services.short_research.factors import (
 )
 from app.services.short_research.final_score_v3 import (
     build_final_score_v3_sector_inputs,
+    build_v3_shadow_comparison,
     final_score_v3_bucket,
     score_final_score_v3,
 )
@@ -3299,6 +3300,7 @@ async def _with_final_score_v3_shadow(
                 ),
                 "tracked_underlying_id": underlying_by_code.get(asset.metadata.code),
                 "quality_gate_rejected": asset.metrics.get("default_display_eligible") is False,
+                "risk_flags": list(asset.risk_flags),
                 "distance_to_ma20": asset.metrics.get("distance_to_ma20_pct"),
                 "theme_group": (
                     asset.metrics["theme_profile"].get("theme_group")
@@ -3362,6 +3364,16 @@ async def _with_final_score_v3_shadow(
         component_reliability["structure_liquidity"] = structure_inputs["structure_input_reliability"]
         component_reliability["sector_trend"] = sector_inputs.get("sector_input_status") or "unavailable"
         component_reliability["theme_catalyst"] = theme_inputs["catalyst_input_reliability"]
+        v3_observation_label = (
+            _conclusion({"risk_flags": asset.risk_flags, "total_score": result.ranking_score})
+            if result.ranking_score is not None
+            else ENTRY_TIMING_INSUFFICIENT
+        )
+        v3_observation_explanation = (
+            f"V3 最终分 {result.ranking_score:.2f}，已在聚合后应用风险与数据上限。"
+            if result.ranking_score is not None
+            else "V3 必需输入不完整，保持等待数据，不生成综合排名分数。"
+        )
         metrics = {
             **asset.metrics,
             **premium_inputs,
@@ -3373,6 +3385,9 @@ async def _with_final_score_v3_shadow(
             "v3_score_version": "final_score_v3",
             "v3_ranking_score": result.ranking_score,
             "v3_score_eligible": result.score_eligible,
+            "v3_score_limitation_reasons": list(result.limitation_reasons),
+            "v3_observation_label": v3_observation_label,
+            "v3_observation_explanation": v3_observation_explanation,
             "v3_metric_peer_counts": dict(result.metric_peer_counts),
             "v3_missing_by_component": dict(result.missing_by_component),
             "tracked_underlying_id": underlying_by_code.get(asset.metadata.code),
@@ -3390,6 +3405,7 @@ async def _with_final_score_v3_shadow(
                         "component_scores": dict(result.component_scores),
                         "metric_peer_counts": dict(result.metric_peer_counts),
                         "missing_by_component": dict(result.missing_by_component),
+                        "limitation_reasons": list(result.limitation_reasons),
                     },
                 },
             )
@@ -3871,6 +3887,7 @@ async def run_signal_generation(
             },
             "score_version": FINAL_SCORE_VERSION if has_etf_assets else "legacy",
             "label_validation": label_validation,
+            "v3_shadow_comparison": build_v3_shadow_comparison(assets),
         }
         await session.commit()
         await session.refresh(run)

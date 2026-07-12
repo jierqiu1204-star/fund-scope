@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import math
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from statistics import mean
 from typing import Any
 
+from app.services.short_research.ranking import apply_final_score_limits
 from app.services.short_research.ranking_contract import (
     RankingInput,
     RankingManifest,
     RankingPrimitive,
+    final_score_v3_manifest,
 )
 
 _COMPARABLE_BUCKETS = {
@@ -32,6 +34,7 @@ class FinalScoreV3Result:
     component_scores: Mapping[str, float]
     missing_by_component: Mapping[str, tuple[str, ...]]
     metric_peer_counts: Mapping[str, int]
+    limitation_reasons: tuple[str, ...]
 
 
 def final_score_v3_bucket(theme_bucket: Any) -> str | None:
@@ -261,6 +264,19 @@ def score_final_score_v3(
             if score_eligible
             else None
         )
+        limitation_reasons: tuple[str, ...] = ()
+        if ranking_score is not None:
+            risk_flags = ranking_input.values.get("risk_flags")
+            bounded_score, limitations = apply_final_score_limits(
+                ranking_score,
+                risk_flags=[str(flag) for flag in risk_flags] if isinstance(risk_flags, Sequence) else [],
+            )
+            ranking_score = round(bounded_score, 4) if math.isfinite(bounded_score) else None
+            limitation_reasons = tuple(limitations)
+        if ranking_score is None and not score_eligible:
+            limitation_reasons = tuple(
+                f"{component_id}:{','.join(reasons)}" for component_id, reasons in sorted(missing_by_component.items())
+            )
         results[ranking_input.asset_code] = FinalScoreV3Result(
             asset_bucket=ranking_input.asset_bucket,
             ranking_score=ranking_score,
@@ -268,5 +284,73 @@ def score_final_score_v3(
             component_scores=component_scores,
             missing_by_component=missing_by_component,
             metric_peer_counts=metric_peer_counts,
+            limitation_reasons=limitation_reasons,
         )
     return results
+
+
+def build_v3_shadow_comparison(assets: Sequence[Any], *, top_n: int = 10) -> dict[str, Any]:
+    etf_assets = [asset for asset in assets if str(getattr(getattr(asset, "metadata", None), "asset_type", "")) == "etf"]
+    v2_scores: list[tuple[str, float]] = []
+    v3_scores: list[tuple[str, float]] = []
+    component_available: Counter[str] = Counter()
+    exclusions: Counter[str] = Counter()
+    capped_count = 0
+    for asset in etf_assets:
+        code = str(getattr(getattr(asset, "metadata", None), "code", ""))
+        metrics = getattr(asset, "metrics", {})
+        breakdown = getattr(asset, "score_breakdown", {})
+        metrics = metrics if isinstance(metrics, Mapping) else {}
+        breakdown = breakdown if isinstance(breakdown, Mapping) else {}
+        total_score = _numeric(getattr(asset, "total_score", None))
+        if code and total_score is not None:
+            v2_scores.append((code, total_score))
+        v3_score = _numeric(metrics.get("v3_ranking_score"))
+        if code and metrics.get("v3_score_eligible") is True and v3_score is not None:
+            v3_scores.append((code, v3_score))
+        shadow = breakdown.get("final_score_v3_shadow")
+        component_scores = shadow.get("component_scores") if isinstance(shadow, Mapping) else None
+        if isinstance(component_scores, Mapping):
+            component_available.update(str(component_id) for component_id in component_scores)
+        limitations = metrics.get("v3_score_limitation_reasons")
+        if isinstance(limitations, Sequence) and not isinstance(limitations, str):
+            exclusions.update(str(reason) for reason in limitations if reason)
+            capped_count += sum(
+                reason in {"数据不足不能形成高分排序。", "旧数据不能提高最终排序。", "不可决策数据不能提高最终排序。"}
+                for reason in limitations
+            )
+        elif isinstance(metrics.get("v3_missing_by_component"), Mapping):
+            for component_id, reasons in metrics["v3_missing_by_component"].items():
+                for reason in reasons if isinstance(reasons, Sequence) and not isinstance(reasons, str) else [reasons]:
+                    exclusions[f"{component_id}:{reason}"] += 1
+    v2_ordered = sorted(v2_scores, key=lambda item: (-item[1], item[0]))
+    v3_ordered = sorted(v3_scores, key=lambda item: (-item[1], item[0]))
+    v2_ranks = {code: index for index, (code, _score) in enumerate(v2_ordered, start=1)}
+    v3_ranks = {code: index for index, (code, _score) in enumerate(v3_ordered, start=1)}
+    common_codes = sorted(set(v2_ranks).intersection(v3_ranks))
+    rank_correlation = None
+    if len(common_codes) >= 2:
+        squared_distance = sum((v2_ranks[code] - v3_ranks[code]) ** 2 for code in common_codes)
+        count = len(common_codes)
+        rank_correlation = round(1 - 6 * squared_distance / (count * (count**2 - 1)), 6)
+    v2_top = [code for code, _score in v2_ordered[:top_n]]
+    v3_top = [code for code, _score in v3_ordered[:top_n]]
+    total = len(etf_assets)
+    return {
+        "coverage": {"total": total, "eligible": len(v3_scores), "ratio": round(len(v3_scores) / total, 4) if total else 0.0},
+        "component_availability": {
+            component_id: {"available": count, "total": total}
+            for component_id, count in sorted(
+                (component_id, component_available[component_id])
+                for component_id in final_score_v3_manifest().components
+            )
+        },
+        "caps": {"applied_count": capped_count},
+        "rank_correlation": rank_correlation,
+        "top_n_changes": {
+            "top_n": top_n,
+            "v2_only": [code for code in v2_top if code not in set(v3_top)],
+            "v3_only": [code for code in v3_top if code not in set(v2_top)],
+        },
+        "exclusion_reasons": dict(sorted(exclusions.items())),
+    }

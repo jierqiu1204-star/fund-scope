@@ -1079,6 +1079,8 @@ async def test_short_research_signal_generation_is_deterministic_and_research_on
     assert body["summary"]["experiment"]["portfolio_single_weight_cap"] == 0.3
     assert body["summary"]["label_validation"]["rule_version"] == "label_validation_v1"
     assert body["summary"]["label_validation"]["outcome_source"] == "stored_signal_items"
+    assert body["summary"]["v3_shadow_comparison"]["coverage"]["total"] > 0
+    assert body["summary"]["v3_shadow_comparison"]["exclusion_reasons"]
     assert body["items"]
     assert {item["conclusion"] for item in body["items"]}.issubset(allowed_conclusions())
     assert any(item["code"] == "110020" and item["asset_type"] == "fund" for item in body["items"])
@@ -1091,6 +1093,8 @@ async def test_short_research_signal_generation_is_deterministic_and_research_on
     assert hot_etf["metrics"]["v3_score_eligible"] is False
     assert hot_etf["metrics"]["v3_metric_peer_counts"]
     assert hot_etf["metrics"]["v3_missing_by_component"]
+    assert hot_etf["metrics"]["v3_observation_label"] == "数据不足"
+    assert hot_etf["metrics"]["v3_score_limitation_reasons"]
 
     payload_text = json.dumps(body, ensure_ascii=False).lower()
     for forbidden in ["buy", "sell", "stop_loss", "take_profit", "target_price", "expected_return", "guaranteed_profit"]:
