@@ -16,7 +16,7 @@
 - [x] 2.4 Add effective-dated ETF universe membership storage with activation/deactivation dates, source, tracked-underlying identity, and exclusion reason.
 - [x] 2.5 Add typed source ranking/scope/universe/input hashes, price basis, execution model, and cutoff fields to validation runs so current evidence selection does not rely on JSON inspection.
 - [x] 2.6 Update ORM, Pydantic, API, and TypeScript contracts for the new nullable fields without making legacy rows appear current.
-- [ ] 2.7 Create migration tests covering upgrade, downgrade, a single Alembic head, indexes, idempotency uniqueness, nullable legacy rows, and duplicate membership interval prevention.
+- [x] 2.7 Create migration tests covering upgrade, downgrade, a single Alembic head, indexes, idempotency uniqueness, nullable legacy rows, and duplicate membership interval prevention.
 - [ ] 2.8 Backfill only factual values that can be proven from stored records; leave score versions, contract hashes, price basis, and point-in-time identity null when they cannot be reconstructed.
 
 ## 3. Implement Immutable Canonical Ranking Snapshots
