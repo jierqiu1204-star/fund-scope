@@ -365,6 +365,16 @@ class EtfSyncCursor(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
+class EtfDailyWorkflowLock(Base):
+    __tablename__ = "etf_daily_workflow_locks"
+
+    trade_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    status: Mapped[str] = mapped_column(String(16), default="running")
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    details_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
 class EtfIntradayQuote(Base):
     __tablename__ = "etf_intraday_quotes"
     __table_args__ = (
