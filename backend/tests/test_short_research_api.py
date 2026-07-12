@@ -11,9 +11,13 @@ from app.models.entities import (
     EtfExitHyperoptItem,
     EtfExitHyperoptRun,
     EtfLabelReplaySample,
+    EtfObservationPortfolioItem,
+    EtfObservationPortfolioSnapshot,
     EtfOptimizedAllocationItem,
     EtfOptimizedAllocationSnapshot,
     EtfPriceHistory,
+    EtfSignalValidationItem,
+    EtfSignalValidationRun,
     FundNavHistory,
     NotificationLog,
     ShortResearchSignalItem,
@@ -1524,15 +1528,22 @@ async def test_every_validation_mode_has_no_live_domain_side_effects(client, app
         ShortResearchSignalItem,
         EtfOptimizedAllocationSnapshot,
         EtfOptimizedAllocationItem,
+        EtfObservationPortfolioSnapshot,
+        EtfObservationPortfolioItem,
         TrackedPosition,
         TrackedPositionAlert,
         NotificationLog,
     )
+    evidence_models = (
+        EtfSignalValidationRun,
+        EtfSignalValidationItem,
+        EtfLabelReplaySample,
+    )
 
-    async def snapshots() -> dict[str, tuple[tuple[Any, ...], ...]]:
+    async def snapshots(models: tuple[Any, ...]) -> dict[str, tuple[tuple[Any, ...], ...]]:
         async with app.state.db.session() as session:
             values: dict[str, tuple[tuple[Any, ...], ...]] = {}
-            for model in protected_models:
+            for model in models:
                 rows = (await session.scalars(select(model).order_by(model.id.asc()))).all()
                 columns = tuple(model.__table__.columns)
                 values[model.__tablename__] = tuple(
@@ -1546,10 +1557,12 @@ async def test_every_validation_mode_has_no_live_domain_side_effects(client, app
         "/api/short-research/validation/score-buckets/run?days=180",
     )
     for path in validation_requests:
-        before = await snapshots()
+        protected_before = await snapshots(protected_models)
+        evidence_before = await snapshots(evidence_models)
         response = await client.post(path)
         assert response.status_code == 200
-        assert await snapshots() == before
+        assert await snapshots(protected_models) == protected_before
+        assert await snapshots(evidence_models) != evidence_before
 
 
 @pytest.mark.asyncio
