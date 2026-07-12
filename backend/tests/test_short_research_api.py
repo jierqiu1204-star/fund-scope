@@ -34,6 +34,9 @@ from app.services.short_research.service import (
     _etf_series,
     _fund_series,
     _max_drawdown,
+    _paired_score_bucket_metrics,
+    _score_bucket_outcome_payload,
+    _ScoreBucketStats,
     _window_return,
     allowed_conclusions,
     ensure_short_research_universe,
@@ -346,6 +349,67 @@ async def test_etf_research_series_uses_only_eligible_adjusted_values(app) -> No
     status, outcome = _completed_outcome_payload(rows, 1)
     assert status == "completed"
     assert outcome["forward_return"] == 0.0
+
+
+def test_score_bucket_outcome_uses_t_plus_one_adjusted_close_and_round_trip_cost() -> None:
+    rows = [
+        EtfPriceHistory(
+            etf_code="510099",
+            trade_date=date(2026, 1, index),
+            open=value,
+            high=value,
+            low=value,
+            close=value,
+            volume=1,
+            turnover=1,
+            pct_change=0.0,
+            research_adjusted_value=value,
+            research_price_basis="total_return_adjusted",
+            decision_eligible=True,
+        )
+        for index, value in enumerate([100.0, 110.0, 121.0], start=1)
+    ]
+
+    status, outcome = _score_bucket_outcome_payload(rows, 2)
+
+    assert status == "completed"
+    assert outcome["entry_date"] == "2026-01-02"
+    assert outcome["entry_price"] == 110.0
+    assert outcome["exit_date"] == "2026-01-03"
+    assert outcome["gross_return"] == pytest.approx(0.1)
+    assert outcome["forward_return"] < outcome["gross_return"]
+    assert outcome["execution_model"] == "t_plus_1_adjusted_close_v1"
+
+
+def test_score_bucket_metrics_keep_duplicate_signal_dates_from_increasing_confidence() -> None:
+    candidate = _ScoreBucketStats()
+    baseline = _ScoreBucketStats()
+    start = date(2026, 1, 1)
+    for offset in range(20):
+        signal_date = start + timedelta(days=offset)
+        candidate.add_date(
+            signal_date=signal_date,
+            outcomes=[("completed", {"forward_return": 0.02, "round_trip_cost": 0.002})],
+        )
+        baseline.add_date(
+            signal_date=signal_date,
+            outcomes=[("completed", {"forward_return": 0.0, "round_trip_cost": 0.002})],
+        )
+    candidate.add_date(
+        signal_date=start,
+        outcomes=[("completed", {"forward_return": 0.02, "round_trip_cost": 0.002})],
+    )
+
+    summary = candidate.summary()
+    paired = _paired_score_bucket_metrics(candidate, baseline)
+
+    assert summary["sample_count"] == 20
+    assert summary["unique_signal_date_count"] == 20
+    assert summary["confidence"] == "sufficient"
+    assert paired["paired_sample_count"] == 20
+    assert paired["sample_sufficiency"] == "sufficient"
+    assert paired["effect_direction"] == "supportive"
+    assert paired["paired_excess_return_ci_95"] == [0.02, 0.02]
 
 
 async def _seed_opportunity_signal_run(app) -> None:
@@ -1661,6 +1725,9 @@ async def test_score_bucket_validation_requires_current_full_ranking_contract(cl
     assert summary["score_field"] == "ranking_score"
     assert summary["top_n"] == [5, 10, 20, 50]
     assert summary["baseline"] == "all_scored"
+    assert summary["execution_model"] == "t_plus_1_adjusted_close_v1"
+    assert summary["round_trip_cost"] > 0
+    assert summary["primary_endpoint"] == "Top 10 / cumulative / 5d paired net excess return vs all_scored"
     assert summary["source_signal_run_ids"] == [seeded["latest_run_id"]]
     assert seeded["old_run_id"] not in summary["source_signal_run_ids"]
     assert seeded["partial_run_id"] not in summary["source_signal_run_ids"]
@@ -1687,10 +1754,36 @@ async def test_score_bucket_validation_requires_current_full_ranking_contract(cl
     assert seeded["mismatched_contract_code"] not in groups[("all_scored", "baseline")]["selected_codes"]
 
     top5_window = groups[("Top 5", "cumulative")]["windows"]["5"]
-    assert top5_window["sample_count"] == 5
+    assert top5_window["sample_count"] == 1
+    assert top5_window["unique_signal_date_count"] == 1
+    assert top5_window["asset_count"] == 5
+    assert top5_window["effective_sample_count"] == 1
+    assert top5_window["asset_coverage"] == 1.0
+    assert top5_window["cost_per_round_trip"] == summary["round_trip_cost"]
     assert top5_window["win_rate"] == 1.0
     assert top5_window["median_return"] > 0
-    assert groups[("Top 50", "cumulative")]["windows"]["10"]["sample_count"] == 12
+    assert groups[("Top 50", "cumulative")]["windows"]["10"]["sample_count"] == 1
+    primary = groups[("Top 10", "cumulative")]["windows"]["5"]
+    assert primary["endpoint_type"] == "primary"
+    assert primary["paired_sample_count"] == 1
+    assert primary["sample_sufficiency"] == "insufficient"
+    assert primary["effect_direction"] == "insufficient"
+    assert summary["source_snapshot_identities"] == [
+        {
+            "source_signal_run_id": seeded["latest_run_id"],
+            "source_date": "2026-07-03",
+            "ranking_contract_hash": "current-contract",
+            "scope_kind": "full",
+            "scope_hash": "full-scope",
+            "universe_snapshot_hash": "universe-current",
+            "input_snapshot_hash": "input-current",
+            "score_field": "ranking_score",
+            "score_version": "final_score_v3",
+            "rule_version": "short_research_rule_v3",
+            "price_basis": "total_return_adjusted",
+            "reliability_policy": "decision_eligible_total_return_adjusted",
+        }
+    ]
 
     latest = await client.get("/api/short-research/validation/score-buckets/latest")
     assert latest.status_code == 200
@@ -1701,6 +1794,80 @@ async def test_score_bucket_validation_requires_current_full_ranking_contract(cl
     status_body = status.json()
     assert status_body["score_bucket_validation"]["validation_mode"] == "score_bucket_replay"
     assert status_body["score_bucket_validation_generated_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_score_bucket_validation_skips_overlapping_signal_windows(client, app) -> None:
+    seeded = await _seed_score_bucket_signal_runs(app)
+    async with app.state.db.session() as session:
+        source_run = await session.get(ShortResearchSignalRun, seeded["latest_run_id"])
+        assert source_run is not None
+        source_items = (
+            await session.scalars(
+                select(ShortResearchSignalItem)
+                .where(ShortResearchSignalItem.run_id == source_run.id)
+                .order_by(ShortResearchSignalItem.rank.asc())
+            )
+        ).all()
+        overlapping_run = ShortResearchSignalRun(
+            status="success",
+            as_of_date=date(2026, 7, 4),
+            scope_kind=source_run.scope_kind,
+            scope_hash=source_run.scope_hash,
+            universe_snapshot_hash=source_run.universe_snapshot_hash,
+            input_snapshot_hash=source_run.input_snapshot_hash,
+            score_version=source_run.score_version,
+            rule_version=source_run.rule_version,
+            ranking_contract_hash=source_run.ranking_contract_hash,
+            score_field=source_run.score_field,
+            data_cutoff=source_run.data_cutoff,
+            as_of_trade_date=date(2026, 7, 4),
+            price_basis=source_run.price_basis,
+            expected_item_count=source_run.expected_item_count,
+            eligible_item_count=source_run.eligible_item_count,
+            coverage_ratio=source_run.coverage_ratio,
+            publication_state=None,
+            published_at=None,
+            idempotency_key="score-bucket-overlapping-window",
+            config_json=dict(source_run.config_json or {}),
+            summary_json=dict(source_run.summary_json or {}),
+        )
+        session.add(overlapping_run)
+        await session.flush()
+        session.add_all(
+            [
+                ShortResearchSignalItem(
+                    run_id=overlapping_run.id,
+                    asset_type=item.asset_type,
+                    asset_code=item.asset_code,
+                    rank=item.rank,
+                    total_score=item.total_score,
+                    conclusion=item.conclusion,
+                    score_breakdown_json=dict(item.score_breakdown_json or {}),
+                    risk_flags_json=list(item.risk_flags_json or []),
+                    rationale_json=dict(item.rationale_json or {}),
+                    metrics_json=dict(item.metrics_json or {}),
+                    ranking_score=item.ranking_score,
+                    score_eligible=item.score_eligible,
+                    global_rank=item.global_rank,
+                )
+                for item in source_items
+            ]
+        )
+        await session.flush()
+        overlapping_run.publication_state = "published"
+        overlapping_run.published_at = source_run.published_at
+        await session.commit()
+
+    response = await client.post("/api/short-research/validation/score-buckets/run?days=180")
+
+    assert response.status_code == 200
+    summary = response.json()["summary"]
+    groups = {(item["label"], item["entry_timing_label"]): item for item in summary["groups"]}
+    primary = groups[("Top 10", "cumulative")]["windows"]["5"]
+    assert summary["source_signal_run_count"] == 2
+    assert primary["sample_count"] == 1
+    assert primary["overlapping_signal_date_count"] == 1
 
 
 @pytest.mark.asyncio
