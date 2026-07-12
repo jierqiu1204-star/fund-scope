@@ -63,6 +63,17 @@ class EtfSignalValidationRunOut(BaseModel):
     source_signal_run_id: int | None = None
     validation_mode: str = "forward_live"
     rule_version: str
+    source_ranking_contract_hash: str | None = None
+    source_scope_kind: str | None = None
+    source_scope_hash: str | None = None
+    source_universe_snapshot_hash: str | None = None
+    source_input_snapshot_hash: str | None = None
+    source_score_field: str | None = None
+    source_score_version: str | None = None
+    source_rule_version: str | None = None
+    price_basis: str | None = None
+    execution_model: str | None = None
+    data_cutoff: datetime | None = None
     summary: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     items: list[EtfSignalValidationItemOut] = Field(default_factory=list)
@@ -121,6 +132,9 @@ class ShortResearchAssetOut(BaseModel):
     code: str
     name: str
     rank: int | None = None
+    ranking_score: float | None = None
+    score_eligible: bool | None = None
+    global_rank: int | None = None
     total_score: float
     technical_score: float | None = None
     opportunity_score: float | None = None
@@ -199,6 +213,23 @@ class ShortResearchSignalRunOut(BaseModel):
     config: dict[str, Any]
     summary: dict[str, Any]
     error_message: str | None
+    scope_kind: str | None = None
+    scope_hash: str | None = None
+    universe_snapshot_hash: str | None = None
+    input_snapshot_hash: str | None = None
+    score_version: str | None = None
+    rule_version: str | None = None
+    ranking_contract_hash: str | None = None
+    score_field: str | None = None
+    data_cutoff: datetime | None = None
+    as_of_trade_date: date | None = None
+    price_basis: str | None = None
+    expected_item_count: int | None = None
+    eligible_item_count: int | None = None
+    coverage_ratio: float | None = None
+    publication_state: str | None = None
+    published_at: datetime | None = None
+    idempotency_key: str | None = None
     items: list[ShortResearchAssetOut]
 
 

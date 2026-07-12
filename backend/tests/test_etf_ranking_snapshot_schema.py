@@ -7,6 +7,11 @@ from app.models.entities import (
     ShortResearchSignalItem,
     ShortResearchSignalRun,
 )
+from app.schemas.short_research import (
+    EtfSignalValidationRunOut,
+    ShortResearchAssetOut,
+    ShortResearchSignalRunOut,
+)
 
 
 def test_signal_run_exposes_nullable_typed_snapshot_identity() -> None:
@@ -163,3 +168,46 @@ def test_validation_run_exposes_nullable_source_ranking_identity() -> None:
         "source_score_field",
         "price_basis",
     ]
+
+
+def test_api_contracts_keep_new_snapshot_fields_nullable() -> None:
+    expected_run_fields = {
+        "scope_kind",
+        "scope_hash",
+        "universe_snapshot_hash",
+        "input_snapshot_hash",
+        "score_version",
+        "rule_version",
+        "ranking_contract_hash",
+        "score_field",
+        "data_cutoff",
+        "as_of_trade_date",
+        "price_basis",
+        "expected_item_count",
+        "eligible_item_count",
+        "coverage_ratio",
+        "publication_state",
+        "published_at",
+        "idempotency_key",
+    }
+    expected_asset_fields = {"ranking_score", "score_eligible", "global_rank"}
+    expected_validation_fields = {
+        "source_ranking_contract_hash",
+        "source_scope_kind",
+        "source_scope_hash",
+        "source_universe_snapshot_hash",
+        "source_input_snapshot_hash",
+        "source_score_field",
+        "source_score_version",
+        "source_rule_version",
+        "price_basis",
+        "execution_model",
+        "data_cutoff",
+    }
+
+    for field_name in expected_run_fields:
+        assert ShortResearchSignalRunOut.model_fields[field_name].default is None
+    for field_name in expected_asset_fields:
+        assert ShortResearchAssetOut.model_fields[field_name].default is None
+    for field_name in expected_validation_fields:
+        assert EtfSignalValidationRunOut.model_fields[field_name].default is None

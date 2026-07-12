@@ -584,6 +584,9 @@ export type ShortResearchAsset = {
   code: string;
   name: string;
   rank: number | null;
+  ranking_score?: number | null;
+  score_eligible?: boolean | null;
+  global_rank?: number | null;
   total_score: number;
   technical_score?: number | null;
   opportunity_score?: number | null;
@@ -710,6 +713,23 @@ export type ShortResearchSignalRun = {
   config: Record<string, unknown>;
   summary: Record<string, unknown>;
   error_message: string | null;
+  scope_kind?: string | null;
+  scope_hash?: string | null;
+  universe_snapshot_hash?: string | null;
+  input_snapshot_hash?: string | null;
+  score_version?: string | null;
+  rule_version?: string | null;
+  ranking_contract_hash?: string | null;
+  score_field?: string | null;
+  data_cutoff?: string | null;
+  as_of_trade_date?: string | null;
+  price_basis?: string | null;
+  expected_item_count?: number | null;
+  eligible_item_count?: number | null;
+  coverage_ratio?: number | null;
+  publication_state?: string | null;
+  published_at?: string | null;
+  idempotency_key?: string | null;
   items: ShortResearchAsset[];
 };
 
