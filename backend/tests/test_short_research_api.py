@@ -836,7 +836,7 @@ async def test_short_research_signal_generation_is_deterministic_and_research_on
 
 
 @pytest.mark.asyncio
-async def test_short_research_assets_return_opportunity_score_without_hiding_risk(client, app) -> None:
+async def test_comprehensive_sort_uses_final_decision_score_not_theme_heat(client, app) -> None:
     await _seed_opportunity_signal_run(app)
 
     response = await client.get("/api/short-research/assets?asset_type=etf&sort=opportunity&universe=all")
@@ -844,22 +844,26 @@ async def test_short_research_assets_return_opportunity_score_without_hiding_ris
     assert response.status_code == 200
     body = response.json()
     assert body["total"] == 2
-    first = body["items"][0]
-    assert first["code"] == "159001"
-    assert first["total_score"] == 70
-    assert first["technical_score"] == 70
-    assert first["opportunity_score"] == 80
-    assert first["opportunity_label"] == "主题强但等买点"
-    assert first["catalyst_score"] == 90
-    assert first["sentiment_heat_score"] == 80
-    assert first["catalyst_summary"] == "宇树科技 IPO 催化机器人主题。"
-    assert first["entry_timing_label"] == "冲高别追"
-    assert any("冲高别追" in item for item in first["catalyst_limitations"])
-    assert first["factor_profile_version"] == "etf_factor_profile_v1_degraded"
-    assert first["factor_profile_score"] == 81.5
-    assert first["factor_group_scores"]["theme_event"]["score"] == 90
-    assert first["factor_availability"]["fund_flow_score"]["availability"] == "unavailable"
-    assert first["risk_gates"][0]["active"] is True
+    items = body["items"]
+    assert [item["code"] for item in items] == ["159002", "159001"]
+    by_code = {item["code"]: item for item in items}
+    assert by_code["159002"]["total_score"] == 78
+
+    theme_hot = by_code["159001"]
+    assert theme_hot["total_score"] == 70
+    assert theme_hot["technical_score"] == 70
+    assert theme_hot["opportunity_score"] == 80
+    assert theme_hot["opportunity_label"] == "主题强但等买点"
+    assert theme_hot["catalyst_score"] == 90
+    assert theme_hot["sentiment_heat_score"] == 80
+    assert theme_hot["catalyst_summary"] == "宇树科技 IPO 催化机器人主题。"
+    assert theme_hot["entry_timing_label"] == "冲高别追"
+    assert any("冲高别追" in item for item in theme_hot["catalyst_limitations"])
+    assert theme_hot["factor_profile_version"] == "etf_factor_profile_v1_degraded"
+    assert theme_hot["factor_profile_score"] == 81.5
+    assert theme_hot["factor_group_scores"]["theme_event"]["score"] == 90
+    assert theme_hot["factor_availability"]["fund_flow_score"]["availability"] == "unavailable"
+    assert theme_hot["risk_gates"][0]["active"] is True
 
 
 @pytest.mark.asyncio
@@ -897,15 +901,15 @@ async def test_short_research_assets_hide_unavailable_catalyst_scores(client, ap
 
 
 @pytest.mark.asyncio
-async def test_short_research_opportunity_sort_puts_unavailable_catalyst_last(client, app) -> None:
+async def test_comprehensive_sort_allows_unavailable_catalyst_to_rank_first(client, app) -> None:
     await _seed_unavailable_opportunity_sort_run(app)
 
     response = await client.get("/api/short-research/assets?asset_type=etf&sort=opportunity&universe=all")
 
     assert response.status_code == 200
     items = response.json()["items"]
-    assert [item["code"] for item in items] == ["159010", "159011"]
-    assert items[1]["opportunity_score"] is None
+    assert [item["code"] for item in items] == ["159011", "159010"]
+    assert items[0]["opportunity_score"] is None
 
 
 @pytest.mark.asyncio
