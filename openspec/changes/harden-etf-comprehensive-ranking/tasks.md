@@ -91,13 +91,13 @@
 
 ## 8. Normalize Intraday Accuracy And Session Handling
 
-- [ ] 8.1 Introduce an Asia/Shanghai exchange calendar for holidays, open, lunch, reopen, close, freshness, and next-poll decisions.
+- [x] 8.1 Introduce an Asia/Shanghai exchange calendar for holidays, open, lunch, reopen, close, freshness, and next-poll decisions.
 - [ ] 8.2 Require a compatible fresh canonical daily snapshot and eligible quote before producing an intraday comprehensive score; expose fresh quote separately when the base is stale.
 - [ ] 8.3 Replace universal price-change thresholds with versioned ATR/volatility and homogeneous asset-bucket thresholds.
 - [ ] 8.4 Build historical same-exchange-minute turnover references and compare current cumulative turnover with same-time distributions instead of full-day averages.
 - [ ] 8.5 Return activity adjustment unavailable when same-time history is insufficient and do not apply an automatic morning penalty or neutral fallback.
 - [ ] 8.6 Use only eligible finite premium/discount, spread, consensus, price, and timestamp inputs and expose unavailable component reasons without weight transfer.
-- [ ] 8.7 Return one effective server market status and next-poll interval and trigger refresh at open, lunch, afternoon reopen, close, and next-trading-day boundaries.
+- [x] 8.7 Return one effective server market status and next-poll interval and trigger refresh at open, lunch, afternoon reopen, close, and next-trading-day boundaries.
 - [ ] 8.8 Add tests for weekday holidays, boundary transitions, stale base plus fresh quote, provider divergence, morning/afternoon equivalent activity, volatility buckets, and insufficient same-time history.
 
 ## 9. Replace Validation With Contract-Exact Date-Level Evidence

@@ -107,6 +107,7 @@ class EtfLiveRankingListOut(BaseModel):
     message: str
     quote_refresh_seconds: int = 60
     page_poll_seconds: int = 30
+    next_poll_seconds: int = 0
     watched_count: int
     total: int
     signal_as_of_date: date | None = None

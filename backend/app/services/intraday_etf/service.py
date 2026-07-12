@@ -3,10 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from math import isfinite
 from typing import Any, cast
-from zoneinfo import ZoneInfo
 
 import akshare as ak
 import httpx
@@ -29,8 +28,13 @@ from app.schemas.etf_quotes import (
     IntradayEtfWatchRunOut,
     IntradayEtfWatchStatusOut,
 )
+from app.services.intraday_etf.exchange_calendar import (
+    ASIA_SHANGHAI,
+    localize_exchange_time,
+    market_session,
+    next_poll_seconds,
+)
 
-ASIA_SHANGHAI = ZoneInfo("Asia/Shanghai")
 QUOTE_SOURCE_AKSHARE = "akshare"
 QUOTE_SOURCE_EASTMONEY = "eastmoney"
 QUOTE_FRESH_SECONDS = 180
@@ -74,6 +78,7 @@ class MarketState:
     status: str
     session: str | None
     now: datetime
+    next_poll_seconds: int = 0
 
 
 @dataclass
@@ -141,24 +146,21 @@ class SpotQuoteFetchResult:
 
 
 def current_market_state(now: datetime | None = None) -> MarketState:
-    local_now = (now or datetime.now(ASIA_SHANGHAI)).astimezone(ASIA_SHANGHAI)
-    if local_now.weekday() >= 5:
-        return MarketState("closed", None, local_now)
-    current = local_now.time()
-    if time(9, 30) <= current < time(11, 30):
-        return MarketState("open", "morning", local_now)
-    if time(11, 30) <= current < time(13, 0):
-        return MarketState("lunch_break", "lunch", local_now)
-    if time(13, 0) <= current < time(15, 0):
-        return MarketState("open", "afternoon", local_now)
-    return MarketState("closed", None, local_now)
+    local_now = localize_exchange_time(now)
+    status, session = market_session(local_now)
+    return MarketState(status, session, local_now, next_poll_seconds(local_now))
 
 
 def is_quote_stale(quote_time: datetime | None, now: datetime | None = None) -> bool:
     if quote_time is None:
         return True
-    effective_now = now or datetime.now(ASIA_SHANGHAI).replace(tzinfo=None)
-    return effective_now - quote_time > timedelta(seconds=QUOTE_FRESH_SECONDS)
+    effective_now = localize_exchange_time(now)
+    effective_quote_time = localize_exchange_time(quote_time)
+    if effective_quote_time.date() != effective_now.date():
+        return True
+    if market_session(effective_now)[0] == "lunch_break":
+        return False
+    return effective_now - effective_quote_time > timedelta(seconds=QUOTE_FRESH_SECONDS)
 
 
 def _number(record: dict[str, Any], *keys: str) -> float | None:

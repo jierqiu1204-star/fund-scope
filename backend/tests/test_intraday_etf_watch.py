@@ -183,6 +183,30 @@ def test_current_market_state_uses_half_open_trading_sessions() -> None:
     assert current_market_state(datetime(2026, 6, 17, 15, 0, 0, tzinfo=ASIA_SHANGHAI)).status == "closed"
 
 
+def test_exchange_calendar_handles_holidays_boundaries_and_lunch_freshness() -> None:
+    holiday = current_market_state(datetime(2026, 10, 1, 10, 0, tzinfo=ASIA_SHANGHAI))
+    assert holiday.status == "closed"
+    assert holiday.next_poll_seconds == 7 * 24 * 60 * 60 - 30 * 60
+
+    before_open = current_market_state(datetime(2026, 6, 17, 9, 29, tzinfo=ASIA_SHANGHAI))
+    assert before_open.status == "closed"
+    assert before_open.next_poll_seconds == 60
+    assert current_market_state(datetime(2026, 6, 17, 9, 30, tzinfo=ASIA_SHANGHAI)).session == "morning"
+    lunch = current_market_state(datetime(2026, 6, 17, 11, 30, tzinfo=ASIA_SHANGHAI))
+    assert lunch.session == "lunch"
+    assert lunch.next_poll_seconds == 90 * 60
+    assert current_market_state(datetime(2026, 6, 17, 13, 0, tzinfo=ASIA_SHANGHAI)).session == "afternoon"
+
+    assert is_quote_stale(
+        datetime(2026, 6, 17, 11, 29, tzinfo=ASIA_SHANGHAI),
+        datetime(2026, 6, 17, 12, 50, tzinfo=ASIA_SHANGHAI),
+    ) is False
+    assert is_quote_stale(
+        datetime(2026, 6, 17, 11, 29, tzinfo=ASIA_SHANGHAI),
+        datetime(2026, 6, 17, 13, 5, tzinfo=ASIA_SHANGHAI),
+    ) is True
+
+
 @pytest.mark.asyncio
 async def test_scheduled_intraday_watch_skips_closed_market_without_fetching(app, monkeypatch) -> None:
     called = False
@@ -256,7 +280,7 @@ async def test_live_rankings_order_and_rank_change(client, app, monkeypatch) -> 
     now = datetime.now().replace(microsecond=0)
     monkeypatch.setattr(
         "app.services.intraday_etf.service.current_market_state",
-        lambda: MarketState("open", "morning", now.replace(tzinfo=ASIA_SHANGHAI)),
+        lambda: MarketState("open", "morning", now.replace(tzinfo=ASIA_SHANGHAI), 30),
     )
     async with app.state.db.session() as session:
         session.add(
@@ -302,6 +326,7 @@ async def test_live_rankings_order_and_rank_change(client, app, monkeypatch) -> 
     body = response.json()
     assert body["total"] == 3
     assert body["watched_count"] == 3
+    assert body["next_poll_seconds"] == 30
     assert body["snapshot"]["snapshot_id"] == run_id
     assert body["snapshot"]["freshness_status"] in {"legacy", "unpublished", "unverified"}
     assert body["live_scope_hash"]
@@ -468,7 +493,7 @@ async def test_live_rankings_search_keeps_global_rank_and_does_not_rank_incompar
     now = datetime.now().replace(microsecond=0)
     monkeypatch.setattr(
         "app.services.intraday_etf.service.current_market_state",
-        lambda: MarketState("open", "morning", now.replace(tzinfo=ASIA_SHANGHAI)),
+        lambda: MarketState("open", "morning", now.replace(tzinfo=ASIA_SHANGHAI), 30),
     )
     async with app.state.db.session() as session:
         session.add_all(
