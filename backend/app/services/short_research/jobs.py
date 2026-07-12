@@ -67,7 +67,7 @@ async def daily_short_research_data_job(session: AsyncSession) -> dict[str, Any]
             to_date=today,
             asset_type=asset_type,
         )
-    return {
+    result = {
         "from_date": (today - timedelta(days=120)).isoformat(),
         "to_date": today.isoformat(),
         "asset_types": SHORT_RESEARCH_DAILY_ASSET_TYPES,
@@ -76,6 +76,13 @@ async def daily_short_research_data_job(session: AsyncSession) -> dict[str, Any]
         "asset_count": sum(_count(item, "asset_count") for item in results.values()),
         "failed": sum(_count(item, "failed") for item in results.values()),
     }
+    if result["failed"]:
+        result["job_status"] = "partial" if result["failed"] < result["asset_count"] else "failed"
+        result["job_message"] = "daily data provider returned incomplete results"
+    elif _count(results[ASSET_TYPE_ETF].get("etfs", {}), "skipped"):
+        result["job_status"] = "partial"
+        result["job_message"] = "bounded ETF daily sync deferred remaining candidates"
+    return result
 
 
 async def post_close_etf_data_job(session: AsyncSession) -> dict[str, Any]:
@@ -85,7 +92,7 @@ async def post_close_etf_data_job(session: AsyncSession) -> dict[str, Any]:
     changed_count = _count(snapshot_result, "inserted") + _count(snapshot_result, "updated")
     deferred_count = _count(snapshot_result, "missing") + _count(snapshot_result, "skipped_too_early")
     if changed_count > 0:
-        return {
+        result = {
             "from_date": today.isoformat(),
             "to_date": today.isoformat(),
             "asset_type": ASSET_TYPE_ETF,
@@ -98,6 +105,10 @@ async def post_close_etf_data_job(session: AsyncSession) -> dict[str, Any]:
             "history_provider_deferred": needs_history_provider,
             "deferred_history_provider_count": deferred_count if needs_history_provider else 0,
         }
+        if needs_history_provider:
+            result["job_status"] = "partial"
+            result["job_message"] = "official daily history remains deferred"
+        return result
 
     return {
         "from_date": today.isoformat(),
@@ -111,6 +122,8 @@ async def post_close_etf_data_job(session: AsyncSession) -> dict[str, Any]:
         "needs_history_provider": True,
         "history_provider_deferred": True,
         "deferred_history_provider_count": deferred_count,
+        "job_status": "skipped",
+        "job_message": "intraday quotes cannot produce official daily history",
     }
 
 

@@ -32,6 +32,21 @@ async def test_daily_short_research_data_job_syncs_funds_and_etfs(monkeypatch) -
 
 
 @pytest.mark.asyncio
+async def test_daily_short_research_data_job_reports_bounded_etf_sync_as_partial(monkeypatch) -> None:
+    async def fake_sync_short_research_data(_session: object, **kwargs: Any) -> dict[str, Any]:
+        if kwargs["asset_type"] == ASSET_TYPE_FUND:
+            return {"asset_count": 1, "failed": 0}
+        return {"asset_count": 3, "failed": 0, "etfs": {"processed": 1, "skipped": 2}}
+
+    monkeypatch.setattr(jobs_module, "sync_short_research_data", fake_sync_short_research_data)
+
+    result = await jobs_module.daily_short_research_data_job(object())  # type: ignore[arg-type]
+
+    assert result["job_status"] == "partial"
+    assert result["job_message"] == "bounded ETF daily sync deferred remaining candidates"
+
+
+@pytest.mark.asyncio
 async def test_daily_etf_universe_job_reports_refresh_counts(monkeypatch) -> None:
     async def fake_refresh_etf_universe(_session: object) -> dict[str, Any]:
         return {
@@ -193,6 +208,7 @@ async def test_post_close_etf_data_job_defers_history_when_snapshot_is_partial(m
     assert result["history_provider_deferred"] is True
     assert result["deferred_history_provider_count"] == 3
     assert result["snapshot"]["skipped_too_early"] == 2
+    assert result["job_status"] == "partial"
 
 
 @pytest.mark.asyncio
@@ -222,6 +238,7 @@ async def test_post_close_etf_data_job_defers_history_when_snapshot_unavailable(
     assert result["history_provider_deferred"] is True
     assert result["deferred_history_provider_count"] == 4
     assert result["etf"]["missing"] == 4
+    assert result["job_status"] == "skipped"
 
 
 @pytest.mark.asyncio

@@ -8,6 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.entities import JobRun, utcnow
 
+_BUSINESS_JOB_STATUSES = {"skipped", "partial", "failed"}
+
 
 def _job_run_payload(job_run: JobRun) -> dict[str, Any]:
     return {
@@ -21,6 +23,22 @@ def _job_run_payload(job_run: JobRun) -> dict[str, Any]:
     }
 
 
+def _business_result_status(result: dict[str, Any]) -> tuple[str, str | None]:
+    status = str(result.get("job_status") or "success")
+    if status not in _BUSINESS_JOB_STATUSES:
+        return "success", None
+    message = result.get("job_message")
+    return status, str(message) if status == "failed" and message else None
+
+
+async def _finish_job_run(job_run: JobRun, result: dict[str, Any]) -> None:
+    status, error_message = _business_result_status(result)
+    job_run.status = status
+    job_run.error_message = error_message
+    job_run.details_json = result
+    job_run.finished_at = utcnow()
+
+
 async def run_job(
     session_factory: Callable[[], AsyncSession],
     job_name: str,
@@ -32,9 +50,7 @@ async def run_job(
         await session.commit()
         try:
             result = await job(session)
-            job_run.status = "success"
-            job_run.details_json = result
-            job_run.finished_at = utcnow()
+            await _finish_job_run(job_run, result)
             await session.commit()
             return result
         except Exception as exc:  # noqa: BLE001
@@ -83,7 +99,5 @@ async def _run_background_job(
 
         job_run = await session.get(JobRun, job_run_id)
         if job_run is not None:
-            job_run.status = "success"
-            job_run.details_json = result
-            job_run.finished_at = utcnow()
+            await _finish_job_run(job_run, result)
             await session.commit()

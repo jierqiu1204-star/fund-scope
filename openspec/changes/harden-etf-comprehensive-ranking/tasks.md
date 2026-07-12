@@ -52,7 +52,7 @@
 - [x] 5.5 Implement the one-trade-date data barrier and default 95 percent expected-universe publication threshold, with exact included/excluded coverage reporting.
 - [x] 5.6 Close point-in-time universe membership when ETFs disappear or become ineligible and preserve delisted/liquidated members in historical coverage.
 - [x] 5.7 Change bounded daily sync ordering to missing/stale first plus persisted rotation cursor while retaining tracked/default-display priority and proving lower-priority ETFs cannot starve.
-- [ ] 5.8 Map skipped, deferred, partial-provider, and coverage-failed business results to `skipped`, `partial`, or `failed` JobRun states instead of success.
+- [x] 5.8 Map skipped, deferred, partial-provider, and coverage-failed business results to `skipped`, `partial`, or `failed` JobRun states instead of success.
 - [ ] 5.9 Add a per-trade-date workflow lock and sequence universe refresh, daily sync, coverage check, full scoring, atomic publication, and optional downstream generation.
 - [ ] 5.10 Register and expose freshness for ETF universe, theme/catalyst, daily repair, and intraday cleanup jobs.
 - [ ] 5.11 Expand data-health output to include raw/research dates, basis, provider, decision eligibility, skipped/deferred state, and issue details requested by the workbench.
