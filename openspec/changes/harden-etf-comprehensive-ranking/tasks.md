@@ -48,7 +48,7 @@
 - [x] 5.1 Ingest and persist traceable total-return-aware ETF research values alongside raw daily values, with fixtures for distributions, splits, merges, and unit adjustments.
 - [x] 5.2 Use accumulated NAV for fund return/drawdown research while retaining unit NAV for the existing display contexts that need it.
 - [x] 5.3 Route ranking, volatility, drawdown, percentile, and forward-return calculations through the declared adjusted research series and fail closed when its provenance is unavailable.
-- [ ] 5.4 Stop promoting 14:55/pre-close, server-time fallback, diverged, stale, or display-only intraday quotes into verified decision daily history.
+- [x] 5.4 Stop promoting 14:55/pre-close, server-time fallback, diverged, stale, or display-only intraday quotes into verified decision daily history.
 - [ ] 5.5 Implement the one-trade-date data barrier and default 95 percent expected-universe publication threshold, with exact included/excluded coverage reporting.
 - [ ] 5.6 Close point-in-time universe membership when ETFs disappear or become ineligible and preserve delisted/liquidated members in historical coverage.
 - [ ] 5.7 Change bounded daily sync ordering to missing/stale first plus persisted rotation cursor while retaining tracked/default-display priority and proving lower-priority ETFs cannot starve.

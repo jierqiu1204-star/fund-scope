@@ -649,8 +649,8 @@ async def sync_etf_price_history_from_intraday_snapshot(
     updated = 0
     missing = 0
     skipped_too_early = 0
+    skipped_display_only = 0
     skipped_codes: list[str] = []
-    changed_codes: list[str] = []
     for code in target_codes:
         quotes = grouped.get(code)
         if not quotes:
@@ -658,57 +658,10 @@ async def sync_etf_price_history_from_intraday_snapshot(
             skipped_codes.append(code)
             continue
 
-        first_quote = quotes[0]
-        last_quote = quotes[-1]
-        if last_quote.quote_time.time() < CLOSE_SNAPSHOT_MIN_TIME:
-            skipped_too_early += 1
-            skipped_codes.append(code)
-            continue
-        latest_price = float(last_quote.latest_price)
-        pct_change = last_quote.change_percent
-        if pct_change is None:
-            previous = await latest_etf_price(session, code, trade_date - timedelta(days=1))
-            pct_change = latest_price / previous.close * 100 - 100 if previous and previous.close else 0.0
-
-        existing = await session.scalar(
-            select(EtfPriceHistory).where(
-                EtfPriceHistory.etf_code == code,
-                EtfPriceHistory.trade_date == trade_date,
-            )
-        )
-        values = {
-            "open": float(first_quote.latest_price),
-            "high": max(float(quote.latest_price) for quote in quotes),
-            "low": min(float(quote.latest_price) for quote in quotes),
-            "close": latest_price,
-            "volume": float(last_quote.volume or 0.0),
-            "turnover": float(last_quote.turnover or 0.0),
-            "pct_change": float(pct_change),
-        }
-        if existing is None:
-            session.add(EtfPriceHistory(etf_code=code, trade_date=trade_date, **values))
-            inserted += 1
-        else:
-            existing.open = values["open"]
-            existing.high = values["high"]
-            existing.low = values["low"]
-            existing.close = values["close"]
-            existing.volume = values["volume"]
-            existing.turnover = values["turnover"]
-            existing.pct_change = values["pct_change"]
-            updated += 1
-        changed_codes.append(code)
-        await upsert_etf_data_health_success(
-            session,
-            etf_code=code,
-            provider="intraday_snapshot",
-            latest_price_date=trade_date,
-            row_count=len(quotes),
-        )
+        skipped_display_only += 1
+        skipped_codes.append(code)
 
     await session.commit()
-    for code in changed_codes:
-        await compute_etf_metric(session, code, trade_date)
 
     return {
         "etfs": len(target_codes),
@@ -716,10 +669,11 @@ async def sync_etf_price_history_from_intraday_snapshot(
         "updated": updated,
         "missing": missing,
         "skipped_too_early": skipped_too_early,
+        "skipped_display_only": skipped_display_only,
         "skipped_codes": skipped_codes[:50],
         "quote_rows": len(quote_rows),
         "provider": "intraday_snapshot",
-        "needs_history_provider": bool(missing or skipped_too_early),
+        "needs_history_provider": bool(missing or skipped_too_early or skipped_display_only),
     }
 
 async def list_etf_data_health(session: AsyncSession) -> list[tuple[TradableEtf, EtfDataHealth | None, bool]]:

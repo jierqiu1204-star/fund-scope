@@ -277,13 +277,14 @@ async def test_intraday_snapshot_before_close_is_not_promoted_to_daily_price(app
 
     assert result["inserted"] == 0
     assert result["updated"] == 0
-    assert result["skipped_too_early"] == 1
+    assert result["skipped_too_early"] == 0
+    assert result["skipped_display_only"] == 1
     assert result["needs_history_provider"] is True
     assert daily is None
 
 
 @pytest.mark.asyncio
-async def test_intraday_snapshot_near_close_can_be_promoted_to_daily_price(app) -> None:
+async def test_intraday_snapshot_near_close_is_not_promoted_to_daily_price(app) -> None:
     async with app.state.db.session() as session:
         session.add(
             TradableEtf(
@@ -339,11 +340,11 @@ async def test_intraday_snapshot_near_close_can_be_promoted_to_daily_price(app) 
             )
         )
 
-    assert result["inserted"] == 1
+    assert result["inserted"] == 0
     assert result["skipped_too_early"] == 0
-    assert result["needs_history_provider"] is False
-    assert daily is not None
-    assert daily.close == 2.58
+    assert result["skipped_display_only"] == 1
+    assert result["needs_history_provider"] is True
+    assert daily is None
 
 
 @pytest.mark.asyncio
