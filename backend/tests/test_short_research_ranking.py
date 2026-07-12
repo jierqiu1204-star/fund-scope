@@ -240,6 +240,8 @@ def test_label_evidence_is_display_only() -> None:
     assert weakened["final_score"] == insufficient["final_score"]
     assert boosted["components"]["label_evidence"]["sample_count"] == 80
     assert boosted["components"]["label_evidence"]["display_only"] is True
+    assert boosted["components"]["label_evidence"]["score_contribution"] == 0.0
+    assert "score" not in boosted["components"]["label_evidence"]
 
 
 def test_stale_cap_is_reapplied_after_label_evidence_enrichment() -> None:
@@ -303,6 +305,8 @@ def test_label_evidence_is_display_only_and_cannot_change_current_score_or_rank(
 
     assert enriched["final_score"] == evidence_candidate["final_score"]
     assert enriched_rank == baseline_rank
+    assert enriched["components"]["label_evidence"]["score_contribution"] == 0.0
+    assert "label_evidence" not in enriched["weights"]
 
 
 def test_legacy_cached_signal_is_marked_as_old_scoring() -> None:

@@ -300,23 +300,26 @@ def apply_label_evidence(
 ) -> dict[str, Any]:
     updated = dict(breakdown)
     components = dict(updated.get("components") or {})
+    weights = dict(updated.get("weights") or {})
+    weights.pop("label_evidence", None)
     if sample_count < 20 or not confidence:
-        evidence_score = 60.0
-        reason = "标签样本不足，不调整排序。"
+        evidence_state = "insufficient"
+        reason = "标签样本不足，仅用于展示，不调整排序。"
     elif confidence == "recent_weakening":
-        evidence_score = 35.0
-        reason = "标签近期验证转弱，降低排序。"
-    elif confidence == "sufficient":
-        evidence_score = 72.0
-        reason = "标签历史样本充足，小幅提高排序。"
-    elif confidence == "limited":
-        evidence_score = 62.0
-        reason = "标签历史样本有限，仅轻微参考。"
+        evidence_state = "stale"
+        reason = "标签验证已转弱，仅用于展示，不调整排序。"
+    elif (median_return is not None and median_return < 0) or (win_rate is not None and win_rate < 0.5):
+        evidence_state = "negative"
+        reason = "标签历史结果偏弱，仅用于展示，不调整排序。"
+    elif confidence != "sufficient":
+        evidence_state = "inconclusive"
+        reason = "标签证据尚无定论，仅用于展示，不调整排序。"
     else:
-        evidence_score = 60.0
-        reason = "标签验证暂不调整排序。"
+        evidence_state = "high_sample"
+        reason = "标签样本充足，仅用于展示，不调整排序。"
     components["label_evidence"] = {
-        "score": evidence_score,
+        "score_contribution": 0.0,
+        "evidence_state": evidence_state,
         "confidence": confidence or "insufficient",
         "sample_count": sample_count,
         "median_return": median_return,
@@ -325,4 +328,5 @@ def apply_label_evidence(
         "display_only": True,
     }
     updated["components"] = components
+    updated["weights"] = weights
     return updated

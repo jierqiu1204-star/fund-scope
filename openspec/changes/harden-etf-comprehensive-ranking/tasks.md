@@ -40,7 +40,7 @@
 - [x] 4.4 Add property tests proving stale scores never exceed 55, unavailable scores never exceed 45, adding a risk never raises score, and auxiliary/evidence changes cannot bypass a cap.
 - [x] 4.5 Change evidence summary construction so missing hashes remain missing and classify as `旧口径结果`; add mismatch tests for score, rule, universe, price basis, and allocation identities.
 - [x] 4.6 Remove `total_score` and other legacy fallback from current Top-N/score-bucket validation and report stable exclusion keys and code/date reasons.
-- [ ] 4.7 Ensure negative, inconclusive, stale, or high-sample label evidence is display-only and can never receive a positive runtime score contribution.
+- [x] 4.7 Ensure negative, inconclusive, stale, or high-sample label evidence is display-only and can never receive a positive runtime score contribution.
 - [ ] 4.8 Add an integration test that snapshots signal, allocation, position, alert, and notification tables before every validation type and proves only evidence tables change.
 
 ## 5. Make Daily Data Point-In-Time And Publication-Safe
