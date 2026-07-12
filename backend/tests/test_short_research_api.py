@@ -396,7 +396,10 @@ async def _seed_score_bucket_signal_runs(app) -> dict[str, Any]:
     available_codes = [f"5890{index:02d}" for index in range(1, 13)]
     unavailable_code = "589098"
     missing_score_code = "589099"
+    non_finite_score_code = "589097"
     old_only_code = "589000"
+    partial_only_code = "589096"
+    mismatched_contract_code = "589095"
     async with app.state.db.session() as session:
         session.add_all(
             [
@@ -410,12 +413,31 @@ async def _seed_score_bucket_signal_runs(app) -> dict[str, Any]:
                     is_short_term_eligible=True,
                     is_watchlist=True,
                 )
-                for code in [old_only_code, *available_codes, unavailable_code, missing_score_code]
+                for code in [
+                    old_only_code,
+                    *available_codes,
+                    unavailable_code,
+                    missing_score_code,
+                    non_finite_score_code,
+                    partial_only_code,
+                    mismatched_contract_code,
+                ]
             ]
         )
         await session.flush()
 
-        for code_index, code in enumerate([old_only_code, *available_codes, unavailable_code, missing_score_code], start=1):
+        for code_index, code in enumerate(
+            [
+                old_only_code,
+                *available_codes,
+                unavailable_code,
+                missing_score_code,
+                non_finite_score_code,
+                partial_only_code,
+                mismatched_contract_code,
+            ],
+            start=1,
+        ):
             for offset in range(11):
                 close = 1.0 + (code_index * 0.001 * offset)
                 previous = 1.0 + (code_index * 0.001 * (offset - 1)) if offset else close
@@ -442,10 +464,42 @@ async def _seed_score_bucket_signal_runs(app) -> dict[str, Any]:
         latest_run = ShortResearchSignalRun(
             status="success",
             as_of_date=signal_date,
-            config_json={"asset_type": "etf", "language": "research_only"},
-            summary_json={"item_count": len(available_codes) + 2},
+            config_json={
+                "asset_type": "etf",
+                "language": "research_only",
+                "scope_kind": "full",
+                "score_version": "final_score_v3",
+                "ranking_contract_hash": "current-contract",
+                "score_field": "ranking_score",
+                "price_basis": "total_return_adjusted",
+            },
+            summary_json={"item_count": len(available_codes) + 3, "score_version": "final_score_v3"},
         )
-        session.add_all([old_run, latest_run])
+        partial_run = ShortResearchSignalRun(
+            status="success",
+            as_of_date=signal_date,
+            config_json={
+                "asset_type": "etf",
+                "scope_kind": "theme",
+                "score_version": "final_score_v3",
+                "ranking_contract_hash": "current-contract",
+                "score_field": "ranking_score",
+            },
+            summary_json={"item_count": 1, "score_version": "final_score_v3"},
+        )
+        mismatched_contract_run = ShortResearchSignalRun(
+            status="success",
+            as_of_date=signal_date,
+            config_json={
+                "asset_type": "etf",
+                "scope_kind": "full",
+                "score_version": "final_score_v3",
+                "ranking_contract_hash": "other-contract",
+                "score_field": "ranking_score",
+            },
+            summary_json={"item_count": 1, "score_version": "final_score_v3"},
+        )
+        session.add_all([old_run, latest_run, partial_run, mismatched_contract_run])
         await session.flush()
         session.add(
             ShortResearchSignalItem(
@@ -476,7 +530,13 @@ async def _seed_score_bucket_signal_runs(app) -> dict[str, Any]:
                     rank=index,
                     total_score=float(score),
                     conclusion="短线观察",
-                    score_breakdown_json={},
+                    score_breakdown_json={
+                        "final_score_v3": {
+                            "score_version": "final_score_v3",
+                            "ranking_score": float(score),
+                            "score_eligible": True,
+                        }
+                    },
                     risk_flags_json=[],
                     rationale_json={},
                     metrics_json={
@@ -496,7 +556,7 @@ async def _seed_score_bucket_signal_runs(app) -> dict[str, Any]:
                     rank=20,
                     total_score=99,
                     conclusion="高位观察",
-                    score_breakdown_json={},
+                    score_breakdown_json={"final_score_v3": {"score_version": "final_score_v3"}},
                     risk_flags_json=[],
                     rationale_json={},
                     metrics_json={
@@ -519,15 +579,72 @@ async def _seed_score_bucket_signal_runs(app) -> dict[str, Any]:
                     rationale_json={},
                     metrics_json={"catalyst_summary": "缺少综合关注分。"},
                 ),
+                ShortResearchSignalItem(
+                    run_id=latest_run.id,
+                    asset_type="etf",
+                    asset_code=non_finite_score_code,
+                    rank=22,
+                    total_score=79,
+                    conclusion="短线观察",
+                    score_breakdown_json={
+                        "final_score_v3": {
+                            "score_version": "final_score_v3",
+                            "ranking_score": float("nan"),
+                            "score_eligible": True,
+                        }
+                    },
+                    risk_flags_json=[],
+                    rationale_json={},
+                    metrics_json={"catalyst_summary": "非有限综合关注分。"},
+                ),
+                ShortResearchSignalItem(
+                    run_id=partial_run.id,
+                    asset_type="etf",
+                    asset_code=partial_only_code,
+                    rank=1,
+                    total_score=100,
+                    conclusion="短线观察",
+                    score_breakdown_json={
+                        "final_score_v3": {
+                            "score_version": "final_score_v3",
+                            "ranking_score": 100,
+                            "score_eligible": True,
+                        }
+                    },
+                    risk_flags_json=[],
+                    rationale_json={},
+                    metrics_json={},
+                ),
+                ShortResearchSignalItem(
+                    run_id=mismatched_contract_run.id,
+                    asset_type="etf",
+                    asset_code=mismatched_contract_code,
+                    rank=1,
+                    total_score=100,
+                    conclusion="短线观察",
+                    score_breakdown_json={
+                        "final_score_v3": {
+                            "score_version": "final_score_v3",
+                            "ranking_score": 100,
+                            "score_eligible": True,
+                        }
+                    },
+                    risk_flags_json=[],
+                    rationale_json={},
+                    metrics_json={},
+                ),
             ]
         )
         await session.commit()
         return {
             "latest_run_id": latest_run.id,
             "old_run_id": old_run.id,
+            "partial_run_id": partial_run.id,
+            "mismatched_contract_run_id": mismatched_contract_run.id,
             "available_codes": available_codes,
             "unavailable_code": unavailable_code,
             "missing_score_code": missing_score_code,
+            "non_finite_score_code": non_finite_score_code,
             "old_only_code": old_only_code,
         }
 
@@ -1230,7 +1347,7 @@ async def test_etf_label_historical_replay_api_separates_tracks_and_does_not_not
 
 
 @pytest.mark.asyncio
-async def test_etf_score_bucket_validation_uses_latest_signal_run_and_real_opportunity_scores(client, app) -> None:
+async def test_score_bucket_validation_requires_current_full_ranking_contract(client, app) -> None:
     seeded = await _seed_score_bucket_signal_runs(app)
 
     response = await client.post("/api/short-research/validation/score-buckets/run?days=180")
@@ -1239,14 +1356,17 @@ async def test_etf_score_bucket_validation_uses_latest_signal_run_and_real_oppor
     body = response.json()
     summary = body["summary"]
     assert body["validation_mode"] == "score_bucket_replay"
-    assert summary["score_basis"] == "opportunity"
+    assert summary["score_field"] == "ranking_score"
     assert summary["top_n"] == [5, 10, 20, 50]
     assert summary["baseline"] == "all_scored"
     assert summary["source_signal_run_ids"] == [seeded["latest_run_id"]]
     assert seeded["old_run_id"] not in summary["source_signal_run_ids"]
-    assert summary["excluded_unavailable_score_count"] == 2
-    assert seeded["unavailable_code"] in summary["excluded_codes"]["unavailable_opportunity_score"]
-    assert seeded["missing_score_code"] in summary["excluded_codes"]["unavailable_opportunity_score"]
+    assert seeded["partial_run_id"] not in summary["source_signal_run_ids"]
+    assert seeded["mismatched_contract_run_id"] not in summary["source_signal_run_ids"]
+    assert summary["excluded_unavailable_score_count"] == 3
+    assert seeded["unavailable_code"] in summary["excluded_codes"]["missing_ranking_score"]
+    assert seeded["missing_score_code"] in summary["excluded_codes"]["missing_ranking_score"]
+    assert seeded["non_finite_score_code"] in summary["excluded_codes"]["non_finite_ranking_score"]
 
     groups = {(item["label"], item["entry_timing_label"]): item for item in summary["groups"]}
     available_codes = seeded["available_codes"]
@@ -1257,6 +1377,8 @@ async def test_etf_score_bucket_validation_uses_latest_signal_run_and_real_oppor
     assert groups[("11-20", "marginal")]["selected_codes"] == available_codes[10:12]
     assert groups[("all_scored", "baseline")]["selected_codes"] == available_codes
     assert seeded["old_only_code"] not in groups[("Top 5", "cumulative")]["selected_codes"]
+    assert seeded["partial_only_code"] not in groups[("all_scored", "baseline")]["selected_codes"]
+    assert seeded["mismatched_contract_code"] not in groups[("all_scored", "baseline")]["selected_codes"]
 
     top5_window = groups[("Top 5", "cumulative")]["windows"]["5"]
     assert top5_window["sample_count"] == 5
