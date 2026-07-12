@@ -317,22 +317,7 @@ def apply_label_evidence(
         "median_return": median_return,
         "win_rate": win_rate,
         "reason": reason,
+        "display_only": True,
     }
     updated["components"] = components
-    weights = dict(updated.get("weights") or {})
-    final = 0.0
-    for key, weight in weights.items():
-        component = components.get(key)
-        if isinstance(component, Mapping):
-            score = component.get("score")
-        else:
-            score = None
-        if isinstance(score, int | float):
-            final += float(score) * float(weight)
-    if final:
-        if confidence == "recent_weakening" and sample_count >= 20:
-            updated.setdefault("limitation_reasons", [])
-            if isinstance(updated["limitation_reasons"], list):
-                updated["limitation_reasons"].append("标签近期走弱。")
-        updated["final_score"] = round(max(0.0, min(100.0, final)), 2)
     return updated

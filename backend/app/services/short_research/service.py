@@ -84,7 +84,6 @@ from app.services.short_research.optimized_allocation import (
 from app.services.short_research.ranking import (
     FINAL_SCORE_VERSION,
     RankingRecord,
-    apply_label_evidence,
     build_final_score_breakdowns,
 )
 from app.services.short_research.ranking_contract import scope_kind_for_filters
@@ -3566,39 +3565,9 @@ def _asset_with_validation_evidence(
     metrics["validation_sample_count"] = sample_count
     metrics["validation_median_return"] = median_return
     metrics["validation_win_rate"] = win_rate
-    score_breakdown = dict(asset.score_breakdown)
-    final_breakdown = score_breakdown.get("final_score_v2")
-    total_score = asset.total_score
-    conclusion = asset.conclusion
-    rationale = dict(asset.rationale)
-    if isinstance(final_breakdown, dict) and final_breakdown.get("score_version") == FINAL_SCORE_VERSION:
-        updated_final = apply_label_evidence(
-            final_breakdown,
-            confidence=confidence,
-            sample_count=sample_count,
-            median_return=median_return if isinstance(median_return, int | float) else None,
-            win_rate=win_rate if isinstance(win_rate, int | float) else None,
-        )
-        score_breakdown["final_score_v2"] = updated_final
-        total_score = float(updated_final.get("final_score") or total_score)
-        metrics["total_score"] = total_score
-        metrics["score_confidence"] = updated_final.get("confidence", metrics.get("score_confidence"))
-        conclusion = _conclusion({**metrics, "risk_flags": asset.risk_flags, "total_score": total_score})
-        rationale = {
-            **rationale,
-            "key_reason": (
-                f"{conclusion}：最终分 {total_score:.1f}，"
-                "已纳入标签历史有效性证据。"
-            ),
-            "label_meaning": _label_meaning(conclusion),
-        }
     return replace(
         asset,
-        total_score=total_score,
-        conclusion=conclusion,
         metrics=metrics,
-        score_breakdown=score_breakdown,
-        rationale=rationale,
     )
 
 

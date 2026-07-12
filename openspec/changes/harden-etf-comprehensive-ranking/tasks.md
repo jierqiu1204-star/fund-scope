@@ -34,7 +34,7 @@
 
 ## 4. Restore One-Way Evidence And Risk Boundaries
 
-- [ ] 4.1 Remove validation/label-evidence reads from signal score generation and delete the post-generation evidence-driven score and conclusion rewrite.
+- [x] 4.1 Remove validation/label-evidence reads from signal score generation and delete the post-generation evidence-driven score and conclusion rewrite.
 - [ ] 4.2 Remove validation-evidence score reapplication from observation portfolio loading while preserving evidence as explanatory output.
 - [ ] 4.3 Move stale, unavailable, insufficient-history, and other hard score/conclusion limits to one final post-enrichment step shared by signal generation and replay.
 - [ ] 4.4 Add property tests proving stale scores never exceed 55, unavailable scores never exceed 45, adding a risk never raises score, and auxiliary/evidence changes cannot bypass a cap.
