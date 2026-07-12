@@ -1455,13 +1455,16 @@ async def test_every_validation_mode_has_no_live_domain_side_effects(client, app
         NotificationLog,
     )
 
-    async def counts() -> tuple[int, ...]:
+    async def snapshots() -> dict[str, tuple[tuple[Any, ...], ...]]:
         async with app.state.db.session() as session:
-            values = []
+            values: dict[str, tuple[tuple[Any, ...], ...]] = {}
             for model in protected_models:
-                count = await session.scalar(select(func.count()).select_from(model))
-                values.append(int(count or 0))
-            return tuple(values)
+                rows = (await session.scalars(select(model).order_by(model.id.asc()))).all()
+                columns = tuple(model.__table__.columns)
+                values[model.__tablename__] = tuple(
+                    tuple(getattr(row, column.name) for column in columns) for row in rows
+                )
+            return values
 
     validation_requests = (
         "/api/short-research/validation/run?validation_mode=forward_live",
@@ -1469,10 +1472,10 @@ async def test_every_validation_mode_has_no_live_domain_side_effects(client, app
         "/api/short-research/validation/score-buckets/run?days=180",
     )
     for path in validation_requests:
-        before = await counts()
+        before = await snapshots()
         response = await client.post(path)
         assert response.status_code == 200
-        assert await counts() == before
+        assert await snapshots() == before
 
 
 @pytest.mark.asyncio
