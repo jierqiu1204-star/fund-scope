@@ -1008,6 +1008,33 @@ async def test_short_research_asset_detail_uses_cached_etf_signal_scores(client,
 
 
 @pytest.mark.asyncio
+async def test_short_research_list_and_detail_expose_source_snapshot_metadata(client, app) -> None:
+    await _seed_opportunity_signal_run(app)
+
+    list_response = await client.get("/api/short-research/assets?asset_type=etf&universe=all")
+    detail_response = await client.get("/api/short-research/assets/etf/159001")
+
+    assert list_response.status_code == 200
+    assert detail_response.status_code == 200
+    list_snapshot = list_response.json()["snapshot"]
+    detail_snapshot = detail_response.json()["snapshot"]
+    required_keys = {
+        "snapshot_id",
+        "score_version",
+        "ranking_contract_hash",
+        "scope_kind",
+        "as_of_trade_date",
+        "generated_at",
+        "coverage_ratio",
+        "freshness_status",
+        "limitations",
+    }
+    assert required_keys <= set(list_snapshot)
+    assert list_snapshot == detail_snapshot
+    assert list_snapshot["snapshot_id"] is not None
+
+
+@pytest.mark.asyncio
 async def test_one_code_detail_preserves_persisted_global_rank(client, app) -> None:
     await _seed_opportunity_signal_run(app)
 
@@ -1155,6 +1182,8 @@ async def test_etf_signal_validation_run_records_forward_outcomes(client, app) -
 
     body = response.json()
     assert body["status"] == "success"
+    assert body["source_ranking_snapshot"]["snapshot_id"] == body["source_signal_run_id"]
+    assert body["source_ranking_snapshot"]["freshness_status"] in {"legacy", "unpublished", "unverified"}
     assert body["summary"]["evaluated_asset_count"] == 1
     items = body["items"]
     assert {item["horizon_days"] for item in items} >= {1, 3, 5, 10}
@@ -1652,6 +1681,8 @@ async def test_short_research_observation_portfolio_filters_out_high_watch_and_b
 
     body = response.json()
     assert body["asset_type"] == "etf"
+    assert body["source_ranking_snapshot"]["snapshot_id"] is not None
+    assert body["source_ranking_snapshot"]["freshness_status"] in {"legacy", "unpublished", "unverified"}
     assert body["cash_weight"] == 0.0
     assert body["weight_sum"] == 1.0
     assert body["portfolio_mode"] == "risk_on"

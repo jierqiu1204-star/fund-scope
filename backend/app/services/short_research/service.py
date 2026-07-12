@@ -89,6 +89,7 @@ from app.services.short_research.ranking import (
 )
 from app.services.short_research.ranking_contract import scope_kind_for_filters
 from app.services.short_research.sector_trends import build_sector_trend_payloads
+from app.services.short_research.snapshot_selector import snapshot_metadata
 from app.services.short_research.theme_catalysts import (
     build_asset_opportunity_payload,
     latest_theme_catalyst_snapshots_by_key,
@@ -4108,6 +4109,11 @@ async def observation_portfolio_from_snapshot(
     session: AsyncSession,
     snapshot: EtfObservationPortfolioSnapshot,
 ) -> dict[str, Any]:
+    source_run = (
+        await session.get(ShortResearchSignalRun, snapshot.source_signal_run_id)
+        if snapshot.source_signal_run_id is not None
+        else None
+    )
     rows = (
         await session.scalars(
             select(EtfObservationPortfolioItem)
@@ -4173,6 +4179,7 @@ async def observation_portfolio_from_snapshot(
             validation_evidence=None if allocation_contract else {"sample_count": 0},
             caveats=["组合证据只说明当前权重口径是否有同源历史验证，不构成买卖指令。"],
         ),
+        "source_ranking_snapshot": snapshot_metadata(source_run),
     }
 
 
@@ -4361,6 +4368,7 @@ async def etf_observation_portfolio(
                 current_contract=None,
                 caveats=["没有 ETF 排序快照，因此没有可验证的组合证据。"],
             ),
+            "source_ranking_snapshot": snapshot_metadata(None),
         }
         return await _attach_optimized_allocation(session, portfolio) if include_optimized else portfolio
     assets, _total = await cached_signal_assets(
@@ -4696,4 +4704,5 @@ async def etf_observation_portfolio(
         current_contract=allocation_contract,
         caveats=["当前组合权重仍在等待同源历史回放验证。"],
     )
+    portfolio["source_ranking_snapshot"] = snapshot_metadata(run)
     return await _attach_optimized_allocation(session, portfolio) if include_optimized else portfolio

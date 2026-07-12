@@ -247,7 +247,7 @@ async def test_watchlist_uses_all_eligible_etfs_without_research_or_tracking_sou
 
 @pytest.mark.asyncio
 async def test_live_rankings_order_and_rank_change(client, app, monkeypatch) -> None:
-    await _seed_signal_run(
+    run_id = await _seed_signal_run(
         app,
         count=3,
         conclusions=[CONCLUSION_WATCH, CONCLUSION_WATCH, CONCLUSION_HIGH_WATCH],
@@ -302,6 +302,8 @@ async def test_live_rankings_order_and_rank_change(client, app, monkeypatch) -> 
     body = response.json()
     assert body["total"] == 3
     assert body["watched_count"] == 3
+    assert body["snapshot"]["snapshot_id"] == run_id
+    assert body["snapshot"]["freshness_status"] in {"legacy", "unpublished", "unverified"}
     items = body["items"]
     assert [item["etf_code"] for item in items] == ["510002", "510001"]
     assert items[0]["live_rank"] == 1

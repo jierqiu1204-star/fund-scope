@@ -7,7 +7,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.defaults.short_research import ASSET_TYPE_ETF
-from app.models.entities import ShortResearchSignalItem, TrackedPosition, TrackedPositionAlert
+from app.models.entities import (
+    ShortResearchSignalItem,
+    ShortResearchSignalRun,
+    TrackedPosition,
+    TrackedPositionAlert,
+)
 from app.schemas.etf_quotes import EtfLiveRankingItemOut, EtfLiveRankingListOut
 from app.services import market_data
 from app.services.intraday_etf import service as intraday_quotes
@@ -27,6 +32,7 @@ from app.services.short_research.service import (
     CONCLUSION_WATCH,
     latest_signal_run,
 )
+from app.services.short_research.snapshot_selector import snapshot_metadata
 
 TOP_SIGNAL_LIMIT = 20
 SOURCE_TOP20_SIGNAL = "top20_signal"
@@ -238,6 +244,11 @@ async def live_rankings(
     tracking_filters = tracking_states or set()
     state = intraday_quotes.current_market_state()
     watchlist = await _build_research_watchlist(session)
+    source_snapshot = (
+        await session.get(ShortResearchSignalRun, watchlist.signal_run_id)
+        if watchlist.signal_run_id is not None
+        else None
+    )
     watch_codes = [item.etf_code for item in watchlist.items]
     latest_run = await market_data.latest_etf_watch_run(session)
     is_open = state.status == "open"
@@ -254,6 +265,7 @@ async def live_rankings(
             signal_status=watchlist.signal_status,
             latest_run=market_data.etf_watch_run_out(latest_run) if latest_run is not None else None,
             items=[],
+            snapshot=snapshot_metadata(source_snapshot),
         )
 
     names = await market_data.etf_quote_name_map(session, watch_codes)
@@ -404,6 +416,7 @@ async def live_rankings(
         signal_as_of_date=watchlist.signal_as_of_date,
         signal_status=watchlist.signal_status,
         latest_run=market_data.etf_watch_run_out(latest_run) if latest_run is not None else None,
+        snapshot=snapshot_metadata(source_snapshot),
         items=[
             EtfLiveRankingItemOut(
                 etf_code=row["etf_code"],

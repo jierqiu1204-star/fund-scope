@@ -5,6 +5,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.schemas.short_research import EtfRankingSnapshotMetadataOut
+
 
 class EtfIntradayQuoteOut(BaseModel):
     etf_code: str
@@ -107,6 +109,7 @@ class EtfLiveRankingListOut(BaseModel):
     signal_status: str
     latest_run: IntradayEtfWatchRunOut | None = None
     items: list[EtfLiveRankingItemOut] = Field(default_factory=list)
+    snapshot: EtfRankingSnapshotMetadataOut | None = None
 
 
 class TrackedEtfIntradaySnapshotOut(BaseModel):

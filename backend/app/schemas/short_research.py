@@ -42,6 +42,18 @@ class ShortResearchStatusOut(BaseModel):
     theme_coverage: dict[str, Any] = Field(default_factory=dict)
 
 
+class EtfRankingSnapshotMetadataOut(BaseModel):
+    snapshot_id: int | None = None
+    score_version: str | None = None
+    ranking_contract_hash: str | None = None
+    scope_kind: str | None = None
+    as_of_trade_date: date | None = None
+    generated_at: datetime | None = None
+    coverage_ratio: float | None = None
+    freshness_status: str = "waiting"
+    limitations: list[str] = Field(default_factory=list)
+
+
 class EtfSignalValidationItemOut(BaseModel):
     label: str
     entry_timing_label: str
@@ -74,6 +86,7 @@ class EtfSignalValidationRunOut(BaseModel):
     price_basis: str | None = None
     execution_model: str | None = None
     data_cutoff: datetime | None = None
+    source_ranking_snapshot: EtfRankingSnapshotMetadataOut | None = None
     summary: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     items: list[EtfSignalValidationItemOut] = Field(default_factory=list)
@@ -195,6 +208,7 @@ class ShortResearchAssetListOut(BaseModel):
     generated_at: datetime | None = None
     as_of_date: date | None = None
     theme_heat: list[dict[str, Any]] = Field(default_factory=list)
+    snapshot: EtfRankingSnapshotMetadataOut | None = None
 
 
 class ShortResearchAssetDetailOut(BaseModel):
@@ -202,6 +216,7 @@ class ShortResearchAssetDetailOut(BaseModel):
     chart: list[ShortResearchChartPointOut]
     return_windows: dict[str, float | None]
     explanation_sections: dict[str, str]
+    snapshot: EtfRankingSnapshotMetadataOut | None = None
 
 
 class ShortResearchSignalRunOut(BaseModel):
@@ -334,6 +349,7 @@ class ShortResearchObservationPortfolioOut(BaseModel):
     evidence_status: str = "等待验证"
     evidence_summary: dict[str, Any] = Field(default_factory=dict)
     optimized_allocation: EtfOptimizedAllocationOut | None = None
+    source_ranking_snapshot: EtfRankingSnapshotMetadataOut | None = None
 
 
 class EtfStrategyHealthcheckItemOut(BaseModel):

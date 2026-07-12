@@ -98,6 +98,7 @@ from app.services.short_research.service import (
     status_summary,
     sync_short_research_data,
 )
+from app.services.short_research.snapshot_selector import snapshot_metadata
 
 router = APIRouter(prefix="/api/short-research", tags=["short-research"])
 
@@ -345,6 +346,11 @@ def _portfolio_contexts(portfolio: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 async def _validation_run_out(session: AsyncSession, run: EtfSignalValidationRun) -> EtfSignalValidationRunOut:
+    source_snapshot = (
+        await session.get(ShortResearchSignalRun, run.source_signal_run_id)
+        if run.source_signal_run_id is not None
+        else None
+    )
     rows = (
         await session.scalars(
             select(EtfSignalValidationItem)
@@ -374,6 +380,7 @@ async def _validation_run_out(session: AsyncSession, run: EtfSignalValidationRun
         price_basis=run.price_basis,
         execution_model=run.execution_model,
         data_cutoff=run.data_cutoff,
+        source_ranking_snapshot=snapshot_metadata(source_snapshot),
         summary=dict(run.summary_json or {}),
         created_at=run.created_at,
         items=[
@@ -485,7 +492,7 @@ async def list_short_research_assets(
         if run is None and theme is not None:
             run = await latest_signal_run(session, asset_type=asset_type)
         if run is None:
-            return ShortResearchAssetListOut(items=[], total=0)
+            return ShortResearchAssetListOut(items=[], total=0, snapshot=snapshot_metadata(None))
         assets, total = await cached_signal_assets(
             session,
             run,
@@ -537,6 +544,7 @@ async def list_short_research_assets(
         generated_at=run.finished_at or run.started_at,
         as_of_date=run.as_of_date,
         theme_heat=theme_heat,
+        snapshot=snapshot_metadata(run),
     )
 
 
@@ -871,6 +879,7 @@ async def get_short_research_asset_detail(
             "return_60d": asset.metrics.get("return_60d"),
         },
         explanation_sections=sections,
+        snapshot=snapshot_metadata(run),
     )
 
 

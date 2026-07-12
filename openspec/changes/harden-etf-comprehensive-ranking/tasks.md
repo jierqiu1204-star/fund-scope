@@ -29,7 +29,7 @@
 - [x] 3.6 Remove the fixed recent-50 scan limit and return explicit waiting, stale, legacy, or version-mismatch when no canonical snapshot qualifies.
 - [x] 3.7 Resolve and pin the source snapshot once per list, detail, live, portfolio, and validation request so concurrent publication cannot mix runs inside one response.
 - [x] 3.8 Enforce post-publication immutability for snapshot identity and item rank/score fields and add mutation-rejection tests.
-- [ ] 3.9 Propagate snapshot id, score version, contract hash, scope, trade date, generated time, coverage, freshness, and limitations to every downstream response.
+- [x] 3.9 Propagate snapshot id, score version, contract hash, scope, trade date, generated time, coverage, freshness, and limitations to every downstream response.
 - [ ] 3.10 Add selector tests proving later partial/theme/code, fund, mixed-asset, failed, stale, and legacy runs never replace a compatible full ETF snapshot.
 
 ## 4. Restore One-Way Evidence And Risk Boundaries
