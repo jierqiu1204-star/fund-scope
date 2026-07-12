@@ -4,7 +4,13 @@ from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 from app.defaults.short_research import ASSET_TYPE_ETF, ShortResearchAsset
-from app.services.short_research.service import PricePoint, _score_metrics, _v3_premium_inputs
+from app.services.short_research.service import (
+    PricePoint,
+    _score_metrics,
+    _v3_premium_inputs,
+    _v3_structure_inputs,
+    _v3_theme_catalyst_inputs,
+)
 
 
 def _etf_metadata() -> ShortResearchAsset:
@@ -88,3 +94,53 @@ def test_v3_premium_input_requires_a_fresh_same_day_decision_quote() -> None:
     assert fresh["premium_input_reliability"] == "verified"
     assert stale["premium_discount_bps"] is None
     assert stale["premium_input_reliability"] == "stale"
+
+
+def test_v3_theme_input_requires_current_sourced_effective_event() -> None:
+    cutoff = datetime(2026, 3, 1, 15)
+    fresh_event = SimpleNamespace(
+        id=7,
+        status="active",
+        source_url="https://example.com/event",
+        effective_start=date(2026, 2, 28),
+        effective_end=date(2026, 3, 3),
+        updated_at=datetime(2026, 2, 28, 16),
+        strength_score=90.0,
+        confidence_score=80.0,
+    )
+    stale_event = SimpleNamespace(
+        **{
+            **fresh_event.__dict__,
+            "updated_at": datetime(2026, 2, 20, 16),
+        }
+    )
+
+    fresh = _v3_theme_catalyst_inputs([fresh_event], as_of_date=date(2026, 3, 1), cutoff=cutoff)
+    stale = _v3_theme_catalyst_inputs([stale_event], as_of_date=date(2026, 3, 1), cutoff=cutoff)
+
+    assert fresh["catalyst_quality"] == 90.0
+    assert fresh["catalyst_confidence"] == 80.0
+    assert fresh["catalyst_input_reliability"] == "alternate_provider"
+    assert stale["catalyst_quality"] is None
+    assert stale["catalyst_input_reliability"] == "unavailable"
+
+
+def test_v3_structure_input_uses_only_a_fresh_quoted_spread_and_quality_gate() -> None:
+    quote = SimpleNamespace(
+        trade_date=date(2026, 3, 1),
+        quote_time=datetime(2026, 3, 1, 10),
+        bid_price=1.0,
+        ask_price=1.002,
+        freshness_status="fresh",
+    )
+
+    structure = _v3_structure_inputs(
+        quote,
+        metrics={"data_quality_score": 88.0, "default_display_eligible": True},
+        as_of_date=date(2026, 3, 1),
+        now=datetime(2026, 3, 1, 10, 5),
+    )
+
+    assert structure["spread_bps"] == 19.98
+    assert structure["structure_quality"] == 88.0
+    assert structure["structure_input_reliability"] == "verified"

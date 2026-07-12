@@ -62,14 +62,14 @@
 
 - [x] 6.1 Introduce a typed `RankingInput` and versioned component DAG/manifest distinguishing score-bearing from explanatory components, primitive-factor lineage, required fields, units, asset buckets, weights, and missing-data behavior.
 - [x] 6.2 Reject component manifests that double-count one primitive factor through both a composite component and a separately weighted child, with DAG validation tests.
-- [ ] 6.3 Compute all declared score-bearing base, cross-sectional, sector, liquidity/structure, premium, theme, and factor inputs before one final-score calculation.
+- [x] 6.3 Compute all declared score-bearing base, cross-sectional, sector, liquidity/structure, premium, theme, and factor inputs before one final-score calculation.
 - [x] 6.4 Produce and persist `distance_to_ma20_pct`, required 20/60-day turnover references, eligible premium/discount, component source dates, reliability, and per-metric peer counts from the production metric path.
-- [ ] 6.5 Make missing or non-finite required inputs unavailable; remove `or 0`, neutral-50, silent weight-renormalization, and fixture-only producer behavior from score-bearing paths.
+- [x] 6.5 Make missing or non-finite required inputs unavailable; remove `or 0`, neutral-50, silent weight-renormalization, and fixture-only producer behavior from score-bearing paths.
 - [x] 6.6 Require 21 eligible closes for a twenty-return volatility metric and expose every effective window/sample count.
-- [ ] 6.7 Deduplicate or cluster-weight ETFs sharing an underlying index before cross-sectional percentiles and sector breadth while preserving individual displayed items.
-- [ ] 6.8 Calculate percentiles inside declared homogeneous ETF asset buckets, persist bucket identity, and prevent incompatible profile versions from direct comparison.
-- [ ] 6.9 Keep unimplemented flow, fundamental, valuation, macro, or other factor groups explanatory/unavailable until a future manifest activates a point-in-time producer.
-- [ ] 6.10 Add theme/catalyst maximum age and prevent a factor/profile pass from restoring a component rejected by data or quality gates.
+- [x] 6.7 Deduplicate or cluster-weight ETFs sharing an underlying index before cross-sectional percentiles and sector breadth while preserving individual displayed items.
+- [x] 6.8 Calculate percentiles inside declared homogeneous ETF asset buckets, persist bucket identity, and prevent incompatible profile versions from direct comparison.
+- [x] 6.9 Keep unimplemented flow, fundamental, valuation, macro, or other factor groups explanatory/unavailable until a future manifest activates a point-in-time producer.
+- [x] 6.10 Add theme/catalyst maximum age and prevent a factor/profile pass from restoring a component rejected by data or quality gates.
 - [x] 6.11 Either incorporate `RankingRecord.base_score` explicitly in the v3 manifest or remove it and its now-dead callers; add a test documenting the chosen behavior.
 - [ ] 6.12 Derive observation labels and explanations from v3, apply final hard limits once, persist score breakdown and limitations, and reject NaN/Infinity at the boundary.
 - [ ] 6.13 Add production-path integration tests from computed market metrics through sector/factor/theme enrichment to final score, including all-missing MA20 and turnover cases.

@@ -96,6 +96,11 @@ def _reliability_missing(
     manifest: RankingManifest,
     missing_by_component: dict[str, tuple[str, ...]],
 ) -> None:
+    if ranking_input.values.get("quality_gate_rejected") is True:
+        for component_id, component in manifest.components.items():
+            if component.score_bearing:
+                missing_by_component[component_id] = (*missing_by_component.get(component_id, ()), "quality_gate_rejected")
+        return
     reliabilities = ranking_input.values.get("component_reliability")
     if not isinstance(reliabilities, Mapping):
         reliabilities = {}

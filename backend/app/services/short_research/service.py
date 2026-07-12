@@ -32,6 +32,7 @@ from app.models.entities import (
     EtfSignalValidationItem,
     EtfSignalValidationRun,
     EtfSyncCursor,
+    EtfThemeCatalystEvent,
     EtfThemeExposure,
     EtfUniverseMembership,
     Fund,
@@ -106,6 +107,7 @@ from app.services.short_research.snapshot_selector import snapshot_metadata
 from app.services.short_research.theme_catalysts import (
     build_asset_opportunity_payload,
     latest_theme_catalyst_snapshots_by_key,
+    theme_keys_for_asset,
 )
 from app.services.short_research.theme_taxonomy import (
     UNKNOWN_GROUP,
@@ -166,6 +168,7 @@ MARKET_REGIME_RISK_ON = "risk_on"
 MARKET_REGIME_NEUTRAL = "neutral"
 MARKET_REGIME_DEFENSIVE = "defensive"
 MARKET_REGIME_CASH_WAIT = "cash_wait"
+V3_THEME_CATALYST_MAX_AGE = timedelta(hours=72)
 
 
 @dataclass(frozen=True)
@@ -3098,6 +3101,114 @@ def _v3_premium_inputs(
     }
 
 
+def _v3_structure_inputs(
+    quote: EtfIntradayLatestQuote | Any | None,
+    *,
+    metrics: Mapping[str, Any],
+    as_of_date: date,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    base = {
+        "spread_bps": None,
+        "structure_quality": None,
+        "structure_input_status": "unavailable",
+        "structure_input_reliability": "unavailable",
+        "structure_source_date": None,
+    }
+    if quote is None:
+        return base
+    observed_at = getattr(quote, "quote_time", None)
+    if not isinstance(observed_at, datetime):
+        return base
+    base["structure_source_date"] = observed_at.isoformat()
+    cutoff = now or utcnow()
+    if (
+        getattr(quote, "trade_date", None) != as_of_date
+        or observed_at < cutoff - timedelta(minutes=15)
+        or getattr(quote, "freshness_status", None) != "fresh"
+        or metrics.get("default_display_eligible") is False
+    ):
+        return base
+    bid = getattr(quote, "bid_price", None)
+    ask = getattr(quote, "ask_price", None)
+    quality = metrics.get("data_quality_score")
+    if (
+        not isinstance(bid, int | float)
+        or not isinstance(ask, int | float)
+        or not isinstance(quality, int | float)
+        or not math.isfinite(float(bid))
+        or not math.isfinite(float(ask))
+        or not math.isfinite(float(quality))
+        or bid <= 0
+        or ask < bid
+    ):
+        return base
+    midpoint = (float(bid) + float(ask)) / 2
+    if midpoint <= 0:
+        return base
+    return {
+        **base,
+        "spread_bps": round((float(ask) - float(bid)) / midpoint * 10_000, 4),
+        "structure_quality": round(max(0.0, min(100.0, float(quality))), 4),
+        "structure_input_status": "verified",
+        "structure_input_reliability": "verified",
+    }
+
+
+def _v3_theme_catalyst_inputs(
+    events: list[EtfThemeCatalystEvent] | list[Any],
+    *,
+    as_of_date: date,
+    cutoff: datetime,
+) -> dict[str, Any]:
+    base = {
+        "catalyst_quality": None,
+        "catalyst_confidence": None,
+        "catalyst_effective_at": None,
+        "catalyst_expires_at": None,
+        "catalyst_source": None,
+        "catalyst_input_reliability": "unavailable",
+    }
+    eligible: list[Any] = []
+    for event in events:
+        start = getattr(event, "effective_start", None)
+        end = getattr(event, "effective_end", None)
+        updated_at = getattr(event, "updated_at", None)
+        source_url = str(getattr(event, "source_url", "") or "").strip()
+        if (
+            str(getattr(event, "status", "") or "") != "active"
+            or not isinstance(start, date)
+            or not isinstance(end, date)
+            or not isinstance(updated_at, datetime)
+            or not source_url
+            or as_of_date < start
+            or as_of_date > end
+            or updated_at > cutoff
+            or cutoff - updated_at > V3_THEME_CATALYST_MAX_AGE
+        ):
+            continue
+        strength = getattr(event, "strength_score", None)
+        confidence = getattr(event, "confidence_score", None)
+        if not isinstance(strength, int | float) or not isinstance(confidence, int | float):
+            continue
+        if not math.isfinite(float(strength)) or not math.isfinite(float(confidence)):
+            continue
+        eligible.append(event)
+    if not eligible:
+        return base
+    starts = [event.effective_start for event in eligible]
+    ends = [event.effective_end for event in eligible]
+    sources = [f"{event.source_url}#{event.id}" for event in eligible]
+    return {
+        "catalyst_quality": round(mean(float(event.strength_score) for event in eligible), 4),
+        "catalyst_confidence": round(mean(float(event.confidence_score) for event in eligible), 4),
+        "catalyst_effective_at": max(starts).isoformat(),
+        "catalyst_expires_at": min(ends).isoformat(),
+        "catalyst_source": ",".join(sorted(sources)),
+        "catalyst_input_reliability": "alternate_provider",
+    }
+
+
 async def _with_final_score_v3_shadow(
     session: AsyncSession,
     assets: list[ComputedAsset],
@@ -3131,6 +3242,44 @@ async def _with_final_score_v3_shadow(
         quote.etf_code: _v3_premium_inputs(quote, as_of_date=as_of_date)
         for quote in quote_rows
     }
+    quote_by_code = {quote.etf_code: quote for quote in quote_rows}
+    structure_by_code = {
+        asset.metadata.code: _v3_structure_inputs(
+            quote_by_code.get(asset.metadata.code),
+            metrics=asset.metrics,
+            as_of_date=as_of_date,
+        )
+        for asset in etf_assets
+    }
+    theme_keys_by_code = {
+        asset.metadata.code: theme_keys_for_asset(
+            asset_name=asset.metadata.name,
+            theme_tags=list(asset.metadata.theme_tags),
+            theme_profile=asset.metrics.get("theme_profile") if isinstance(asset.metrics.get("theme_profile"), Mapping) else None,
+        )
+        for asset in etf_assets
+    }
+    theme_keys = sorted({key for keys in theme_keys_by_code.values() for key in keys})
+    event_rows = (
+        (
+            await session.scalars(
+                select(EtfThemeCatalystEvent).where(EtfThemeCatalystEvent.theme_key.in_(theme_keys))
+            )
+        ).all()
+        if theme_keys
+        else []
+    )
+    events_by_key: dict[str, list[EtfThemeCatalystEvent]] = {}
+    for event in event_rows:
+        events_by_key.setdefault(event.theme_key, []).append(event)
+    theme_by_code = {
+        code: _v3_theme_catalyst_inputs(
+            [event for key in keys for event in events_by_key.get(key, [])],
+            as_of_date=as_of_date,
+            cutoff=datetime.combine(as_of_date, datetime.max.time()),
+        )
+        for code, keys in theme_keys_by_code.items()
+    }
     base_inputs = [
         RankingInput(
             asset_code=asset.metadata.code,
@@ -3140,7 +3289,16 @@ async def _with_final_score_v3_shadow(
             values={
                 **asset.metrics,
                 **premium_by_code.get(asset.metadata.code, _v3_premium_inputs(None, as_of_date=as_of_date)),
+                **structure_by_code.get(
+                    asset.metadata.code,
+                    _v3_structure_inputs(None, metrics=asset.metrics, as_of_date=as_of_date),
+                ),
+                **theme_by_code.get(
+                    asset.metadata.code,
+                    _v3_theme_catalyst_inputs([], as_of_date=as_of_date, cutoff=datetime.combine(as_of_date, datetime.max.time())),
+                ),
                 "tracked_underlying_id": underlying_by_code.get(asset.metadata.code),
+                "quality_gate_rejected": asset.metrics.get("default_display_eligible") is False,
                 "distance_to_ma20": asset.metrics.get("distance_to_ma20_pct"),
                 "theme_group": (
                     asset.metrics["theme_profile"].get("theme_group")
@@ -3166,6 +3324,12 @@ async def _with_final_score_v3_shadow(
                     "sector_trend": str(
                         sector_by_code.get(ranking_input.asset_code, {}).get("sector_input_status") or "unavailable"
                     ),
+                    "theme_catalyst": str(
+                        ranking_input.values.get("catalyst_input_reliability") or "unavailable"
+                    ),
+                    "structure_liquidity": str(
+                        ranking_input.values.get("structure_input_reliability") or "unavailable"
+                    ),
                 },
             },
         )
@@ -3179,17 +3343,31 @@ async def _with_final_score_v3_shadow(
             updated.append(asset)
             continue
         premium_inputs = premium_by_code.get(asset.metadata.code, _v3_premium_inputs(None, as_of_date=as_of_date))
+        structure_inputs = structure_by_code.get(
+            asset.metadata.code,
+            _v3_structure_inputs(None, metrics=asset.metrics, as_of_date=as_of_date),
+        )
+        theme_inputs = theme_by_code.get(
+            asset.metadata.code,
+            _v3_theme_catalyst_inputs([], as_of_date=as_of_date, cutoff=datetime.combine(as_of_date, datetime.max.time())),
+        )
         component_source_dates = dict(asset.metrics.get("component_source_dates") or {})
         component_source_dates["premium_discount"] = premium_inputs["premium_source_date"]
+        component_source_dates["structure_liquidity"] = structure_inputs["structure_source_date"]
         sector_inputs = sector_by_code.get(asset.metadata.code, {})
         component_source_dates["sector_trend"] = sector_inputs.get("sector_source_trade_date")
+        component_source_dates["theme_catalyst"] = theme_inputs["catalyst_effective_at"]
         component_reliability = dict(asset.metrics.get("component_reliability") or {})
         component_reliability["premium_discount"] = premium_inputs["premium_input_reliability"]
+        component_reliability["structure_liquidity"] = structure_inputs["structure_input_reliability"]
         component_reliability["sector_trend"] = sector_inputs.get("sector_input_status") or "unavailable"
+        component_reliability["theme_catalyst"] = theme_inputs["catalyst_input_reliability"]
         metrics = {
             **asset.metrics,
             **premium_inputs,
+            **structure_inputs,
             **sector_inputs,
+            **theme_inputs,
             "component_source_dates": component_source_dates,
             "component_reliability": component_reliability,
             "v3_score_version": "final_score_v3",

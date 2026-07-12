@@ -126,6 +126,25 @@ def test_v3_derives_peer_count_instead_of_accepting_fixture_count() -> None:
     assert result.missing_by_component["technical_momentum_cross_section"] == ("eligible_peer_count",)
 
 
+def test_v3_rejects_non_finite_input_without_weight_renormalization() -> None:
+    invalid = _input("510300")
+    invalid_values = dict(invalid.values)
+    invalid_values["return_5d"] = float("nan")
+    invalid = RankingInput(
+        asset_code=invalid.asset_code,
+        asset_bucket=invalid.asset_bucket,
+        price_basis=invalid.price_basis,
+        profile_version=invalid.profile_version,
+        values=invalid_values,
+    )
+
+    result = score_final_score_v3([invalid, _input("510500"), _input("510880")], manifest=_manifest())["510300"]
+
+    assert result.ranking_score is None
+    assert result.score_eligible is False
+    assert result.missing_by_component["technical_momentum_cross_section"] == ("return_5d",)
+
+
 def test_v3_sector_inputs_deduplicate_clones_before_breadth() -> None:
     payloads = build_final_score_v3_sector_inputs(
         [
@@ -138,3 +157,57 @@ def test_v3_sector_inputs_deduplicate_clones_before_breadth() -> None:
     assert payloads["510300"]["sector_eligible_peer_count"] == 2
     assert payloads["510300"]["sector_breadth_20d"] == payloads["510310"]["sector_breadth_20d"]
     assert payloads["510300"]["sector_momentum_20d"] == payloads["510310"]["sector_momentum_20d"]
+
+
+def test_v3_keeps_unimplemented_factor_groups_explanatory_only() -> None:
+    explanatory = _input("510300")
+    explanatory_values = dict(explanatory.values)
+    explanatory_values.update(
+        {
+            "fund_flow_score": 100.0,
+            "fundamental_score": 100.0,
+            "valuation_percentile_score": 100.0,
+            "macro_style_score": 100.0,
+        }
+    )
+    explanatory = RankingInput(
+        asset_code=explanatory.asset_code,
+        asset_bucket=explanatory.asset_bucket,
+        price_basis=explanatory.price_basis,
+        profile_version=explanatory.profile_version,
+        values=explanatory_values,
+    )
+    baseline = score_final_score_v3([_input("510300"), _input("510500"), _input("510880")], manifest=_manifest())
+    with_explanatory = score_final_score_v3(
+        [explanatory, _input("510500"), _input("510880")],
+        manifest=_manifest(),
+    )
+
+    assert with_explanatory["510300"].ranking_score == baseline["510300"].ranking_score
+    assert all("factor" not in component for component in with_explanatory["510300"].component_scores)
+
+
+def test_v3_quality_gate_cannot_be_restored_by_later_enrichment() -> None:
+    gated = _input("510300")
+    gated_values = dict(gated.values)
+    gated_values.update(
+        {
+            "quality_gate_rejected": True,
+            "catalyst_quality": 100.0,
+            "catalyst_confidence": 100.0,
+            "premium_discount_bps": 0.0,
+            "premium_provider_consensus": 100.0,
+        }
+    )
+    gated = RankingInput(
+        asset_code=gated.asset_code,
+        asset_bucket=gated.asset_bucket,
+        price_basis=gated.price_basis,
+        profile_version=gated.profile_version,
+        values=gated_values,
+    )
+
+    result = score_final_score_v3([gated, _input("510500"), _input("510880")], manifest=_manifest())["510300"]
+
+    assert result.ranking_score is None
+    assert result.missing_by_component["theme_catalyst"] == ("quality_gate_rejected",)
