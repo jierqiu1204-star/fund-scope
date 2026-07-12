@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date
+from typing import Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,14 +10,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.entities import ShortResearchSignalItem, ShortResearchSignalRun
 
 
-async def select_canonical_etf_snapshot(
-    session: AsyncSession,
-    *,
-    score_version: str,
-    ranking_contract_hash: str,
-    price_basis: str,
-    required_trade_date: date,
-) -> ShortResearchSignalRun | None:
+@dataclass(frozen=True)
+class CanonicalSnapshotSelection:
+    state: Literal["ready", "waiting", "stale", "legacy", "version_mismatch"]
+    run: ShortResearchSignalRun | None
+
+
+def _etf_item_clauses() -> tuple[object, object]:
     has_etf_item = (
         select(ShortResearchSignalItem.id)
         .where(
@@ -32,6 +33,18 @@ async def select_canonical_etf_snapshot(
         )
         .exists()
     )
+    return has_etf_item, has_non_etf_item
+
+
+async def select_canonical_etf_snapshot(
+    session: AsyncSession,
+    *,
+    score_version: str,
+    ranking_contract_hash: str,
+    price_basis: str,
+    required_trade_date: date,
+) -> ShortResearchSignalRun | None:
+    has_etf_item, has_non_etf_item = _etf_item_clauses()
     return await session.scalar(
         select(ShortResearchSignalRun)
         .where(
@@ -47,3 +60,65 @@ async def select_canonical_etf_snapshot(
         )
         .order_by(ShortResearchSignalRun.published_at.desc(), ShortResearchSignalRun.id.desc())
     )
+
+
+async def resolve_canonical_etf_snapshot(
+    session: AsyncSession,
+    *,
+    score_version: str,
+    ranking_contract_hash: str,
+    price_basis: str,
+    required_trade_date: date,
+) -> CanonicalSnapshotSelection:
+    run = await select_canonical_etf_snapshot(
+        session,
+        score_version=score_version,
+        ranking_contract_hash=ranking_contract_hash,
+        price_basis=price_basis,
+        required_trade_date=required_trade_date,
+    )
+    if run is not None:
+        return CanonicalSnapshotSelection("ready", run)
+
+    has_etf_item, has_non_etf_item = _etf_item_clauses()
+    base = (
+        ShortResearchSignalRun.status == "success",
+        ShortResearchSignalRun.publication_state == "published",
+        ShortResearchSignalRun.scope_kind == "full",
+        has_etf_item,
+        ~has_non_etf_item,
+    )
+    stale = await session.scalar(
+        select(ShortResearchSignalRun.id).where(
+            *base,
+            ShortResearchSignalRun.score_version == score_version,
+            ShortResearchSignalRun.ranking_contract_hash == ranking_contract_hash,
+            ShortResearchSignalRun.price_basis == price_basis,
+            ShortResearchSignalRun.as_of_trade_date != required_trade_date,
+        )
+    )
+    if stale is not None:
+        return CanonicalSnapshotSelection("stale", None)
+    mismatch = await session.scalar(
+        select(ShortResearchSignalRun.id).where(
+            *base,
+            (
+                (ShortResearchSignalRun.score_version != score_version)
+                | (ShortResearchSignalRun.ranking_contract_hash != ranking_contract_hash)
+                | (ShortResearchSignalRun.price_basis != price_basis)
+            ),
+        )
+    )
+    if mismatch is not None:
+        return CanonicalSnapshotSelection("version_mismatch", None)
+    legacy = await session.scalar(
+        select(ShortResearchSignalRun.id).where(
+            ShortResearchSignalRun.status == "success",
+            (
+                ShortResearchSignalRun.scope_kind.is_(None)
+                | ShortResearchSignalRun.score_version.is_(None)
+                | ShortResearchSignalRun.ranking_contract_hash.is_(None)
+            ),
+        )
+    )
+    return CanonicalSnapshotSelection("legacy" if legacy is not None else "waiting", None)

@@ -5,7 +5,10 @@ from datetime import date, datetime, timedelta
 import pytest
 
 from app.models.entities import ShortResearchSignalItem, ShortResearchSignalRun
-from app.services.short_research.snapshot_selector import select_canonical_etf_snapshot
+from app.services.short_research.snapshot_selector import (
+    resolve_canonical_etf_snapshot,
+    select_canonical_etf_snapshot,
+)
 
 
 async def _seed_run(
@@ -81,3 +84,43 @@ async def test_canonical_selector_returns_none_when_trade_date_is_stale(app) -> 
         )
 
     assert selected is None
+
+
+@pytest.mark.asyncio
+async def test_canonical_selector_reports_stale_and_version_mismatch_states(app) -> None:
+    await _seed_run(app, scope_kind="full")
+
+    async with app.state.db.session() as session:
+        stale = await resolve_canonical_etf_snapshot(
+            session,
+            score_version="final_score_v3",
+            ranking_contract_hash="current-contract",
+            price_basis="total_return_adjusted",
+            required_trade_date=date(2026, 1, 3),
+        )
+    assert stale.state == "stale"
+    assert stale.run is None
+
+    async with app.state.db.session() as session:
+        mismatch = await resolve_canonical_etf_snapshot(
+            session,
+            score_version="final_score_v3",
+            ranking_contract_hash="other-contract",
+            price_basis="total_return_adjusted",
+            required_trade_date=date(2026, 1, 2),
+        )
+    assert mismatch.state == "version_mismatch"
+
+@pytest.mark.asyncio
+async def test_canonical_selector_reports_legacy_when_only_legacy_runs_exist(app) -> None:
+    async with app.state.db.session() as session:
+        session.add(ShortResearchSignalRun(status="success", as_of_date=date(2026, 1, 2)))
+        await session.commit()
+        legacy = await resolve_canonical_etf_snapshot(
+            session,
+            score_version="final_score_v3",
+            ranking_contract_hash="current-contract",
+            price_basis="total_return_adjusted",
+            required_trade_date=date(2026, 1, 2),
+        )
+    assert legacy.state == "legacy"

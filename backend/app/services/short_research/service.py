@@ -390,7 +390,6 @@ async def _latest_signal_run(
                 ShortResearchSignalRun.finished_at.desc(),
                 ShortResearchSignalRun.id.desc(),
             )
-            .limit(50)
         )
     ).all()
     if asset_type is None and theme is None and codes is None:
