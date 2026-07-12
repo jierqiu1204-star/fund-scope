@@ -25,6 +25,21 @@ EVIDENCE_STATUS_INSUFFICIENT = "样本不足"
 EVIDENCE_STATUS_VERSION_MISMATCH = "版本不一致"
 EVIDENCE_STATUS_LEGACY = "旧口径结果"
 
+_CONTRACT_HASH_FIELDS = (
+    "ranking_contract_hash",
+    "source_ranking_contract_hash",
+    "contract_hash",
+)
+_EVIDENCE_IDENTITY_FIELDS = (
+    (("score_version",), ("source_score_version", "score_version")),
+    (("score_field",), ("source_score_field", "score_field")),
+    (("rule_version",), ("source_rule_version", "rule_version")),
+    (("universe_snapshot_hash",), ("source_universe_snapshot_hash", "universe_snapshot_hash")),
+    (("price_basis",), ("price_basis",)),
+    (("allocation_version",), ("allocation_version",)),
+    (("allocation_contract_hash",), ("source_allocation_contract_hash", "allocation_contract_hash")),
+)
+
 
 def _canonical(value: Any) -> Any:
     if isinstance(value, datetime):
@@ -61,6 +76,11 @@ class ResearchSignalContract:
     data_reliability: str
     source_data_time: str | None
     rule_version: str = SIGNAL_CONTRACT_VERSION
+    ranking_contract_hash: str | None = None
+    score_version: str | None = None
+    score_field: str | None = None
+    universe_snapshot_hash: str | None = None
+    price_basis: str | None = None
     evidence_schema_version: str = EVIDENCE_SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
@@ -165,6 +185,11 @@ def build_research_signal_contract(
     data_reliability: str | None,
     source_data_time: Any,
     rule_version: str = SIGNAL_CONTRACT_VERSION,
+    ranking_contract_hash: str | None = None,
+    score_version: str | None = None,
+    score_field: str | None = None,
+    universe_snapshot_hash: str | None = None,
+    price_basis: str | None = None,
 ) -> dict[str, Any]:
     return ResearchSignalContract(
         asset_type=asset_type,
@@ -177,6 +202,11 @@ def build_research_signal_contract(
         data_reliability=data_reliability or "unavailable",
         source_data_time=str(_canonical(source_data_time)) if source_data_time is not None else None,
         rule_version=rule_version,
+        ranking_contract_hash=ranking_contract_hash,
+        score_version=score_version,
+        score_field=score_field,
+        universe_snapshot_hash=universe_snapshot_hash,
+        price_basis=price_basis,
     ).to_dict()
 
 
@@ -323,6 +353,28 @@ def build_exit_v2_baseline_comparison(
     }
 
 
+def _identity_value(payload: dict[str, Any], fields: tuple[str, ...]) -> Any:
+    for field in fields:
+        value = payload.get(field)
+        if value is not None:
+            return value
+    return None
+
+
+def _contract_hash(payload: dict[str, Any]) -> str | None:
+    value = _identity_value(payload, _CONTRACT_HASH_FIELDS)
+    return str(value) if value else None
+
+
+def _has_identity_mismatch(current_contract: dict[str, Any], evidence_summary: dict[str, Any]) -> bool:
+    for current_fields, evidence_fields in _EVIDENCE_IDENTITY_FIELDS:
+        current_value = _identity_value(current_contract, current_fields)
+        evidence_value = _identity_value(evidence_summary, evidence_fields)
+        if current_value is not None and evidence_value is not None and current_value != evidence_value:
+            return True
+    return False
+
+
 def classify_evidence_status(
     current_contract: dict[str, Any] | None,
     evidence_summary: dict[str, Any] | None,
@@ -331,11 +383,15 @@ def classify_evidence_status(
 ) -> str:
     if not evidence_summary:
         return EVIDENCE_STATUS_WAITING
-    evidence_hash = evidence_summary.get("contract_hash")
+    evidence_hash = _contract_hash(evidence_summary)
     if not evidence_hash:
         return EVIDENCE_STATUS_LEGACY
-    current_hash = (current_contract or {}).get("contract_hash")
-    if current_hash and evidence_hash != current_hash:
+    current_hash = _contract_hash(current_contract or {})
+    if not current_hash:
+        return EVIDENCE_STATUS_LEGACY
+    if evidence_hash != current_hash:
+        return EVIDENCE_STATUS_VERSION_MISMATCH
+    if _has_identity_mismatch(current_contract or {}, evidence_summary):
         return EVIDENCE_STATUS_VERSION_MISMATCH
     sample_count = int(evidence_summary.get("sample_count") or 0)
     if sample_count < min_sample_count:
@@ -350,10 +406,10 @@ def build_evidence_summary(
     backtest_metrics: dict[str, Any] | None = None,
     caveats: list[str] | None = None,
 ) -> dict[str, Any]:
-    if validation_evidence is None and not backtest_metrics:
+    if not validation_evidence and not backtest_metrics:
         return EvidenceSummary(
             evidence_status=EVIDENCE_STATUS_WAITING,
-            contract_hash=(current_contract or {}).get("contract_hash"),
+            contract_hash=_contract_hash(current_contract or {}),
             caveats=caveats or [],
         ).to_dict()
 
@@ -363,11 +419,12 @@ def build_evidence_summary(
         quality = validation.get("sample_quality")
         if isinstance(quality, dict):
             sample_count = int(quality.get("sample_count_total") or 0)
-    contract_hash = validation.get("contract_hash") or (current_contract or {}).get("contract_hash")
+    contract_hash = _contract_hash(validation)
+    evidence_for_status = validation or {"sample_count": sample_count}
     summary = EvidenceSummary(
         evidence_status=classify_evidence_status(
             current_contract,
-            {"contract_hash": contract_hash, "sample_count": sample_count} if contract_hash else validation,
+            evidence_for_status,
         ),
         contract_hash=contract_hash,
         sample_count=sample_count,

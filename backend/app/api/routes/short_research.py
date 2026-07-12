@@ -176,6 +176,11 @@ def _asset_out(
             data_reliability=str(metrics.get("data_reliability") or metrics.get("score_source") or "verified"),
             source_data_time=source_data_time,
             rule_version=str(signal_rule_version) if signal_rule_version else "short_research_signal_v1",
+            ranking_contract_hash=signal_run.ranking_contract_hash if signal_run else None,
+            score_version=signal_run.score_version if signal_run else None,
+            score_field=signal_run.score_field if signal_run else None,
+            universe_snapshot_hash=signal_run.universe_snapshot_hash if signal_run else None,
+            price_basis=signal_run.price_basis if signal_run else None,
         )
         evidence_summary = build_evidence_summary(
             current_contract=signal_contract,
