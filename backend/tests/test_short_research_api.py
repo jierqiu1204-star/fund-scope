@@ -467,6 +467,21 @@ async def _seed_score_bucket_signal_runs(app) -> dict[str, Any]:
         latest_run = ShortResearchSignalRun(
             status="success",
             as_of_date=signal_date,
+            scope_kind="full",
+            scope_hash="full-scope",
+            universe_snapshot_hash="universe-current",
+            input_snapshot_hash="input-current",
+            score_version="final_score_v3",
+            rule_version="short_research_rule_v3",
+            ranking_contract_hash="current-contract",
+            score_field="ranking_score",
+            data_cutoff=utcnow(),
+            as_of_trade_date=signal_date,
+            price_basis="total_return_adjusted",
+            expected_item_count=len(available_codes) + 3,
+            eligible_item_count=len(available_codes),
+            coverage_ratio=1.0,
+            idempotency_key="score-bucket-current",
             config_json={
                 "asset_type": "etf",
                 "language": "research_only",
@@ -481,6 +496,12 @@ async def _seed_score_bucket_signal_runs(app) -> dict[str, Any]:
         partial_run = ShortResearchSignalRun(
             status="success",
             as_of_date=signal_date,
+            scope_kind="theme",
+            score_version="final_score_v3",
+            ranking_contract_hash="current-contract",
+            score_field="ranking_score",
+            as_of_trade_date=signal_date,
+            price_basis="total_return_adjusted",
             config_json={
                 "asset_type": "etf",
                 "scope_kind": "theme",
@@ -493,6 +514,12 @@ async def _seed_score_bucket_signal_runs(app) -> dict[str, Any]:
         mismatched_contract_run = ShortResearchSignalRun(
             status="success",
             as_of_date=signal_date,
+            scope_kind="full",
+            score_version="final_score_v3",
+            ranking_contract_hash="other-contract",
+            score_field="total_score",
+            as_of_trade_date=signal_date,
+            price_basis="total_return_adjusted",
             config_json={
                 "asset_type": "etf",
                 "scope_kind": "full",
@@ -532,6 +559,9 @@ async def _seed_score_bucket_signal_runs(app) -> dict[str, Any]:
                     asset_code=code,
                     rank=index,
                     total_score=float(score),
+                    ranking_score=float(score),
+                    score_eligible=True,
+                    global_rank=index,
                     conclusion="短线观察",
                     score_breakdown_json={
                         "final_score_v3": {
@@ -588,6 +618,8 @@ async def _seed_score_bucket_signal_runs(app) -> dict[str, Any]:
                     asset_code=non_finite_score_code,
                     rank=22,
                     total_score=79,
+                    ranking_score=float("nan"),
+                    score_eligible=True,
                     conclusion="短线观察",
                     score_breakdown_json={
                         "final_score_v3": {
@@ -606,6 +638,8 @@ async def _seed_score_bucket_signal_runs(app) -> dict[str, Any]:
                     asset_code=partial_only_code,
                     rank=1,
                     total_score=100,
+                    ranking_score=100,
+                    score_eligible=True,
                     conclusion="短线观察",
                     score_breakdown_json={
                         "final_score_v3": {
@@ -624,6 +658,8 @@ async def _seed_score_bucket_signal_runs(app) -> dict[str, Any]:
                     asset_code=mismatched_contract_code,
                     rank=1,
                     total_score=100,
+                    ranking_score=100,
+                    score_eligible=True,
                     conclusion="短线观察",
                     score_breakdown_json={
                         "final_score_v3": {
@@ -638,6 +674,11 @@ async def _seed_score_bucket_signal_runs(app) -> dict[str, Any]:
                 ),
             ]
         )
+        await session.commit()
+        latest_run.publication_state = "published"
+        latest_run.published_at = utcnow()
+        mismatched_contract_run.publication_state = "published"
+        mismatched_contract_run.published_at = utcnow()
         await session.commit()
         return {
             "latest_run_id": latest_run.id,
@@ -1411,6 +1452,10 @@ async def test_score_bucket_validation_requires_current_full_ranking_contract(cl
     assert seeded["unavailable_code"] in summary["excluded_codes"]["missing_ranking_score"]
     assert seeded["missing_score_code"] in summary["excluded_codes"]["missing_ranking_score"]
     assert seeded["non_finite_score_code"] in summary["excluded_codes"]["non_finite_ranking_score"]
+    assert summary["excluded_items"]["missing_ranking_score"] == [
+        {"asset_code": seeded["unavailable_code"], "key": "missing_ranking_score", "signal_date": "2026-07-03"},
+        {"asset_code": seeded["missing_score_code"], "key": "missing_ranking_score", "signal_date": "2026-07-03"},
+    ]
 
     groups = {(item["label"], item["entry_timing_label"]): item for item in summary["groups"]}
     available_codes = seeded["available_codes"]

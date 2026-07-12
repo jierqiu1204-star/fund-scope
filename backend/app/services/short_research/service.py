@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -1116,6 +1117,9 @@ _SCORE_BUCKET_DEFAULT_DAYS = 180
 _SCORE_BUCKET_DEFAULT_TOP_N = (5, 10, 20, 50)
 _SCORE_BUCKET_SCORE_BASIS = "opportunity"
 _SCORE_BUCKET_BASELINE = "all_scored"
+_SCORE_BUCKET_SCORE_VERSION = "final_score_v3"
+_SCORE_BUCKET_SCORE_FIELD = "ranking_score"
+_SCORE_BUCKET_PRICE_BASIS = "total_return_adjusted"
 
 
 def _forward_drawdown(series: list[PricePoint]) -> float | None:
@@ -1951,22 +1955,32 @@ async def _latest_etf_signal_runs_by_date(
             select(ShortResearchSignalRun)
             .where(
                 ShortResearchSignalRun.status == RUN_STATUS_SUCCESS,
-                ShortResearchSignalRun.as_of_date >= from_date,
+                ShortResearchSignalRun.publication_state == "published",
+                ShortResearchSignalRun.scope_kind == "full",
+                ShortResearchSignalRun.score_version == _SCORE_BUCKET_SCORE_VERSION,
+                ShortResearchSignalRun.score_field == _SCORE_BUCKET_SCORE_FIELD,
+                ShortResearchSignalRun.price_basis == _SCORE_BUCKET_PRICE_BASIS,
+                ShortResearchSignalRun.as_of_trade_date >= from_date,
                 ShortResearchSignalRun.id.in_(etf_run_ids),
             )
-            .order_by(ShortResearchSignalRun.as_of_date.desc(), ShortResearchSignalRun.id.desc())
+            .order_by(
+                ShortResearchSignalRun.as_of_trade_date.desc(),
+                ShortResearchSignalRun.published_at.desc(),
+                ShortResearchSignalRun.id.desc(),
+            )
         )
     ).all()
     by_date: dict[date, ShortResearchSignalRun] = {}
     for run in rows:
-        by_date.setdefault(run.as_of_date, run)
+        assert run.as_of_trade_date is not None
+        by_date.setdefault(run.as_of_trade_date, run)
     return list(by_date.values())
 
 
 async def _score_bucket_signal_items(
     session: AsyncSession,
     run: ShortResearchSignalRun,
-) -> tuple[list[tuple[ShortResearchSignalItem, float]], list[str]]:
+) -> tuple[list[tuple[ShortResearchSignalItem, float]], list[dict[str, str]]]:
     rows = (
         await session.scalars(
             select(ShortResearchSignalItem)
@@ -1978,15 +1992,60 @@ async def _score_bucket_signal_items(
         )
     ).all()
     scored: list[tuple[ShortResearchSignalItem, float]] = []
-    excluded_codes: list[str] = []
+    exclusions: list[dict[str, str]] = []
+    signal_date = (run.as_of_trade_date or run.as_of_date).isoformat()
     for item in rows:
-        score = _final_decision_score_from_breakdown(item.score_breakdown_json or {}, item.total_score)
+        score = item.ranking_score
         if score is None:
-            excluded_codes.append(item.asset_code)
+            breakdown = (item.score_breakdown_json or {}).get(_SCORE_BUCKET_SCORE_VERSION)
+            declared_score = breakdown.get(_SCORE_BUCKET_SCORE_FIELD) if isinstance(breakdown, Mapping) else None
+            reason = (
+                "non_finite_ranking_score"
+                if isinstance(declared_score, int | float) and not math.isfinite(declared_score)
+                else "missing_ranking_score"
+            )
+            exclusions.append(
+                {
+                    "key": reason,
+                    "asset_code": item.asset_code,
+                    "signal_date": signal_date,
+                }
+            )
+            continue
+        if not math.isfinite(score):
+            exclusions.append(
+                {
+                    "key": "non_finite_ranking_score",
+                    "asset_code": item.asset_code,
+                    "signal_date": signal_date,
+                }
+            )
+            continue
+        if item.score_eligible is not True:
+            exclusions.append(
+                {
+                    "key": "ineligible_ranking_score",
+                    "asset_code": item.asset_code,
+                    "signal_date": signal_date,
+                }
+            )
             continue
         scored.append((item, score))
-    scored.sort(key=lambda pair: (-pair[1], pair[0].rank or 999999, pair[0].asset_code))
-    return scored, excluded_codes
+    scored.sort(key=lambda pair: (-pair[1], pair[0].global_rank or pair[0].rank or 999999, pair[0].asset_code))
+    return scored, exclusions
+
+
+def _stable_score_bucket_exclusions(
+    excluded_codes: dict[str, list[str]],
+    excluded_items: dict[str, list[dict[str, str]]],
+) -> tuple[dict[str, list[str]], dict[str, list[dict[str, str]]]]:
+    return (
+        {key: sorted(codes) for key, codes in sorted(excluded_codes.items())},
+        {
+            key: sorted(items, key=lambda item: (item["signal_date"], item["asset_code"]))
+            for key, items in sorted(excluded_items.items())
+        },
+    )
 
 
 def _score_bucket_group_specs(top_n: list[int]) -> list[dict[str, Any]]:
@@ -2037,8 +2096,9 @@ async def run_etf_score_bucket_validation(
         "validation_mode": VALIDATION_MODE_SCORE_BUCKET_REPLAY,
         "days": days,
         "score_basis": score_basis,
-        "score_field": "score_breakdown_json.final_score_v2.final_score",
-        "score_meaning": "综合关注最终决策分",
+        "score_field": _SCORE_BUCKET_SCORE_FIELD,
+        "score_version": _SCORE_BUCKET_SCORE_VERSION,
+        "score_meaning": "综合排名最终分",
         "top_n": requested_top_n,
         "windows": horizons,
         "baseline": _SCORE_BUCKET_BASELINE,
@@ -2092,6 +2152,7 @@ async def run_etf_score_bucket_validation(
         (spec["label"], spec["entry_timing_label"]): [] for spec in group_specs
     }
     excluded_codes: dict[str, list[str]] = {"unavailable_final_decision_score": []}
+    excluded_items: dict[str, list[dict[str, str]]] = {}
     source_signal_run_ids: list[int] = []
     source_dates: list[str] = []
     scored_item_count = 0
@@ -2104,10 +2165,19 @@ async def run_etf_score_bucket_validation(
     max_horizon = max(horizons)
 
     for source_run in source_runs:
-        scored_items, unavailable_codes = await _score_bucket_signal_items(session, source_run)
-        if unavailable_codes:
-            excluded_unavailable_score_count += len(unavailable_codes)
-            _append_unique_codes(excluded_codes["unavailable_final_decision_score"], unavailable_codes)
+        scored_items, score_exclusions = await _score_bucket_signal_items(session, source_run)
+        if score_exclusions:
+            excluded_unavailable_score_count += len(score_exclusions)
+            _append_unique_codes(
+                excluded_codes["unavailable_final_decision_score"],
+                [item["asset_code"] for item in score_exclusions],
+            )
+            for item in score_exclusions:
+                key = item["key"]
+                _append_unique_codes(excluded_codes.setdefault(key, []), [item["asset_code"]])
+                bucket = excluded_items.setdefault(key, [])
+                if item not in bucket:
+                    bucket.append(item)
         if not scored_items:
             continue
         source_signal_run_ids.append(source_run.id)
@@ -2157,6 +2227,7 @@ async def run_etf_score_bucket_validation(
                     ).add(signal_date=source_run.as_of_date, status=status, payload=metrics)
 
     if not source_signal_run_ids:
+        stable_excluded_codes, stable_excluded_items = _stable_score_bucket_exclusions(excluded_codes, excluded_items)
         run.status = RUN_STATUS_FAILED
         run.finished_at = utcnow()
         run.error_message = "历史 ETF signal run 没有可用真实综合关注分。"
@@ -2167,7 +2238,8 @@ async def run_etf_score_bucket_validation(
             "unavailable_reason": "no_available_final_decision_score",
             "source_signal_run_count": len(source_runs),
             "excluded_unavailable_score_count": excluded_unavailable_score_count,
-            "excluded_codes": excluded_codes,
+            "excluded_codes": stable_excluded_codes,
+            "excluded_items": stable_excluded_items,
             "groups": [],
         }
         await session.commit()
@@ -2201,6 +2273,8 @@ async def run_etf_score_bucket_validation(
             }
         )
 
+    excluded_codes, excluded_items = _stable_score_bucket_exclusions(excluded_codes, excluded_items)
+
     summary = {
         **config,
         "status": RUN_STATUS_SUCCESS,
@@ -2218,12 +2292,14 @@ async def run_etf_score_bucket_validation(
         "scored_item_count": scored_item_count,
         "excluded_unavailable_score_count": excluded_unavailable_score_count,
         "excluded_codes": excluded_codes,
+        "excluded_items": excluded_items,
         "completed_samples": completed_samples,
         "excluded_samples": excluded_samples,
         "pending_samples": pending_samples,
         "sample_policy": (
-            "每天只取最新成功 ETF signal run，按缓存 final_score_v2 最终决策分排序；"
-            "缺失真实综合关注分或主题数据不可用的 ETF 排除；未来收益只读取 signal 日期之后的已保存 ETF 日线。"
+            "每天只取已发布的全范围 final_score_v3 ETF 快照，按其声明的 ranking_score 排序；"
+            "缺失、非有限或不具备决策资格的 ranking_score 均排除，不回退 total_score；"
+            "未来收益只读取 signal 日期之后的已保存 ETF 日线。"
         ),
         "research_only": True,
         "no_trade_instruction": True,
