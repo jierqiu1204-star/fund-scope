@@ -6,7 +6,7 @@ import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from math import sqrt
+from math import isfinite, sqrt
 from statistics import mean, pstdev
 from typing import Any, cast
 
@@ -41,6 +41,8 @@ DEFAULT_PROVIDER_RETRY_DELAY_SECONDS = 1.0
 INELIGIBLE_NAME_KEYWORDS = ("一年持有", "持有期", "定开", "封闭", "封闭期")
 PRICE_HISTORY_PROVIDER_NAMES = ("akshare", "efinance", "sina")
 CLOSE_SNAPSHOT_MIN_TIME = time(14, 55)
+RAW_PRICE_BASIS = "raw_ohlc"
+TOTAL_RETURN_PRICE_BASIS = "total_return_adjusted"
 
 PriceHistoryRows = list[dict[str, float | str]]
 PriceHistoryFetcher = Callable[[str, date, date], Awaitable[PriceHistoryRows]]
@@ -80,6 +82,45 @@ def _optional_number(record: Any, *keys: str) -> float | None:
         if value not in (None, ""):
             return float(value)
     return None
+
+
+def _research_price_fields(row: dict[str, Any], *, provider: str, source_timestamp: datetime) -> dict[str, Any]:
+    adjusted_value = _optional_number(row, "research_adjusted_value", "adjusted_close")
+    price_basis = str(row.get("research_price_basis") or "")
+    adjustment_version = str(row.get("adjustment_version") or "")
+    provider_version = str(row.get("provider_version") or "")
+    ineligibility_reason = None
+    if adjusted_value is None or not isfinite(adjusted_value) or adjusted_value <= 0:
+        ineligibility_reason = "missing_total_return_provenance"
+    elif price_basis != TOTAL_RETURN_PRICE_BASIS:
+        ineligibility_reason = "incompatible_research_price_basis"
+    elif not adjustment_version:
+        ineligibility_reason = "missing_adjustment_version"
+    elif not provider_version:
+        ineligibility_reason = "missing_provider_version"
+    if ineligibility_reason is not None:
+        return {
+            "raw_price_basis": str(row.get("raw_price_basis") or RAW_PRICE_BASIS),
+            "research_adjusted_value": None,
+            "research_price_basis": None,
+            "data_provider": provider,
+            "provider_version": provider_version or None,
+            "source_timestamp": source_timestamp,
+            "adjustment_version": adjustment_version or None,
+            "decision_eligible": False,
+            "decision_ineligibility_reason": ineligibility_reason,
+        }
+    return {
+        "raw_price_basis": str(row.get("raw_price_basis") or RAW_PRICE_BASIS),
+        "research_adjusted_value": adjusted_value,
+        "research_price_basis": price_basis,
+        "data_provider": provider,
+        "provider_version": provider_version,
+        "source_timestamp": source_timestamp,
+        "adjustment_version": adjustment_version,
+        "decision_eligible": True,
+        "decision_ineligibility_reason": None,
+    }
 
 
 def _float_env(name: str, default: float) -> float:
@@ -512,8 +553,19 @@ async def sync_etf_price_history(
             provider_counts[result.provider] = provider_counts.get(result.provider, 0) + 1
             if result.fallback_used:
                 fallback_used += 1
+            source_timestamp = utcnow()
             for row in rows:
                 trade_date = date.fromisoformat(str(row["date"]))
+                values = {
+                    "open": float(row["open"]),
+                    "high": float(row["high"]),
+                    "low": float(row["low"]),
+                    "close": float(row["close"]),
+                    "volume": float(row["volume"]),
+                    "turnover": float(row["turnover"]),
+                    "pct_change": float(row["pct_change"]),
+                    **_research_price_fields(row, provider=result.provider, source_timestamp=source_timestamp),
+                }
                 existing = await session.scalar(
                     select(EtfPriceHistory).where(
                         EtfPriceHistory.etf_code == etf.code,
@@ -525,24 +577,13 @@ async def sync_etf_price_history(
                         EtfPriceHistory(
                             etf_code=etf.code,
                             trade_date=trade_date,
-                            open=float(row["open"]),
-                            high=float(row["high"]),
-                            low=float(row["low"]),
-                            close=float(row["close"]),
-                            volume=float(row["volume"]),
-                            turnover=float(row["turnover"]),
-                            pct_change=float(row["pct_change"]),
+                            **values,
                         )
                     )
                     inserted += 1
                 else:
-                    existing.open = float(row["open"])
-                    existing.high = float(row["high"])
-                    existing.low = float(row["low"])
-                    existing.close = float(row["close"])
-                    existing.volume = float(row["volume"])
-                    existing.turnover = float(row["turnover"])
-                    existing.pct_change = float(row["pct_change"])
+                    for field, value in values.items():
+                        setattr(existing, field, value)
                     updated += 1
             latest_row_date = max((date.fromisoformat(str(row["date"])) for row in rows), default=None)
             await upsert_etf_data_health_success(

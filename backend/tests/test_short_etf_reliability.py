@@ -13,7 +13,10 @@ from app.models.entities import (
     ShortEtfSignalRun,
     TradableEtf,
 )
-from app.services.short_etf.data import sync_etf_price_history_from_intraday_snapshot
+from app.services.short_etf.data import (
+    sync_etf_price_history,
+    sync_etf_price_history_from_intraday_snapshot,
+)
 
 
 async def _seed_etf(
@@ -112,6 +115,107 @@ async def test_short_etf_sync_uses_backup_provider_and_records_health(client, mo
     assert item["latest_price_date"] == "2026-01-02"
     assert item["consecutive_failures"] == 0
     assert item["last_error_message"] is None
+
+
+@pytest.mark.asyncio
+async def test_sync_persists_traceable_total_return_values_alongside_raw_ohlc(client, app, monkeypatch) -> None:
+    from app.services.short_etf import data as etf_data
+
+    monkeypatch.setenv("SHORT_ETF_SYNC_DELAY_SECONDS", "0")
+
+    async def total_return_rows(code: str, from_date: date, to_date: date):
+        return [
+            {
+                "date": "2026-01-02",
+                "open": 1.0,
+                "high": 1.02,
+                "low": 0.94,
+                "close": 0.95,
+                "volume": 1_000_000,
+                "turnover": 120_000_000,
+                "pct_change": -5.0,
+                "research_adjusted_value": 1.05,
+                "research_price_basis": "total_return_adjusted",
+                "adjustment_version": "fixture-distribution-v1",
+                "provider_version": "fixture-v1",
+            },
+            {
+                "date": "2026-01-03",
+                "open": 0.5,
+                "high": 0.52,
+                "low": 0.48,
+                "close": 0.5,
+                "volume": 2_000_000,
+                "turnover": 120_000_000,
+                "pct_change": 0.0,
+                "research_adjusted_value": 1.05,
+                "research_price_basis": "total_return_adjusted",
+                "adjustment_version": "fixture-split-v1",
+                "provider_version": "fixture-v1",
+            },
+            {
+                "date": "2026-01-04",
+                "open": 2.0,
+                "high": 2.04,
+                "low": 1.96,
+                "close": 2.0,
+                "volume": 500_000,
+                "turnover": 120_000_000,
+                "pct_change": 0.0,
+                "research_adjusted_value": 1.05,
+                "research_price_basis": "total_return_adjusted",
+                "adjustment_version": "fixture-merge-v1",
+                "provider_version": "fixture-v1",
+            },
+            {
+                "date": "2026-01-05",
+                "open": 0.25,
+                "high": 0.26,
+                "low": 0.24,
+                "close": 0.25,
+                "volume": 4_000_000,
+                "turnover": 120_000_000,
+                "pct_change": 0.0,
+                "research_adjusted_value": 1.05,
+                "research_price_basis": "total_return_adjusted",
+                "adjustment_version": "fixture-unit-adjustment-v1",
+                "provider_version": "fixture-v1",
+            },
+            {
+                "date": "2026-01-06",
+                "open": 1.0,
+                "high": 1.01,
+                "low": 0.99,
+                "close": 1.0,
+                "volume": 1_000_000,
+                "turnover": 120_000_000,
+                "pct_change": 0.0,
+            },
+        ]
+
+    monkeypatch.setattr(etf_data, "fetch_akshare_etf_price_history", total_return_rows)
+
+    async with app.state.db.session() as session:
+        result = await sync_etf_price_history(session, date(2026, 1, 2), date(2026, 1, 6), ["159915"])
+        rows = (
+            await session.scalars(
+                select(EtfPriceHistory)
+                .where(EtfPriceHistory.etf_code == "159915")
+                .order_by(EtfPriceHistory.trade_date.asc())
+            )
+        ).all()
+
+    assert result["inserted"] == 5
+    assert [row.close for row in rows] == [0.95, 0.5, 2.0, 0.25, 1.0]
+    assert [row.research_adjusted_value for row in rows[:4]] == [1.05, 1.05, 1.05, 1.05]
+    assert all(row.raw_price_basis == "raw_ohlc" for row in rows)
+    assert all(row.research_price_basis == "total_return_adjusted" for row in rows[:4])
+    assert all(row.decision_eligible is True for row in rows[:4])
+    assert all(row.source_timestamp is not None for row in rows[:4])
+    assert all(row.provider_version == "fixture-v1" for row in rows[:4])
+    assert rows[-1].research_adjusted_value is None
+    assert rows[-1].decision_eligible is False
+    assert rows[-1].decision_ineligibility_reason == "missing_total_return_provenance"
 
 
 @pytest.mark.asyncio
