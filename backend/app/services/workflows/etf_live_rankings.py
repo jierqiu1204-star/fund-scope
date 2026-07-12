@@ -260,12 +260,11 @@ async def live_rankings(
     latest_quotes = await market_data.latest_etf_quotes_by_code(session, watch_codes)
     keyword = q.strip().lower() if q else None
     now = datetime.now(ASIA_SHANGHAI).replace(tzinfo=None)
-    signal_run = await latest_signal_run(session, asset_type=ASSET_TYPE_ETF)
     signal_items_by_code: dict[str, ShortResearchSignalItem] = {}
-    if signal_run is not None:
+    if watchlist.signal_run_id is not None:
         signal_rows = await session.scalars(
             select(ShortResearchSignalItem).where(
-                ShortResearchSignalItem.run_id == signal_run.id,
+                ShortResearchSignalItem.run_id == watchlist.signal_run_id,
                 ShortResearchSignalItem.asset_type == ASSET_TYPE_ETF,
                 ShortResearchSignalItem.asset_code.in_(watch_codes),
             )

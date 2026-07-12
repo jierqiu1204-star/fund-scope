@@ -27,7 +27,7 @@
 - [x] 3.4 Implement idempotent publication state transitions so a full snapshot becomes published only after item count, rank continuity, hashes, coverage, and summary metadata pass and commit atomically.
 - [x] 3.5 Replace permissive latest-run lookup with an indexed canonical selector requiring ETF, published, full scope, current score/contract, compatible basis, target trade date, and exchange-calendar freshness.
 - [x] 3.6 Remove the fixed recent-50 scan limit and return explicit waiting, stale, legacy, or version-mismatch when no canonical snapshot qualifies.
-- [ ] 3.7 Resolve and pin the source snapshot once per list, detail, live, portfolio, and validation request so concurrent publication cannot mix runs inside one response.
+- [x] 3.7 Resolve and pin the source snapshot once per list, detail, live, portfolio, and validation request so concurrent publication cannot mix runs inside one response.
 - [ ] 3.8 Enforce post-publication immutability for snapshot identity and item rank/score fields and add mutation-rejection tests.
 - [ ] 3.9 Propagate snapshot id, score version, contract hash, scope, trade date, generated time, coverage, freshness, and limitations to every downstream response.
 - [ ] 3.10 Add selector tests proving later partial/theme/code, fund, mixed-asset, failed, stale, and legacy runs never replace a compatible full ETF snapshot.

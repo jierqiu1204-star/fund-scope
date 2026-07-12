@@ -12,6 +12,7 @@ from app.models.entities import (
     EtfIntradayDailySummary,
     EtfIntradayLatestQuote,
     EtfIntradayQuote,
+    EtfLabelOutcome,
     EtfPriceHistory,
     ShortResearchSignalItem,
     ShortResearchSignalRun,
@@ -45,12 +46,14 @@ from app.services.intraday_etf.service import (
     select_consensus_quotes,
     summarize_and_cleanup_intraday_quotes,
 )
+from app.services.short_research import service as short_research_service
 from app.services.short_research.service import CONCLUSION_HIGH_WATCH, CONCLUSION_WATCH
 from app.services.tracked_positions.service import (
     create_alert_if_needed,
     create_position,
     position_analysis,
 )
+from app.services.workflows import etf_live_rankings as live_ranking_workflow
 
 
 def _etf(code: str, name: str | None = None) -> TradableEtf:
@@ -312,6 +315,120 @@ async def test_live_rankings_order_and_rank_change(client, app, monkeypatch) -> 
     assert items[1]["base_rank"] == 2
     assert items[1]["rank_change"] == 0
     assert items[1]["live_entry_timing_label"] == "冲高别追"
+
+
+@pytest.mark.asyncio
+async def test_live_rankings_pins_the_signal_run_selected_for_its_watchlist(client, app, monkeypatch) -> None:
+    run_id = await _seed_signal_run(app, count=1)
+    calls = 0
+
+    async def one_source_run(session, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise AssertionError("live ranking must not resolve a second signal run")
+        run = await session.get(ShortResearchSignalRun, run_id)
+        assert run is not None
+        return run
+
+    monkeypatch.setattr(live_ranking_workflow, "latest_signal_run", one_source_run)
+
+    response = await client.get("/api/etf-quotes/live-rankings?limit=10")
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["base_rank"] == 1
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_detail_and_portfolio_reuse_the_provided_signal_run(app, monkeypatch) -> None:
+    run_id = await _seed_signal_run(app, count=1)
+
+    async def unexpected_latest_signal_run(*_args, **_kwargs):
+        raise AssertionError("a pinned signal run must not be resolved again")
+
+    monkeypatch.setattr(short_research_service, "latest_signal_run", unexpected_latest_signal_run)
+
+    async with app.state.db.session() as session:
+        run = await session.get(ShortResearchSignalRun, run_id)
+        assert run is not None
+        asset, _chart, _sections = await short_research_service.get_asset_detail(
+            session,
+            "etf",
+            "510000",
+            source_run=run,
+        )
+        portfolio = await short_research_service.etf_observation_portfolio(
+            session,
+            source_run=run,
+            use_snapshot=False,
+            include_optimized=False,
+        )
+
+    assert asset.metadata.code == "510000"
+    assert portfolio["daily_signal_date"] == run.as_of_date
+
+
+@pytest.mark.asyncio
+async def test_validation_summary_uses_only_the_pinned_source_run(app) -> None:
+    async with app.state.db.session() as session:
+        source_run = ShortResearchSignalRun(status="success", as_of_date=date(2026, 6, 12))
+        other_run = ShortResearchSignalRun(status="success", as_of_date=date(2026, 6, 12))
+        session.add_all([source_run, other_run])
+        await session.flush()
+        source_item = ShortResearchSignalItem(
+            run_id=source_run.id,
+            asset_type="etf",
+            asset_code="510100",
+            rank=1,
+            total_score=70.0,
+            conclusion=CONCLUSION_WATCH,
+        )
+        other_item = ShortResearchSignalItem(
+            run_id=other_run.id,
+            asset_type="etf",
+            asset_code="510101",
+            rank=1,
+            total_score=60.0,
+            conclusion=CONCLUSION_HIGH_WATCH,
+        )
+        session.add_all([source_item, other_item])
+        await session.flush()
+        session.add_all(
+            [
+                EtfLabelOutcome(
+                    signal_item_id=source_item.id,
+                    signal_run_id=source_run.id,
+                    asset_code=source_item.asset_code,
+                    label=CONCLUSION_WATCH,
+                    entry_timing_label="趋势延续",
+                    signal_date=source_run.as_of_date,
+                    horizon_days=5,
+                    forward_return=0.03,
+                    status="completed",
+                ),
+                EtfLabelOutcome(
+                    signal_item_id=other_item.id,
+                    signal_run_id=other_run.id,
+                    asset_code=other_item.asset_code,
+                    label=CONCLUSION_HIGH_WATCH,
+                    entry_timing_label="冲高别追",
+                    signal_date=other_run.as_of_date,
+                    horizon_days=5,
+                    forward_return=-0.02,
+                    status="completed",
+                ),
+            ]
+        )
+        await session.commit()
+        summary = await short_research_service._label_outcome_summary(
+            session,
+            source_run.as_of_date,
+            source_signal_run_id=source_run.id,
+        )
+
+    assert summary["asset_count"] == 1
+    assert [group["label"] for group in summary["groups"]] == [CONCLUSION_WATCH]
 
 
 @pytest.mark.asyncio

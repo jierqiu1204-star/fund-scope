@@ -503,7 +503,13 @@ async def list_short_research_assets(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     advisor_reports = await latest_reports_by_asset(session, run.id) if run is not None else {}
     validation_by_label = await latest_validation_evidence_by_label(session) if asset_type in {None, "etf"} else {}
-    portfolio_context_by_code = _portfolio_contexts(await etf_observation_portfolio(session)) if asset_type in {None, "etf"} else {}
+    portfolio_context_by_code = (
+        _portfolio_contexts(
+            await etf_observation_portfolio(session, source_run=run if asset_type == "etf" else None)
+        )
+        if asset_type in {None, "etf"}
+        else {}
+    )
     theme_heat: list[dict[str, Any]] = []
     if asset_type in {None, "etf"}:
         heat_assets, _heat_total = await cached_signal_assets(
@@ -827,14 +833,18 @@ async def get_short_research_asset_detail(
     code: str,
     session: AsyncSession = Depends(get_db_session),
 ) -> ShortResearchAssetDetailOut:
+    run = await latest_signal_run(session, asset_type=asset_type) if asset_type == "etf" else None
     try:
-        asset, chart, sections = await get_asset_detail(session, asset_type, code)
+        asset, chart, sections = await get_asset_detail(session, asset_type, code, source_run=run)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    run = await latest_signal_run(session, asset_type=asset_type)
     advisor_reports = await latest_reports_by_asset(session, run.id) if run is not None else {}
     validation_by_label = await latest_validation_evidence_by_label(session) if asset.metadata.asset_type == "etf" else {}
-    portfolio_context_by_code = _portfolio_contexts(await etf_observation_portfolio(session)) if asset.metadata.asset_type == "etf" else {}
+    portfolio_context_by_code = (
+        _portfolio_contexts(await etf_observation_portfolio(session, source_run=run))
+        if asset.metadata.asset_type == "etf"
+        else {}
+    )
     return ShortResearchAssetDetailOut(
         asset=_asset_out(
             asset,

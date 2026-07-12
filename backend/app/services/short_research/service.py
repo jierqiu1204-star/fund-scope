@@ -1412,12 +1412,20 @@ def _summarize_outcome_rows(rows: list[EtfLabelOutcome], total_rows: int) -> dic
     }
 
 
-async def _label_outcome_summary(session: AsyncSession, as_of_date: date) -> dict[str, Any]:
+async def _label_outcome_summary(
+    session: AsyncSession,
+    as_of_date: date,
+    *,
+    source_signal_run_id: int | None = None,
+) -> dict[str, Any]:
+    filters = [EtfLabelOutcome.asset_type == ASSET_TYPE_ETF]
+    if source_signal_run_id is not None:
+        filters.append(EtfLabelOutcome.signal_run_id == source_signal_run_id)
     rows = list(
         (
             await session.scalars(
                 select(EtfLabelOutcome)
-                .where(EtfLabelOutcome.asset_type == ASSET_TYPE_ETF)
+                .where(*filters)
                 .order_by(EtfLabelOutcome.signal_date.desc(), EtfLabelOutcome.id.desc())
             )
         ).all()
@@ -2530,7 +2538,11 @@ async def run_etf_signal_validation(session: AsyncSession) -> EtfSignalValidatio
         await session.refresh(run)
         return run
     outcome_status = await review_etf_label_outcomes(session, source_run=source_run)
-    summary = await _label_outcome_summary(session, source_run.as_of_date)
+    summary = await _label_outcome_summary(
+        session,
+        source_run.as_of_date,
+        source_signal_run_id=source_run.id,
+    )
     summary.update(outcome_status)
     run = EtfSignalValidationRun(
         status=RUN_STATUS_SUCCESS,
@@ -3109,6 +3121,7 @@ async def get_asset_detail(
     code: str,
     *,
     as_of_date: date | None = None,
+    source_run: ShortResearchSignalRun | None = None,
 ) -> tuple[ComputedAsset, list[dict[str, Any]], dict[str, str]]:
     await ensure_short_research_universe(session)
     if asset_type == ASSET_TYPE_ETF:
@@ -3116,7 +3129,7 @@ async def get_asset_detail(
             etf = await session.scalar(select(TradableEtf).where(TradableEtf.code == code))
             if etf is None:
                 raise ValueError("未找到这只 ETF")
-        run = await latest_signal_run(session, asset_type=ASSET_TYPE_ETF)
+        run = source_run or await latest_signal_run(session, asset_type=ASSET_TYPE_ETF)
         if run is None:
             raise ValueError("等待 ETF 信号生成后再查看当前评分")
         cached_assets, _total = await cached_signal_assets(
@@ -4270,6 +4283,7 @@ async def run_etf_observation_portfolio_optimization(
         universe=UNIVERSE_DEFAULT,
         use_snapshot=False,
         include_optimized=False,
+        source_run=signal_run,
     )
     return await persist_observation_portfolio_snapshot(
         session,
@@ -4293,13 +4307,14 @@ async def etf_observation_portfolio(
     universe: str = UNIVERSE_DEFAULT,
     use_snapshot: bool = True,
     include_optimized: bool = True,
+    source_run: ShortResearchSignalRun | None = None,
 ) -> dict[str, Any]:
-    if use_snapshot and universe == UNIVERSE_DEFAULT:
+    if use_snapshot and source_run is None and universe == UNIVERSE_DEFAULT:
         snapshot = await latest_observation_portfolio_snapshot(session)
         if snapshot is not None and _observation_snapshot_is_usable(snapshot):
             portfolio = await observation_portfolio_from_snapshot(session, snapshot)
             return await _attach_optimized_allocation(session, portfolio) if include_optimized else portfolio
-    run = await latest_signal_run(session, asset_type=ASSET_TYPE_ETF)
+    run = source_run or await latest_signal_run(session, asset_type=ASSET_TYPE_ETF)
     if run is None:
         portfolio = {
             "as_of_date": as_of_date or await latest_data_date(session) or date.today(),
