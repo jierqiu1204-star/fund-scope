@@ -281,7 +281,11 @@ function scoreBucketPrimaryEndpointText(group: ScoreBucketValidationGroup | unde
   const effect = window.effect_direction ?? "insufficient";
   const label =
     effect === "supportive" ? "支持" : effect === "negative" ? "负向" : effect === "inconclusive" ? "不确定" : "样本不足";
-  return `主终点：Top 10 5 日相对 all_scored 的配对净超额，${label}；95% 区间 ${intervalText}；独立日期 ${window.paired_sample_count ?? 0}。`;
+  const coverage = window.asset_coverage ?? window.coverage;
+  const coverageText = coverage === null || coverage === undefined ? "暂无" : formatPercent(coverage * 100);
+  const cost = window.cost_per_round_trip;
+  const costText = cost === null || cost === undefined ? "暂无" : formatPercent(cost * 100);
+  return `主终点：Top 10 5 日相对 all_scored 的配对净超额，${label}；95% 区间 ${intervalText}；独立日期 ${window.paired_sample_count ?? 0}；数据覆盖 ${coverageText}；双边成本 ${costText}。`;
 }
 
 function validationConfidenceLabel(confidence: string | undefined) {

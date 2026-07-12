@@ -1880,6 +1880,25 @@ async def test_score_bucket_validation_skips_overlapping_signal_windows(client, 
 
 
 @pytest.mark.asyncio
+async def test_score_bucket_validation_uses_historical_source_membership_after_etf_deactivation(client, app) -> None:
+    seeded = await _seed_score_bucket_signal_runs(app)
+    delisted_code = seeded["available_codes"][0]
+    async with app.state.db.session() as session:
+        metadata = await session.get(TradableEtf, delisted_code)
+        assert metadata is not None
+        metadata.is_short_term_eligible = False
+        await session.commit()
+
+    response = await client.post("/api/short-research/validation/score-buckets/run?days=180")
+
+    assert response.status_code == 200
+    groups = {(item["label"], item["entry_timing_label"]): item for item in response.json()["summary"]["groups"]}
+    top5_window = groups[("Top 5", "cumulative")]["windows"]["5"]
+    assert top5_window["asset_count"] == 5
+    assert top5_window["sample_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_canonical_assets_ignore_later_partial_run(client, app) -> None:
     seeded = await _seed_score_bucket_signal_runs(app)
 
