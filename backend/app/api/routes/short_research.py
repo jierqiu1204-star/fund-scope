@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, timedelta
 from typing import Any
 
@@ -7,7 +8,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import require_approved_user
+from app.core.auth import optional_approved_user, require_approved_user
 from app.core.db import get_db_session
 from app.models.entities import (
     EtfSignalValidationItem,
@@ -99,6 +100,10 @@ from app.services.short_research.service import (
     sync_short_research_data,
 )
 from app.services.short_research.snapshot_selector import snapshot_metadata
+from app.services.workflows.tracking_filters import (
+    tracking_states_by_code,
+    validate_tracking_states,
+)
 
 router = APIRouter(prefix="/api/short-research", tags=["short-research"])
 
@@ -490,11 +495,19 @@ async def list_short_research_assets(
     universe: str = Query(default="default"),
     observation_labels: str | None = Query(default=None),
     entry_labels: str | None = Query(default=None),
+    tracking_states: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_db_session),
+    user: User | None = Depends(optional_approved_user),
 ) -> ShortResearchAssetListOut:
     try:
+        tracking_filters = _csv_values(tracking_states)
+        validate_tracking_states(tracking_filters)
+        if tracking_filters and user is None:
+            raise HTTPException(status_code=401, detail="持仓筛选需要登录")
+        if tracking_filters and asset_type == "fund":
+            raise ValueError("持仓筛选仅支持 ETF")
         run = await latest_signal_run(session, asset_type=asset_type, theme=theme)
         if run is None and theme is not None:
             run = await latest_signal_run(session, asset_type=asset_type)
@@ -508,11 +521,22 @@ async def list_short_research_assets(
             q=q,
             sort=sort,
             universe=universe,
-            limit=limit,
-            offset=offset,
+            limit=None if tracking_filters else limit,
+            offset=0 if tracking_filters else offset,
             observation_labels=_csv_values(observation_labels),
             entry_labels=_csv_values(entry_labels),
         )
+        if tracking_filters:
+            assert user is not None
+            states_by_code = await tracking_states_by_code(session, user_id=user.id, as_of_date=run.as_of_date)
+            assets = [
+                asset
+                for asset in assets
+                if tracking_filters & states_by_code.get(asset.metadata.code, set())
+            ]
+            assets = [replace(asset, filtered_position=index) for index, asset in enumerate(assets, start=1)]
+            total = len(assets)
+            assets = assets[offset : offset + limit]
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     advisor_reports = await latest_reports_by_asset(session, run.id) if run is not None else {}

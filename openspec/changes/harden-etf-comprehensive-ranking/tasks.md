@@ -83,11 +83,11 @@
 - [x] 7.4 Freeze the live watch scope and hash, calculate base/live scope ranks before user filters, and return `base_global_rank`, `live_scope_rank`, `filtered_position`, `rank_scope`, and nullable `rank_change`.
 - [x] 7.5 Calculate rank change only between the same live-scope hash and score version; use a shared stable tie-break and return null for incomparable scopes.
 - [x] 7.6 Replace truthiness sentinels in return, drawdown, risk, liquidity, and other sort modes with explicit finite/missing sort tuples that keep real zero and put missing values last.
-- [ ] 7.7 Implement `tracking_states` consistently for static and live endpoints through API/workflow orchestration without making research services import tracking services.
-- [ ] 7.8 Separate scheduler-wide quote collection from authenticated presentation sources so another user's holding never appears as `tracked_position` or changes user-scoped counts.
-- [ ] 7.9 Define current alert relevance/expiry for `触发提醒` and `仅网页提示` filters so historical alerts do not remain active indefinitely.
-- [ ] 7.10 Reject unsupported tracking/filter combinations explicitly instead of silently ignoring query parameters.
-- [ ] 7.11 Add multi-user, filter, pagination, equal-score, zero/missing-value, one-code detail, and static/live compatibility tests, including domain-boundary assertions.
+- [x] 7.7 Implement `tracking_states` consistently for static and live endpoints through API/workflow orchestration without making research services import tracking services.
+- [x] 7.8 Separate scheduler-wide quote collection from authenticated presentation sources so another user's holding never appears as `tracked_position` or changes user-scoped counts.
+- [x] 7.9 Define current alert relevance/expiry for `触发提醒` and `仅网页提示` filters so historical alerts do not remain active indefinitely.
+- [x] 7.10 Reject unsupported tracking/filter combinations explicitly instead of silently ignoring query parameters.
+- [x] 7.11 Add multi-user, filter, pagination, equal-score, zero/missing-value, one-code detail, and static/live compatibility tests, including domain-boundary assertions.
 
 ## 8. Normalize Intraday Accuracy And Session Handling
 

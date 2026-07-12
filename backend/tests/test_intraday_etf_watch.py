@@ -328,6 +328,25 @@ async def test_live_rankings_order_and_rank_change(client, app, monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_live_rankings_keep_base_rank_for_equal_scores(client, app, monkeypatch) -> None:
+    await _seed_signal_run(app, count=2, total_scores=[80.0, 80.0])
+    now = datetime(2026, 6, 12, 16, 0, 0)
+    monkeypatch.setattr(
+        "app.services.intraday_etf.service.current_market_state",
+        lambda: MarketState("closed", "after_close", now.replace(tzinfo=ASIA_SHANGHAI)),
+    )
+
+    response = await client.get("/api/etf-quotes/live-rankings")
+
+    assert response.status_code == 200
+    assert [item["etf_code"] for item in response.json()["items"]] == ["510000", "510001"]
+    assert [
+        (item["base_global_rank"], item["live_scope_rank"], item["rank_change"])
+        for item in response.json()["items"]
+    ] == [(1, 1, 0), (2, 2, 0)]
+
+
+@pytest.mark.asyncio
 async def test_live_rankings_pins_the_signal_run_selected_for_its_watchlist(client, app, monkeypatch) -> None:
     run_id = await _seed_signal_run(app, count=1)
     calls = 0
@@ -553,6 +572,61 @@ async def test_live_rank_change_requires_matching_scope_and_score_version(client
     mismatched_scope = await client.get("/api/etf-quotes/live-rankings?q=510000")
     assert mismatched_scope.status_code == 200
     assert mismatched_scope.json()["items"][0]["rank_change"] is None
+
+
+@pytest.mark.asyncio
+async def test_live_tracking_filter_is_limited_to_current_user(client, app, monkeypatch) -> None:
+    await _seed_signal_run(app, count=2, total_scores=[80.0, 70.0])
+    now = datetime(2026, 6, 12, 16, 0, 0)
+    monkeypatch.setattr(
+        "app.services.intraday_etf.service.current_market_state",
+        lambda: MarketState("closed", "after_close", now.replace(tzinfo=ASIA_SHANGHAI)),
+    )
+    async with app.state.db.session() as session:
+        owner = await session.get(User, 1)
+        assert owner is not None
+        other = User(email="live-tracking-other@example.com", recipient_email="live-tracking-other@example.com", is_approved=True)
+        session.add(other)
+        await session.flush()
+        session.add_all(
+            [
+                TrackedPosition(
+                    user_id=owner.id,
+                    asset_type="etf",
+                    asset_code="510001",
+                    asset_name="ETF510001",
+                    buy_date=date(2026, 6, 12),
+                    buy_amount=1000,
+                    status="active",
+                ),
+                TrackedPosition(
+                    user_id=other.id,
+                    asset_type="etf",
+                    asset_code="510000",
+                    asset_name="ETF510000",
+                    buy_date=date(2026, 6, 12),
+                    buy_amount=1000,
+                    status="active",
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await client.get("/api/etf-quotes/live-rankings?tracking_states=我已持仓")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert body["items"][0]["etf_code"] == "510001"
+    assert body["items"][0]["filtered_position"] == 1
+    assert "tracked_position" not in body["items"][0]["sources"]
+
+    unauthenticated = await client.get(
+        "/api/etf-quotes/live-rankings?tracking_states=我已持仓",
+        headers={"Authorization": ""},
+    )
+    assert unauthenticated.status_code == 401
+    unsupported = await client.get("/api/etf-quotes/live-rankings?tracking_states=未知状态")
+    assert unsupported.status_code == 400
 
 
 @pytest.mark.asyncio

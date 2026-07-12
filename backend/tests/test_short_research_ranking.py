@@ -461,3 +461,6 @@ def test_sort_key_keeps_zero_and_places_missing_values_last() -> None:
         "zero",
         "missing",
     ]
+
+    equal_scores = [replace(base, metadata=replace(base.metadata, code="b")), replace(base, metadata=replace(base.metadata, code="a"))]
+    assert [item.metadata.code for item in sorted(equal_scores, key=lambda item: _sort_key(item, "score"))] == ["a", "b"]
