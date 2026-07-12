@@ -14,7 +14,7 @@
 - [x] 2.2 Add nullable item-level `ranking_score`, `score_eligible`, global rank, and source snapshot identity without removing current compatibility fields or guessing values for legacy items.
 - [x] 2.3 Add raw-versus-research price-basis, adjusted value, provider version, source timestamp, and decision-eligibility fields needed by ETF daily history while preserving raw OHLC data.
 - [x] 2.4 Add effective-dated ETF universe membership storage with activation/deactivation dates, source, tracked-underlying identity, and exclusion reason.
-- [ ] 2.5 Add typed source ranking/scope/universe/input hashes, price basis, execution model, and cutoff fields to validation runs so current evidence selection does not rely on JSON inspection.
+- [x] 2.5 Add typed source ranking/scope/universe/input hashes, price basis, execution model, and cutoff fields to validation runs so current evidence selection does not rely on JSON inspection.
 - [ ] 2.6 Update ORM, Pydantic, API, and TypeScript contracts for the new nullable fields without making legacy rows appear current.
 - [ ] 2.7 Create migration tests covering upgrade, downgrade, a single Alembic head, indexes, idempotency uniqueness, nullable legacy rows, and duplicate membership interval prevention.
 - [ ] 2.8 Backfill only factual values that can be proven from stored records; leave score versions, contract hashes, price basis, and point-in-time identity null when they cannot be reconstructed.

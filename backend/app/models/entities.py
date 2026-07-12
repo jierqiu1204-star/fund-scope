@@ -651,6 +651,16 @@ class ShortResearchSignalItem(Base):
 
 class EtfSignalValidationRun(Base):
     __tablename__ = "etf_signal_validation_runs"
+    __table_args__ = (
+        SaIndex(
+            "ix_etf_signal_validation_runs_source_contract",
+            "source_ranking_contract_hash",
+            "source_scope_kind",
+            "source_universe_snapshot_hash",
+            "source_score_field",
+            "price_basis",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     status: Mapped[str] = mapped_column(String(32), default="success")
@@ -667,6 +677,17 @@ class EtfSignalValidationRun(Base):
     summary_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    source_ranking_contract_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_scope_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    source_scope_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_universe_snapshot_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_input_snapshot_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_score_field: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_score_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_rule_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    price_basis: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    execution_model: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    data_cutoff: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class EtfSignalValidationItem(Base):

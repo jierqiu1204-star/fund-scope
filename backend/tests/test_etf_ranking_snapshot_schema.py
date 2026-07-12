@@ -1,7 +1,12 @@
 from sqlalchemy import Boolean, Date, DateTime, Float, Integer, String, Text, UniqueConstraint
 
 from app.db.base import Base
-from app.models.entities import EtfPriceHistory, ShortResearchSignalItem, ShortResearchSignalRun
+from app.models.entities import (
+    EtfPriceHistory,
+    EtfSignalValidationRun,
+    ShortResearchSignalItem,
+    ShortResearchSignalRun,
+)
 
 
 def test_signal_run_exposes_nullable_typed_snapshot_identity() -> None:
@@ -126,3 +131,35 @@ def test_etf_universe_membership_tracks_effective_history_and_provenance() -> No
     }
     interval_key = unique_constraints["uq_etf_universe_membership_effective_from"]
     assert [column.name for column in interval_key.columns] == ["etf_code", "effective_from"]
+
+
+def test_validation_run_exposes_nullable_source_ranking_identity() -> None:
+    table = EtfSignalValidationRun.__table__
+    expected_types = {
+        "source_ranking_contract_hash": String,
+        "source_scope_kind": String,
+        "source_scope_hash": String,
+        "source_universe_snapshot_hash": String,
+        "source_input_snapshot_hash": String,
+        "source_score_field": String,
+        "source_score_version": String,
+        "source_rule_version": String,
+        "price_basis": String,
+        "execution_model": String,
+        "data_cutoff": DateTime,
+    }
+
+    for column_name, expected_type in expected_types.items():
+        column = table.c[column_name]
+        assert column.nullable is True
+        assert isinstance(column.type, expected_type)
+
+    indexes = {index.name: index for index in table.indexes}
+    contract_index = indexes["ix_etf_signal_validation_runs_source_contract"]
+    assert [column.name for column in contract_index.columns] == [
+        "source_ranking_contract_hash",
+        "source_scope_kind",
+        "source_universe_snapshot_hash",
+        "source_score_field",
+        "price_basis",
+    ]
