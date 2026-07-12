@@ -94,6 +94,7 @@ class EtfLiveRankingItemOut(BaseModel):
     score_version: str | None = None
     score_breakdown: dict[str, Any] = Field(default_factory=dict)
     score_contribution_reasons: list[str] = Field(default_factory=list)
+    intraday_component_status: dict[str, dict[str, Any]] = Field(default_factory=dict)
     live_entry_timing_label: str
     live_entry_timing_reason: str
     daily_entry_timing_label: str

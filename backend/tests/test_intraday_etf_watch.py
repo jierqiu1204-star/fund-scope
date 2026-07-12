@@ -75,18 +75,31 @@ async def _seed_signal_run(
     count: int = 25,
     conclusions: list[str] | None = None,
     total_scores: list[float] | None = None,
+    canonical: bool = False,
+    as_of_date: date | None = None,
+    metrics_overrides: dict[str, dict[str, object]] | None = None,
 ) -> int:
     conclusions = conclusions or [CONCLUSION_WATCH] * count
     total_scores = total_scores or [100.0 - i for i in range(count)]
+    signal_date = as_of_date or date(2026, 6, 12)
     async with app.state.db.session() as session:
         session.add_all([_etf(f"51{i:04d}") for i in range(count)])
         run = ShortResearchSignalRun(
             status="success",
             started_at=utcnow(),
             finished_at=utcnow(),
-            as_of_date=date(2026, 6, 12),
+            as_of_date=signal_date,
             config_json={"asset_type": "etf", "theme": None, "codes": [], "language": "research_only"},
             summary_json={"item_count": count, "etf_count": count},
+            scope_kind="full" if canonical else None,
+            score_version="final_score_v3" if canonical else None,
+            ranking_contract_hash="test-ranking-contract" if canonical else None,
+            score_field="ranking_score" if canonical else None,
+            as_of_trade_date=signal_date if canonical else None,
+            price_basis="total_return_adjusted" if canonical else None,
+            coverage_ratio=1.0 if canonical else None,
+            publication_state=None,
+            published_at=None,
         )
         session.add(run)
         await session.commit()
@@ -98,7 +111,10 @@ async def _seed_signal_run(
                     asset_type="etf",
                     asset_code=f"51{i:04d}",
                     rank=i + 1,
+                    global_rank=i + 1 if canonical else None,
                     total_score=total_scores[i] if i < len(total_scores) else 100.0 - i,
+                    ranking_score=(total_scores[i] if i < len(total_scores) else 100.0 - i) if canonical else None,
+                    score_eligible=True if canonical else None,
                     conclusion=conclusions[i] if i < len(conclusions) else CONCLUSION_WATCH,
                     score_breakdown_json={},
                     risk_flags_json=[],
@@ -111,12 +127,22 @@ async def _seed_signal_run(
                         "default_display_eligible": True,
                         "entry_timing_label": "趋势延续",
                         "entry_timing_reason": "日线趋势仍在。",
+                        **(
+                            {"ranking_asset_bucket": "equity", "volatility_20d": 0.01}
+                            if canonical
+                            else {}
+                        ),
+                        **(metrics_overrides or {}).get(f"51{i:04d}", {}),
                     },
                 )
                 for i in range(count)
             ]
         )
         await session.commit()
+        if canonical:
+            run.publication_state = "published"
+            run.published_at = utcnow()
+            await session.commit()
         return run.id
 
 
@@ -207,6 +233,111 @@ def test_exchange_calendar_handles_holidays_boundaries_and_lunch_freshness() -> 
     ) is True
 
 
+def test_intraday_adjustments_are_volatility_and_same_time_normalized() -> None:
+    low_volatility = live_ranking_workflow._volatility_price_adjustment(
+        change_percent=1.0,
+        conclusion=CONCLUSION_WATCH,
+        asset_bucket="bond",
+        volatility_20d=0.005,
+    )
+    high_volatility = live_ranking_workflow._volatility_price_adjustment(
+        change_percent=1.0,
+        conclusion=CONCLUSION_WATCH,
+        asset_bucket="commodity",
+        volatility_20d=0.05,
+    )
+    morning = live_ranking_workflow._same_time_activity_adjustment(150.0, [100.0] * 5)
+    afternoon = live_ranking_workflow._same_time_activity_adjustment(300.0, [200.0] * 5)
+    insufficient = live_ranking_workflow._same_time_activity_adjustment(150.0, [100.0] * 4)
+
+    assert low_volatility[0] == "冲高别追"
+    assert low_volatility[2] < 0
+    assert high_volatility[0] == "趋势延续"
+    assert high_volatility[2] > 0
+    assert morning[0] == afternoon[0] == 1.0
+    assert insufficient[0] is None
+
+
+@pytest.mark.asyncio
+async def test_live_rankings_compare_turnover_with_same_exchange_minute_history(client, app, monkeypatch) -> None:
+    now = datetime(2026, 6, 17, 10, 0, 0)
+    await _seed_signal_run(app, count=1, canonical=True, as_of_date=now.date())
+    monkeypatch.setattr(
+        "app.services.intraday_etf.service.current_market_state",
+        lambda: MarketState("open", "morning", now.replace(tzinfo=ASIA_SHANGHAI)),
+    )
+    async with app.state.db.session() as session:
+        session.add_all(
+            [
+                EtfIntradayQuote(
+                    etf_code="510000",
+                    quote_time=datetime(2026, 6, 17 - offset, 10, 0, 0),
+                    trade_date=date(2026, 6, 17 - offset),
+                    latest_price=1.0,
+                    turnover=100.0,
+                )
+                for offset in range(1, 6)
+            ]
+        )
+        session.add(
+            EtfIntradayQuote(
+                etf_code="510000",
+                quote_time=now,
+                trade_date=now.date(),
+                latest_price=1.01,
+                change_percent=0.5,
+                turnover=150.0,
+                source="test",
+                freshness_status="fresh",
+                raw_json={"decision_eligible": True},
+            )
+        )
+        await session.commit()
+
+    response = await client.get("/api/etf-quotes/live-rankings")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["score_source"] == "intraday"
+    assert any("同刻历史中位数" in reason for reason in item["score_contribution_reasons"])
+    assert item["intraday_adjustment_score"] == 2.0
+
+
+@pytest.mark.asyncio
+async def test_live_rankings_reports_unavailable_structure_components_without_weight_transfer(client, app, monkeypatch) -> None:
+    now = datetime(2026, 6, 17, 10, 0, 0)
+    await _seed_signal_run(app, count=1, canonical=True, as_of_date=now.date())
+    monkeypatch.setattr(
+        "app.services.intraday_etf.service.current_market_state",
+        lambda: MarketState("open", "morning", now.replace(tzinfo=ASIA_SHANGHAI)),
+    )
+    async with app.state.db.session() as session:
+        session.add(
+            EtfIntradayQuote(
+                etf_code="510000",
+                quote_time=now,
+                trade_date=now.date(),
+                latest_price=1.01,
+                change_percent=0.5,
+                source="test",
+                freshness_status="fresh",
+                raw_json={"decision_eligible": True},
+            )
+        )
+        await session.commit()
+
+    response = await client.get("/api/etf-quotes/live-rankings")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    components = item["intraday_component_status"]
+    assert components["price"]["status"] == "available"
+    assert components["premium_discount"]["status"] == "unavailable"
+    assert components["spread"]["status"] == "unavailable"
+    assert components["activity"]["status"] == "unavailable"
+    assert item["intraday_adjustment_score"] == 1.0
+
+
 @pytest.mark.asyncio
 async def test_scheduled_intraday_watch_skips_closed_market_without_fetching(app, monkeypatch) -> None:
     called = False
@@ -276,6 +407,8 @@ async def test_live_rankings_order_and_rank_change(client, app, monkeypatch) -> 
         count=3,
         conclusions=[CONCLUSION_WATCH, CONCLUSION_WATCH, CONCLUSION_HIGH_WATCH],
         total_scores=[60.0, 70.0, 80.0],
+        canonical=True,
+        as_of_date=date.today(),
     )
     now = datetime.now().replace(microsecond=0)
     monkeypatch.setattr(
@@ -350,6 +483,41 @@ async def test_live_rankings_order_and_rank_change(client, app, monkeypatch) -> 
     assert items[1]["filtered_position"] == 2
     assert items[1]["rank_change"] == 0
     assert items[1]["live_entry_timing_label"] == "冲高别追"
+
+
+@pytest.mark.asyncio
+async def test_live_rankings_exposes_fresh_quote_without_score_from_stale_daily_base(client, app, monkeypatch) -> None:
+    await _seed_signal_run(app, count=1, total_scores=[80.0])
+    now = datetime.now().replace(microsecond=0)
+    monkeypatch.setattr(
+        "app.services.intraday_etf.service.current_market_state",
+        lambda: MarketState("open", "morning", now.replace(tzinfo=ASIA_SHANGHAI)),
+    )
+    async with app.state.db.session() as session:
+        session.add(
+            EtfIntradayQuote(
+                etf_code="510000",
+                quote_time=now,
+                trade_date=now.date(),
+                latest_price=1.02,
+                change_percent=1.0,
+                source="test",
+                freshness_status="fresh",
+                raw_json={"decision_eligible": True},
+            )
+        )
+        await session.commit()
+
+    response = await client.get("/api/etf-quotes/live-rankings")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["quote"]["decision_eligible"] is True
+    assert item["base_score"] == 80.0
+    assert item["score_source"] == "unavailable"
+    assert item["live_total_score"] is None
+    assert item["live_scope_rank"] is None
+    assert any("日线基座" in reason for reason in item["score_contribution_reasons"])
 
 
 @pytest.mark.asyncio
@@ -489,7 +657,7 @@ async def test_validation_summary_uses_only_the_pinned_source_run(app) -> None:
 async def test_live_rankings_search_keeps_global_rank_and_does_not_rank_incomparable_item(
     client, app, monkeypatch
 ) -> None:
-    await _seed_signal_run(app, count=3, total_scores=[60.0, 70.0, 80.0])
+    await _seed_signal_run(app, count=3, total_scores=[60.0, 70.0, 80.0], canonical=True, as_of_date=date.today())
     now = datetime.now().replace(microsecond=0)
     monkeypatch.setattr(
         "app.services.intraday_etf.service.current_market_state",
@@ -656,7 +824,19 @@ async def test_live_tracking_filter_is_limited_to_current_user(client, app, monk
 
 @pytest.mark.asyncio
 async def test_live_rankings_keeps_intraday_entry_timing_when_daily_cache_is_high_chase(client, app, monkeypatch) -> None:
-    run_id = await _seed_signal_run(app, count=1, conclusions=[CONCLUSION_HIGH_WATCH], total_scores=[94.6])
+    daily_timing = {
+        "entry_timing_label": "冲高别追",
+        "entry_timing_reason": "今天 3.09%，且近20日 22.23%、近60日 44.86% 已经不低，追高风险上升。",
+    }
+    run_id = await _seed_signal_run(
+        app,
+        count=1,
+        conclusions=[CONCLUSION_HIGH_WATCH],
+        total_scores=[94.6],
+        canonical=True,
+        as_of_date=date.today(),
+        metrics_overrides={"510000": daily_timing},
+    )
     now = datetime.now().replace(microsecond=0)
     monkeypatch.setattr(
         "app.services.intraday_etf.service.current_market_state",
@@ -670,12 +850,6 @@ async def test_live_rankings_keeps_intraday_entry_timing_when_daily_cache_is_hig
             )
         )
         assert signal_item is not None
-        daily_timing = {
-            "entry_timing_label": "冲高别追",
-            "entry_timing_reason": "今天 3.09%，且近20日 22.23%、近60日 44.86% 已经不低，追高风险上升。",
-        }
-        signal_item.metrics_json = {**dict(signal_item.metrics_json or {}), **daily_timing}
-        signal_item.rationale_json = daily_timing
         session.add(
             EtfIntradayQuote(
                 etf_code="510000",
@@ -1938,7 +2112,7 @@ def test_select_consensus_quotes_blocks_diverged_and_missing_time_quotes() -> No
 
 @pytest.mark.asyncio
 async def test_diverged_quote_does_not_drive_live_ranking_or_tracked_email(client, app, settings, monkeypatch) -> None:
-    await _seed_signal_run(app, count=1, total_scores=[80.0])
+    await _seed_signal_run(app, count=1, total_scores=[80.0], canonical=True, as_of_date=date.today())
     await _seed_price_history(app, "510000")
     now = datetime.now().replace(microsecond=0)
     sent: list[dict] = []
@@ -1997,6 +2171,7 @@ async def test_diverged_quote_does_not_drive_live_ranking_or_tracked_email(clien
     assert item["score_source"] == "daily"
     assert item["quote"]["decision_eligible"] is False
     assert item["quote"]["consensus_status"] == CONSENSUS_DIVERGED
+    assert item["intraday_component_status"]["consensus"]["status"] == "unavailable"
     assert status in {"data_ineligible", "web_only"}
     if alert is not None:
         assert alert.email_status == "skipped"
