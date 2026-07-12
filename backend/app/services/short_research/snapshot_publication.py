@@ -1,15 +1,42 @@
 from __future__ import annotations
 
 import math
+from dataclasses import asdict, dataclass
+from datetime import date
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.entities import ShortResearchSignalItem, ShortResearchSignalRun, utcnow
+from app.models.entities import (
+    EtfPriceHistory,
+    ShortResearchSignalItem,
+    ShortResearchSignalRun,
+    utcnow,
+)
+from app.services.short_research.universe import build_point_in_time_universe_snapshot
 
 
 class SnapshotPublicationError(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class EtfCoverageBarrier:
+    expected_codes: list[str]
+    included_codes: list[str]
+    excluded: list[dict[str, str]]
+
+    @property
+    def coverage_ratio(self) -> float:
+        return len(self.included_codes) / len(self.expected_codes) if self.expected_codes else 0.0
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            **asdict(self),
+            "expected_count": len(self.expected_codes),
+            "included_count": len(self.included_codes),
+            "coverage_ratio": round(self.coverage_ratio, 6),
+        }
 
 
 _REQUIRED_IDENTITY_FIELDS = (
@@ -29,6 +56,45 @@ _REQUIRED_IDENTITY_FIELDS = (
     "coverage_ratio",
     "idempotency_key",
 )
+
+
+async def build_etf_coverage_barrier(
+    session: AsyncSession,
+    *,
+    as_of_trade_date: date | None,
+) -> EtfCoverageBarrier:
+    if as_of_trade_date is None:
+        raise SnapshotPublicationError("snapshot trade date is required")
+    universe = await build_point_in_time_universe_snapshot(session, as_of_date=as_of_trade_date)
+    expected_codes = [str(member["asset_code"]) for member in universe.members]
+    if not expected_codes:
+        return EtfCoverageBarrier(expected_codes=[], included_codes=[], excluded=[])
+    rows = (
+        await session.scalars(
+            select(EtfPriceHistory).where(
+                EtfPriceHistory.etf_code.in_(expected_codes),
+                EtfPriceHistory.trade_date == as_of_trade_date,
+            )
+        )
+    ).all()
+    by_code = {row.etf_code: row for row in rows}
+    included_codes: list[str] = []
+    excluded: list[dict[str, str]] = []
+    for code in expected_codes:
+        row = by_code.get(code)
+        if row is None:
+            reason = "missing_trade_date_price"
+        elif row.decision_eligible is not True:
+            reason = row.decision_ineligibility_reason or "decision_ineligible_price"
+        elif row.research_price_basis != "total_return_adjusted":
+            reason = "incompatible_research_price_basis"
+        elif row.research_adjusted_value is None or not math.isfinite(row.research_adjusted_value):
+            reason = "missing_research_adjusted_value"
+        else:
+            included_codes.append(code)
+            continue
+        excluded.append({"asset_code": code, "reason": reason})
+    return EtfCoverageBarrier(expected_codes=expected_codes, included_codes=included_codes, excluded=excluded)
 
 
 def _validate_publishable(run: ShortResearchSignalRun, items: list[ShortResearchSignalItem]) -> None:
@@ -67,6 +133,15 @@ async def publish_full_snapshot(session: AsyncSession, *, run_id: int) -> ShortR
             raise SnapshotPublicationError("snapshot run does not exist")
         if run.publication_state == "published":
             return run
+        barrier = await build_etf_coverage_barrier(session, as_of_trade_date=run.as_of_trade_date)
+        if not barrier.expected_codes:
+            raise SnapshotPublicationError("expected universe coverage is unavailable")
+        if run.expected_item_count != len(barrier.expected_codes):
+            raise SnapshotPublicationError("expected item count does not match point-in-time universe")
+        if run.eligible_item_count != len(barrier.included_codes):
+            raise SnapshotPublicationError("eligible item count does not match decision-data coverage")
+        if run.coverage_ratio is None or not math.isclose(run.coverage_ratio, barrier.coverage_ratio, abs_tol=1e-6):
+            raise SnapshotPublicationError("coverage ratio does not match decision-data coverage")
         items = (
             await session.scalars(
                 select(ShortResearchSignalItem)
@@ -75,6 +150,9 @@ async def publish_full_snapshot(session: AsyncSession, *, run_id: int) -> ShortR
             )
         ).all()
         _validate_publishable(run, items)
+        summary = dict(run.summary_json or {})
+        summary["coverage"] = barrier.to_dict()
+        run.summary_json = summary
         run.publication_state = "published"
         run.published_at = utcnow()
     return run

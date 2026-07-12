@@ -5,15 +5,72 @@ from datetime import date, datetime
 import pytest
 from sqlalchemy import select
 
-from app.models.entities import ShortResearchSignalItem, ShortResearchSignalRun
+from app.models.entities import (
+    EtfPriceHistory,
+    EtfUniverseMembership,
+    ShortResearchSignalItem,
+    ShortResearchSignalRun,
+    TradableEtf,
+)
 from app.services.short_research.snapshot_publication import (
     SnapshotPublicationError,
+    build_etf_coverage_barrier,
     publish_full_snapshot,
 )
 
 
-async def _seed_publishable_run(app, *, scope_kind: str = "full", coverage_ratio: float = 1.0) -> int:
+async def _seed_publishable_run(
+    app,
+    *,
+    scope_kind: str = "full",
+    coverage_ratio: float = 1.0,
+    missing_price_code: str | None = None,
+) -> int:
     async with app.state.db.session() as session:
+        session.add_all(
+            [
+                TradableEtf(
+                    code="159915",
+                    name="创业板ETF",
+                    exchange="SZ",
+                    theme_tags_json=["科技"],
+                    trading_rule_label="T+1",
+                    asset_class="sector",
+                    is_short_term_eligible=True,
+                    is_watchlist=True,
+                ),
+                TradableEtf(
+                    code="510300",
+                    name="沪深300ETF",
+                    exchange="SH",
+                    theme_tags_json=["宽基"],
+                    trading_rule_label="T+1",
+                    asset_class="broad_index",
+                    is_short_term_eligible=True,
+                    is_watchlist=True,
+                ),
+            ]
+        )
+        await session.flush()
+        for code in ("159915", "510300"):
+            session.add(EtfUniverseMembership(etf_code=code, effective_from=date(2025, 1, 1), source="fixture"))
+            if code != missing_price_code:
+                session.add(
+                    EtfPriceHistory(
+                        etf_code=code,
+                        trade_date=date(2026, 1, 2),
+                        open=1.0,
+                        high=1.1,
+                        low=0.9,
+                        close=1.0,
+                        volume=1_000_000,
+                        turnover=100_000_000,
+                        pct_change=0.0,
+                        research_adjusted_value=1.0,
+                        research_price_basis="total_return_adjusted",
+                        decision_eligible=True,
+                    )
+                )
         run = ShortResearchSignalRun(
             status="success",
             as_of_date=date(2026, 1, 2),
@@ -77,6 +134,14 @@ async def test_full_snapshot_publication_is_idempotent_and_marks_run_published(a
         assert first.id == second.id
         assert first.publication_state == "published"
         assert first.published_at is not None
+        assert first.summary_json["coverage"] == {
+            "expected_codes": ["159915", "510300"],
+            "included_codes": ["159915", "510300"],
+            "excluded": [],
+            "expected_count": 2,
+            "included_count": 2,
+            "coverage_ratio": 1.0,
+        }
 
 
 @pytest.mark.asyncio
@@ -91,6 +156,23 @@ async def test_partial_or_undercovered_snapshot_cannot_publish(app) -> None:
     assert run is not None
     assert run.publication_state is None
     assert run.published_at is None
+
+
+@pytest.mark.asyncio
+async def test_coverage_barrier_reports_each_same_date_data_exclusion(app) -> None:
+    await _seed_publishable_run(app, missing_price_code="510300")
+
+    async with app.state.db.session() as session:
+        barrier = await build_etf_coverage_barrier(session, as_of_trade_date=date(2026, 1, 2))
+
+    assert barrier.to_dict() == {
+        "expected_codes": ["159915", "510300"],
+        "included_codes": ["159915"],
+        "excluded": [{"asset_code": "510300", "reason": "missing_trade_date_price"}],
+        "expected_count": 2,
+        "included_count": 1,
+        "coverage_ratio": 0.5,
+    }
 
 
 @pytest.mark.asyncio

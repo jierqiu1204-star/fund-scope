@@ -49,7 +49,7 @@
 - [x] 5.2 Use accumulated NAV for fund return/drawdown research while retaining unit NAV for the existing display contexts that need it.
 - [x] 5.3 Route ranking, volatility, drawdown, percentile, and forward-return calculations through the declared adjusted research series and fail closed when its provenance is unavailable.
 - [x] 5.4 Stop promoting 14:55/pre-close, server-time fallback, diverged, stale, or display-only intraday quotes into verified decision daily history.
-- [ ] 5.5 Implement the one-trade-date data barrier and default 95 percent expected-universe publication threshold, with exact included/excluded coverage reporting.
+- [x] 5.5 Implement the one-trade-date data barrier and default 95 percent expected-universe publication threshold, with exact included/excluded coverage reporting.
 - [ ] 5.6 Close point-in-time universe membership when ETFs disappear or become ineligible and preserve delisted/liquidated members in historical coverage.
 - [ ] 5.7 Change bounded daily sync ordering to missing/stale first plus persisted rotation cursor while retaining tracked/default-display priority and proving lower-priority ETFs cannot starve.
 - [ ] 5.8 Map skipped, deferred, partial-provider, and coverage-failed business results to `skipped`, `partial`, or `failed` JobRun states instead of success.
