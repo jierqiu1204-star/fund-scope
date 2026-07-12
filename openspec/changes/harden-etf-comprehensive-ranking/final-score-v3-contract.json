@@ -20,6 +20,16 @@
         "id": "technical_momentum_cross_section",
         "weight": 0.3,
         "score_bearing": true,
+        "formula": {
+          "type": "weighted_sum",
+          "inputs": [
+            {"primitive": "return_5d", "weight": 0.2, "direction": "higher_is_better", "normalization": "bucket_percentile"},
+            {"primitive": "return_10d", "weight": 0.25, "direction": "higher_is_better", "normalization": "bucket_percentile"},
+            {"primitive": "return_20d", "weight": 0.3, "direction": "higher_is_better", "normalization": "bucket_percentile"},
+            {"primitive": "distance_to_ma20", "weight": 0.15, "direction": "higher_is_better", "normalization": "winsorized_bucket_percentile"},
+            {"primitive": "trend_consistency", "weight": 0.1, "direction": "higher_is_better", "normalization": "bucket_percentile"}
+          ]
+        },
         "required_inputs": [
           "return_5d",
           "return_10d",
@@ -41,6 +51,15 @@
         "id": "risk_quality_cross_section",
         "weight": 0.2,
         "score_bearing": true,
+        "formula": {
+          "type": "weighted_sum",
+          "inputs": [
+            {"primitive": "realized_volatility_20d", "weight": 0.25, "direction": "lower_is_better", "normalization": "bucket_percentile"},
+            {"primitive": "downside_volatility_20d", "weight": 0.25, "direction": "lower_is_better", "normalization": "bucket_percentile"},
+            {"primitive": "max_drawdown_20d", "weight": 0.3, "direction": "lower_absolute_loss_is_better", "normalization": "bucket_percentile"},
+            {"primitive": "overextension_atr", "weight": 0.2, "direction": "lower_is_better", "normalization": "winsorized_bucket_percentile"}
+          ]
+        },
         "required_inputs": [
           "realized_volatility_20d",
           "downside_volatility_20d",
@@ -60,6 +79,15 @@
         "id": "structure_liquidity",
         "weight": 0.15,
         "score_bearing": true,
+        "formula": {
+          "type": "weighted_sum",
+          "inputs": [
+            {"primitive": "average_turnover_20d", "weight": 0.35, "direction": "higher_is_better", "normalization": "bucket_percentile"},
+            {"primitive": "average_turnover_60d", "weight": 0.25, "direction": "higher_is_better", "normalization": "bucket_percentile"},
+            {"primitive": "spread_bps", "weight": 0.2, "direction": "lower_is_better", "normalization": "bucket_percentile"},
+            {"primitive": "structure_quality", "weight": 0.2, "direction": "higher_is_better", "normalization": "bounded_0_100"}
+          ]
+        },
         "required_inputs": [
           "average_turnover_20d",
           "average_turnover_60d",
@@ -78,6 +106,14 @@
         "id": "sector_trend",
         "weight": 0.15,
         "score_bearing": true,
+        "formula": {
+          "type": "weighted_sum",
+          "inputs": [
+            {"primitive": "sector_breadth_20d", "weight": 0.4, "direction": "higher_is_better", "normalization": "bounded_0_100"},
+            {"primitive": "sector_momentum_20d", "weight": 0.35, "direction": "higher_is_better", "normalization": "bucket_percentile"},
+            {"primitive": "sector_turnover_ratio_20_60", "weight": 0.25, "direction": "higher_is_better", "normalization": "winsorized_bucket_percentile"}
+          ]
+        },
         "required_inputs": [
           "sector_breadth_20d",
           "sector_momentum_20d",
@@ -95,6 +131,13 @@
         "id": "theme_catalyst",
         "weight": 0.1,
         "score_bearing": true,
+        "formula": {
+          "type": "weighted_sum",
+          "inputs": [
+            {"primitive": "catalyst_quality", "weight": 0.6, "direction": "higher_is_better", "normalization": "bounded_0_100"},
+            {"primitive": "catalyst_confidence", "weight": 0.4, "direction": "higher_is_better", "normalization": "bounded_0_100"}
+          ]
+        },
         "required_inputs": [
           "catalyst_quality",
           "catalyst_confidence",
@@ -111,6 +154,13 @@
         "id": "premium_discount",
         "weight": 0.1,
         "score_bearing": true,
+        "formula": {
+          "type": "weighted_sum",
+          "inputs": [
+            {"primitive": "premium_discount_bps", "weight": 0.7, "direction": "closer_to_zero_is_better", "normalization": "absolute_distance_bucket_percentile"},
+            {"primitive": "premium_provider_consensus", "weight": 0.3, "direction": "higher_is_better", "normalization": "bounded_0_100"}
+          ]
+        },
         "required_inputs": [
           "premium_discount_bps",
           "iopv_observed_at",
@@ -121,7 +171,66 @@
           "premium_provider_consensus"
         ]
       }
-    ]
+    ],
+    "dag": {
+      "primitive_edges": "Each calculation.components[].formula.inputs[] entry is a directed primitive-to-component edge with frozen weight, direction, and normalization.",
+      "component_edges": [
+        {"from": "technical_momentum_cross_section", "to": "weighted_aggregate", "weight": 0.3},
+        {"from": "risk_quality_cross_section", "to": "weighted_aggregate", "weight": 0.2},
+        {"from": "structure_liquidity", "to": "weighted_aggregate", "weight": 0.15},
+        {"from": "sector_trend", "to": "weighted_aggregate", "weight": 0.15},
+        {"from": "theme_catalyst", "to": "weighted_aggregate", "weight": 0.1},
+        {"from": "premium_discount", "to": "weighted_aggregate", "weight": 0.1}
+      ],
+      "terminal_edges": [
+        {"from": "weighted_aggregate", "to": "reliability_gate"},
+        {"from": "reliability_gate", "to": "risk_and_freshness_caps"},
+        {"from": "risk_and_freshness_caps", "to": "ranking_score"}
+      ],
+      "acyclic_order": [
+        "primitive_inputs",
+        "technical_momentum_cross_section",
+        "risk_quality_cross_section",
+        "structure_liquidity",
+        "sector_trend",
+        "theme_catalyst",
+        "premium_discount",
+        "weighted_aggregate",
+        "reliability_gate",
+        "risk_and_freshness_caps",
+        "ranking_score"
+      ]
+    }
+  },
+  "freshness": {
+    "daily_market_structure_and_sector": {
+      "rule": "source_trade_date_equals_snapshot_trade_date",
+      "calendar": "china_exchange_calendar"
+    },
+    "theme_catalyst": {
+      "maximum_age_hours": 72,
+      "effective_window_required": true,
+      "rule": "effective_at_lte_cutoff_and_cutoff_lt_expires_at"
+    },
+    "premium_discount": {
+      "maximum_age_minutes": 15,
+      "rule": "iopv_observed_at_within_cutoff_window"
+    },
+    "expired_input_action": "score_unavailable"
+  },
+  "reliability": {
+    "severity_order": ["verified", "alternate_provider", "estimated", "stale", "unavailable"],
+    "decision_eligible_statuses": ["verified", "alternate_provider"],
+    "component_status": "worst_required_input_status",
+    "aggregate_status": "worst_score_bearing_component_status",
+    "execution_stage": "after_weighted_aggregate_before_risk_and_freshness_caps",
+    "post_aggregation_actions": {
+      "verified": {"score_eligible": true, "cap": null},
+      "alternate_provider": {"score_eligible": true, "cap": null},
+      "estimated": {"score_eligible": false, "cap": 45, "display_only": true},
+      "stale": {"score_eligible": false, "cap": 55, "display_only": true},
+      "unavailable": {"score_eligible": false, "cap": 45, "display_only": true}
+    }
   },
   "eligibility": {
     "finite_score_inputs_required": true,
@@ -139,11 +248,11 @@
   },
   "asset_buckets": {
     "comparable_bucket_ids": [
-      "broad_equity",
-      "sector_theme_equity",
-      "fixed_income",
+      "broad-equity",
+      "sector/theme-equity",
+      "fixed-income",
       "commodity",
-      "cross_border"
+      "cross-border"
     ],
     "unknown_or_incompatible": "score_unavailable",
     "cross_bucket_percentiles": false,
