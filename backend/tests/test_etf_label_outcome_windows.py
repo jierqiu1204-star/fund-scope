@@ -17,6 +17,12 @@ def _price_row(offset: int, close: float) -> EtfPriceHistory:
         volume=1_000_000,
         turnover=100_000_000,
         pct_change=0.0,
+        research_adjusted_value=close,
+        research_price_basis="total_return_adjusted",
+        data_provider="fixture",
+        provider_version="fixture-v1",
+        adjustment_version="fixture-total-return-v1",
+        decision_eligible=True,
     )
 
 

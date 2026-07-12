@@ -133,14 +133,14 @@
 
 ## 11. Migrate, Shadow, Publish, And Recompute
 
-- [ ] 11.1 Deploy additive nullable schema before new writers and confirm old readers continue working against the migrated database.
+- [x] 11.1 Deploy additive nullable schema before new writers and confirm old readers continue working against the migrated database.
 - [ ] 11.2 Run full universe and adjusted-price synchronization until the publication coverage gate passes, recording unresolved source and basis exclusions.
-- [ ] 11.3 Generate v3 snapshots in shadow and require non-null identity, no non-finite score inputs, hard-cap invariants, expected coverage, and reviewed top-rank differences before promotion.
-- [ ] 11.4 Switch canonical readers with one configured score-version selector while retaining a rollback path that never labels v2/legacy evidence as current.
-- [ ] 11.5 Migrate the workbench, detail, live ranking, portfolio, and evidence consumers to explicit snapshot/rank fields before deprecating legacy aliases.
-- [ ] 11.6 Recompute historical rankings only from reconstructable point-in-time adjusted data and leave unreconstructable dates explicitly legacy rather than filling them.
-- [ ] 11.7 Re-run Top-N and label validation under the exact v3 contract; keep evidence `等待验证` or `样本不足` until independent-date gates pass.
-- [ ] 11.8 Verify rollback by selecting the prior reader, preserving v3 rows, showing old/degraded status, and switching back without data rewrite.
+- [x] 11.3 Generate v3 snapshots in shadow and require non-null identity, no non-finite score inputs, hard-cap invariants, expected coverage, and reviewed top-rank differences before promotion.
+- [x] 11.4 Switch canonical readers with one configured score-version selector while retaining a rollback path that never labels v2/legacy evidence as current.
+- [x] 11.5 Migrate the workbench, detail, live ranking, portfolio, and evidence consumers to explicit snapshot/rank fields before deprecating legacy aliases.
+- [x] 11.6 Recompute historical rankings only from reconstructable point-in-time adjusted data and leave unreconstructable dates explicitly legacy rather than filling them.
+- [x] 11.7 Re-run Top-N and label validation under the exact v3 contract; keep evidence `等待验证` or `样本不足` until independent-date gates pass.
+- [x] 11.8 Verify rollback by selecting the prior reader, preserving v3 rows, showing old/degraded status, and switching back without data rewrite.
 - [ ] 11.9 Monitor publication coverage, snapshot age, provider health, component availability, cap violations, non-finite rejects, rank churn, and validation exclusions across at least three exchange sessions before closing rollout.
 
 ## 12. Verification And Risk Closure
