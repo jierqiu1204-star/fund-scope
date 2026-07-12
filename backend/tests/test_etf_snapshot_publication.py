@@ -91,3 +91,28 @@ async def test_partial_or_undercovered_snapshot_cannot_publish(app) -> None:
     assert run is not None
     assert run.publication_state is None
     assert run.published_at is None
+
+
+@pytest.mark.asyncio
+async def test_published_snapshot_identity_and_item_ranks_are_immutable(app) -> None:
+    run_id = await _seed_publishable_run(app)
+
+    async with app.state.db.session() as session:
+        await publish_full_snapshot(session, run_id=run_id)
+        run = await session.get(ShortResearchSignalRun, run_id)
+        assert run is not None
+        run.ranking_contract_hash = "changed-contract"
+        with pytest.raises(ValueError, match="published.*immutable"):
+            await session.commit()
+        await session.rollback()
+
+    async with app.state.db.session() as session:
+        item = await session.scalar(
+            select(ShortResearchSignalItem).where(ShortResearchSignalItem.run_id == run_id)
+        )
+        assert item is not None
+        item.global_rank = 99
+        item.ranking_score = 99.0
+        with pytest.raises(ValueError, match="published.*immutable"):
+            await session.commit()
+        await session.rollback()

@@ -14,17 +14,24 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
+    inspect,
+    select,
 )
 from sqlalchemy import (
     Index as SaIndex,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from app.db.base import Base
 
 
 def utcnow() -> datetime:
     return datetime.utcnow()
+
+
+class PublishedSnapshotImmutableError(ValueError):
+    pass
 
 
 class User(Base):
@@ -1609,5 +1616,64 @@ class JobRun(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     details_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+_SNAPSHOT_IDENTITY_FIELDS = (
+    "scope_kind",
+    "scope_hash",
+    "universe_snapshot_hash",
+    "input_snapshot_hash",
+    "score_version",
+    "rule_version",
+    "ranking_contract_hash",
+    "score_field",
+    "data_cutoff",
+    "as_of_trade_date",
+    "price_basis",
+    "expected_item_count",
+    "eligible_item_count",
+    "coverage_ratio",
+    "idempotency_key",
+)
+_SNAPSHOT_ITEM_FIELDS = ("run_id", "rank", "global_rank", "total_score", "ranking_score", "score_eligible")
+
+
+def _changed_fields(instance: object, fields: tuple[str, ...]) -> bool:
+    state = inspect(instance)
+    return any(state.attrs[field].history.has_changes() for field in fields)
+
+
+@event.listens_for(Session, "before_flush")
+def _prevent_published_snapshot_mutation(session: Session, _flush_context: object, _instances: object) -> None:
+    published_run_ids: set[int] = set()
+    item_run_ids: set[int] = set()
+    changed_items: list[ShortResearchSignalItem] = []
+    for instance in session.dirty:
+        if isinstance(instance, ShortResearchSignalRun):
+            state = inspect(instance)
+            was_published = instance.publication_state == "published" or "published" in state.attrs.publication_state.history.deleted
+            if was_published and _changed_fields(instance, _SNAPSHOT_IDENTITY_FIELDS):
+                raise PublishedSnapshotImmutableError("published ranking snapshot identity is immutable")
+            if "published" in state.attrs.publication_state.history.deleted:
+                raise PublishedSnapshotImmutableError("published ranking snapshot is immutable")
+        elif isinstance(instance, ShortResearchSignalItem) and _changed_fields(instance, _SNAPSHOT_ITEM_FIELDS):
+            changed_items.append(instance)
+            item_run_ids.add(instance.run_id)
+            item_run_ids.update(inspect(instance).attrs.run_id.history.deleted)
+    for instance in session.new:
+        if isinstance(instance, ShortResearchSignalItem):
+            changed_items.append(instance)
+            item_run_ids.add(instance.run_id)
+    if item_run_ids:
+        published_run_ids = set(
+            session.scalars(
+                select(ShortResearchSignalRun.id).where(
+                    ShortResearchSignalRun.id.in_(item_run_ids),
+                    ShortResearchSignalRun.publication_state == "published",
+                )
+            )
+        )
+    if any(item.run_id in published_run_ids for item in changed_items):
+        raise PublishedSnapshotImmutableError("published ranking snapshot items are immutable")
 
 
