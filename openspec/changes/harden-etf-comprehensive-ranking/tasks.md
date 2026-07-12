@@ -46,7 +46,7 @@
 ## 5. Make Daily Data Point-In-Time And Publication-Safe
 
 - [x] 5.1 Ingest and persist traceable total-return-aware ETF research values alongside raw daily values, with fixtures for distributions, splits, merges, and unit adjustments.
-- [ ] 5.2 Use accumulated NAV for fund return/drawdown research while retaining unit NAV for the existing display contexts that need it.
+- [x] 5.2 Use accumulated NAV for fund return/drawdown research while retaining unit NAV for the existing display contexts that need it.
 - [ ] 5.3 Route ranking, volatility, drawdown, percentile, and forward-return calculations through the declared adjusted research series and fail closed when its provenance is unavailable.
 - [ ] 5.4 Stop promoting 14:55/pre-close, server-time fallback, diverged, stale, or display-only intraday quotes into verified decision daily history.
 - [ ] 5.5 Implement the one-trade-date data barrier and default 95 percent expected-universe publication threshold, with exact included/excluded coverage reporting.

@@ -687,7 +687,11 @@ async def _fund_series(session: AsyncSession, code: str, as_of_date: date | None
     if as_of_date is not None:
         query = query.where(FundNavHistory.nav_date <= as_of_date)
     rows = await session.scalars(query.order_by(FundNavHistory.nav_date.asc()))
-    return [PricePoint(point_date=row.nav_date, value=row.nav, nav=row.nav) for row in rows.all() if row.nav > 0]
+    return [
+        PricePoint(point_date=row.nav_date, value=row.accumulated_nav, nav=row.nav)
+        for row in rows.all()
+        if row.accumulated_nav > 0
+    ]
 
 
 async def _etf_series(session: AsyncSession, code: str, as_of_date: date | None = None) -> list[PricePoint]:

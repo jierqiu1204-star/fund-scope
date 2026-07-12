@@ -18,6 +18,7 @@ from app.models.entities import (
     EtfPriceHistory,
     EtfSignalValidationItem,
     EtfSignalValidationRun,
+    Fund,
     FundNavHistory,
     NotificationLog,
     ShortResearchSignalItem,
@@ -28,6 +29,9 @@ from app.models.entities import (
     utcnow,
 )
 from app.services.short_research.service import (
+    _fund_series,
+    _max_drawdown,
+    _window_return,
     allowed_conclusions,
     ensure_short_research_universe,
     run_etf_observation_portfolio_optimization,
@@ -236,6 +240,26 @@ async def _seed_observation_portfolio_signal_run(
             ]
         )
         await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_fund_research_returns_use_accumulated_nav_while_display_keeps_unit_nav(app) -> None:
+    async with app.state.db.session() as session:
+        session.add(Fund(code="000001", name="累计净值测试基金", category="equity"))
+        session.add_all(
+            [
+                FundNavHistory(fund_code="000001", nav_date=date(2026, 1, 2), nav=1.0, accumulated_nav=1.0),
+                FundNavHistory(fund_code="000001", nav_date=date(2026, 1, 3), nav=0.9, accumulated_nav=1.05),
+                FundNavHistory(fund_code="000001", nav_date=date(2026, 1, 4), nav=0.95, accumulated_nav=1.1),
+            ]
+        )
+        await session.commit()
+        series = await _fund_series(session, "000001")
+
+    assert [point.value for point in series] == [1.0, 1.05, 1.1]
+    assert [point.nav for point in series] == [1.0, 0.9, 0.95]
+    assert _window_return(series, 2) == pytest.approx(0.1)
+    assert _max_drawdown(series) == 0.0
 
 
 async def _seed_opportunity_signal_run(app) -> None:
