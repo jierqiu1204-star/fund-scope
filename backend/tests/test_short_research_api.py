@@ -1732,6 +1732,13 @@ async def test_score_bucket_validation_requires_current_full_ranking_contract(cl
     assert seeded["old_run_id"] not in summary["source_signal_run_ids"]
     assert seeded["partial_run_id"] not in summary["source_signal_run_ids"]
     assert seeded["mismatched_contract_run_id"] not in summary["source_signal_run_ids"]
+    excluded_snapshots = {
+        item["source_signal_run_id"]: item["reason"]
+        for item in summary["excluded_source_snapshots"]
+    }
+    assert excluded_snapshots[seeded["old_run_id"]] == "partial_or_legacy_scope"
+    assert excluded_snapshots[seeded["partial_run_id"]] == "partial_or_legacy_scope"
+    assert excluded_snapshots[seeded["mismatched_contract_run_id"]] == "incompatible_score_field"
     assert summary["excluded_unavailable_score_count"] == 3
     assert seeded["unavailable_code"] in summary["excluded_codes"]["missing_ranking_score"]
     assert seeded["missing_score_code"] in summary["excluded_codes"]["missing_ranking_score"]
@@ -1784,6 +1791,8 @@ async def test_score_bucket_validation_requires_current_full_ranking_contract(cl
             "reliability_policy": "decision_eligible_total_return_adjusted",
         }
     ]
+    assert summary["source_evidence_contract_groups"][0]["identity"]["ranking_contract_hash"] == "current-contract"
+    assert summary["source_evidence_contract_groups"][0]["source_snapshots"] == summary["source_snapshot_identities"]
 
     latest = await client.get("/api/short-research/validation/score-buckets/latest")
     assert latest.status_code == 200

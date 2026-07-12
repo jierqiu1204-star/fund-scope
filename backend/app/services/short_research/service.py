@@ -1967,6 +1967,34 @@ def _paired_score_bucket_metrics(
     }
 
 
+def _source_evidence_contract_groups(source_snapshots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    identity_fields = (
+        "ranking_contract_hash",
+        "scope_kind",
+        "scope_hash",
+        "universe_snapshot_hash",
+        "input_snapshot_hash",
+        "score_field",
+        "score_version",
+        "rule_version",
+        "price_basis",
+        "reliability_policy",
+    )
+    grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for snapshot in source_snapshots:
+        grouped.setdefault(tuple(snapshot.get(field) for field in identity_fields), []).append(snapshot)
+    return [
+        {
+            "identity": {field: key[index] for index, field in enumerate(identity_fields)},
+            "source_snapshots": sorted(
+                snapshots,
+                key=lambda snapshot: (snapshot["source_date"], snapshot["source_signal_run_id"]),
+            ),
+        }
+        for key, snapshots in sorted(grouped.items(), key=lambda item: tuple(str(value) for value in item[0]))
+    ]
+
+
 def _append_unique_codes(target: list[str], codes: list[str]) -> None:
     seen = set(target)
     for code in codes:
@@ -2311,6 +2339,64 @@ async def _latest_etf_signal_runs_by_date(
     return list(by_date.values())
 
 
+async def _score_bucket_source_snapshot_exclusions(
+    session: AsyncSession,
+    *,
+    from_date: date,
+    accepted_run_ids: set[int],
+) -> list[dict[str, Any]]:
+    etf_run_ids = (
+        select(ShortResearchSignalItem.run_id)
+        .where(ShortResearchSignalItem.asset_type == ASSET_TYPE_ETF)
+        .distinct()
+    )
+    rows = (
+        await session.scalars(
+            select(ShortResearchSignalRun)
+            .where(
+                ShortResearchSignalRun.status == RUN_STATUS_SUCCESS,
+                ShortResearchSignalRun.as_of_date >= from_date,
+                ShortResearchSignalRun.id.in_(etf_run_ids),
+            )
+            .order_by(ShortResearchSignalRun.as_of_date.asc(), ShortResearchSignalRun.id.asc())
+        )
+    ).all()
+    exclusions: list[dict[str, Any]] = []
+    for run in rows:
+        reason: str | None = None
+        if run.scope_kind != "full":
+            reason = "partial_or_legacy_scope"
+        elif run.publication_state != "published":
+            reason = "unpublished_snapshot"
+        elif run.score_version != _SCORE_BUCKET_SCORE_VERSION:
+            reason = "incompatible_score_version"
+        elif run.score_field != _SCORE_BUCKET_SCORE_FIELD:
+            reason = "incompatible_score_field"
+        elif run.price_basis != _SCORE_BUCKET_PRICE_BASIS:
+            reason = "incompatible_price_basis"
+        elif run.ranking_contract_hash is None:
+            reason = "missing_ranking_contract_hash"
+        elif run.universe_snapshot_hash is None:
+            reason = "missing_universe_snapshot_hash"
+        elif run.input_snapshot_hash is None:
+            reason = "missing_input_snapshot_hash"
+        elif run.rule_version is None:
+            reason = "missing_rule_version"
+        elif run.as_of_trade_date is None:
+            reason = "missing_as_of_trade_date"
+        elif run.id not in accepted_run_ids:
+            reason = "superseded_source_snapshot"
+        if reason is not None:
+            exclusions.append(
+                {
+                    "source_signal_run_id": run.id,
+                    "source_date": (run.as_of_trade_date or run.as_of_date).isoformat(),
+                    "reason": reason,
+                }
+            )
+    return exclusions
+
+
 async def _score_bucket_signal_items(
     session: AsyncSession,
     run: ShortResearchSignalRun,
@@ -2484,6 +2570,11 @@ async def run_etf_score_bucket_validation(
         session,
         from_date=date.today() - timedelta(days=days),
     )
+    source_snapshot_exclusions = await _score_bucket_source_snapshot_exclusions(
+        session,
+        from_date=date.today() - timedelta(days=days),
+        accepted_run_ids={source_run.id for source_run in source_runs},
+    )
     if not source_runs:
         run.status = RUN_STATUS_FAILED
         run.finished_at = utcnow()
@@ -2493,6 +2584,7 @@ async def run_etf_score_bucket_validation(
             "status": RUN_STATUS_FAILED,
             "generated_at": utcnow().isoformat(),
             "unavailable_reason": "waiting_signal_generation",
+            "excluded_source_snapshots": source_snapshot_exclusions,
             "groups": [],
         }
         await session.commit()
@@ -2655,6 +2747,7 @@ async def run_etf_score_bucket_validation(
             "excluded_unavailable_score_count": excluded_unavailable_score_count,
             "excluded_codes": stable_excluded_codes,
             "excluded_items": stable_excluded_items,
+            "excluded_source_snapshots": source_snapshot_exclusions,
             "groups": [],
         }
         await session.commit()
@@ -2714,6 +2807,8 @@ async def run_etf_score_bucket_validation(
         "source_signal_run_ids": source_signal_run_ids,
         "source_signal_as_of_dates": source_dates,
         "source_snapshot_identities": source_snapshots,
+        "source_evidence_contract_groups": _source_evidence_contract_groups(source_snapshots),
+        "excluded_source_snapshots": source_snapshot_exclusions,
         "ranking_sort": "opportunity",
         "requested_top_n": requested_top_n,
         "top_n": requested_top_n,
