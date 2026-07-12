@@ -179,7 +179,7 @@ def test_opportunity_score_is_unavailable_without_sector_or_catalyst_evidence() 
     )
 
     assert payload["metrics"]["opportunity_score"] is None
-    assert payload["metrics"]["opportunity_label"] == "暂无综合关注"
+    assert payload["metrics"]["opportunity_label"] == "暂无主题辅助"
     assert payload["metrics"]["opportunity_score_version"] == "opportunity_score_v2_unavailable"
 
 
