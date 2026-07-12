@@ -84,6 +84,7 @@ from app.services.short_research.optimized_allocation import (
 from app.services.short_research.ranking import (
     FINAL_SCORE_VERSION,
     RankingRecord,
+    apply_final_score_limits,
     build_final_score_breakdowns,
 )
 from app.services.short_research.ranking_contract import scope_kind_for_filters
@@ -1036,10 +1037,7 @@ def _score_metrics(metadata: ShortResearchAsset, series: list[PricePoint], as_of
     if metadata.asset_type == ASSET_TYPE_ETF:
         liquidity_score = round(max(0.0, min(100.0, (average_turnover_20d or 0.0) / 1_000_000)), 2)
     total_score = round(trend_score * 0.55 + risk_score * 0.30 + liquidity_score * 0.15, 2)
-    if usable_days < 20:
-        total_score = min(total_score, 35.0)
-    elif "数据滞后" in risk_flags:
-        total_score = min(total_score, 55.0)
+    total_score, score_limitations = apply_final_score_limits(total_score, risk_flags=risk_flags)
     entry_timing = _entry_timing_metrics(
         metadata,
         series,
@@ -1068,6 +1066,7 @@ def _score_metrics(metadata: ShortResearchAsset, series: list[PricePoint], as_of
         "risk_score": risk_score,
         "liquidity_score": liquidity_score,
         "total_score": total_score,
+        "score_limitations": score_limitations,
         "risk_flags": risk_flags,
         **entry_timing,
     }

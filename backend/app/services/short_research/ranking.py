@@ -199,6 +199,22 @@ def _reliability(record: RankingRecord) -> tuple[str, float, list[str]]:
     return reliability, round(max(0.0, min(100.0, score)), 2), reasons
 
 
+def apply_final_score_limits(
+    score: float,
+    *,
+    risk_flags: Sequence[str],
+    unavailable: bool = False,
+) -> tuple[float, list[str]]:
+    bounded = max(0.0, min(100.0, score))
+    if "数据不足" in risk_flags:
+        return min(bounded, 35.0), ["数据不足不能形成高分排序。"]
+    if "数据滞后" in risk_flags:
+        return min(bounded, 55.0), ["旧数据不能提高最终排序。"]
+    if unavailable:
+        return min(bounded, 45.0), ["不可决策数据不能提高最终排序。"]
+    return bounded, []
+
+
 def _score_liquidity_premium(record: RankingRecord, records: Sequence[RankingRecord]) -> dict[str, Any]:
     liquidity = percentile_rank(
         numeric_metric(record.metrics, "average_turnover_20d"),
@@ -241,19 +257,17 @@ def build_final_score_breakdowns(records: Sequence[RankingRecord]) -> dict[str, 
             + liquidity_premium["score"] * 0.12,
             2,
         )
-        cap_reason = None
-        if reliability == "stale":
-            final_score = min(final_score, 55.0)
-            cap_reason = "旧数据不能提高最终排序。"
-        elif reliability == "unavailable":
-            final_score = min(final_score, 45.0)
-            cap_reason = "不可决策数据不能提高最终排序。"
+        final_score, limitation_reasons = apply_final_score_limits(
+            final_score,
+            risk_flags=record.risk_flags,
+            unavailable=reliability == "unavailable",
+        )
         confidence = "high" if reliability in {"verified", "alternate_provider"} and cross["peer_sample_count"] >= MIN_PEER_SAMPLE_COUNT else "medium"
         if reliability in {"stale", "unavailable"}:
             confidence = "low"
         results[record.code] = {
             "score_version": FINAL_SCORE_VERSION,
-            "final_score": round(max(0.0, min(100.0, final_score)), 2),
+            "final_score": round(final_score, 2),
             "confidence": confidence,
             "components": {
                 "cross_sectional_percentile": cross,
@@ -271,7 +285,7 @@ def build_final_score_breakdowns(records: Sequence[RankingRecord]) -> dict[str, 
                 "data_reliability": 0.16,
                 "liquidity_premium": 0.12,
             },
-            "limitation_reasons": [reason for reason in [cap_reason] if reason],
+            "limitation_reasons": limitation_reasons,
         }
     return results
 

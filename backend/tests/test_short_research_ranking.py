@@ -9,6 +9,7 @@ from app.models.entities import ShortResearchSignalItem
 from app.services.short_research.ranking import (
     FINAL_SCORE_VERSION,
     RankingRecord,
+    apply_final_score_limits,
     apply_label_evidence,
     build_final_score_breakdowns,
     percentile_rank,
@@ -108,6 +109,25 @@ def test_validation_evidence_cannot_reduce_portfolio_exposure() -> None:
     evidence_tagged = _portfolio_exposure_for_asset(_portfolio_asset(validation_confidence="insufficient"))
 
     assert evidence_tagged == baseline
+
+
+@pytest.mark.parametrize(
+    ("risk_flags", "unavailable", "expected"),
+    [
+        (["数据不足"], False, 35.0),
+        (["数据滞后"], False, 55.0),
+        ([], True, 45.0),
+    ],
+)
+def test_final_score_limits_are_shared_and_fail_closed(
+    risk_flags: list[str],
+    unavailable: bool,
+    expected: float,
+) -> None:
+    score, limitations = apply_final_score_limits(99.0, risk_flags=risk_flags, unavailable=unavailable)
+
+    assert score == expected
+    assert limitations
 
 
 def test_final_score_v2_separates_similar_base_scores() -> None:
