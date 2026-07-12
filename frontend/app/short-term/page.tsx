@@ -2012,6 +2012,12 @@ function ShortTermClient() {
     (item) => item.label === "Top 10" && item.entry_timing_label === "cumulative"
   );
   const scoreBucketValidation = statusData?.score_bucket_validation ?? {};
+  const scoreBucketExcludedSources = Array.isArray(scoreBucketValidation.excluded_source_snapshots)
+    ? scoreBucketValidation.excluded_source_snapshots.filter(
+        (item): item is { source_signal_run_id?: number; source_date?: string; reason?: string } =>
+          typeof item === "object" && item !== null
+      )
+    : [];
   const scoreBucketSourceRuns =
     typeof scoreBucketValidation.source_signal_run_count === "number" ? scoreBucketValidation.source_signal_run_count : 0;
   const scoreBucketScoredItems =
@@ -3648,6 +3654,18 @@ function ShortTermClient() {
                 排序字段：{String(scoreBucketValidation.score_version ?? "final_score_v3")} / {String(scoreBucketValidation.score_field ?? "ranking_score")}；
                 执行：{String(scoreBucketValidation.execution_model ?? "等待执行模型")}；缺失真实综合关注分、复权价格或契约的 ETF 已排除。
               </p>
+              {scoreBucketExcludedSources.length ? (
+                <details className="rounded-[8px] border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
+                  <summary className="cursor-pointer font-semibold">旧口径或不兼容来源已排除，不计入当前结论（{scoreBucketExcludedSources.length} 个）</summary>
+                  <ul className="mt-2 list-disc pl-4">
+                    {scoreBucketExcludedSources.slice(0, 6).map((item) => (
+                      <li key={`${item.source_signal_run_id}-${item.reason}`}>
+                        run {item.source_signal_run_id ?? "-"} / {item.source_date ?? "-"}：{item.reason ?? "不兼容"}
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              ) : null}
             </div>
           ) : (
             <div className="mt-4 rounded-[8px] border border-dashed border-ink/20 bg-paper px-4 py-5 text-sm text-ink/55">

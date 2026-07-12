@@ -412,6 +412,30 @@ def test_score_bucket_metrics_keep_duplicate_signal_dates_from_increasing_confid
     assert paired["paired_excess_return_ci_95"] == [0.02, 0.02]
 
 
+def test_score_bucket_metrics_distinguish_negative_and_inconclusive_intervals() -> None:
+    negative = _ScoreBucketStats()
+    mixed = _ScoreBucketStats()
+    baseline = _ScoreBucketStats()
+    start = date(2026, 2, 1)
+    for offset in range(20):
+        signal_date = start + timedelta(days=offset)
+        baseline.add_date(signal_date=signal_date, outcomes=[("completed", {"forward_return": 0.0})])
+        negative.add_date(signal_date=signal_date, outcomes=[("completed", {"forward_return": -0.02})])
+        mixed.add_date(
+            signal_date=signal_date,
+            outcomes=[("completed", {"forward_return": 0.02 if offset % 2 else -0.02})],
+        )
+
+    negative_metrics = _paired_score_bucket_metrics(negative, baseline)
+    mixed_metrics = _paired_score_bucket_metrics(mixed, baseline)
+
+    assert negative_metrics["effect_direction"] == "negative"
+    assert negative_metrics["paired_excess_return_ci_95"] == [-0.02, -0.02]
+    assert mixed_metrics["effect_direction"] == "inconclusive"
+    assert mixed_metrics["paired_excess_return_ci_95"] is not None
+    assert mixed_metrics["paired_excess_return_ci_95"][0] <= 0 <= mixed_metrics["paired_excess_return_ci_95"][1]
+
+
 async def _seed_opportunity_signal_run(app) -> None:
     async with app.state.db.session() as session:
         session.add_all(

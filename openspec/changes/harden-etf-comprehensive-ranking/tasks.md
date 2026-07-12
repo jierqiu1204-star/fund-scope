@@ -102,19 +102,19 @@
 
 ## 9. Replace Validation With Contract-Exact Date-Level Evidence
 
-- [ ] 9.1 Select only successful compatible full snapshots and the finite score field declared by each snapshot; record every source snapshot id and every exclusion reason.
-- [ ] 9.2 Build same-date Top 5/10/20/50 and `all_scored` portfolios from the identical point-in-time universe, ranking contract, price basis, and reliability policy.
-- [ ] 9.3 Aggregate each Top-N or label bucket to one equal-weight observation per signal date before time-series statistics.
-- [ ] 9.4 Use non-overlapping signal dates for each validation horizon and report overlapping/pending windows separately.
-- [ ] 9.5 Implement the versioned T+1 adjusted-close entry, horizon exit, and fixed two-sided fee/slippage model with missing-entry exclusion.
-- [ ] 9.6 Declare Top 10 five-trading-day paired net excess return versus `all_scored` as the primary endpoint and label all other Top-N/horizon combinations exploratory.
-- [ ] 9.7 Report unique/effective signal dates, asset count, price/universe coverage, mean/median net and paired excess returns, win rate, drawdown, turnover, costs, and exclusions.
-- [ ] 9.8 Implement a deterministic date-block bootstrap 95 percent interval and separate sample sufficiency from `supportive`, `inconclusive`, or `negative` effect direction.
-- [ ] 9.9 Enforce `insufficient` below 20 independent dates or 95 percent required coverage and prove duplicated same-date ETF rows cannot increase confidence.
-- [ ] 9.10 Group and store evidence by exact ranking hash, scope, universe, score field, score/rule version, basis, reliability, label, timing, horizon, asset bucket, and source date.
-- [ ] 9.11 Keep old survivor-biased, unadjusted, hashless, partial, or legacy-score validation visibly old and exclude it from current-contract totals.
-- [ ] 9.12 Update evidence APIs and workbench data so users can see primary versus exploratory endpoint, confidence interval, effective dates, coverage, costs, and limitations.
-- [ ] 9.13 Add tests for T+1 execution, distributions, delisted ETF membership, duplicate rows, non-overlap, paired baseline, interval state boundaries, contract grouping, and no decision-domain writes.
+- [x] 9.1 Select only successful compatible full snapshots and the finite score field declared by each snapshot; record every source snapshot id and every exclusion reason.
+- [x] 9.2 Build same-date Top 5/10/20/50 and `all_scored` portfolios from the identical point-in-time universe, ranking contract, price basis, and reliability policy.
+- [x] 9.3 Aggregate each Top-N or label bucket to one equal-weight observation per signal date before time-series statistics.
+- [x] 9.4 Use non-overlapping signal dates for each validation horizon and report overlapping/pending windows separately.
+- [x] 9.5 Implement the versioned T+1 adjusted-close entry, horizon exit, and fixed two-sided fee/slippage model with missing-entry exclusion.
+- [x] 9.6 Declare Top 10 five-trading-day paired net excess return versus `all_scored` as the primary endpoint and label all other Top-N/horizon combinations exploratory.
+- [x] 9.7 Report unique/effective signal dates, asset count, price/universe coverage, mean/median net and paired excess returns, win rate, drawdown, turnover, costs, and exclusions.
+- [x] 9.8 Implement a deterministic date-block bootstrap 95 percent interval and separate sample sufficiency from `supportive`, `inconclusive`, or `negative` effect direction.
+- [x] 9.9 Enforce `insufficient` below 20 independent dates or 95 percent required coverage and prove duplicated same-date ETF rows cannot increase confidence.
+- [x] 9.10 Group and store evidence by exact ranking hash, scope, universe, score field, score/rule version, basis, reliability, label, timing, horizon, asset bucket, and source date.
+- [x] 9.11 Keep old survivor-biased, unadjusted, hashless, partial, or legacy-score validation visibly old and exclude it from current-contract totals.
+- [x] 9.12 Update evidence APIs and workbench data so users can see primary versus exploratory endpoint, confidence interval, effective dates, coverage, costs, and limitations.
+- [x] 9.13 Add tests for T+1 execution, distributions, delisted ETF membership, duplicate rows, non-overlap, paired baseline, interval state boundaries, contract grouping, and no decision-domain writes.
 
 ## 10. Fix Workbench State, Privacy, And Operational Behavior
 
