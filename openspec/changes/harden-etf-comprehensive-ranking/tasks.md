@@ -51,7 +51,7 @@
 - [x] 5.4 Stop promoting 14:55/pre-close, server-time fallback, diverged, stale, or display-only intraday quotes into verified decision daily history.
 - [x] 5.5 Implement the one-trade-date data barrier and default 95 percent expected-universe publication threshold, with exact included/excluded coverage reporting.
 - [x] 5.6 Close point-in-time universe membership when ETFs disappear or become ineligible and preserve delisted/liquidated members in historical coverage.
-- [ ] 5.7 Change bounded daily sync ordering to missing/stale first plus persisted rotation cursor while retaining tracked/default-display priority and proving lower-priority ETFs cannot starve.
+- [x] 5.7 Change bounded daily sync ordering to missing/stale first plus persisted rotation cursor while retaining tracked/default-display priority and proving lower-priority ETFs cannot starve.
 - [ ] 5.8 Map skipped, deferred, partial-provider, and coverage-failed business results to `skipped`, `partial`, or `failed` JobRun states instead of success.
 - [ ] 5.9 Add a per-trade-date workflow lock and sequence universe refresh, daily sync, coverage check, full scoring, atomic publication, and optional downstream generation.
 - [ ] 5.10 Register and expose freshness for ETF universe, theme/catalyst, daily repair, and intraday cleanup jobs.

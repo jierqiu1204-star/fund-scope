@@ -67,6 +67,12 @@ async def _seed_etf_history(
                     volume=turnover / close,
                     turnover=turnover,
                     pct_change=0.0 if offset == 0 else daily_return * 100,
+                    research_adjusted_value=close,
+                    research_price_basis="total_return_adjusted",
+                    data_provider="fixture",
+                    provider_version="fixture-v1",
+                    adjustment_version="fixture-v1",
+                    decision_eligible=True,
                 )
             )
         await session.commit()
@@ -670,3 +676,124 @@ async def test_dynamic_etf_sync_limits_daily_batches_when_codes_are_not_explicit
     assert result["etfs"]["batches_total"] >= 3
     assert result["etfs"]["processed"] == 2
     assert result["etfs"]["skipped"] >= 3
+
+
+@pytest.mark.asyncio
+async def test_bounded_etf_sync_rotates_regular_codes_without_starvation(app, monkeypatch) -> None:
+    codes = ["561100", "561101", "561102", "561103", "561104"]
+    calls: list[list[str]] = []
+
+    async def fake_dynamic_etf_codes(_session: Any, _codes: list[str] | None = None) -> list[str]:
+        return codes
+
+    async def fake_etf_sync(
+        _session: Any, _from_date: date, _to_date: date, batch_codes: list[str] | None = None
+    ) -> dict[str, Any]:
+        batch = list(batch_codes or [])
+        calls.append(batch)
+        return {"etfs": len(batch), "inserted": 0, "updated": 0, "failed": 0, "failures": []}
+
+    monkeypatch.setenv("SHORT_RESEARCH_ETF_SYNC_BATCH_SIZE", "2")
+    monkeypatch.setenv("SHORT_RESEARCH_ETF_SYNC_MAX_BATCHES", "1")
+    monkeypatch.setattr(short_research_service, "_dynamic_etf_codes", fake_dynamic_etf_codes)
+    monkeypatch.setattr(short_research_service, "sync_etf_price_history", fake_etf_sync)
+
+    async with app.state.db.session() as session:
+        session.add_all(
+            [
+                TradableEtf(
+                    code="561100",
+                    name="跟踪优先ETF",
+                    exchange="SH",
+                    theme_tags_json=["批量"],
+                    trading_rule_label="证券账户 T+1 ETF",
+                    asset_class="sector",
+                    is_short_term_eligible=True,
+                    is_watchlist=False,
+                ),
+                TradableEtf(
+                    code="561101",
+                    name="默认展示ETF",
+                    exchange="SH",
+                    theme_tags_json=["批量"],
+                    trading_rule_label="证券账户 T+1 ETF",
+                    asset_class="sector",
+                    is_short_term_eligible=True,
+                    is_watchlist=True,
+                ),
+                *[
+                    TradableEtf(
+                        code=code,
+                        name=f"普通ETF{code}",
+                        exchange="SH",
+                        theme_tags_json=["批量"],
+                        trading_rule_label="证券账户 T+1 ETF",
+                        asset_class="sector",
+                        is_short_term_eligible=True,
+                        is_watchlist=False,
+                    )
+                    for code in codes[2:]
+                ],
+                EtfPriceHistory(
+                    etf_code="561103",
+                    trade_date=date(2026, 6, 4),
+                    open=1.0,
+                    high=1.0,
+                    low=1.0,
+                    close=1.0,
+                    volume=1.0,
+                    turnover=1.0,
+                    pct_change=0.0,
+                ),
+                EtfPriceHistory(
+                    etf_code="561104",
+                    trade_date=date(2026, 6, 5),
+                    open=1.0,
+                    high=1.0,
+                    low=1.0,
+                    close=1.0,
+                    volume=1.0,
+                    turnover=1.0,
+                    pct_change=0.0,
+                ),
+            ]
+        )
+        await session.commit()
+        await short_research_service.sync_short_research_data(
+            session,
+            from_date=date(2026, 6, 1),
+            to_date=date(2026, 6, 5),
+            asset_type="etf",
+            priority_etf_codes=["561100"],
+        )
+
+    for _ in range(2):
+        async with app.state.db.session() as session:
+            await short_research_service.sync_short_research_data(
+                session,
+                from_date=date(2026, 6, 1),
+                to_date=date(2026, 6, 5),
+                asset_type="etf",
+                priority_etf_codes=["561100"],
+            )
+
+    monkeypatch.setenv("SHORT_RESEARCH_ETF_SYNC_BATCH_SIZE", "1")
+    for _ in range(4):
+        async with app.state.db.session() as session:
+            await short_research_service.sync_short_research_data(
+                session,
+                from_date=date(2026, 6, 1),
+                to_date=date(2026, 6, 5),
+                asset_type="etf",
+                priority_etf_codes=["561100"],
+            )
+
+    assert calls == [
+        ["561100", "561102"],
+        ["561101", "561103"],
+        ["561100", "561104"],
+        ["561101"],
+        ["561102"],
+        ["561100"],
+        ["561103"],
+    ]

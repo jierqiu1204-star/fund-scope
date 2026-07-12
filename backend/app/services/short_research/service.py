@@ -31,6 +31,7 @@ from app.models.entities import (
     EtfPriceHistory,
     EtfSignalValidationItem,
     EtfSignalValidationRun,
+    EtfSyncCursor,
     EtfThemeExposure,
     Fund,
     FundNavHistory,
@@ -123,6 +124,7 @@ STALE_DATA_DAYS = 7
 MIN_AVERAGE_TURNOVER = 50_000_000
 DEFAULT_ETF_SYNC_BATCH_SIZE = 100
 DEFAULT_ETF_SYNC_MAX_BATCHES = 1
+ETF_DAILY_SYNC_CURSOR_SCOPE = "short_research_daily"
 UNIVERSE_DEFAULT = "default"
 UNIVERSE_ALL = "all"
 UNIVERSE_ILLIQUID = "illiquid"
@@ -176,6 +178,14 @@ class ComputedAsset:
     source_note: str
     entry_timing_label: str
     entry_timing_reason: str
+
+
+@dataclass(frozen=True)
+class EtfSyncSelection:
+    codes: list[str]
+    last_priority_code: str | None
+    last_regular_code: str | None
+    last_lane: str | None
 
 
 def allowed_conclusions() -> set[str]:
@@ -3586,6 +3596,94 @@ async def _prioritize_etf_sync_codes(
     ]
 
 
+def _rotate_sync_codes(codes: list[str], last_code: str | None) -> list[str]:
+    if not last_code or last_code not in codes:
+        return codes
+    index = codes.index(last_code)
+    return [*codes[index + 1 :], *codes[: index + 1]]
+
+
+async def _select_bounded_etf_sync_codes(
+    session: AsyncSession,
+    *,
+    codes: list[str],
+    priority_codes: list[str] | None,
+    to_date: date,
+    limit: int,
+) -> EtfSyncSelection:
+    if not codes or limit < 1:
+        return EtfSyncSelection([], None, None, None)
+
+    code_set = set(codes)
+    priority_set = {str(code) for code in (priority_codes or []) if str(code) in code_set}
+    rows = await session.execute(
+        select(TradableEtf.code, TradableEtf.is_watchlist).where(TradableEtf.code.in_(code_set))
+    )
+    default_display_codes = {str(code) for code, is_watchlist in rows if is_watchlist} - priority_set
+    latest_rows = await session.execute(
+        select(EtfPriceHistory.etf_code, func.max(EtfPriceHistory.trade_date))
+        .where(EtfPriceHistory.etf_code.in_(code_set))
+        .group_by(EtfPriceHistory.etf_code)
+    )
+    latest_by_code = {str(code): latest_date for code, latest_date in latest_rows}
+
+    def freshness(code: str) -> int:
+        latest_date = latest_by_code.get(code)
+        if latest_date is None:
+            return 0
+        return 1 if latest_date < to_date else 2
+
+    priority = sorted(
+        priority_set | default_display_codes,
+        key=lambda code: (freshness(code), 0 if code in priority_set else 1, code),
+    )
+    regular = sorted(code_set - set(priority), key=lambda code: (freshness(code), code))
+    cursor = await session.get(EtfSyncCursor, ETF_DAILY_SYNC_CURSOR_SCOPE)
+    priority_codes_rotated = _rotate_sync_codes(priority, cursor.last_priority_code if cursor else None)
+    regular_codes_rotated = _rotate_sync_codes(regular, cursor.last_regular_code if cursor else None)
+
+    selected_priority: list[str] = []
+    selected_regular: list[str] = []
+    if priority_codes_rotated and regular_codes_rotated and limit == 1:
+        if cursor and cursor.last_lane == "priority":
+            selected_regular = regular_codes_rotated[:1]
+        else:
+            selected_priority = priority_codes_rotated[:1]
+    elif priority_codes_rotated and regular_codes_rotated:
+        priority_slots = limit // 2
+        selected_priority = priority_codes_rotated[:priority_slots]
+        selected_regular = regular_codes_rotated[: limit - len(selected_priority)]
+        remaining = limit - len(selected_priority) - len(selected_regular)
+        if remaining:
+            selected_priority.extend(priority_codes_rotated[len(selected_priority) : len(selected_priority) + remaining])
+    else:
+        selected_priority = priority_codes_rotated[:limit]
+        selected_regular = regular_codes_rotated[: limit - len(selected_priority)]
+
+    last_priority_code = selected_priority[-1] if selected_priority else (cursor.last_priority_code if cursor else None)
+    last_regular_code = selected_regular[-1] if selected_regular else (cursor.last_regular_code if cursor else None)
+    last_lane = "regular" if selected_regular else "priority" if selected_priority else None
+    return EtfSyncSelection(
+        codes=[*selected_priority, *selected_regular],
+        last_priority_code=last_priority_code,
+        last_regular_code=last_regular_code,
+        last_lane=last_lane,
+    )
+
+
+async def _persist_etf_sync_cursor(session: AsyncSession, selection: EtfSyncSelection) -> None:
+    if not selection.codes:
+        return
+    cursor = await session.get(EtfSyncCursor, ETF_DAILY_SYNC_CURSOR_SCOPE)
+    if cursor is None:
+        cursor = EtfSyncCursor(scope=ETF_DAILY_SYNC_CURSOR_SCOPE)
+        session.add(cursor)
+    cursor.last_priority_code = selection.last_priority_code
+    cursor.last_regular_code = selection.last_regular_code
+    cursor.last_lane = selection.last_lane
+    await session.commit()
+
+
 async def sync_short_research_data(
     session: AsyncSession,
     *,
@@ -3605,7 +3703,8 @@ async def sync_short_research_data(
         and is_short_term_eligible_name(item.name)
     ]
     etf_codes = await _dynamic_etf_codes(session, codes) if asset_type in (None, ASSET_TYPE_ETF) else []
-    etf_codes = await _prioritize_etf_sync_codes(session, etf_codes, priority_etf_codes)
+    bounded_etf_sync = bool(etf_codes) and not sync_all_etfs and not codes
+    sync_selection: EtfSyncSelection | None = None
     fund_result = {"funds": 0, "rows_inserted": 0, "rows_updated": 0, "failed": 0, "failures": []}
     etf_result: dict[str, Any] = {
         "etfs": 0,
@@ -3624,9 +3723,22 @@ async def sync_short_research_data(
     if fund_codes:
         fund_result = await sync_fund_nav_history(session, from_date, to_date, fund_codes)
     if etf_codes:
-        all_batches = _chunks(etf_codes, _etf_sync_batch_size())
-        max_batches = len(all_batches) if sync_all_etfs or codes else _etf_sync_max_batches()
-        batches = all_batches[:max_batches]
+        batch_size = _etf_sync_batch_size()
+        if bounded_etf_sync:
+            sync_selection = await _select_bounded_etf_sync_codes(
+                session,
+                codes=etf_codes,
+                priority_codes=priority_etf_codes,
+                to_date=to_date,
+                limit=batch_size * _etf_sync_max_batches(),
+            )
+            batches = _chunks(sync_selection.codes, batch_size)
+            batches_total = len(_chunks(etf_codes, batch_size))
+        else:
+            prioritized_codes = await _prioritize_etf_sync_codes(session, etf_codes, priority_etf_codes)
+            all_batches = _chunks(prioritized_codes, batch_size)
+            batches = all_batches
+            batches_total = len(all_batches)
         for batch in batches:
             batch_result = await sync_etf_price_history(session, from_date, to_date, batch)
             etf_result["etfs"] += _result_count(batch_result, "etfs")
@@ -3635,9 +3747,11 @@ async def sync_short_research_data(
             etf_result["failed"] += _result_count(batch_result, "failed")
             etf_result["failures"].extend(batch_result.get("failures", []))
         etf_result["batches"] = len(batches)
-        etf_result["batches_total"] = len(all_batches)
+        etf_result["batches_total"] = batches_total
         etf_result["processed"] = sum(len(batch) for batch in batches)
         etf_result["skipped"] = max(0, len(etf_codes) - etf_result["processed"])
+        if sync_selection is not None:
+            await _persist_etf_sync_cursor(session, sync_selection)
     return {
         "from_date": from_date.isoformat(),
         "to_date": to_date.isoformat(),

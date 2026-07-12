@@ -355,6 +355,16 @@ class EtfDataHealth(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
+class EtfSyncCursor(Base):
+    __tablename__ = "etf_sync_cursors"
+
+    scope: Mapped[str] = mapped_column(String(64), primary_key=True)
+    last_priority_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_regular_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_lane: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class EtfIntradayQuote(Base):
     __tablename__ = "etf_intraday_quotes"
     __table_args__ = (
