@@ -34,6 +34,7 @@ def _record(
     entry_label: str = "趋势延续",
     premium_state: str = "normal",
     decision_eligible: bool = True,
+    default_display_eligible: bool = True,
     risk_flags: list[str] | None = None,
 ) -> RankingRecord:
     return RankingRecord(
@@ -49,7 +50,7 @@ def _record(
             "average_turnover_20d": turnover,
             "distance_to_ma5_pct": return_20d / 6,
             "data_quality_score": 100,
-            "default_display_eligible": True,
+            "default_display_eligible": default_display_eligible,
             "entry_timing_label": entry_label,
             "theme_profile": {"asset_bucket": bucket, "theme_group": group},
             "dynamic_threshold_context": {
@@ -128,6 +129,55 @@ def test_final_score_limits_are_shared_and_fail_closed(
 
     assert score == expected
     assert limitations
+
+
+@pytest.mark.parametrize(
+    "risk_flag",
+    ["数据不足", "数据滞后", "追高风险", "连续大涨", "高波动", "回撤较大", "流动性不足"],
+)
+def test_adding_any_risk_flag_never_raises_final_score(risk_flag: str) -> None:
+    baseline = build_final_score_breakdowns(
+        [_record("510300", return_20d=0.08, drawdown=-0.04, volatility=0.02, turnover=300_000_000)]
+    )["510300"]["final_score"]
+    with_risk = build_final_score_breakdowns(
+        [_record("510300", return_20d=0.08, drawdown=-0.04, volatility=0.02, turnover=300_000_000, risk_flags=[risk_flag])]
+    )["510300"]["final_score"]
+
+    assert with_risk <= baseline
+
+
+@pytest.mark.parametrize(
+    "return_20d,drawdown,volatility,turnover",
+    [
+        (0.20, -0.01, 0.01, 500_000_000),
+        (0.08, -0.04, 0.02, 300_000_000),
+        (-0.15, -0.25, 0.05, 10_000_000),
+    ],
+)
+def test_hard_limits_survive_all_soft_component_inputs(
+    return_20d: float,
+    drawdown: float,
+    volatility: float,
+    turnover: float,
+) -> None:
+    stale = build_final_score_breakdowns(
+        [_record("510300", return_20d=return_20d, drawdown=drawdown, volatility=volatility, turnover=turnover, risk_flags=["数据滞后"])]
+    )["510300"]
+    unavailable = build_final_score_breakdowns(
+        [
+            _record(
+                "510301",
+                return_20d=return_20d,
+                drawdown=drawdown,
+                volatility=volatility,
+                turnover=turnover,
+                default_display_eligible=False,
+            )
+        ]
+    )["510301"]
+
+    assert stale["final_score"] <= 55
+    assert unavailable["final_score"] <= 45
 
 
 def test_final_score_v2_separates_similar_base_scores() -> None:
