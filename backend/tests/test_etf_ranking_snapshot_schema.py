@@ -1,6 +1,6 @@
-from sqlalchemy import Date, DateTime, Float, Integer, String
+from sqlalchemy import Boolean, Date, DateTime, Float, Integer, String
 
-from app.models.entities import ShortResearchSignalRun
+from app.models.entities import ShortResearchSignalItem, ShortResearchSignalRun
 
 
 def test_signal_run_exposes_nullable_typed_snapshot_identity() -> None:
@@ -48,3 +48,28 @@ def test_signal_run_snapshot_selectors_are_indexed_and_idempotent() -> None:
     idempotency = indexes["ux_short_research_signal_runs_idempotency_key"]
     assert [column.name for column in idempotency.columns] == ["idempotency_key"]
     assert idempotency.unique is True
+
+
+def test_signal_item_exposes_nullable_current_ranking_fields() -> None:
+    table = ShortResearchSignalItem.__table__
+    expected_types = {
+        "ranking_score": Float,
+        "score_eligible": Boolean,
+        "global_rank": Integer,
+    }
+
+    for column_name, expected_type in expected_types.items():
+        column = table.c[column_name]
+        assert column.nullable is True
+        assert isinstance(column.type, expected_type)
+
+
+def test_signal_item_run_id_remains_the_source_snapshot_identity() -> None:
+    table = ShortResearchSignalItem.__table__
+    foreign_keys = table.c.run_id.foreign_keys
+    assert len(foreign_keys) == 1
+    assert next(iter(foreign_keys)).target_fullname == "short_research_signal_runs.id"
+
+    indexes = {index.name: index for index in table.indexes}
+    global_rank_index = indexes["ix_short_research_signal_items_run_global_rank"]
+    assert [column.name for column in global_rank_index.columns] == ["run_id", "global_rank"]

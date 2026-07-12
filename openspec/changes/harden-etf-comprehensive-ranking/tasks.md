@@ -11,7 +11,7 @@
 ## 2. Add Snapshot, Price-Basis, And Universe Schema
 
 - [x] 2.1 Add nullable typed and indexed snapshot identity fields to `ShortResearchSignalRun` for scope kind/hash, universe and input-snapshot hashes, score/rule versions, ranking contract hash, score field, cutoff, trade date, price basis, coverage counts, publication state/time, and a unique idempotency key.
-- [ ] 2.2 Add nullable item-level `ranking_score`, `score_eligible`, global rank, and source snapshot identity without removing current compatibility fields or guessing values for legacy items.
+- [x] 2.2 Add nullable item-level `ranking_score`, `score_eligible`, global rank, and source snapshot identity without removing current compatibility fields or guessing values for legacy items.
 - [ ] 2.3 Add raw-versus-research price-basis, adjusted value, provider version, source timestamp, and decision-eligibility fields needed by ETF daily history while preserving raw OHLC data.
 - [ ] 2.4 Add effective-dated ETF universe membership storage with activation/deactivation dates, source, tracked-underlying identity, and exclusion reason.
 - [ ] 2.5 Add typed source ranking/scope/universe/input hashes, price basis, execution model, and cutoff fields to validation runs so current evidence selection does not rely on JSON inspection.

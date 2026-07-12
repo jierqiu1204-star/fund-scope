@@ -597,7 +597,10 @@ class ShortResearchSignalRun(Base):
 
 class ShortResearchSignalItem(Base):
     __tablename__ = "short_research_signal_items"
-    __table_args__ = (UniqueConstraint("run_id", "asset_type", "asset_code", name="uq_short_research_signal_item"),)
+    __table_args__ = (
+        UniqueConstraint("run_id", "asset_type", "asset_code", name="uq_short_research_signal_item"),
+        SaIndex("ix_short_research_signal_items_run_global_rank", "run_id", "global_rank"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     run_id: Mapped[int] = mapped_column(ForeignKey("short_research_signal_runs.id", ondelete="CASCADE"))
@@ -611,6 +614,9 @@ class ShortResearchSignalItem(Base):
     rationale_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    ranking_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    score_eligible: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    global_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class EtfSignalValidationRun(Base):
