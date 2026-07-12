@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.db import DatabaseManager
+from app.services.intraday_etf.jobs import intraday_etf_cleanup_job
 from app.services.job_runner import run_job
 from app.services.jobs import (
     daily_asset_recommendations_job,
@@ -24,6 +25,8 @@ from app.services.short_research.jobs import (
     daily_etf_observation_portfolio_job,
     daily_etf_signal_validation_job,
     daily_etf_taxonomy_job,
+    daily_etf_theme_catalyst_job,
+    daily_etf_universe_job,
     daily_short_research_advisor_job,
     daily_short_research_data_job,
     daily_short_research_signals_job,
@@ -149,6 +152,16 @@ def register_default_jobs(
     scheduler.add_job(
         _run_tracked_job,
         "cron",
+        args=[db, "daily_etf_universe", daily_etf_universe_job],
+        day_of_week="mon-fri",
+        hour=15,
+        minute=0,
+        id="daily_etf_universe",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_tracked_job,
+        "cron",
         args=[db, "post_close_etf_data", post_close_etf_data_job],
         day_of_week="mon-fri",
         hour=15,
@@ -164,6 +177,16 @@ def register_default_jobs(
         hour=15,
         minute=8,
         id="daily_etf_taxonomy",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_tracked_job,
+        "cron",
+        args=[db, "daily_etf_theme_catalyst", daily_etf_theme_catalyst_job],
+        day_of_week="mon-fri",
+        hour=15,
+        minute=9,
+        id="daily_etf_theme_catalyst",
         replace_existing=True,
     )
     scheduler.add_job(
@@ -194,6 +217,16 @@ def register_default_jobs(
         hour=15,
         minute=12,
         id="post_close_etf_observation_portfolio",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_tracked_job,
+        "cron",
+        args=[db, "intraday_etf_cleanup", intraday_etf_cleanup_job],
+        day_of_week="mon-fri",
+        hour=15,
+        minute=20,
+        id="intraday_etf_cleanup",
         replace_existing=True,
     )
     scheduler.add_job(

@@ -40,6 +40,7 @@ class ShortResearchStatusOut(BaseModel):
     score_bucket_validation: dict[str, Any] = Field(default_factory=dict)
     score_bucket_validation_generated_at: datetime | None = None
     theme_coverage: dict[str, Any] = Field(default_factory=dict)
+    job_freshness: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 class EtfRankingSnapshotMetadataOut(BaseModel):

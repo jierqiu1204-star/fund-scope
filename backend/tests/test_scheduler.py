@@ -38,12 +38,15 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
 
     job_ids = {job.id for job in scheduler.get_jobs()}
     intraday_11 = scheduler.get_job("intraday_etf_watch_11")
+    daily_etf_universe = scheduler.get_job("daily_etf_universe")
     post_close_etf_data = scheduler.get_job("post_close_etf_data")
+    daily_etf_theme_catalyst = scheduler.get_job("daily_etf_theme_catalyst")
     post_close_etf_signals = scheduler.get_job("post_close_etf_signals")
     post_close_etf_label_review = scheduler.get_job("post_close_etf_label_outcome_review")
     post_close_etf_observation = scheduler.get_job("post_close_etf_observation_portfolio")
     etf_exit_signal_credibility = scheduler.get_job("etf_exit_signal_credibility")
     etf_exit_hyperopt = scheduler.get_job("etf_exit_hyperopt")
+    intraday_etf_cleanup = scheduler.get_job("intraday_etf_cleanup")
 
     def trigger_field(job: object, name: str) -> str:
         return str(next(field for field in job.trigger.fields if field.name == name))
@@ -51,6 +54,8 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     assert "daily_short_research_data" in job_ids
     assert "daily_short_research_signals" in job_ids
     assert "daily_short_research_advisor" in job_ids
+    assert "daily_etf_universe" in job_ids
+    assert "daily_etf_theme_catalyst" in job_ids
     assert "post_close_etf_data" in job_ids
     assert "post_close_etf_signals" in job_ids
     assert "post_close_etf_label_outcome_review" in job_ids
@@ -61,17 +66,25 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     assert "intraday_etf_watch_13_14" in job_ids
     assert "etf_exit_signal_credibility" in job_ids
     assert "etf_exit_hyperopt" in job_ids
+    assert "intraday_etf_cleanup" in job_ids
     assert "intraday_etf_watch_1500" not in job_ids
     assert intraday_11 is not None
+    assert daily_etf_universe is not None
     assert post_close_etf_data is not None
+    assert daily_etf_theme_catalyst is not None
     assert post_close_etf_signals is not None
     assert post_close_etf_label_review is not None
     assert post_close_etf_observation is not None
     assert etf_exit_signal_credibility is not None
     assert etf_exit_hyperopt is not None
+    assert intraday_etf_cleanup is not None
     assert trigger_field(intraday_11, "minute") == "0-29"
+    assert trigger_field(daily_etf_universe, "hour") == "15"
+    assert trigger_field(daily_etf_universe, "minute") == "0"
     assert trigger_field(post_close_etf_data, "hour") == "15"
     assert trigger_field(post_close_etf_data, "minute") == "5"
+    assert trigger_field(daily_etf_theme_catalyst, "hour") == "15"
+    assert trigger_field(daily_etf_theme_catalyst, "minute") == "9"
     assert trigger_field(post_close_etf_signals, "hour") == "15"
     assert trigger_field(post_close_etf_signals, "minute") == "10"
     assert trigger_field(post_close_etf_label_review, "hour") == "15"
@@ -82,6 +95,8 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     assert trigger_field(etf_exit_signal_credibility, "minute") == "30"
     assert trigger_field(etf_exit_hyperopt, "hour") == "23"
     assert trigger_field(etf_exit_hyperopt, "minute") == "45"
+    assert trigger_field(intraday_etf_cleanup, "hour") == "15"
+    assert trigger_field(intraday_etf_cleanup, "minute") == "20"
     assert "daily_short_etf_data" not in job_ids
     assert "daily_short_etf_signals" not in job_ids
     assert "daily_short_etf_paper" not in job_ids

@@ -35,6 +35,7 @@ from app.models.entities import (
     EtfThemeExposure,
     Fund,
     FundNavHistory,
+    JobRun,
     ShortResearchSignalItem,
     ShortResearchSignalRun,
     TradableEtf,
@@ -125,6 +126,12 @@ MIN_AVERAGE_TURNOVER = 50_000_000
 DEFAULT_ETF_SYNC_BATCH_SIZE = 100
 DEFAULT_ETF_SYNC_MAX_BATCHES = 1
 ETF_DAILY_SYNC_CURSOR_SCOPE = "short_research_daily"
+ETF_JOB_FRESHNESS_WINDOWS = {
+    "daily_etf_universe": timedelta(days=2),
+    "daily_etf_theme_catalyst": timedelta(days=2),
+    "daily_short_research_data": timedelta(days=2),
+    "intraday_etf_cleanup": timedelta(days=2),
+}
 UNIVERSE_DEFAULT = "default"
 UNIVERSE_ALL = "all"
 UNIVERSE_ILLIQUID = "illiquid"
@@ -3399,6 +3406,42 @@ async def signal_run_items_as_assets(session: AsyncSession, run: ShortResearchSi
     return cached_assets
 
 
+async def scheduled_etf_job_freshness(session: AsyncSession) -> dict[str, dict[str, Any]]:
+    job_names = tuple(ETF_JOB_FRESHNESS_WINDOWS)
+    rows = (
+        await session.scalars(
+            select(JobRun)
+            .where(JobRun.job_name.in_(job_names))
+            .order_by(JobRun.job_name.asc(), JobRun.started_at.desc(), JobRun.id.desc())
+        )
+    ).all()
+    latest_by_name: dict[str, JobRun] = {}
+    for row in rows:
+        latest_by_name.setdefault(row.job_name, row)
+
+    now = utcnow()
+    freshness: dict[str, dict[str, Any]] = {}
+    for job_name, max_age in ETF_JOB_FRESHNESS_WINDOWS.items():
+        row = latest_by_name.get(job_name)
+        if row is None:
+            freshness[job_name] = {"status": "waiting", "finished_at": None, "last_job_status": None}
+            continue
+        if row.status == "running":
+            status = "running"
+        elif row.status != "success":
+            status = "degraded" if row.status in {"partial", "skipped"} else "failed"
+        elif row.finished_at is None or now - row.finished_at > max_age:
+            status = "stale"
+        else:
+            status = "fresh"
+        freshness[job_name] = {
+            "status": status,
+            "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+            "last_job_status": row.status,
+        }
+    return freshness
+
+
 async def status_summary(session: AsyncSession, *, include_health: bool = False) -> dict[str, Any]:
     await ensure_short_research_universe(session)
     latest_run = await latest_signal_run(session)
@@ -3502,6 +3545,7 @@ async def status_summary(session: AsyncSession, *, include_health: bool = False)
         "high_risk_count": high_risk_count,
         "data_issue_count": data_issue_count,
         "data_health": health,
+        "job_freshness": await scheduled_etf_job_freshness(session),
     }
 
 

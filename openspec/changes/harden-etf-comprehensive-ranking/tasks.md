@@ -54,7 +54,7 @@
 - [x] 5.7 Change bounded daily sync ordering to missing/stale first plus persisted rotation cursor while retaining tracked/default-display priority and proving lower-priority ETFs cannot starve.
 - [x] 5.8 Map skipped, deferred, partial-provider, and coverage-failed business results to `skipped`, `partial`, or `failed` JobRun states instead of success.
 - [x] 5.9 Add a per-trade-date workflow lock and sequence universe refresh, daily sync, coverage check, full scoring, atomic publication, and optional downstream generation.
-- [ ] 5.10 Register and expose freshness for ETF universe, theme/catalyst, daily repair, and intraday cleanup jobs.
+- [x] 5.10 Register and expose freshness for ETF universe, theme/catalyst, daily repair, and intraday cleanup jobs.
 - [ ] 5.11 Expand data-health output to include raw/research dates, basis, provider, decision eligibility, skipped/deferred state, and issue details requested by the workbench.
 - [ ] 5.12 Add regression tests for mixed trade dates, insufficient coverage, partial batch, provider-incompatible basis, sync cursor rotation, deactivation history, and JobRun state mapping.
 
