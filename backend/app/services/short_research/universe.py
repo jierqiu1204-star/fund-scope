@@ -3,14 +3,16 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 import akshare as ak
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.defaults.short_research import DEFAULT_SHORT_RESEARCH_ETFS
-from app.models.entities import TradableEtf
+from app.models.entities import EtfUniverseMembership, TradableEtf
+from app.services.short_research.ranking_contract import canonical_hash
 
 EXCLUDED_ETF_KEYWORDS = (
     "货币",
@@ -36,6 +38,13 @@ class EtfUniverseRecord:
     theme_tags: list[str]
     trading_rule_label: str
     source: str
+
+
+@dataclass(frozen=True)
+class PointInTimeUniverseSnapshot:
+    as_of_date: date
+    members: list[dict[str, Any]]
+    universe_snapshot_hash: str
 
 
 def normalize_etf_code(value: Any) -> str:
@@ -85,6 +94,47 @@ def is_short_term_etf_eligible(name: str, *, code: str = "") -> bool:
     if not name or any(keyword in name for keyword in EXCLUDED_ETF_KEYWORDS):
         return False
     return "ETF" in name.upper()
+
+
+async def build_point_in_time_universe_snapshot(
+    session: AsyncSession,
+    *,
+    as_of_date: date,
+) -> PointInTimeUniverseSnapshot:
+    rows = (
+        await session.execute(
+            select(TradableEtf, EtfUniverseMembership)
+            .join(EtfUniverseMembership, EtfUniverseMembership.etf_code == TradableEtf.code)
+            .where(
+                EtfUniverseMembership.effective_from <= as_of_date,
+                or_(
+                    EtfUniverseMembership.effective_to.is_(None),
+                    EtfUniverseMembership.effective_to >= as_of_date,
+                ),
+            )
+            .order_by(TradableEtf.code.asc(), EtfUniverseMembership.effective_from.desc())
+        )
+    ).all()
+    members_by_code: dict[str, dict[str, Any]] = {}
+    for etf, membership in rows:
+        members_by_code.setdefault(
+            etf.code,
+            {
+                "asset_code": etf.code,
+                "asset_bucket": etf.asset_class,
+                "theme_tags": sorted(etf.theme_tags_json or []),
+                "tracked_underlying_id": membership.tracked_underlying_id,
+                "membership_source": membership.source,
+                "effective_from": membership.effective_from,
+                "effective_to": membership.effective_to,
+            },
+        )
+    members = [members_by_code[code] for code in sorted(members_by_code)]
+    return PointInTimeUniverseSnapshot(
+        as_of_date=as_of_date,
+        members=members,
+        universe_snapshot_hash=canonical_hash(members),
+    )
 
 
 def classify_etf(name: str) -> tuple[str, list[str], str, str]:

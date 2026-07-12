@@ -28,6 +28,10 @@ def _hash(value: Any) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def canonical_hash(value: Any) -> str:
+    return _hash(value)
+
+
 def _unordered(values: list[Any]) -> list[Any]:
     return sorted((_canonical(value) for value in values), key=_canonical_json)
 
