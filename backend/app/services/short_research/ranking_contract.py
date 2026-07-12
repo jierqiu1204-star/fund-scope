@@ -32,6 +32,14 @@ def _unordered(values: list[Any]) -> list[Any]:
     return sorted((_canonical(value) for value in values), key=_canonical_json)
 
 
+def scope_kind_for_filters(*, theme: str | None, codes: list[str] | None) -> str:
+    if any(code.strip() for code in codes or []):
+        return "codes"
+    if theme and theme.strip():
+        return "theme"
+    return "full"
+
+
 def build_ranking_contract(
     *,
     score_version: str,

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from app.services.short_research.ranking_contract import build_ranking_contract
+from app.services.short_research.ranking_contract import (
+    build_ranking_contract,
+    scope_kind_for_filters,
+)
 
 
 def _contract(*, price_basis: str = "total_return_adjusted", reverse: bool = False) -> dict[str, object]:
@@ -40,3 +43,9 @@ def test_ranking_contract_hash_changes_when_decision_inputs_change() -> None:
     incompatible_basis = _contract(price_basis="raw_close")
 
     assert original["ranking_contract_hash"] != incompatible_basis["ranking_contract_hash"]
+
+
+def test_scope_kind_is_explicit_for_new_runs() -> None:
+    assert scope_kind_for_filters(theme=None, codes=None) == "full"
+    assert scope_kind_for_filters(theme="人工智能", codes=[]) == "theme"
+    assert scope_kind_for_filters(theme="人工智能", codes=["510300"]) == "codes"

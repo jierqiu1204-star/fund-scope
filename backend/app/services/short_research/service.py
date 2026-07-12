@@ -87,6 +87,7 @@ from app.services.short_research.ranking import (
     apply_label_evidence,
     build_final_score_breakdowns,
 )
+from app.services.short_research.ranking_contract import scope_kind_for_filters
 from app.services.short_research.sector_trends import build_sector_trend_payloads
 from app.services.short_research.theme_catalysts import (
     build_asset_opportunity_payload,
@@ -3187,6 +3188,7 @@ async def run_signal_generation(
     run = ShortResearchSignalRun(
         status=RUN_STATUS_RUNNING,
         as_of_date=effective_date,
+        scope_kind=scope_kind_for_filters(theme=theme, codes=codes),
         config_json={"asset_type": asset_type, "theme": theme, "codes": codes or [], "language": "research_only"},
         summary_json={},
     )
