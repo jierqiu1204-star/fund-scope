@@ -77,9 +77,9 @@
 
 ## 7. Correct Static, Detail, Live, And User-Scoped Ranking Semantics
 
-- [ ] 7.1 Sort and assign persisted daily global rank across the full snapshot before search, theme, labels, tracking, pagination, or page-size filters.
-- [ ] 7.2 Return `global_rank` and `filtered_position`, keep legacy `rank` as a documented global-rank alias, and keep `total` as filtered pre-pagination count.
-- [ ] 7.3 Make asset detail read the stored item/global rank directly so a one-code lookup cannot return synthetic rank one.
+- [x] 7.1 Sort and assign persisted daily global rank across the full snapshot before search, theme, labels, tracking, pagination, or page-size filters.
+- [x] 7.2 Return `global_rank` and `filtered_position`, keep legacy `rank` as a documented global-rank alias, and keep `total` as filtered pre-pagination count.
+- [x] 7.3 Make asset detail read the stored item/global rank directly so a one-code lookup cannot return synthetic rank one.
 - [ ] 7.4 Freeze the live watch scope and hash, calculate base/live scope ranks before user filters, and return `base_global_rank`, `live_scope_rank`, `filtered_position`, `rank_scope`, and nullable `rank_change`.
 - [ ] 7.5 Calculate rank change only between the same live-scope hash and score version; use a shared stable tie-break and return null for incomparable scopes.
 - [ ] 7.6 Replace truthiness sentinels in return, drawdown, risk, liquidity, and other sort modes with explicit finite/missing sort tuples that keep real zero and put missing values last.

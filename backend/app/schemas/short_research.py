@@ -155,10 +155,11 @@ class ShortResearchAssetOut(BaseModel):
     asset_type: str
     code: str
     name: str
-    rank: int | None = None
+    rank: int | None = Field(default=None, description="兼容字段，等于 global_rank")
     ranking_score: float | None = None
     score_eligible: bool | None = None
-    global_rank: int | None = None
+    global_rank: int | None = Field(default=None, description="不可变快照内的全局名次")
+    filtered_position: int | None = Field(default=None, description="当前筛选和排序结果中的位置")
     total_score: float
     technical_score: float | None = None
     opportunity_score: float | None = None

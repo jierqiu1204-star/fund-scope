@@ -1130,6 +1130,10 @@ async def test_comprehensive_sort_uses_final_decision_score_not_theme_heat(clien
     assert body["total"] == 2
     items = body["items"]
     assert [item["code"] for item in items] == ["159002", "159001"]
+    assert [
+        (item["rank"], item["global_rank"], item["filtered_position"])
+        for item in items
+    ] == [(2, 2, 1), (1, 1, 2)]
     by_code = {item["code"]: item for item in items}
     assert by_code["159002"]["total_score"] == 78
 
@@ -1203,7 +1207,10 @@ async def test_one_code_detail_preserves_persisted_global_rank(client, app) -> N
     response = await client.get("/api/short-research/assets/etf/159002")
 
     assert response.status_code == 200
-    assert response.json()["asset"]["rank"] == 2
+    asset = response.json()["asset"]
+    assert asset["rank"] == 2
+    assert asset["global_rank"] == 2
+    assert asset["filtered_position"] == 1
 
 
 @pytest.mark.asyncio

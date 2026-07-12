@@ -199,6 +199,8 @@ class ComputedAsset:
     source_note: str
     entry_timing_label: str
     entry_timing_reason: str
+    global_rank: int | None = None
+    filtered_position: int | None = None
 
 
 @dataclass(frozen=True)
@@ -458,7 +460,11 @@ async def list_signal_items(session: AsyncSession, run_id: int) -> list[ShortRes
     rows = await session.scalars(
         select(ShortResearchSignalItem)
         .where(ShortResearchSignalItem.run_id == run_id)
-        .order_by(ShortResearchSignalItem.rank.asc(), ShortResearchSignalItem.asset_type.asc())
+        .order_by(
+            func.coalesce(ShortResearchSignalItem.global_rank, ShortResearchSignalItem.rank).asc(),
+            ShortResearchSignalItem.asset_type.asc(),
+            ShortResearchSignalItem.asset_code.asc(),
+        )
     )
     return list(rows.all())
 
@@ -624,9 +630,10 @@ def _cached_asset_from_signal_item(
             "公开 ETF 日线数据" if item.asset_type == ASSET_TYPE_ETF else "公开基金净值数据",
         )
     )
+    global_rank = item.global_rank if item.global_rank is not None else item.rank
     return ComputedAsset(
         metadata=metadata,
-        rank=item.rank,
+        rank=global_rank,
         total_score=float(item.total_score),
         conclusion=item.conclusion,
         latest_date=latest_date,
@@ -640,6 +647,7 @@ def _cached_asset_from_signal_item(
         source_note=source_note,
         entry_timing_label=entry_timing_label,
         entry_timing_reason=entry_timing_reason,
+        global_rank=global_rank,
     )
 
 
@@ -665,7 +673,12 @@ async def cached_signal_assets(
         query = query.where(ShortResearchSignalItem.asset_type == asset_type)
     if codes:
         query = query.where(ShortResearchSignalItem.asset_code.in_(codes))
-    rows = await session.scalars(query.order_by(ShortResearchSignalItem.rank.asc()))
+    rows = await session.scalars(
+        query.order_by(
+            func.coalesce(ShortResearchSignalItem.global_rank, ShortResearchSignalItem.rank).asc(),
+            ShortResearchSignalItem.asset_code.asc(),
+        )
+    )
     items = list(rows.all())
     metadata_by_key = await _metadata_map_for_signal_items(session, items)
     code_set = set(codes or [])
@@ -697,7 +710,14 @@ async def cached_signal_assets(
             continue
         assets.append(asset)
     assets.sort(key=lambda asset: _sort_key(asset, sort), reverse=True)
-    ranked = [replace(asset, rank=index) for index, asset in enumerate(assets, start=1)]
+    ranked = [
+        replace(
+            asset,
+            rank=asset.global_rank if asset.global_rank is not None else asset.rank,
+            filtered_position=index,
+        )
+        for index, asset in enumerate(assets, start=1)
+    ]
     total = len(ranked)
     if offset:
         ranked = ranked[offset:]
@@ -3715,30 +3735,27 @@ async def list_computed_assets(
 ) -> list[ComputedAsset]:
     await ensure_short_research_universe(session)
     effective_date = as_of_date or await latest_data_date(session) or date.today()
-    candidates = [
-        item
-        for item in await _available_assets(session, asset_type=asset_type, codes=codes)
-        if _matches_filters(item, asset_type=asset_type, theme=theme, codes=codes)
-    ]
+    candidates = await _available_assets(session, asset_type=asset_type)
     computed = [await compute_asset(session, item, as_of_date=effective_date) for item in candidates]
     if asset_type == ASSET_TYPE_ETF or any(item.metadata.asset_type == ASSET_TYPE_ETF for item in computed):
         computed = _with_final_score_v2(computed)
         computed = _with_sector_trend_scores(computed)
         computed = await _with_opportunity_scores(session, computed, effective_date)
         computed = await _with_final_score_v3_shadow(session, computed, effective_date)
-    if asset_type == ASSET_TYPE_ETF and universe == UNIVERSE_DEFAULT and not codes:
-        computed = [item for item in computed if bool(item.metrics.get("default_display_eligible"))]
-        computed = _dedupe_etf_candidates(computed)
-    elif asset_type == ASSET_TYPE_ETF and universe not in {UNIVERSE_DEFAULT, UNIVERSE_ALL, UNIVERSE_ILLIQUID}:
+    if asset_type == ASSET_TYPE_ETF and universe not in {UNIVERSE_DEFAULT, UNIVERSE_ALL, UNIVERSE_ILLIQUID}:
         raise ValueError("ETF universe 只支持 default、all、illiquid")
     computed.sort(key=lambda item: _sort_key(item, sort), reverse=True)
-    return [
-        replace(
-            item,
-            rank=index,
-        )
-        for index, item in enumerate(computed, start=1)
+    globally_ranked = [replace(item, rank=index, global_rank=index) for index, item in enumerate(computed, start=1)]
+    filtered = [
+        item
+        for item in globally_ranked
+        if _matches_filters(item.metadata, asset_type=asset_type, theme=theme, codes=codes)
     ]
+    if asset_type == ASSET_TYPE_ETF and universe == UNIVERSE_DEFAULT and not codes:
+        filtered = [item for item in filtered if bool(item.metrics.get("default_display_eligible"))]
+        filtered = _dedupe_etf_candidates(filtered)
+    filtered.sort(key=lambda item: _sort_key(item, sort), reverse=True)
+    return [replace(item, filtered_position=index) for index, item in enumerate(filtered, start=1)]
 
 
 async def get_asset_detail(
@@ -3858,7 +3875,8 @@ async def run_signal_generation(
                     run_id=run.id,
                     asset_type=asset.metadata.asset_type,
                     asset_code=asset.metadata.code,
-                    rank=asset.rank or 0,
+                    rank=asset.global_rank if asset.global_rank is not None else asset.rank or 0,
+                    global_rank=asset.global_rank if asset.global_rank is not None else asset.rank,
                     total_score=round(asset.total_score, 2),
                     conclusion=asset.conclusion,
                     score_breakdown_json=asset.score_breakdown,

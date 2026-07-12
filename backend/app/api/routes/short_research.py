@@ -193,6 +193,8 @@ def _asset_out(
         code=asset.metadata.code,
         name=asset.metadata.name,
         rank=asset.rank,
+        global_rank=asset.global_rank if asset.global_rank is not None else asset.rank,
+        filtered_position=asset.filtered_position,
         total_score=round(asset.total_score, 2),
         technical_score=round(float(metrics["technical_score"]), 2) if isinstance(metrics.get("technical_score"), (int, float)) else None,
         opportunity_score=round(float(opportunity_score), 2)
