@@ -1087,6 +1087,10 @@ async def test_short_research_signal_generation_is_deterministic_and_research_on
     assert "key_reason" in hot_etf["rationale"]
     assert hot_etf["rationale"]["research_only"] is True
     assert hot_etf["rationale"]["no_trade_instruction"] is True
+    assert hot_etf["metrics"]["v3_score_version"] == "final_score_v3"
+    assert hot_etf["metrics"]["v3_score_eligible"] is False
+    assert hot_etf["metrics"]["v3_metric_peer_counts"]
+    assert hot_etf["metrics"]["v3_missing_by_component"]
 
     payload_text = json.dumps(body, ensure_ascii=False).lower()
     for forbidden in ["buy", "sell", "stop_loss", "take_profit", "target_price", "expected_return", "guaranteed_profit"]:

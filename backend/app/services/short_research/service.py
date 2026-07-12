@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta
 from statistics import mean, median, pstdev
 from typing import Any, cast
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.defaults.short_research import (
@@ -33,6 +33,7 @@ from app.models.entities import (
     EtfSignalValidationRun,
     EtfSyncCursor,
     EtfThemeExposure,
+    EtfUniverseMembership,
     Fund,
     FundNavHistory,
     JobRun,
@@ -80,6 +81,11 @@ from app.services.short_research.factors import (
     FACTOR_PROFILE_UNAVAILABLE_VERSION,
     build_asset_factor_payload,
 )
+from app.services.short_research.final_score_v3 import (
+    build_final_score_v3_sector_inputs,
+    final_score_v3_bucket,
+    score_final_score_v3,
+)
 from app.services.short_research.optimized_allocation import (
     latest_optimized_allocation_snapshot,
     optimized_allocation_payload,
@@ -90,7 +96,11 @@ from app.services.short_research.ranking import (
     apply_final_score_limits,
     build_final_score_breakdowns,
 )
-from app.services.short_research.ranking_contract import scope_kind_for_filters
+from app.services.short_research.ranking_contract import (
+    RankingInput,
+    final_score_v3_manifest,
+    scope_kind_for_filters,
+)
 from app.services.short_research.sector_trends import build_sector_trend_payloads
 from app.services.short_research.snapshot_selector import snapshot_metadata
 from app.services.short_research.theme_catalysts import (
@@ -806,8 +816,10 @@ def _format_percent(value: float | None) -> str:
     return f"{value * 100:.2f}%"
 
 
-def _mean_value(points: list[PricePoint]) -> float | None:
+def _mean_value(points: list[PricePoint], *, required_count: int | None = None) -> float | None:
     values = [item.value for item in points if item.value > 0]
+    if required_count is not None and (len(points) != required_count or len(values) != required_count):
+        return None
     return mean(values) if values else None
 
 
@@ -852,9 +864,9 @@ def _entry_timing_metrics(
     latest = series[-1] if series else None
     latest_value = latest.value if latest else None
     latest_date = latest.point_date if latest else None
-    ma5 = _mean_value(series[-5:])
-    ma10 = _mean_value(series[-10:])
-    ma20 = _mean_value(series[-20:])
+    ma5 = _mean_value(series[-5:], required_count=5)
+    ma10 = _mean_value(series[-10:], required_count=10)
+    ma20 = _mean_value(series[-20:], required_count=20)
     today_return = _latest_day_return(series)
     distance_to_ma5 = _distance_to_average(latest_value, ma5)
     distance_to_ma10 = _distance_to_average(latest_value, ma10)
@@ -977,6 +989,7 @@ def _score_metrics(metadata: ShortResearchAsset, series: list[PricePoint], as_of
     latest_date = series[-1].point_date if series else None
     latest_value = series[-1].value if series else None
     volatility_points = series[-21:]
+    last_20 = series[-20:]
     last_60 = series[-60:]
     returns_20 = _daily_returns(volatility_points)
     return_5d = _window_return(series, 5)
@@ -984,6 +997,10 @@ def _score_metrics(metadata: ShortResearchAsset, series: list[PricePoint], as_of
     return_20d = _window_return(series, 20)
     return_60d = _window_return(series, 60)
     volatility_20d = pstdev(returns_20) if len(returns_20) == 20 else None
+    downside_volatility_20d = (
+        math.sqrt(mean(min(item, 0.0) ** 2 for item in returns_20)) if len(returns_20) == 20 else None
+    )
+    max_drawdown_20d = _max_drawdown(last_20) if len(last_20) == 20 else None
     max_drawdown_60d = _max_drawdown(last_60)
     average_turnover_20d = None
     average_turnover_60d = None
@@ -1002,8 +1019,18 @@ def _score_metrics(metadata: ShortResearchAsset, series: list[PricePoint], as_of
         asset_class=metadata.category,
         theme_tags=list(metadata.theme_tags),
     )
-    ma5 = _mean_value(series[-5:])
+    ranking_asset_bucket = final_score_v3_bucket(theme_profile.asset_bucket)
+    ma5 = _mean_value(series[-5:], required_count=5)
+    ma20 = _mean_value(last_20, required_count=20)
     distance_to_ma5 = _distance_to_average(latest_value, ma5)
+    distance_to_ma20 = _distance_to_average(latest_value, ma20)
+    trend_consistency = (
+        sum(1 for item in returns_20 if item > 0) / len(returns_20) if len(returns_20) == 20 else None
+    )
+    market_data_reliability = (
+        "unavailable" if latest_date is None else "verified" if latest_date == as_of_date else "stale"
+    )
+    source_trade_date = latest_date.isoformat() if latest_date else None
     threshold_points = [
         ThresholdPricePoint(value=item.value, pct_change=item.pct_change)
         for item in series
@@ -1104,9 +1131,39 @@ def _score_metrics(metadata: ShortResearchAsset, series: list[PricePoint], as_of
         "return_20d": return_20d,
         "return_60d": return_60d,
         "volatility_20d": volatility_20d,
+        "realized_volatility_20d": volatility_20d,
+        "downside_volatility_20d": downside_volatility_20d,
+        "max_drawdown_20d": max_drawdown_20d,
         "max_drawdown_60d": max_drawdown_60d,
         "average_turnover_20d": average_turnover_20d,
         "average_turnover_60d": average_turnover_60d,
+        "distance_to_ma20_pct": distance_to_ma20,
+        "trend_consistency": trend_consistency,
+        "overextension_atr": None,
+        "overextension_atr_status": "unavailable_no_range_series",
+        "spread_bps": None,
+        "structure_quality": None,
+        "premium_discount_bps": None,
+        "premium_provider_consensus": None,
+        "premium_input_status": "unavailable",
+        "source_trade_date": source_trade_date,
+        "market_data_reliability": market_data_reliability,
+        "component_source_dates": {
+            "technical_momentum_cross_section": source_trade_date,
+            "risk_quality_cross_section": source_trade_date,
+            "structure_liquidity": source_trade_date,
+            "sector_trend": None,
+            "theme_catalyst": None,
+            "premium_discount": None,
+        },
+        "component_reliability": {
+            "technical_momentum_cross_section": market_data_reliability,
+            "risk_quality_cross_section": market_data_reliability,
+            "structure_liquidity": market_data_reliability,
+            "sector_trend": "unavailable",
+            "theme_catalyst": "unavailable",
+            "premium_discount": "unavailable",
+        },
         "effective_windows": {
             "return_5d": {"close_count": min(len(series), 6), "required_close_count": 6},
             "return_10d": {"close_count": min(len(series), 11), "required_close_count": 11},
@@ -1118,11 +1175,15 @@ def _score_metrics(metadata: ShortResearchAsset, series: list[PricePoint], as_of
                 "required_close_count": 21,
                 "required_return_count": 20,
             },
+            "ma20": {"close_count": min(len(series), 20), "required_close_count": 20},
+            "max_drawdown_20d": {"close_count": len(last_20), "required_close_count": 20},
             "max_drawdown_60d": {"close_count": len(last_60), "required_close_count": 60},
             "average_turnover_20d": {"observation_count": turnover_20_count, "required_count": 20},
             "average_turnover_60d": {"observation_count": turnover_60_count, "required_count": 60},
         },
         "theme_profile": theme_profile.as_dict(),
+        "ranking_asset_bucket": ranking_asset_bucket,
+        "ranking_profile_version": "final_score_v3",
         "dynamic_threshold_context": dynamic_context,
         "trend_score": trend_score,
         "risk_score": risk_score,
@@ -2998,6 +3059,166 @@ async def _with_opportunity_scores(
     return updated
 
 
+def _v3_premium_inputs(
+    quote: EtfIntradayLatestQuote | None,
+    *,
+    as_of_date: date,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    base = {
+        "premium_discount_bps": None,
+        "premium_provider_consensus": None,
+        "iopv_observed_at": None,
+        "premium_input_status": "unavailable",
+        "premium_input_reliability": "unavailable",
+        "premium_source_date": None,
+    }
+    if quote is None:
+        return base
+    observed_at = quote.quote_time
+    base["iopv_observed_at"] = observed_at.isoformat()
+    base["premium_source_date"] = quote.trade_date.isoformat()
+    cutoff = now or utcnow()
+    if quote.trade_date != as_of_date or observed_at < cutoff - timedelta(minutes=15):
+        return {**base, "premium_input_status": "stale", "premium_input_reliability": "stale"}
+    if quote.freshness_status != "fresh" or quote.premium_discount_pct is None:
+        return base
+    premium = float(quote.premium_discount_pct)
+    if not math.isfinite(premium):
+        return base
+    raw = quote.raw_json if isinstance(quote.raw_json, Mapping) else {}
+    consensus = raw.get("premium_provider_consensus")
+    consensus_value = float(consensus) if isinstance(consensus, int | float) and math.isfinite(float(consensus)) else None
+    return {
+        **base,
+        "premium_discount_bps": round(premium * 100, 4),
+        "premium_provider_consensus": consensus_value,
+        "premium_input_status": "verified",
+        "premium_input_reliability": "verified",
+    }
+
+
+async def _with_final_score_v3_shadow(
+    session: AsyncSession,
+    assets: list[ComputedAsset],
+    as_of_date: date,
+) -> list[ComputedAsset]:
+    etf_assets = [asset for asset in assets if asset.metadata.asset_type == ASSET_TYPE_ETF]
+    if not etf_assets:
+        return assets
+    codes = [asset.metadata.code for asset in etf_assets]
+    membership_rows = (
+        await session.scalars(
+            select(EtfUniverseMembership)
+            .where(
+                EtfUniverseMembership.etf_code.in_(codes),
+                EtfUniverseMembership.effective_from <= as_of_date,
+                or_(
+                    EtfUniverseMembership.effective_to.is_(None),
+                    EtfUniverseMembership.effective_to >= as_of_date,
+                ),
+            )
+            .order_by(EtfUniverseMembership.etf_code.asc(), EtfUniverseMembership.effective_from.desc())
+        )
+    ).all()
+    underlying_by_code: dict[str, str | None] = {}
+    for row in membership_rows:
+        underlying_by_code.setdefault(row.etf_code, row.tracked_underlying_id)
+    quote_rows = (
+        await session.scalars(select(EtfIntradayLatestQuote).where(EtfIntradayLatestQuote.etf_code.in_(codes)))
+    ).all()
+    premium_by_code = {
+        quote.etf_code: _v3_premium_inputs(quote, as_of_date=as_of_date)
+        for quote in quote_rows
+    }
+    base_inputs = [
+        RankingInput(
+            asset_code=asset.metadata.code,
+            asset_bucket=str(asset.metrics.get("ranking_asset_bucket") or "unknown"),
+            price_basis="total_return_adjusted",
+            profile_version=str(asset.metrics.get("ranking_profile_version") or "unknown"),
+            values={
+                **asset.metrics,
+                **premium_by_code.get(asset.metadata.code, _v3_premium_inputs(None, as_of_date=as_of_date)),
+                "tracked_underlying_id": underlying_by_code.get(asset.metadata.code),
+                "distance_to_ma20": asset.metrics.get("distance_to_ma20_pct"),
+                "theme_group": (
+                    asset.metrics["theme_profile"].get("theme_group")
+                    if isinstance(asset.metrics.get("theme_profile"), Mapping)
+                    else None
+                ),
+            },
+        )
+        for asset in etf_assets
+    ]
+    sector_by_code = build_final_score_v3_sector_inputs(base_inputs)
+    inputs = [
+        RankingInput(
+            asset_code=ranking_input.asset_code,
+            asset_bucket=ranking_input.asset_bucket,
+            price_basis=ranking_input.price_basis,
+            profile_version=ranking_input.profile_version,
+            values={
+                **ranking_input.values,
+                **sector_by_code.get(ranking_input.asset_code, {"sector_input_status": "unavailable"}),
+                "component_reliability": {
+                    **dict(ranking_input.values.get("component_reliability") or {}),
+                    "sector_trend": str(
+                        sector_by_code.get(ranking_input.asset_code, {}).get("sector_input_status") or "unavailable"
+                    ),
+                },
+            },
+        )
+        for ranking_input in base_inputs
+    ]
+    results = score_final_score_v3(inputs, manifest=final_score_v3_manifest())
+    updated: list[ComputedAsset] = []
+    for asset in assets:
+        result = results.get(asset.metadata.code)
+        if result is None:
+            updated.append(asset)
+            continue
+        premium_inputs = premium_by_code.get(asset.metadata.code, _v3_premium_inputs(None, as_of_date=as_of_date))
+        component_source_dates = dict(asset.metrics.get("component_source_dates") or {})
+        component_source_dates["premium_discount"] = premium_inputs["premium_source_date"]
+        sector_inputs = sector_by_code.get(asset.metadata.code, {})
+        component_source_dates["sector_trend"] = sector_inputs.get("sector_source_trade_date")
+        component_reliability = dict(asset.metrics.get("component_reliability") or {})
+        component_reliability["premium_discount"] = premium_inputs["premium_input_reliability"]
+        component_reliability["sector_trend"] = sector_inputs.get("sector_input_status") or "unavailable"
+        metrics = {
+            **asset.metrics,
+            **premium_inputs,
+            **sector_inputs,
+            "component_source_dates": component_source_dates,
+            "component_reliability": component_reliability,
+            "v3_score_version": "final_score_v3",
+            "v3_ranking_score": result.ranking_score,
+            "v3_score_eligible": result.score_eligible,
+            "v3_metric_peer_counts": dict(result.metric_peer_counts),
+            "v3_missing_by_component": dict(result.missing_by_component),
+            "tracked_underlying_id": underlying_by_code.get(asset.metadata.code),
+        }
+        updated.append(
+            replace(
+                asset,
+                metrics=metrics,
+                score_breakdown={
+                    **asset.score_breakdown,
+                    "final_score_v3_shadow": {
+                        "score": result.ranking_score,
+                        "score_eligible": result.score_eligible,
+                        "asset_bucket": result.asset_bucket,
+                        "component_scores": dict(result.component_scores),
+                        "metric_peer_counts": dict(result.metric_peer_counts),
+                        "missing_by_component": dict(result.missing_by_component),
+                    },
+                },
+            )
+        )
+    return updated
+
+
 async def compute_asset(
     session: AsyncSession,
     metadata: ShortResearchAsset,
@@ -3022,20 +3243,40 @@ async def compute_asset(
                 "return_20d",
                 "return_60d",
                 "volatility_20d",
+                "realized_volatility_20d",
+                "downside_volatility_20d",
+                "max_drawdown_20d",
                 "max_drawdown_60d",
                 "average_turnover_20d",
+                "average_turnover_60d",
                 "today_return_pct",
                 "ma5",
                 "ma10",
                 "ma20",
                 "distance_to_ma5_pct",
                 "distance_to_ma10_pct",
+                "distance_to_ma20_pct",
+                "trend_consistency",
+                "overextension_atr",
+                "overextension_atr_status",
+                "spread_bps",
+                "structure_quality",
+                "premium_discount_bps",
+                "premium_provider_consensus",
+                "premium_input_status",
+                "source_trade_date",
+                "market_data_reliability",
+                "component_source_dates",
+                "component_reliability",
+                "effective_windows",
                 "pullback_from_5d_high_pct",
                 "pullback_from_20d_high_pct",
                 "volume_ratio_20d",
                 "entry_timing_label",
                 "entry_timing_reason",
                 "theme_profile",
+                "ranking_asset_bucket",
+                "ranking_profile_version",
                 "dynamic_threshold_context",
             )
         },
@@ -3057,20 +3298,40 @@ async def compute_asset(
                 "return_20d",
                 "return_60d",
                 "volatility_20d",
+                "realized_volatility_20d",
+                "downside_volatility_20d",
+                "max_drawdown_20d",
                 "max_drawdown_60d",
                 "average_turnover_20d",
+                "average_turnover_60d",
                 "today_return_pct",
                 "ma5",
                 "ma10",
                 "ma20",
                 "distance_to_ma5_pct",
                 "distance_to_ma10_pct",
+                "distance_to_ma20_pct",
+                "trend_consistency",
+                "overextension_atr",
+                "overextension_atr_status",
+                "spread_bps",
+                "structure_quality",
+                "premium_discount_bps",
+                "premium_provider_consensus",
+                "premium_input_status",
+                "source_trade_date",
+                "market_data_reliability",
+                "component_source_dates",
+                "component_reliability",
+                "effective_windows",
                 "pullback_from_5d_high_pct",
                 "pullback_from_20d_high_pct",
                 "volume_ratio_20d",
                 "entry_timing_label",
                 "entry_timing_reason",
                 "theme_profile",
+                "ranking_asset_bucket",
+                "ranking_profile_version",
                 "dynamic_threshold_context",
             )
         },
@@ -3100,20 +3361,40 @@ def compute_asset_for_replay_from_series(
         "return_20d",
         "return_60d",
         "volatility_20d",
+        "realized_volatility_20d",
+        "downside_volatility_20d",
+        "max_drawdown_20d",
         "max_drawdown_60d",
         "average_turnover_20d",
+        "average_turnover_60d",
         "today_return_pct",
         "ma5",
         "ma10",
         "ma20",
         "distance_to_ma5_pct",
         "distance_to_ma10_pct",
+        "distance_to_ma20_pct",
+        "trend_consistency",
+        "overextension_atr",
+        "overextension_atr_status",
+        "spread_bps",
+        "structure_quality",
+        "premium_discount_bps",
+        "premium_provider_consensus",
+        "premium_input_status",
+        "source_trade_date",
+        "market_data_reliability",
+        "component_source_dates",
+        "component_reliability",
+        "effective_windows",
         "pullback_from_5d_high_pct",
         "pullback_from_20d_high_pct",
         "volume_ratio_20d",
         "entry_timing_label",
         "entry_timing_reason",
         "theme_profile",
+        "ranking_asset_bucket",
+        "ranking_profile_version",
         "dynamic_threshold_context",
     )
     replay_metrics = {key: metrics[key] for key in metric_keys}
@@ -3250,6 +3531,7 @@ async def list_computed_assets(
         computed = _with_final_score_v2(computed)
         computed = _with_sector_trend_scores(computed)
         computed = await _with_opportunity_scores(session, computed, effective_date)
+        computed = await _with_final_score_v3_shadow(session, computed, effective_date)
     if asset_type == ASSET_TYPE_ETF and universe == UNIVERSE_DEFAULT and not codes:
         computed = [item for item in computed if bool(item.metrics.get("default_display_eligible"))]
         computed = _dedupe_etf_candidates(computed)

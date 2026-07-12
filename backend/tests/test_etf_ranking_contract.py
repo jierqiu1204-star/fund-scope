@@ -9,6 +9,7 @@ import pytest
 from app.services.short_research.ranking_contract import (
     RankingInput,
     build_ranking_contract,
+    final_score_v3_manifest,
     parse_ranking_manifest,
     scope_kind_for_filters,
 )
@@ -84,6 +85,13 @@ def test_final_score_v3_manifest_has_typed_score_inputs_and_missing_policy() -> 
     assert manifest.dag_edges[0].target == "weighted_aggregate"
     assert manifest.acyclic_order[-1] == "ranking_score"
     assert "label_validation" in manifest.explanatory_only
+
+
+def test_runtime_v3_manifest_uses_the_frozen_contract() -> None:
+    manifest = final_score_v3_manifest()
+
+    assert manifest.score_version == "final_score_v3"
+    assert manifest.components["premium_discount"].primitive_inputs[0].primitive_id == "premium_discount_bps"
 
 
 def test_ranking_input_fails_closed_when_a_required_v3_input_is_missing() -> None:

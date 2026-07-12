@@ -6,6 +6,8 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 _METADATA_INPUTS = frozenset(
@@ -58,12 +60,21 @@ class RankingInput:
 
 
 @dataclass(frozen=True)
+class RankingPrimitive:
+    primitive_id: str
+    weight: float
+    direction: str
+    normalization: str
+
+
+@dataclass(frozen=True)
 class RankingComponent:
     component_id: str
     weight: float
     score_bearing: bool
     required_inputs: tuple[str, ...]
     primitive_lineage: tuple[str, ...]
+    primitive_inputs: tuple[RankingPrimitive, ...]
     units: Mapping[str, str]
     missing_data_behavior: str
 
@@ -140,14 +151,29 @@ def parse_ranking_manifest(contract: Mapping[str, Any]) -> RankingManifest:
         component_id = str(raw_component.get("id") or "")
         required_inputs = tuple(str(value) for value in raw_component.get("required_inputs") or [])
         primitive_lineage = tuple(str(value) for value in raw_component.get("primitive_lineage") or [])
-        if not component_id or component_id in components or not required_inputs:
+        formula = raw_component.get("formula")
+        raw_primitive_inputs = formula.get("inputs") if isinstance(formula, Mapping) else None
+        if not component_id or component_id in components or not required_inputs or not isinstance(raw_primitive_inputs, list):
             raise ValueError("ranking component id and required inputs must be unique and non-empty")
+        primitive_inputs = tuple(
+            RankingPrimitive(
+                primitive_id=str(raw_input.get("primitive") or ""),
+                weight=float(raw_input.get("weight") or 0.0),
+                direction=str(raw_input.get("direction") or ""),
+                normalization=str(raw_input.get("normalization") or ""),
+            )
+            for raw_input in raw_primitive_inputs
+            if isinstance(raw_input, Mapping)
+        )
+        if len(primitive_inputs) != len(raw_primitive_inputs) or any(not item.primitive_id for item in primitive_inputs):
+            raise ValueError(f"ranking component {component_id} has invalid primitive inputs")
         component = RankingComponent(
             component_id=component_id,
             weight=float(raw_component.get("weight") or 0.0),
             score_bearing=bool(raw_component.get("score_bearing")),
             required_inputs=required_inputs,
             primitive_lineage=primitive_lineage,
+            primitive_inputs=primitive_inputs,
             units={key: _PRIMITIVE_UNITS.get(key, "unknown") for key in required_inputs},
             missing_data_behavior=missing_data_behavior,
         )
@@ -187,6 +213,18 @@ def parse_ranking_manifest(contract: Mapping[str, Any]) -> RankingManifest:
         dag_edges=tuple(dag_edges),
         acyclic_order=tuple(str(value) for value in dag.get("acyclic_order") or []),
     )
+
+
+@lru_cache(maxsize=1)
+def final_score_v3_manifest() -> RankingManifest:
+    contract_path = (
+        Path(__file__).resolve().parents[4]
+        / "openspec"
+        / "changes"
+        / "harden-etf-comprehensive-ranking"
+        / "final-score-v3-contract.json"
+    )
+    return parse_ranking_manifest(json.loads(contract_path.read_text(encoding="utf-8")))
 
 
 def _canonical(value: Any) -> Any:
