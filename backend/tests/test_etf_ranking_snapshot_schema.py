@@ -1,5 +1,6 @@
-from sqlalchemy import Boolean, Date, DateTime, Float, Integer, String
+from sqlalchemy import Boolean, Date, DateTime, Float, Integer, String, Text, UniqueConstraint
 
+from app.db.base import Base
 from app.models.entities import EtfPriceHistory, ShortResearchSignalItem, ShortResearchSignalRun
 
 
@@ -98,3 +99,30 @@ def test_etf_daily_history_keeps_research_price_provenance_separate_from_raw_ohl
     indexes = {index.name: index for index in table.indexes}
     eligibility_index = indexes["ix_etf_price_history_trade_date_decision_eligible"]
     assert [column.name for column in eligibility_index.columns] == ["trade_date", "decision_eligible"]
+
+
+def test_etf_universe_membership_tracks_effective_history_and_provenance() -> None:
+    table = Base.metadata.tables["etf_universe_memberships"]
+    expected_columns = {
+        "etf_code": (String, False),
+        "effective_from": (Date, False),
+        "effective_to": (Date, True),
+        "source": (String, False),
+        "tracked_underlying_id": (String, True),
+        "exclusion_reason": (Text, True),
+    }
+
+    for column_name, (expected_type, nullable) in expected_columns.items():
+        column = table.c[column_name]
+        assert column.nullable is nullable
+        assert isinstance(column.type, expected_type)
+
+    foreign_keys = table.c.etf_code.foreign_keys
+    assert len(foreign_keys) == 1
+    assert next(iter(foreign_keys)).target_fullname == "tradable_etfs.code"
+
+    unique_constraints = {
+        constraint.name: constraint for constraint in table.constraints if isinstance(constraint, UniqueConstraint)
+    }
+    interval_key = unique_constraints["uq_etf_universe_membership_effective_from"]
+    assert [column.name for column in interval_key.columns] == ["etf_code", "effective_from"]

@@ -235,6 +235,24 @@ class TradableEtf(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
+class EtfUniverseMembership(Base):
+    __tablename__ = "etf_universe_memberships"
+    __table_args__ = (
+        UniqueConstraint("etf_code", "effective_from", name="uq_etf_universe_membership_effective_from"),
+        SaIndex("ix_etf_universe_memberships_effective_lookup", "etf_code", "effective_from", "effective_to"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    etf_code: Mapped[str] = mapped_column(ForeignKey("tradable_etfs.code", ondelete="CASCADE"))
+    effective_from: Mapped[date] = mapped_column(Date)
+    effective_to: Mapped[date | None] = mapped_column(Date, nullable=True)
+    source: Mapped[str] = mapped_column(String(64))
+    tracked_underlying_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    exclusion_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class EtfPriceHistory(Base):
     __tablename__ = "etf_price_history"
     __table_args__ = (
