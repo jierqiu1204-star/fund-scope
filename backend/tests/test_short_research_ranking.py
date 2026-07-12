@@ -122,6 +122,7 @@ def test_final_score_v2_separates_similar_base_scores() -> None:
     assert scores["510001"]["score_version"] == FINAL_SCORE_VERSION
     assert scores["510001"]["final_score"] > scores["510002"]["final_score"]
     assert scores["510001"]["components"]["cross_sectional_percentile"]["score"] > scores["510002"]["components"]["cross_sectional_percentile"]["score"]
+    assert "label_evidence" not in scores["510001"]["weights"]
 
 
 def test_dynamic_threshold_and_premium_penalize_ineligible_etf() -> None:
@@ -156,7 +157,7 @@ def test_unavailable_data_cannot_improve_final_score() -> None:
     assert scores["588001"]["components"]["data_reliability"]["reliability"] == "stale"
 
 
-def test_label_evidence_adjustment_is_bounded() -> None:
+def test_label_evidence_is_display_only() -> None:
     base = build_final_score_breakdowns(
         [_record("515000", return_20d=0.08, drawdown=-0.04, volatility=0.020, turnover=300_000_000)]
     )["515000"]
@@ -165,9 +166,10 @@ def test_label_evidence_adjustment_is_bounded() -> None:
     weakened = apply_label_evidence(base, confidence="recent_weakening", sample_count=80, median_return=-0.01, win_rate=0.42)
     insufficient = apply_label_evidence(base, confidence="sufficient", sample_count=5)
 
-    assert boosted["final_score"] > insufficient["final_score"]
-    assert weakened["final_score"] < insufficient["final_score"]
+    assert boosted["final_score"] == insufficient["final_score"]
+    assert weakened["final_score"] == insufficient["final_score"]
     assert boosted["components"]["label_evidence"]["sample_count"] == 80
+    assert boosted["components"]["label_evidence"]["display_only"] is True
 
 
 def test_stale_cap_is_reapplied_after_label_evidence_enrichment() -> None:

@@ -234,18 +234,11 @@ def build_final_score_breakdowns(records: Sequence[RankingRecord]) -> dict[str, 
         dynamic = _score_dynamic_threshold(record)
         reliability, reliability_score, reliability_reasons = _reliability(record)
         liquidity_premium = _score_liquidity_premium(record, records)
-        label_evidence = {
-            "score": 60.0,
-            "confidence": "waiting",
-            "sample_count": 0,
-            "reason": "等待标签历史有效性验证。",
-        }
         final_score = round(
-            cross["score"] * 0.46
-            + dynamic["score"] * 0.18
-            + label_evidence["score"] * 0.12
-            + reliability_score * 0.14
-            + liquidity_premium["score"] * 0.10,
+            cross["score"] * 0.52
+            + dynamic["score"] * 0.20
+            + reliability_score * 0.16
+            + liquidity_premium["score"] * 0.12,
             2,
         )
         cap_reason = None
@@ -265,7 +258,6 @@ def build_final_score_breakdowns(records: Sequence[RankingRecord]) -> dict[str, 
             "components": {
                 "cross_sectional_percentile": cross,
                 "dynamic_threshold": dynamic,
-                "label_evidence": label_evidence,
                 "data_reliability": {
                     "score": reliability_score,
                     "reliability": reliability,
@@ -274,11 +266,10 @@ def build_final_score_breakdowns(records: Sequence[RankingRecord]) -> dict[str, 
                 "liquidity_premium": liquidity_premium,
             },
             "weights": {
-                "cross_sectional_percentile": 0.46,
-                "dynamic_threshold": 0.18,
-                "label_evidence": 0.12,
-                "data_reliability": 0.14,
-                "liquidity_premium": 0.10,
+                "cross_sectional_percentile": 0.52,
+                "dynamic_threshold": 0.20,
+                "data_reliability": 0.16,
+                "liquidity_premium": 0.12,
             },
             "limitation_reasons": [reason for reason in [cap_reason] if reason],
         }
