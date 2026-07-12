@@ -78,8 +78,12 @@ class IntradayEtfWatchStatusOut(BaseModel):
 class EtfLiveRankingItemOut(BaseModel):
     etf_code: str
     etf_name: str | None = None
-    base_rank: int | None = None
-    live_rank: int | None = None
+    base_rank: int | None = Field(default=None, description="兼容字段，等于 base_global_rank")
+    live_rank: int | None = Field(default=None, description="兼容字段，等于 live_scope_rank")
+    base_global_rank: int | None = None
+    live_scope_rank: int | None = None
+    filtered_position: int | None = None
+    rank_scope: str | None = None
     rank_change: int | None = None
     sources: list[str] = Field(default_factory=list)
     conclusion: str | None = None
@@ -107,6 +111,7 @@ class EtfLiveRankingListOut(BaseModel):
     total: int
     signal_as_of_date: date | None = None
     signal_status: str
+    live_scope_hash: str | None = None
     latest_run: IntradayEtfWatchRunOut | None = None
     items: list[EtfLiveRankingItemOut] = Field(default_factory=list)
     snapshot: EtfRankingSnapshotMetadataOut | None = None

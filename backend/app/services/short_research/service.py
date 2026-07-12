@@ -709,7 +709,7 @@ async def cached_signal_assets(
         ):
             continue
         assets.append(asset)
-    assets.sort(key=lambda asset: _sort_key(asset, sort), reverse=True)
+    assets.sort(key=lambda asset: _sort_key(asset, sort))
     ranked = [
         replace(
             asset,
@@ -3682,24 +3682,38 @@ def _matches_filters(
     return True
 
 
-def _sort_key(asset: ComputedAsset, sort: str) -> tuple[float, str]:
+def _sort_key(asset: ComputedAsset, sort: str) -> tuple[int, float, str]:
+    def finite(value: Any) -> float | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int | float) and math.isfinite(value):
+            return float(value)
+        return None
+
+    def descending(value: Any) -> tuple[int, float, str]:
+        numeric = finite(value)
+        return (0, -numeric, asset.metadata.code) if numeric is not None else (1, 0.0, asset.metadata.code)
+
+    def ascending(value: Any) -> tuple[int, float, str]:
+        numeric = finite(value)
+        return (0, numeric, asset.metadata.code) if numeric is not None else (1, 0.0, asset.metadata.code)
+
     metrics = asset.metrics
     if sort == "opportunity":
-        final_score = _final_decision_score(asset)
-        if final_score is None:
-            return (-999.0, asset.metadata.code)
-        return (final_score, asset.metadata.code)
+        return descending(_final_decision_score(asset))
     if sort == "return_5d":
-        return (float(metrics.get("return_5d") or -999), asset.metadata.code)
+        return descending(metrics.get("return_5d"))
     if sort == "return_20d":
-        return (float(metrics.get("return_20d") or -999), asset.metadata.code)
+        return descending(metrics.get("return_20d"))
     if sort == "drawdown_low":
-        return (-(abs(float(metrics.get("max_drawdown_60d") or 0.0))), asset.metadata.code)
+        drawdown = finite(metrics.get("max_drawdown_60d"))
+        return ascending(abs(drawdown)) if drawdown is not None else ascending(None)
     if sort == "liquidity":
-        return (float(metrics.get("average_turnover_20d") or 0.0), asset.metadata.code)
+        return descending(metrics.get("average_turnover_20d"))
     if sort == "risk_low":
-        return (float(asset.score_breakdown["risk"]["score"]), asset.metadata.code)
-    return (asset.total_score, asset.metadata.code)
+        risk = asset.score_breakdown.get("risk")
+        return descending(risk.get("score") if isinstance(risk, Mapping) else None)
+    return descending(asset.total_score)
 
 
 def _dedupe_etf_candidates(assets: list[ComputedAsset]) -> list[ComputedAsset]:
@@ -3744,7 +3758,7 @@ async def list_computed_assets(
         computed = await _with_final_score_v3_shadow(session, computed, effective_date)
     if asset_type == ASSET_TYPE_ETF and universe not in {UNIVERSE_DEFAULT, UNIVERSE_ALL, UNIVERSE_ILLIQUID}:
         raise ValueError("ETF universe 只支持 default、all、illiquid")
-    computed.sort(key=lambda item: _sort_key(item, sort), reverse=True)
+    computed.sort(key=lambda item: _sort_key(item, sort))
     globally_ranked = [replace(item, rank=index, global_rank=index) for index, item in enumerate(computed, start=1)]
     filtered = [
         item
@@ -3754,7 +3768,7 @@ async def list_computed_assets(
     if asset_type == ASSET_TYPE_ETF and universe == UNIVERSE_DEFAULT and not codes:
         filtered = [item for item in filtered if bool(item.metrics.get("default_display_eligible"))]
         filtered = _dedupe_etf_candidates(filtered)
-    filtered.sort(key=lambda item: _sort_key(item, sort), reverse=True)
+    filtered.sort(key=lambda item: _sort_key(item, sort))
     return [replace(item, filtered_position=index) for index, item in enumerate(filtered, start=1)]
 
 

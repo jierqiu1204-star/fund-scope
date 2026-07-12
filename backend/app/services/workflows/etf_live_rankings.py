@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 from datetime import date, datetime
 from typing import Any
 
@@ -75,6 +78,19 @@ def _to_pagination(limit: int, offset: int) -> tuple[int, int]:
 
 def _clamp_score(value: float) -> float:
     return round(max(0.0, min(100.0, value)), 2)
+
+
+def _live_scope_hash(codes: list[str], score_version: str) -> str:
+    payload = json.dumps(
+        {"codes": sorted(set(codes)), "score_version": score_version},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _is_finite_score(value: Any) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def _entry_timing(
@@ -282,6 +298,9 @@ async def live_rankings(
             )
         )
         signal_items_by_code = {item.asset_code: item for item in signal_rows.all()}
+    scope_score_version = str(source_snapshot.score_version or "legacy") if source_snapshot is not None else "unavailable"
+    live_scope_hash = _live_scope_hash(watch_codes, scope_score_version)
+    base_scope_hash = _live_scope_hash(list(signal_items_by_code), scope_score_version)
     selected_theme = theme.strip() if theme else None
     if selected_theme in {"", "all", "全部"}:
         selected_theme = None
@@ -290,11 +309,7 @@ async def live_rankings(
     scored_rows: list[dict[str, Any]] = []
     for watch_item in watchlist.items:
         name = names.get(watch_item.etf_code)
-        if keyword and keyword not in watch_item.etf_code.lower() and keyword not in (name or "").lower():
-            continue
         signal_item = signal_items_by_code.get(watch_item.etf_code)
-        if selected_theme and selected_theme not in _signal_item_theme_values(signal_item):
-            continue
         base_score = _float_or_none(signal_item.total_score) if signal_item is not None else None
         signal_metrics = dict(signal_item.metrics_json or {}) if signal_item is not None else {}
         signal_breakdown = dict(signal_item.score_breakdown_json or {}) if signal_item is not None else {}
@@ -304,10 +319,10 @@ async def live_rankings(
             or signal_breakdown.get("score_version")
             or (final_score_breakdown.get("score_version") if isinstance(final_score_breakdown, dict) else None)
         )
-        base_rank = watch_item.rank
+        base_global_rank = (
+            signal_item.global_rank if signal_item is not None and signal_item.global_rank is not None else watch_item.rank
+        )
         conclusion = signal_item.conclusion if signal_item is not None else None
-        if observation_filters and (conclusion is None or conclusion not in observation_filters):
-            continue
         quote = latest_quotes.get(watch_item.etf_code)
         daily_entry_timing_label, daily_entry_timing_reason = _daily_entry_timing(signal_item)
 
@@ -355,24 +370,11 @@ async def live_rankings(
                         intraday_adjustment_score = (intraday_adjustment_score or 0.0) - 2.0
                         score_contribution_reasons.append("盘中成交额明显偏低，流动性扣 2 分。")
 
-        if entry_filters and not (
-            entry_filters
-            & _entry_filter_labels(
-                live_label=live_label,
-                daily_label=daily_entry_timing_label,
-                is_open=is_open,
-                quote_is_stale=market_data.is_etf_quote_stale(quote.quote_time if quote is not None else None, now),
-            )
-        ):
-            continue
-        if tracking_filters and not (tracking_filters & tracking_states_by_code.get(watch_item.etf_code, set())):
-            continue
-
         scored_rows.append(
             {
                 "etf_code": watch_item.etf_code,
                 "etf_name": name,
-                "base_rank": base_rank,
+                "base_global_rank": base_global_rank,
                 "conclusion": conclusion,
                 "base_score": base_score,
                 "live_total_score": live_total_score,
@@ -387,24 +389,74 @@ async def live_rankings(
                 "daily_entry_timing_reason": daily_entry_timing_reason,
                 "sources": sorted(watch_item.sources),
                 "quote": market_data.etf_quote_out(quote, etf_name=name, now=now) if quote is not None else None,
+                "theme_values": _signal_item_theme_values(signal_item),
+                "tracking_states": tracking_states_by_code.get(watch_item.etf_code, set()),
+                "keyword_matches": not keyword
+                or keyword in watch_item.etf_code.lower()
+                or keyword in (name or "").lower(),
             }
         )
 
+    for row in scored_rows:
+        row["live_rankable"] = _is_finite_score(row["live_total_score"]) and (
+            not is_open or row["score_source"] == "intraday"
+        )
     scored_rows.sort(
         key=lambda row: (
-            row["live_total_score"] is None,
-            -(row["live_total_score"] or 0.0),
+            not row["live_rankable"],
+            -float(row["live_total_score"]) if row["live_rankable"] else 0.0,
+            row["base_global_rank"] is None,
+            row["base_global_rank"] or 0,
             row["etf_code"],
         )
     )
 
-    ranked_rows = []
-    for index, row in enumerate(scored_rows, start=1):
-        row["live_rank"] = index
-        row["rank_change"] = row["base_rank"] - index if row["base_rank"] is not None else None
-        ranked_rows.append(row)
+    live_scope_rank = 0
+    for row in scored_rows:
+        if row["live_rankable"]:
+            live_scope_rank += 1
+            row["live_scope_rank"] = live_scope_rank
+            row["rank_scope"] = "live_scope"
+        else:
+            row["live_scope_rank"] = None
+            row["rank_scope"] = "unranked"
+        row["rank_change"] = (
+            row["base_global_rank"] - row["live_scope_rank"]
+            if (
+                row["base_global_rank"] is not None
+                and row["live_scope_rank"] is not None
+                and base_scope_hash == live_scope_hash
+                and row["score_version"] == scope_score_version
+            )
+            else None
+        )
 
-    selected = ranked_rows[safe_offset : safe_offset + safe_limit]
+    filtered_rows = []
+    for row in scored_rows:
+        if not row["keyword_matches"]:
+            continue
+        if selected_theme and selected_theme not in row["theme_values"]:
+            continue
+        if observation_filters and row["conclusion"] not in observation_filters:
+            continue
+        entry_filter_values = _entry_filter_labels(
+            live_label=row["live_entry_timing_label"],
+            daily_label=row["daily_entry_timing_label"],
+            is_open=is_open,
+            quote_is_stale=market_data.is_etf_quote_stale(
+                row["quote"].quote_time if row["quote"] is not None else None,
+                now,
+            ),
+        )
+        if entry_filters and not (entry_filters & entry_filter_values):
+            continue
+        if tracking_filters and not (tracking_filters & row["tracking_states"]):
+            continue
+        filtered_rows.append(row)
+    for index, row in enumerate(filtered_rows, start=1):
+        row["filtered_position"] = index
+
+    selected = filtered_rows[safe_offset : safe_offset + safe_limit]
     return EtfLiveRankingListOut(
         market_status=state.status,
         market_session=state.session,
@@ -412,17 +464,22 @@ async def live_rankings(
         quote_refresh_seconds=WATCH_REFRESH_SECONDS if is_open else 0,
         page_poll_seconds=PAGE_POLL_SECONDS if is_open else 0,
         watched_count=len(watchlist.items),
-        total=len(ranked_rows),
+        total=len(filtered_rows),
         signal_as_of_date=watchlist.signal_as_of_date,
         signal_status=watchlist.signal_status,
         latest_run=market_data.etf_watch_run_out(latest_run) if latest_run is not None else None,
         snapshot=snapshot_metadata(source_snapshot),
+        live_scope_hash=live_scope_hash,
         items=[
             EtfLiveRankingItemOut(
                 etf_code=row["etf_code"],
                 etf_name=row["etf_name"],
-                base_rank=row["base_rank"],
-                live_rank=row["live_rank"],
+                base_rank=row["base_global_rank"],
+                live_rank=row["live_scope_rank"],
+                base_global_rank=row["base_global_rank"],
+                live_scope_rank=row["live_scope_rank"],
+                filtered_position=row["filtered_position"],
+                rank_scope=row["rank_scope"],
                 rank_change=row["rank_change"],
                 sources=row["sources"],
                 conclusion=row["conclusion"],

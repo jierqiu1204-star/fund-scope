@@ -304,10 +304,15 @@ async def test_live_rankings_order_and_rank_change(client, app, monkeypatch) -> 
     assert body["watched_count"] == 3
     assert body["snapshot"]["snapshot_id"] == run_id
     assert body["snapshot"]["freshness_status"] in {"legacy", "unpublished", "unverified"}
+    assert body["live_scope_hash"]
     items = body["items"]
     assert [item["etf_code"] for item in items] == ["510002", "510001"]
     assert items[0]["live_rank"] == 1
     assert items[0]["base_rank"] == 3
+    assert items[0]["base_global_rank"] == 3
+    assert items[0]["live_scope_rank"] == 1
+    assert items[0]["filtered_position"] == 1
+    assert items[0]["rank_scope"] == "live_scope"
     assert items[0]["rank_change"] == 2
     assert items[0]["score_source"] == "intraday"
     assert items[0]["intraday_adjustment_score"] is not None
@@ -315,6 +320,9 @@ async def test_live_rankings_order_and_rank_change(client, app, monkeypatch) -> 
     assert items[0]["live_entry_timing_label"] == "健康回踩"
     assert items[1]["live_rank"] == 2
     assert items[1]["base_rank"] == 2
+    assert items[1]["base_global_rank"] == 2
+    assert items[1]["live_scope_rank"] == 2
+    assert items[1]["filtered_position"] == 2
     assert items[1]["rank_change"] == 0
     assert items[1]["live_entry_timing_label"] == "冲高别追"
 
@@ -475,6 +483,10 @@ async def test_live_rankings_search_keeps_global_rank_and_does_not_rank_incompar
     ranked_item = ranked_response.json()["items"][0]
     assert ranked_item["etf_code"] == "510001"
     assert ranked_item["live_rank"] == 2
+    assert ranked_item["base_global_rank"] == 2
+    assert ranked_item["live_scope_rank"] == 2
+    assert ranked_item["filtered_position"] == 1
+    assert ranked_item["rank_scope"] == "live_scope"
     assert ranked_item["rank_change"] == 0
 
     incomparable_response = await client.get("/api/etf-quotes/live-rankings?q=510000")
@@ -482,7 +494,65 @@ async def test_live_rankings_search_keeps_global_rank_and_does_not_rank_incompar
     incomparable_item = incomparable_response.json()["items"][0]
     assert incomparable_item["etf_code"] == "510000"
     assert incomparable_item["live_rank"] is None
+    assert incomparable_item["live_scope_rank"] is None
+    assert incomparable_item["filtered_position"] == 1
+    assert incomparable_item["rank_scope"] == "unranked"
     assert incomparable_item["rank_change"] is None
+
+
+@pytest.mark.asyncio
+async def test_live_rank_change_requires_matching_scope_and_score_version(client, app, monkeypatch) -> None:
+    run_id = await _seed_signal_run(app, count=2, total_scores=[80.0, 70.0])
+    now = datetime(2026, 6, 12, 16, 0, 0)
+    monkeypatch.setattr(
+        "app.services.intraday_etf.service.current_market_state",
+        lambda: MarketState("closed", "after_close", now.replace(tzinfo=ASIA_SHANGHAI)),
+    )
+    async with app.state.db.session() as session:
+        run = await session.get(ShortResearchSignalRun, run_id)
+        assert run is not None
+        run.score_version = "final_score_v2"
+        items = (
+            await session.scalars(select(ShortResearchSignalItem).where(ShortResearchSignalItem.run_id == run_id))
+        ).all()
+        for item in items:
+            item.metrics_json = {**dict(item.metrics_json or {}), "score_version": "final_score_v2"}
+        await session.commit()
+
+    comparable = await client.get("/api/etf-quotes/live-rankings?q=510000")
+    assert comparable.status_code == 200
+    assert comparable.json()["items"][0]["rank_change"] == 0
+
+    async with app.state.db.session() as session:
+        item = await session.scalar(
+            select(ShortResearchSignalItem).where(
+                ShortResearchSignalItem.run_id == run_id,
+                ShortResearchSignalItem.asset_code == "510000",
+            )
+        )
+        assert item is not None
+        item.metrics_json = {**dict(item.metrics_json or {}), "score_version": "other_score_version"}
+        await session.commit()
+
+    mismatched_version = await client.get("/api/etf-quotes/live-rankings?q=510000")
+    assert mismatched_version.status_code == 200
+    assert mismatched_version.json()["items"][0]["rank_change"] is None
+
+    async with app.state.db.session() as session:
+        item = await session.scalar(
+            select(ShortResearchSignalItem).where(
+                ShortResearchSignalItem.run_id == run_id,
+                ShortResearchSignalItem.asset_code == "510000",
+            )
+        )
+        assert item is not None
+        item.metrics_json = {**dict(item.metrics_json or {}), "score_version": "final_score_v2"}
+        session.add(_etf("159999", "Scope-only ETF"))
+        await session.commit()
+
+    mismatched_scope = await client.get("/api/etf-quotes/live-rankings?q=510000")
+    assert mismatched_scope.status_code == 200
+    assert mismatched_scope.json()["items"][0]["rank_change"] is None
 
 
 @pytest.mark.asyncio
@@ -573,6 +643,8 @@ async def test_live_rankings_filters_labels_before_pagination_and_keeps_daily_en
     assert high_body["total"] == 1
     assert high_body["items"][0]["etf_code"] == "510001"
     assert high_body["items"][0]["live_rank"] == 2
+    assert high_body["items"][0]["live_scope_rank"] == 2
+    assert high_body["items"][0]["filtered_position"] == 1
     assert high_body["items"][0]["rank_change"] == 0
 
     entry_response = await client.get(
@@ -582,8 +654,10 @@ async def test_live_rankings_filters_labels_before_pagination_and_keeps_daily_en
     entry_body = entry_response.json()
     assert entry_body["total"] == 1
     assert entry_body["items"][0]["etf_code"] == "510002"
-    assert entry_body["items"][0]["live_rank"] is None
-    assert entry_body["items"][0]["rank_change"] is None
+    assert entry_body["items"][0]["live_rank"] == 3
+    assert entry_body["items"][0]["live_scope_rank"] == 3
+    assert entry_body["items"][0]["filtered_position"] == 1
+    assert entry_body["items"][0]["rank_change"] == 0
     assert entry_body["items"][0]["live_entry_timing_label"] == "数据不足"
     assert entry_body["items"][0]["daily_entry_timing_label"] == "健康回踩"
 

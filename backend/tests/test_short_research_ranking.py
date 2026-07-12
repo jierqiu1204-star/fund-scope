@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 
 import pytest
@@ -401,4 +402,62 @@ def test_opportunity_sort_uses_final_decision_score_not_theme_heat() -> None:
         as_of_date=date(2026, 6, 30),
     )
 
-    assert _sort_key(safer_final, "opportunity") > _sort_key(hot_theme, "opportunity")
+    assert _sort_key(safer_final, "opportunity") < _sort_key(hot_theme, "opportunity")
+
+
+def test_sort_key_keeps_zero_and_places_missing_values_last() -> None:
+    base = _portfolio_asset()
+
+    def asset(code: str, *, metric: str, value: float | None, risk_score: float | None = None) -> ComputedAsset:
+        metrics = {**base.metrics, metric: value}
+        breakdown = {"risk": {"score": risk_score}} if risk_score is not None else {}
+        return replace(
+            base,
+            metadata=replace(base.metadata, code=code),
+            metrics=metrics,
+            score_breakdown=breakdown,
+        )
+
+    returns = [
+        asset("zero", metric="return_5d", value=0.0),
+        asset("negative", metric="return_5d", value=-0.01),
+        asset("missing", metric="return_5d", value=None),
+    ]
+    assert [item.metadata.code for item in sorted(returns, key=lambda item: _sort_key(item, "return_5d"))] == [
+        "zero",
+        "negative",
+        "missing",
+    ]
+
+    drawdowns = [
+        asset("zero", metric="max_drawdown_60d", value=0.0),
+        asset("drawdown", metric="max_drawdown_60d", value=-0.10),
+        asset("missing", metric="max_drawdown_60d", value=None),
+    ]
+    assert [item.metadata.code for item in sorted(drawdowns, key=lambda item: _sort_key(item, "drawdown_low"))] == [
+        "zero",
+        "drawdown",
+        "missing",
+    ]
+
+    liquidity = [
+        asset("zero", metric="average_turnover_20d", value=0.0),
+        asset("positive", metric="average_turnover_20d", value=1.0),
+        asset("missing", metric="average_turnover_20d", value=None),
+    ]
+    assert [item.metadata.code for item in sorted(liquidity, key=lambda item: _sort_key(item, "liquidity"))] == [
+        "positive",
+        "zero",
+        "missing",
+    ]
+
+    risks = [
+        asset("zero", metric="return_5d", value=0.0, risk_score=0.0),
+        asset("positive", metric="return_5d", value=0.0, risk_score=10.0),
+        asset("missing", metric="return_5d", value=0.0),
+    ]
+    assert [item.metadata.code for item in sorted(risks, key=lambda item: _sort_key(item, "risk_low"))] == [
+        "positive",
+        "zero",
+        "missing",
+    ]
