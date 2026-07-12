@@ -11,11 +11,14 @@ from app.models.entities import (
     EtfExitHyperoptItem,
     EtfExitHyperoptRun,
     EtfLabelReplaySample,
+    EtfOptimizedAllocationItem,
+    EtfOptimizedAllocationSnapshot,
     EtfPriceHistory,
     FundNavHistory,
     NotificationLog,
     ShortResearchSignalItem,
     ShortResearchSignalRun,
+    TrackedPosition,
     TrackedPositionAlert,
     TradableEtf,
     utcnow,
@@ -1005,6 +1008,16 @@ async def test_short_research_asset_detail_uses_cached_etf_signal_scores(client,
 
 
 @pytest.mark.asyncio
+async def test_one_code_detail_preserves_persisted_global_rank(client, app) -> None:
+    await _seed_opportunity_signal_run(app)
+
+    response = await client.get("/api/short-research/assets/etf/159002")
+
+    assert response.status_code == 200
+    assert response.json()["asset"]["rank"] == 2
+
+
+@pytest.mark.asyncio
 async def test_short_research_assets_hide_unavailable_catalyst_scores(client, app) -> None:
     await _seed_opportunity_signal_run(app)
 
@@ -1397,6 +1410,69 @@ async def test_score_bucket_validation_requires_current_full_ranking_contract(cl
     status_body = status.json()
     assert status_body["score_bucket_validation"]["validation_mode"] == "score_bucket_replay"
     assert status_body["score_bucket_validation_generated_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_canonical_assets_ignore_later_partial_run(client, app) -> None:
+    seeded = await _seed_score_bucket_signal_runs(app)
+
+    response = await client.get("/api/short-research/assets?asset_type=etf&universe=all&limit=100")
+
+    assert response.status_code == 200
+    codes = {item["code"] for item in response.json()["items"]}
+    assert seeded["available_codes"][0] in codes
+    assert seeded["partial_only_code"] not in codes
+    assert seeded["mismatched_contract_code"] not in codes
+
+
+@pytest.mark.asyncio
+async def test_stale_full_snapshot_is_not_returned_as_current_cache(client, app) -> None:
+    seeded = await _seed_score_bucket_signal_runs(app)
+    async with app.state.db.session() as session:
+        for run_id in (seeded["partial_run_id"], seeded["mismatched_contract_run_id"]):
+            run = await session.get(ShortResearchSignalRun, run_id)
+            assert run is not None
+            run.status = "failed"
+        await session.commit()
+
+    response = await client.get(f"/api/short-research/assets/etf/{seeded['available_codes'][0]}")
+
+    assert response.status_code == 503
+    detail = str(response.json().get("detail", "")).lower()
+    assert "stale" in detail or "等待" in detail
+
+
+@pytest.mark.asyncio
+async def test_every_validation_mode_has_no_live_domain_side_effects(client, app) -> None:
+    await _seed_score_bucket_signal_runs(app)
+    protected_models = (
+        ShortResearchSignalRun,
+        ShortResearchSignalItem,
+        EtfOptimizedAllocationSnapshot,
+        EtfOptimizedAllocationItem,
+        TrackedPosition,
+        TrackedPositionAlert,
+        NotificationLog,
+    )
+
+    async def counts() -> tuple[int, ...]:
+        async with app.state.db.session() as session:
+            values = []
+            for model in protected_models:
+                count = await session.scalar(select(func.count()).select_from(model))
+                values.append(int(count or 0))
+            return tuple(values)
+
+    validation_requests = (
+        "/api/short-research/validation/run?validation_mode=forward_live",
+        "/api/short-research/validation/run?validation_mode=historical_replay&days=30&max_assets=1",
+        "/api/short-research/validation/score-buckets/run?days=180",
+    )
+    for path in validation_requests:
+        before = await counts()
+        response = await client.post(path)
+        assert response.status_code == 200
+        assert await counts() == before
 
 
 @pytest.mark.asyncio

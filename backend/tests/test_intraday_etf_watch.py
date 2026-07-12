@@ -315,6 +315,58 @@ async def test_live_rankings_order_and_rank_change(client, app, monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_live_rankings_search_keeps_global_rank_and_does_not_rank_incomparable_item(
+    client, app, monkeypatch
+) -> None:
+    await _seed_signal_run(app, count=3, total_scores=[60.0, 70.0, 80.0])
+    now = datetime.now().replace(microsecond=0)
+    monkeypatch.setattr(
+        "app.services.intraday_etf.service.current_market_state",
+        lambda: MarketState("open", "morning", now.replace(tzinfo=ASIA_SHANGHAI)),
+    )
+    async with app.state.db.session() as session:
+        session.add_all(
+            [
+                EtfIntradayQuote(
+                    etf_code="510001",
+                    quote_time=now,
+                    trade_date=now.date(),
+                    latest_price=1.2,
+                    change_percent=3.0,
+                    source="test",
+                    freshness_status="fresh",
+                    raw_json={},
+                ),
+                EtfIntradayQuote(
+                    etf_code="510002",
+                    quote_time=now,
+                    trade_date=now.date(),
+                    latest_price=1.4,
+                    change_percent=-1.0,
+                    source="test",
+                    freshness_status="fresh",
+                    raw_json={},
+                ),
+            ]
+        )
+        await session.commit()
+
+    ranked_response = await client.get("/api/etf-quotes/live-rankings?q=510001")
+    assert ranked_response.status_code == 200
+    ranked_item = ranked_response.json()["items"][0]
+    assert ranked_item["etf_code"] == "510001"
+    assert ranked_item["live_rank"] == 2
+    assert ranked_item["rank_change"] == 0
+
+    incomparable_response = await client.get("/api/etf-quotes/live-rankings?q=510000")
+    assert incomparable_response.status_code == 200
+    incomparable_item = incomparable_response.json()["items"][0]
+    assert incomparable_item["etf_code"] == "510000"
+    assert incomparable_item["live_rank"] is None
+    assert incomparable_item["rank_change"] is None
+
+
+@pytest.mark.asyncio
 async def test_live_rankings_keeps_intraday_entry_timing_when_daily_cache_is_high_chase(client, app, monkeypatch) -> None:
     run_id = await _seed_signal_run(app, count=1, conclusions=[CONCLUSION_HIGH_WATCH], total_scores=[94.6])
     now = datetime.now().replace(microsecond=0)
@@ -401,6 +453,8 @@ async def test_live_rankings_filters_labels_before_pagination_and_keeps_daily_en
     high_body = high_response.json()
     assert high_body["total"] == 1
     assert high_body["items"][0]["etf_code"] == "510001"
+    assert high_body["items"][0]["live_rank"] == 2
+    assert high_body["items"][0]["rank_change"] == 0
 
     entry_response = await client.get(
         "/api/etf-quotes/live-rankings?limit=1&entry_labels=健康回踩"
@@ -409,6 +463,8 @@ async def test_live_rankings_filters_labels_before_pagination_and_keeps_daily_en
     entry_body = entry_response.json()
     assert entry_body["total"] == 1
     assert entry_body["items"][0]["etf_code"] == "510002"
+    assert entry_body["items"][0]["live_rank"] is None
+    assert entry_body["items"][0]["rank_change"] is None
     assert entry_body["items"][0]["live_entry_timing_label"] == "数据不足"
     assert entry_body["items"][0]["daily_entry_timing_label"] == "健康回踩"
 

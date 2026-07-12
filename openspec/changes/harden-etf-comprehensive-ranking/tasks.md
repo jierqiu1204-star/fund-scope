@@ -6,7 +6,7 @@
 - [x] 1.4 Freeze the `final_score_v3` component DAG/manifest, compatibility aliases, stale/unavailable caps, homogeneous asset buckets, anti-double-count lineage, and current score-version selector in one reviewed configuration contract.
 - [x] 1.5 Convert the failing opportunity-order test into `test_comprehensive_sort_uses_final_decision_score_not_theme_heat`, preserving theme/catalyst evidence assertions.
 - [x] 1.6 Convert the failing score-bucket test into `test_score_bucket_validation_requires_current_full_ranking_contract`, covering legacy score, later partial run, contract mismatch, missing score, and non-finite score.
-- [ ] 1.7 Add failing regression tests for partial-run canonical pollution, stale canonical cache, one-code detail rank, filtered live rank change, missing-hash classification, post-enrichment caps, negative evidence, and validation side effects before changing production behavior.
+- [x] 1.7 Add failing regression tests for partial-run canonical pollution, stale canonical cache, one-code detail rank, filtered live rank change, missing-hash classification, post-enrichment caps, negative evidence, and validation side effects before changing production behavior.
 
 ## 2. Add Snapshot, Price-Basis, And Universe Schema
 

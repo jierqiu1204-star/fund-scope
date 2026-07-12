@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import date
 
+import pytest
+
 from app.defaults.short_research import ASSET_TYPE_ETF, ShortResearchAsset
 from app.models.entities import ShortResearchSignalItem
 from app.services.short_research.ranking import (
@@ -119,6 +121,69 @@ def test_label_evidence_adjustment_is_bounded() -> None:
     assert boosted["final_score"] > insufficient["final_score"]
     assert weakened["final_score"] < insufficient["final_score"]
     assert boosted["components"]["label_evidence"]["sample_count"] == 80
+
+
+def test_stale_cap_is_reapplied_after_label_evidence_enrichment() -> None:
+    stale = build_final_score_breakdowns(
+        [_record("588003", return_20d=0.20, drawdown=-0.02, volatility=0.01, turnover=500_000_000, risk_flags=["数据滞后"])]
+    )["588003"]
+
+    enriched = apply_label_evidence(stale, confidence="sufficient", sample_count=100, median_return=0.08, win_rate=0.9)
+
+    assert enriched["final_score"] <= 55
+
+
+def test_unavailable_cap_is_reapplied_after_label_evidence_enrichment() -> None:
+    unavailable = build_final_score_breakdowns(
+        [_record("588004", return_20d=0.20, drawdown=-0.02, volatility=0.01, turnover=500_000_000, risk_flags=["数据不足"])]
+    )["588004"]
+
+    enriched = apply_label_evidence(unavailable, confidence="sufficient", sample_count=100, median_return=0.08, win_rate=0.9)
+
+    assert enriched["final_score"] <= 45
+
+
+@pytest.mark.parametrize(
+    ("confidence", "median_return", "win_rate"),
+    [
+        ("sufficient", -0.02, 0.3),
+        ("limited", 0.0, 0.5),
+        ("recent_weakening", -0.01, 0.42),
+        ("sufficient", 0.08, 0.9),
+    ],
+    ids=["negative", "inconclusive", "stale", "high-sample"],
+)
+def test_label_evidence_is_display_only_and_cannot_change_current_score_or_rank(
+    confidence: str,
+    median_return: float,
+    win_rate: float,
+) -> None:
+    evidence_candidate = {
+        "final_score": 68.8,
+        "components": {"base": {"score": 70.0}, "label_evidence": {"score": 60.0}},
+        "weights": {"base": 0.88, "label_evidence": 0.12},
+    }
+    higher_candidate = {"final_score": 69.0}
+    baseline_rank = ["higher", "evidence"]
+
+    enriched = apply_label_evidence(
+        evidence_candidate,
+        confidence=confidence,
+        sample_count=100,
+        median_return=median_return,
+        win_rate=win_rate,
+    )
+    enriched_rank = [
+        code
+        for code, _ in sorted(
+            (("higher", higher_candidate), ("evidence", enriched)),
+            key=lambda item: item[1]["final_score"],
+            reverse=True,
+        )
+    ]
+
+    assert enriched["final_score"] == evidence_candidate["final_score"]
+    assert enriched_rank == baseline_rank
 
 
 def test_legacy_cached_signal_is_marked_as_old_scoring() -> None:

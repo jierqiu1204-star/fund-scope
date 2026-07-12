@@ -59,6 +59,28 @@ def test_evidence_status_distinguishes_waiting_legacy_mismatch_and_verified() ->
     )
 
 
+def test_evidence_without_contract_hash_is_always_legacy() -> None:
+    contract = build_research_signal_contract(
+        asset_type="etf",
+        asset_code="513520",
+        signal_run_id=1,
+        signal_date=date(2026, 6, 29),
+        score=88.0,
+        observation_label="短线观察",
+        entry_timing_label="健康回踩",
+        data_reliability="verified",
+        source_data_time="2026-06-29",
+    )
+
+    summary = build_evidence_summary(
+        current_contract=contract,
+        validation_evidence={"sample_count": 30, "score": 88.0, "rule_version": contract["rule_version"]},
+    )
+
+    assert summary["evidence_status"] == EVIDENCE_STATUS_LEGACY
+    assert summary["contract_hash"] is None
+
+
 def test_empty_validation_with_current_contract_is_waiting_not_insufficient() -> None:
     contract = build_research_signal_contract(
         asset_type="etf",
