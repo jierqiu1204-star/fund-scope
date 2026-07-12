@@ -65,7 +65,7 @@
 - [ ] 6.3 Compute all declared score-bearing base, cross-sectional, sector, liquidity/structure, premium, theme, and factor inputs before one final-score calculation.
 - [ ] 6.4 Produce and persist `distance_to_ma20_pct`, required 20/60-day turnover references, eligible premium/discount, component source dates, reliability, and per-metric peer counts from the production metric path.
 - [ ] 6.5 Make missing or non-finite required inputs unavailable; remove `or 0`, neutral-50, silent weight-renormalization, and fixture-only producer behavior from score-bearing paths.
-- [ ] 6.6 Require 21 eligible closes for a twenty-return volatility metric and expose every effective window/sample count.
+- [x] 6.6 Require 21 eligible closes for a twenty-return volatility metric and expose every effective window/sample count.
 - [ ] 6.7 Deduplicate or cluster-weight ETFs sharing an underlying index before cross-sectional percentiles and sector breadth while preserving individual displayed items.
 - [ ] 6.8 Calculate percentiles inside declared homogeneous ETF asset buckets, persist bucket identity, and prevent incompatible profile versions from direct comparison.
 - [ ] 6.9 Keep unimplemented flow, fundamental, valuation, macro, or other factor groups explanatory/unavailable until a future manifest activates a point-in-time producer.

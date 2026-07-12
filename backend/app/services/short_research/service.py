@@ -976,19 +976,26 @@ def _score_metrics(metadata: ShortResearchAsset, series: list[PricePoint], as_of
     usable_days = len(series)
     latest_date = series[-1].point_date if series else None
     latest_value = series[-1].value if series else None
-    last_20 = series[-20:]
+    volatility_points = series[-21:]
     last_60 = series[-60:]
-    returns_20 = _daily_returns(last_20)
+    returns_20 = _daily_returns(volatility_points)
     return_5d = _window_return(series, 5)
     return_10d = _window_return(series, 10)
     return_20d = _window_return(series, 20)
     return_60d = _window_return(series, 60)
-    volatility_20d = pstdev(returns_20) if len(returns_20) > 1 else None
+    volatility_20d = pstdev(returns_20) if len(returns_20) == 20 else None
     max_drawdown_60d = _max_drawdown(last_60)
     average_turnover_20d = None
+    average_turnover_60d = None
+    turnover_20_count = 0
+    turnover_60_count = 0
     if metadata.asset_type == ASSET_TYPE_ETF:
-        turnovers = [item.turnover for item in last_20 if item.turnover is not None]
-        average_turnover_20d = mean(turnovers) if turnovers else None
+        turnovers_20d = [item.turnover for item in series[-20:] if item.turnover is not None]
+        turnovers_60d = [item.turnover for item in last_60 if item.turnover is not None]
+        turnover_20_count = len(turnovers_20d)
+        turnover_60_count = len(turnovers_60d)
+        average_turnover_20d = mean(turnovers_20d) if turnover_20_count == 20 else None
+        average_turnover_60d = mean(turnovers_60d) if turnover_60_count == 60 else None
     theme_profile = classify_etf_theme(
         code=metadata.code,
         name=metadata.name,
@@ -1099,6 +1106,22 @@ def _score_metrics(metadata: ShortResearchAsset, series: list[PricePoint], as_of
         "volatility_20d": volatility_20d,
         "max_drawdown_60d": max_drawdown_60d,
         "average_turnover_20d": average_turnover_20d,
+        "average_turnover_60d": average_turnover_60d,
+        "effective_windows": {
+            "return_5d": {"close_count": min(len(series), 6), "required_close_count": 6},
+            "return_10d": {"close_count": min(len(series), 11), "required_close_count": 11},
+            "return_20d": {"close_count": min(len(series), 21), "required_close_count": 21},
+            "return_60d": {"close_count": min(len(series), 61), "required_close_count": 61},
+            "volatility_20d": {
+                "close_count": len(volatility_points),
+                "return_count": len(returns_20),
+                "required_close_count": 21,
+                "required_return_count": 20,
+            },
+            "max_drawdown_60d": {"close_count": len(last_60), "required_close_count": 60},
+            "average_turnover_20d": {"observation_count": turnover_20_count, "required_count": 20},
+            "average_turnover_60d": {"observation_count": turnover_60_count, "required_count": 60},
+        },
         "theme_profile": theme_profile.as_dict(),
         "dynamic_threshold_context": dynamic_context,
         "trend_score": trend_score,

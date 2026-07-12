@@ -67,6 +67,12 @@ async def _seed_short_research_history(app) -> None:
                     volume=2_000_000 + offset * 5000,
                     turnover=220_000_000 + offset * 1_000_000,
                     pct_change=0.0 if offset == 0 else 0.012 / (1.0 + (offset - 1) * 0.012) * 100,
+                    research_adjusted_value=etf_close,
+                    research_price_basis="total_return_adjusted",
+                    data_provider="fixture",
+                    provider_version="fixture-v1",
+                    adjustment_version="fixture-v1",
+                    decision_eligible=True,
                 )
             )
         await session.commit()
