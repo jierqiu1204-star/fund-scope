@@ -133,6 +133,7 @@ def parse_ranking_manifest(contract: Mapping[str, Any]) -> RankingManifest:
         raise ValueError("ranking contract components must be a list")
     missing_data_behavior = str(calculation.get("missing_score_bearing_input") or "score_unavailable")
     components: dict[str, RankingComponent] = {}
+    score_bearing_primitives: dict[str, str] = {}
     for raw_component in raw_components:
         if not isinstance(raw_component, Mapping):
             raise ValueError("ranking component must be an object")
@@ -141,7 +142,7 @@ def parse_ranking_manifest(contract: Mapping[str, Any]) -> RankingManifest:
         primitive_lineage = tuple(str(value) for value in raw_component.get("primitive_lineage") or [])
         if not component_id or component_id in components or not required_inputs:
             raise ValueError("ranking component id and required inputs must be unique and non-empty")
-        components[component_id] = RankingComponent(
+        component = RankingComponent(
             component_id=component_id,
             weight=float(raw_component.get("weight") or 0.0),
             score_bearing=bool(raw_component.get("score_bearing")),
@@ -150,6 +151,19 @@ def parse_ranking_manifest(contract: Mapping[str, Any]) -> RankingManifest:
             units={key: _PRIMITIVE_UNITS.get(key, "unknown") for key in required_inputs},
             missing_data_behavior=missing_data_behavior,
         )
+        if component.score_bearing:
+            for primitive in component.primitive_lineage:
+                prior_component = score_bearing_primitives.get(primitive)
+                if prior_component is not None:
+                    raise ValueError(
+                        f"double-counted primitive {primitive} in {prior_component} and {component.component_id}"
+                    )
+                score_bearing_primitives[primitive] = component.component_id
+        components[component_id] = component
+    component_ids = set(components)
+    composite_primitives = component_ids.intersection(score_bearing_primitives)
+    if composite_primitives:
+        raise ValueError(f"score-bearing component cannot be weighted as a primitive: {sorted(composite_primitives)}")
     dag = calculation.get("dag")
     if not isinstance(dag, Mapping):
         raise ValueError("ranking contract DAG must be an object")

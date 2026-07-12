@@ -4,6 +4,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from app.services.short_research.ranking_contract import (
     RankingInput,
     build_ranking_contract,
@@ -120,3 +122,18 @@ def test_ranking_input_fails_closed_when_a_required_v3_input_is_missing() -> Non
     validation = manifest.validate_input(ranking_input)
     assert validation.score_eligible is False
     assert validation.missing_by_component == {"structure_liquidity": ("average_turnover_60d",)}
+
+
+def test_ranking_manifest_rejects_double_counted_score_bearing_primitive() -> None:
+    contract_path = (
+        Path(__file__).resolve().parents[2]
+        / "openspec"
+        / "changes"
+        / "harden-etf-comprehensive-ranking"
+        / "final-score-v3-contract.json"
+    )
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    contract["calculation"]["components"][1]["primitive_lineage"].append("return_5d")
+
+    with pytest.raises(ValueError, match="double-counted primitive"):
+        parse_ranking_manifest(contract)

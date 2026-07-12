@@ -61,7 +61,7 @@
 ## 6. Build The Single-Pass `final_score_v3` Pipeline
 
 - [x] 6.1 Introduce a typed `RankingInput` and versioned component DAG/manifest distinguishing score-bearing from explanatory components, primitive-factor lineage, required fields, units, asset buckets, weights, and missing-data behavior.
-- [ ] 6.2 Reject component manifests that double-count one primitive factor through both a composite component and a separately weighted child, with DAG validation tests.
+- [x] 6.2 Reject component manifests that double-count one primitive factor through both a composite component and a separately weighted child, with DAG validation tests.
 - [ ] 6.3 Compute all declared score-bearing base, cross-sectional, sector, liquidity/structure, premium, theme, and factor inputs before one final-score calculation.
 - [ ] 6.4 Produce and persist `distance_to_ma20_pct`, required 20/60-day turnover references, eligible premium/discount, component source dates, reliability, and per-metric peer counts from the production metric path.
 - [ ] 6.5 Make missing or non-finite required inputs unavailable; remove `or 0`, neutral-50, silent weight-renormalization, and fixture-only producer behavior from score-bearing paths.
