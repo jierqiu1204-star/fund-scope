@@ -646,6 +646,8 @@ async def _seed_score_bucket_signal_runs(app) -> dict[str, Any]:
             "missing_score_code": missing_score_code,
             "non_finite_score_code": non_finite_score_code,
             "old_only_code": old_only_code,
+            "partial_only_code": partial_only_code,
+            "mismatched_contract_code": mismatched_contract_code,
         }
 
 
