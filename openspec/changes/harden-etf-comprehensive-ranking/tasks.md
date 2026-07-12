@@ -118,18 +118,18 @@
 
 ## 10. Fix Workbench State, Privacy, And Operational Behavior
 
-- [ ] 10.1 Extend frontend types and query parsing for snapshot identity, freshness, limitations, explicit rank fields, rank scope, decision eligibility, market status, polling interval, and filtered totals while preserving legacy fields.
-- [ ] 10.2 Extract small pure helpers for ranking parameters, effective live status, rank presentation, view state, pagination clamp, count scope, and Asia/Shanghai calendar values without restructuring unrelated page layout.
-- [ ] 10.3 Display global and filtered rank separately and consume only comparable server rank-change fields in both desktop and mobile views.
-- [ ] 10.4 Derive quote/session status from the applicable live-list or selected-ETF response so the default comprehensive page cannot show open data as closed or zero watched items.
-- [ ] 10.5 Refetch all ETF quote queries at open, lunch, afternoon reopen, close, and next-session boundaries regardless of the previous response and use server polling intervals while open.
-- [ ] 10.6 Distinguish loading, ready, filtered-empty, no-snapshot, stale, unavailable, and request-error states and ensure an error never renders as ordinary no-results.
-- [ ] 10.7 Clamp invalid offsets when totals shrink, retain previous-page navigation whenever offset is positive, and label current-page versus full/filtered summary counts.
-- [ ] 10.8 Request or lazily fetch data-health details whenever the issue panel depends on them and keep fund and ETF issue-count scopes separate.
-- [ ] 10.9 Add stable user identity to private query keys, cancel/remove private queries on logout/account change, and pass React Query AbortSignal through Axios query functions.
-- [ ] 10.10 Disable overlapping sync, signal, and advisor actions for the same scope and bind advisor requests to the completed source snapshot id.
-- [ ] 10.11 Replace UTC date slicing and browser-dependent `YYYY-MM-DD` parsing with Asia/Shanghai calendar helpers and test 00:00-08:00 and negative-browser-offset cases.
-- [ ] 10.12 Add frontend unit/component tests for filters, ranks, market boundaries, stale/error/empty states, pagination shrink, user A to B cache isolation, in-flight cancellation, task mutual exclusion, count scope, and Shanghai dates.
+- [x] 10.1 Extend frontend types and query parsing for snapshot identity, freshness, limitations, explicit rank fields, rank scope, decision eligibility, market status, polling interval, and filtered totals while preserving legacy fields.
+- [x] 10.2 Extract small pure helpers for ranking parameters, effective live status, rank presentation, view state, pagination clamp, count scope, and Asia/Shanghai calendar values without restructuring unrelated page layout.
+- [x] 10.3 Display global and filtered rank separately and consume only comparable server rank-change fields in both desktop and mobile views.
+- [x] 10.4 Derive quote/session status from the applicable live-list or selected-ETF response so the default comprehensive page cannot show open data as closed or zero watched items.
+- [x] 10.5 Refetch all ETF quote queries at open, lunch, afternoon reopen, close, and next-session boundaries regardless of the previous response and use server polling intervals while open.
+- [x] 10.6 Distinguish loading, ready, filtered-empty, no-snapshot, stale, unavailable, and request-error states and ensure an error never renders as ordinary no-results.
+- [x] 10.7 Clamp invalid offsets when totals shrink, retain previous-page navigation whenever offset is positive, and label current-page versus full/filtered summary counts.
+- [x] 10.8 Request or lazily fetch data-health details whenever the issue panel depends on them and keep fund and ETF issue-count scopes separate.
+- [x] 10.9 Add stable user identity to private query keys, cancel/remove private queries on logout/account change, and pass React Query AbortSignal through Axios query functions.
+- [x] 10.10 Disable overlapping sync, signal, and advisor actions for the same scope and bind advisor requests to the completed source snapshot id.
+- [x] 10.11 Replace UTC date slicing and browser-dependent `YYYY-MM-DD` parsing with Asia/Shanghai calendar helpers and test 00:00-08:00 and negative-browser-offset cases.
+- [x] 10.12 Add frontend unit/component tests for filters, ranks, market boundaries, stale/error/empty states, pagination shrink, user A to B cache isolation, in-flight cancellation, task mutual exclusion, count scope, and Shanghai dates.
 
 ## 11. Migrate, Shadow, Publish, And Recompute
 

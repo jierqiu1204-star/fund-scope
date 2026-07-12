@@ -1356,6 +1356,7 @@ function AssetPaginationBar({
   offset,
   visibleCount,
   isFetching,
+  scopeLabel,
   onPrevious,
   onNext
 }: {
@@ -1363,6 +1364,7 @@ function AssetPaginationBar({
   offset: number;
   visibleCount: number;
   isFetching: boolean;
+  scopeLabel: string;
   onPrevious: () => void;
   onNext: () => void;
 }) {
@@ -1376,7 +1378,7 @@ function AssetPaginationBar({
   return (
     <div className="flex flex-col gap-3 rounded-[8px] border border-border bg-white px-3 py-2 text-sm text-ink/65 md:flex-row md:items-center md:justify-between">
       <span>
-        当前显示 {start} - {end} / {total} 只
+        {scopeLabel}：当前页 {start} - {end} / {total} 只
       </span>
       <div className="flex gap-2">
         <button
@@ -1502,7 +1504,8 @@ function ShortTermClient() {
 
   const status = useQuery({
     queryKey: ["short-research", "status"],
-    queryFn: async ({ signal }) => (await api.get<ShortResearchStatus>("/api/short-research/status", { signal })).data
+    queryFn: async ({ signal }) =>
+      (await api.get<ShortResearchStatus>("/api/short-research/status?include_health=true", { signal })).data
   });
 
   const latestCompletedSignal = useQuery({
@@ -1650,6 +1653,8 @@ function ShortTermClient() {
     return map;
   }, [activeTracked]);
   const activeLabelFilterCount = labelFilters.observation.length + labelFilters.entry.length + labelFilters.tracking.length;
+  const assetCountScope =
+    theme !== "all" || Boolean(keyword.trim()) || activeLabelFilterCount > 0 ? "当前筛选结果" : "当前完整范围";
   const showLabelFilterDetails = labelFilterExpanded || activeLabelFilterCount > 0;
   const selectedLabelChips = useMemo(
     () =>
@@ -2563,6 +2568,7 @@ function ShortTermClient() {
             offset={assetOffset}
             visibleCount={visibleAssets.length}
             isFetching={assets.isFetching}
+            scopeLabel={assetCountScope}
             onPrevious={goToPreviousAssetPage}
             onNext={goToNextAssetPage}
           />
@@ -2757,6 +2763,7 @@ function ShortTermClient() {
             offset={assetOffset}
             visibleCount={visibleAssets.length}
             isFetching={assets.isFetching}
+            scopeLabel={assetCountScope}
             onPrevious={goToPreviousAssetPage}
             onNext={goToNextAssetPage}
           />
@@ -3754,6 +3761,7 @@ function ShortTermClient() {
                 offset={assetOffset}
                 visibleCount={visibleAssets.length}
                 isFetching={assets.isFetching}
+                scopeLabel={assetCountScope}
                 onPrevious={goToPreviousAssetPage}
                 onNext={goToNextAssetPage}
               />
@@ -3901,6 +3909,7 @@ function ShortTermClient() {
               offset={assetOffset}
               visibleCount={visibleAssets.length}
               isFetching={assets.isFetching}
+              scopeLabel={assetCountScope}
               onPrevious={goToPreviousAssetPage}
               onNext={goToNextAssetPage}
             />

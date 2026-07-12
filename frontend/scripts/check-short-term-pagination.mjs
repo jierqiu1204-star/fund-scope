@@ -23,6 +23,38 @@ const checks = [
   {
     name: "renders pagination controls above and below the list",
     pass: (source.match(/<AssetPaginationBar/g) ?? []).length >= 2
+  },
+  {
+    name: "clamps offset when result totals shrink",
+    pass: source.includes("lastValidOffset") && source.includes("setAssetOffset(lastValidOffset)")
+  },
+  {
+    name: "labels pagination count scope",
+    pass: source.includes("scopeLabel={assetCountScope}") && source.includes("当前页 {start} - {end}")
+  },
+  {
+    name: "loads health detail for the issue panel",
+    pass: source.includes("/api/short-research/status?include_health=true")
+  },
+  {
+    name: "keys private tracking data by stable user identity",
+    pass: source.includes('["tracked-positions", user?.id ?? "anonymous"]')
+  },
+  {
+    name: "uses server polling intervals and next boundary hints",
+    pass: source.includes("data.next_poll_seconds") && source.includes("data.page_poll_seconds")
+  },
+  {
+    name: "passes React Query abort signals to list requests",
+    pass: source.includes("api.get<ShortResearchAssetList>") && source.includes("{ signal }")
+  },
+  {
+    name: "uses Shanghai calendar values for editable dates",
+    pass: source.includes("shanghaiClockParts") && source.includes("timeZone: \"Asia/Shanghai\"")
+  },
+  {
+    name: "prevents overlapping research actions",
+    pass: source.includes("const isResearchTaskPending") && source.includes("source_signal_run_id: advisorSourceRunId")
   }
 ];
 
