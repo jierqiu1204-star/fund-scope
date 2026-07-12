@@ -25,6 +25,7 @@ from app.schemas.short_research import (
     EtfPortfolioBacktestDetailOut,
     EtfPortfolioBacktestListOut,
     EtfPortfolioBacktestRequest,
+    EtfRankingSnapshotMetadataOut,
     EtfSignalValidationItemOut,
     EtfSignalValidationRunOut,
     EtfStrategyComparisonOut,
@@ -392,7 +393,7 @@ async def _validation_run_out(session: AsyncSession, run: EtfSignalValidationRun
         price_basis=run.price_basis,
         execution_model=run.execution_model,
         data_cutoff=run.data_cutoff,
-        source_ranking_snapshot=snapshot_metadata(source_snapshot),
+        source_ranking_snapshot=EtfRankingSnapshotMetadataOut.model_validate(snapshot_metadata(source_snapshot)),
         summary=dict(run.summary_json or {}),
         created_at=run.created_at,
         items=[
@@ -512,7 +513,11 @@ async def list_short_research_assets(
         if run is None and theme is not None:
             run = await latest_signal_run(session, asset_type=asset_type)
         if run is None:
-            return ShortResearchAssetListOut(items=[], total=0, snapshot=snapshot_metadata(None))
+            return ShortResearchAssetListOut(
+                items=[],
+                total=0,
+                snapshot=EtfRankingSnapshotMetadataOut.model_validate(snapshot_metadata(None)),
+            )
         assets, total = await cached_signal_assets(
             session,
             run,
@@ -575,7 +580,7 @@ async def list_short_research_assets(
         generated_at=run.finished_at or run.started_at,
         as_of_date=run.as_of_date,
         theme_heat=theme_heat,
-        snapshot=snapshot_metadata(run),
+        snapshot=EtfRankingSnapshotMetadataOut.model_validate(snapshot_metadata(run)),
     )
 
 
@@ -597,7 +602,10 @@ async def run_etf_strategy_healthcheck_endpoint(
     _user: User = Depends(require_approved_user),
 ) -> dict[str, Any]:
     snapshot = await run_etf_strategy_healthcheck(session)
-    return await healthcheck_payload(session, snapshot)
+    result = await healthcheck_payload(session, snapshot)
+    if result is None:
+        raise HTTPException(status_code=500, detail="策略健康检查结果不可用")
+    return result
 
 
 @router.get("/etf-strategy-healthcheck/latest", response_model=EtfStrategyHealthcheckOut | None)
@@ -617,7 +625,10 @@ async def run_etf_optimized_allocation_endpoint(
     _user: User = Depends(require_approved_user),
 ) -> dict[str, Any]:
     snapshot = await run_etf_optimized_allocation(session)
-    return await optimized_allocation_payload(session, snapshot)
+    result = await optimized_allocation_payload(session, snapshot)
+    if result is None:
+        raise HTTPException(status_code=500, detail="ETF 优化配置结果不可用")
+    return result
 
 
 @router.get("/etf-optimized-allocation/latest", response_model=EtfOptimizedAllocationOut | None)
@@ -910,7 +921,7 @@ async def get_short_research_asset_detail(
             "return_60d": asset.metrics.get("return_60d"),
         },
         explanation_sections=sections,
-        snapshot=snapshot_metadata(run),
+        snapshot=EtfRankingSnapshotMetadataOut.model_validate(snapshot_metadata(run)),
     )
 
 

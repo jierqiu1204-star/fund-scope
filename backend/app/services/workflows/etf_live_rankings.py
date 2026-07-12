@@ -17,6 +17,7 @@ from app.models.entities import (
     ShortResearchSignalRun,
 )
 from app.schemas.etf_quotes import EtfLiveRankingItemOut, EtfLiveRankingListOut
+from app.schemas.short_research import EtfRankingSnapshotMetadataOut
 from app.services import market_data
 from app.services.intraday_etf import service as intraday_quotes
 from app.services.intraday_etf.service import (
@@ -127,9 +128,10 @@ def _eligible_intraday_base(
         return None, "日线基座覆盖率不足。"
     if snapshot.as_of_trade_date is None or snapshot.as_of_trade_date != quote_trade_date:
         return None, "日线基座不是当前交易日，盘中综合分不可用。"
-    if item is None or item.score_eligible is not True or not _is_finite_score(item.ranking_score):
+    score = item.ranking_score if item is not None else None
+    if item is None or item.score_eligible is not True or score is None or not _is_finite_score(score):
         return None, "日线基座缺少可用最终分。"
-    return float(item.ranking_score), None
+    return float(score), None
 
 
 def _volatility_price_adjustment(
@@ -239,8 +241,11 @@ def _quote_component_status(quote: Any, now: datetime) -> dict[str, dict[str, An
 
     bid = _float_or_none(quote.bid_price)
     ask = _float_or_none(quote.ask_price)
-    midpoint = (bid + ask) / 2 if bid is not None and ask is not None else None
-    spread_bps = ((ask - bid) / midpoint) * 10_000 if midpoint is not None and midpoint > 0 else None
+    spread_bps: float | None = None
+    if bid is not None and ask is not None:
+        midpoint = (bid + ask) / 2
+        if midpoint > 0:
+            spread_bps = ((ask - bid) / midpoint) * 10_000
     spread_available = consensus_eligible and _is_finite_score(spread_bps) and spread_bps is not None and spread_bps >= 0
     spread_adjustment = -1.0 if spread_available and spread_bps is not None and spread_bps > 50 else 0.0
     spread_status = _component_status(
@@ -289,7 +294,10 @@ async def _same_time_turnover_history(
     for row in rows:
         if _exchange_minute(row.quote_time) != target_minute or not _is_finite_score(row.turnover):
             continue
-        by_code_and_date[(row.etf_code, row.trade_date)] = float(row.turnover)
+        turnover = row.turnover
+        if turnover is None:
+            continue
+        by_code_and_date[(row.etf_code, row.trade_date)] = float(turnover)
     result: dict[str, list[float]] = {}
     for (code, _trade_date), turnover in by_code_and_date.items():
         result.setdefault(code, []).append(turnover)
@@ -419,7 +427,7 @@ async def live_rankings(
             signal_status=watchlist.signal_status,
             latest_run=market_data.etf_watch_run_out(latest_run) if latest_run is not None else None,
             items=[],
-            snapshot=snapshot_metadata(source_snapshot),
+            snapshot=EtfRankingSnapshotMetadataOut.model_validate(snapshot_metadata(source_snapshot)),
         )
 
     names = await market_data.etf_quote_name_map(session, watch_codes)
@@ -445,7 +453,7 @@ async def live_rankings(
         selected_theme = None
     states_by_code = (
         await tracking_states_by_code(session, user_id=user_id, as_of_date=source_snapshot.as_of_date)
-        if tracking_filters and source_snapshot is not None
+        if tracking_filters and user_id is not None and source_snapshot is not None
         else {}
     )
 
@@ -457,12 +465,12 @@ async def live_rankings(
         signal_metrics = dict(signal_item.metrics_json or {}) if signal_item is not None else {}
         signal_breakdown = dict(signal_item.score_breakdown_json or {}) if signal_item is not None else {}
         final_score_breakdown = signal_breakdown.get("final_score_v2")
-        score_version = (
-            (source_snapshot.score_version if source_snapshot is not None else None)
-            or signal_metrics.get("score_version")
+        item_score_version = (
+            signal_metrics.get("score_version")
             or signal_breakdown.get("score_version")
             or (final_score_breakdown.get("score_version") if isinstance(final_score_breakdown, dict) else None)
         )
+        score_version = item_score_version or (source_snapshot.score_version if source_snapshot is not None else None)
         base_global_rank = (
             signal_item.global_rank if signal_item is not None and signal_item.global_rank is not None else watch_item.rank
         )
@@ -565,6 +573,7 @@ async def live_rankings(
                 "intraday_adjustment_score": intraday_adjustment_score,
                 "score_source": score_source,
                 "score_version": str(score_version or "legacy") if signal_item is not None else None,
+                "item_score_version": str(item_score_version) if item_score_version is not None else None,
                 "score_breakdown": signal_breakdown,
                 "score_contribution_reasons": score_contribution_reasons,
                 "intraday_component_status": component_status,
@@ -612,6 +621,7 @@ async def live_rankings(
                 and row["live_scope_rank"] is not None
                 and base_scope_hash == live_scope_hash
                 and row["score_version"] == scope_score_version
+                and row["item_score_version"] == scope_score_version
             )
             else None
         )
@@ -654,7 +664,7 @@ async def live_rankings(
         signal_as_of_date=watchlist.signal_as_of_date,
         signal_status=watchlist.signal_status,
         latest_run=market_data.etf_watch_run_out(latest_run) if latest_run is not None else None,
-        snapshot=snapshot_metadata(source_snapshot),
+        snapshot=EtfRankingSnapshotMetadataOut.model_validate(snapshot_metadata(source_snapshot)),
         live_scope_hash=live_scope_hash,
         items=[
             EtfLiveRankingItemOut(

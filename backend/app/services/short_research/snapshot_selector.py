@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
-from typing import Literal
+from datetime import date, datetime
+from typing import Literal, TypedDict
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.models.entities import ShortResearchSignalItem, ShortResearchSignalRun
 
@@ -16,7 +17,19 @@ class CanonicalSnapshotSelection:
     run: ShortResearchSignalRun | None
 
 
-def snapshot_metadata(run: ShortResearchSignalRun | None) -> dict[str, object]:
+class SnapshotMetadata(TypedDict):
+    snapshot_id: int | None
+    score_version: str | None
+    ranking_contract_hash: str | None
+    scope_kind: str | None
+    as_of_trade_date: date | None
+    generated_at: datetime | None
+    coverage_ratio: float | None
+    freshness_status: str
+    limitations: list[str]
+
+
+def snapshot_metadata(run: ShortResearchSignalRun | None) -> SnapshotMetadata:
     if run is None:
         return {
             "snapshot_id": None,
@@ -55,7 +68,7 @@ def snapshot_metadata(run: ShortResearchSignalRun | None) -> dict[str, object]:
     }
 
 
-def _etf_item_clauses() -> tuple[object, object]:
+def _etf_item_clauses() -> tuple[ColumnElement[bool], ColumnElement[bool]]:
     has_etf_item = (
         select(ShortResearchSignalItem.id)
         .where(
@@ -84,7 +97,7 @@ async def select_canonical_etf_snapshot(
     required_trade_date: date,
 ) -> ShortResearchSignalRun | None:
     has_etf_item, has_non_etf_item = _etf_item_clauses()
-    return await session.scalar(
+    rows = await session.scalars(
         select(ShortResearchSignalRun)
         .where(
             ShortResearchSignalRun.status == "success",
@@ -99,6 +112,7 @@ async def select_canonical_etf_snapshot(
         )
         .order_by(ShortResearchSignalRun.published_at.desc(), ShortResearchSignalRun.id.desc())
     )
+    return rows.first()
 
 
 async def resolve_canonical_etf_snapshot(

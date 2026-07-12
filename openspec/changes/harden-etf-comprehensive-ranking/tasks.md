@@ -145,12 +145,12 @@
 
 ## 12. Verification And Risk Closure
 
-- [ ] 12.1 Run ranking, evidence, API, sector/factor/theme, intraday, data-sync, scheduler, migration, and validation tests with explicit timeouts; keep the two former failures as passing regression tests.
-- [ ] 12.2 Run `uv run pytest tests/test_backend_domain_boundaries.py` and confirm the new tracking filters remain in API/workflow orchestration.
+- [x] 12.1 Run ranking, evidence, API, sector/factor/theme, intraday, data-sync, scheduler, migration, and validation tests with explicit timeouts; keep the two former failures as passing regression tests.
+- [x] 12.2 Run `uv run pytest tests/test_backend_domain_boundaries.py` and confirm the new tracking filters remain in API/workflow orchestration.
 - [ ] 12.3 Run `uv run ruff check .`, backend type checks used by the repository, frontend typecheck, frontend lint, and frontend unit/component tests.
-- [ ] 12.4 Run `openspec validate harden-etf-comprehensive-ranking --strict` and fix every schema, requirement, and scenario error.
-- [ ] 12.5 Compare unfiltered and filtered static/live responses from one snapshot and automatically prove stable global rank, explicit filtered position, compatible rank change, user isolation, and pagination invariants.
-- [ ] 12.6 Verify every audited P0/P1 path: partial-run pollution, stale cache, mixed dates, legacy score fallback, fabricated hash, validation feedback, cap bypass, raw-price distortion, sector input gaps, filtered-rank fabrication, and cross-user leakage.
-- [ ] 12.7 Verify every audited accuracy path: clone handling, asset buckets, premium and factor availability, point-in-time universe, non-overlapping date-level validation, costs, uncertainty, same-time activity, and exchange calendar.
-- [ ] 12.8 Verify every audited workbench path: tracking filters, live status source, boundary refresh, stale/error/empty states, pagination recovery, health detail, count scope, auth cache, task concurrency, and Shanghai dates.
-- [ ] 12.9 Run any verification expected to exceed three minutes with a bounded timeout and process monitoring, using the project server Docker environment when local static builds are known to hang.
+- [x] 12.4 Run `openspec validate harden-etf-comprehensive-ranking --strict` and fix every schema, requirement, and scenario error.
+- [x] 12.5 Compare unfiltered and filtered static/live responses from one snapshot and automatically prove stable global rank, explicit filtered position, compatible rank change, user isolation, and pagination invariants.
+- [x] 12.6 Verify every audited P0/P1 path: partial-run pollution, stale cache, mixed dates, legacy score fallback, fabricated hash, validation feedback, cap bypass, raw-price distortion, sector input gaps, filtered-rank fabrication, and cross-user leakage.
+- [x] 12.7 Verify every audited accuracy path: clone handling, asset buckets, premium and factor availability, point-in-time universe, non-overlapping date-level validation, costs, uncertainty, same-time activity, and exchange calendar.
+- [x] 12.8 Verify every audited workbench path: tracking filters, live status source, boundary refresh, stale/error/empty states, pagination recovery, health detail, count scope, auth cache, task concurrency, and Shanghai dates.
+- [x] 12.9 Run any verification expected to exceed three minutes with a bounded timeout and process monitoring, using the project server Docker environment when local static builds are known to hang.
