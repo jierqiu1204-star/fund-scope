@@ -21,7 +21,7 @@
 
 ## 3. Implement Immutable Canonical Ranking Snapshots
 
-- [ ] 3.1 Implement canonical serialization and hashing for score/rule versions, component DAG/manifest, scope, universe and input snapshots, price basis, cutoff semantics, and reliability policy with order-independent hash tests.
+- [x] 3.1 Implement canonical serialization and hashing for score/rule versions, component DAG/manifest, scope, universe and input snapshots, price basis, cutoff semantics, and reliability policy with order-independent hash tests.
 - [ ] 3.2 Persist explicit `full`, `theme`, and `codes` scope kinds and ensure every new run records exact scope rather than relying on omitted query fields.
 - [ ] 3.3 Build the expected point-in-time universe snapshot and hash before scoring, including inactive-later ETFs for historical replay and tracked-underlying metadata for clone handling.
 - [ ] 3.4 Implement idempotent publication state transitions so a full snapshot becomes published only after item count, rank continuity, hashes, coverage, and summary metadata pass and commit atomically.
