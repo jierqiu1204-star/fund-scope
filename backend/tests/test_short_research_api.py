@@ -566,10 +566,16 @@ async def _seed_score_bucket_signal_runs(app) -> dict[str, Any]:
                         high=close * 1.01,
                         low=close * 0.99,
                         close=close,
-                        volume=2_000_000,
-                        turnover=180_000_000,
-                        pct_change=0.0 if offset == 0 else (close / previous - 1.0) * 100,
-                    )
+                    volume=2_000_000,
+                    turnover=180_000_000,
+                    pct_change=0.0 if offset == 0 else (close / previous - 1.0) * 100,
+                    research_adjusted_value=close,
+                    research_price_basis="total_return_adjusted",
+                    data_provider="fixture",
+                    provider_version="fixture-v1",
+                    adjustment_version="fixture-total-return-v1",
+                    decision_eligible=True,
+                )
                 )
 
         old_run = ShortResearchSignalRun(
