@@ -3549,31 +3549,166 @@ async def status_summary(session: AsyncSession, *, include_health: bool = False)
     }
 
 
+async def _latest_etf_sync_state(session: AsyncSession) -> tuple[str, int]:
+    run = await session.scalar(
+        select(JobRun)
+        .where(JobRun.job_name == "daily_short_research_data")
+        .order_by(JobRun.started_at.desc(), JobRun.id.desc())
+        .limit(1)
+    )
+    if run is None:
+        return "waiting", 0
+    details = dict(run.details_json or {})
+    etf_details = details.get("etf")
+    etf_result = etf_details.get("etfs") if isinstance(etf_details, dict) else None
+    deferred = _result_count(etf_result, "skipped") if isinstance(etf_result, dict) else 0
+    if run.status == "partial" and deferred:
+        return "deferred", deferred
+    return run.status, deferred
+
+
 async def data_health(session: AsyncSession) -> list[dict[str, Any]]:
+    metadata_items = await _available_assets(session)
+    etf_codes = [item.code for item in metadata_items if item.asset_type == ASSET_TYPE_ETF]
+    raw_by_code: dict[str, EtfPriceHistory] = {}
+    research_by_code: dict[str, EtfPriceHistory] = {}
+    research_count_by_code: dict[str, int] = {}
+    health_by_code: dict[str, EtfDataHealth] = {}
+    if etf_codes:
+        raw_dates = (
+            select(
+                EtfPriceHistory.etf_code.label("etf_code"),
+                func.max(EtfPriceHistory.trade_date).label("trade_date"),
+            )
+            .where(EtfPriceHistory.etf_code.in_(etf_codes))
+            .group_by(EtfPriceHistory.etf_code)
+            .subquery()
+        )
+        raw_rows = await session.scalars(
+            select(EtfPriceHistory).join(
+                raw_dates,
+                (EtfPriceHistory.etf_code == raw_dates.c.etf_code)
+                & (EtfPriceHistory.trade_date == raw_dates.c.trade_date),
+            )
+        )
+        raw_by_code = {row.etf_code: row for row in raw_rows.all()}
+
+        research_filter = (
+            EtfPriceHistory.etf_code.in_(etf_codes),
+            EtfPriceHistory.decision_eligible.is_(True),
+            EtfPriceHistory.research_price_basis == "total_return_adjusted",
+            EtfPriceHistory.research_adjusted_value.is_not(None),
+        )
+        research_dates = (
+            select(
+                EtfPriceHistory.etf_code.label("etf_code"),
+                func.max(EtfPriceHistory.trade_date).label("trade_date"),
+            )
+            .where(*research_filter)
+            .group_by(EtfPriceHistory.etf_code)
+            .subquery()
+        )
+        research_rows = await session.scalars(
+            select(EtfPriceHistory).join(
+                research_dates,
+                (EtfPriceHistory.etf_code == research_dates.c.etf_code)
+                & (EtfPriceHistory.trade_date == research_dates.c.trade_date),
+            )
+        )
+        research_by_code = {row.etf_code: row for row in research_rows.all()}
+        research_counts = await session.execute(
+            select(EtfPriceHistory.etf_code, func.count())
+            .where(*research_filter)
+            .group_by(EtfPriceHistory.etf_code)
+        )
+        research_count_by_code = {str(code): int(count) for code, count in research_counts}
+        health_rows = await session.scalars(select(EtfDataHealth).where(EtfDataHealth.etf_code.in_(etf_codes)))
+        health_by_code = {row.etf_code: row for row in health_rows.all()}
+
+    sync_state, deferred_count = await _latest_etf_sync_state(session)
     rows: list[dict[str, Any]] = []
     today = date.today()
-    for metadata in await _available_assets(session):
-        series = await _series_for_asset(session, metadata)
-        latest = series[-1].point_date if series else None
-        provider = None
-        error_message = None
-        if metadata.asset_type == ASSET_TYPE_ETF:
-            etf_health = await session.scalar(select(EtfDataHealth).where(EtfDataHealth.etf_code == metadata.code))
-            if etf_health is not None:
-                provider = etf_health.provider
-                error_message = etf_health.last_error_message
-        is_stale = latest is None or (today - latest).days > STALE_DATA_DAYS
+    for metadata in metadata_items:
+        if metadata.asset_type != ASSET_TYPE_ETF:
+            series = await _series_for_asset(session, metadata)
+            latest = series[-1].point_date if series else None
+            rows.append(
+                {
+                    "asset_type": metadata.asset_type,
+                    "code": metadata.code,
+                    "name": metadata.name,
+                    "status": "missing" if latest is None else "success",
+                    "latest_date": latest,
+                    "raw_latest_date": latest,
+                    "research_latest_date": latest,
+                    "usable_days": len(series),
+                    "provider": None,
+                    "provider_version": None,
+                    "research_price_basis": "accumulated_nav",
+                    "source_timestamp": None,
+                    "decision_eligible": None,
+                    "decision_ineligibility_reason": None,
+                    "sync_state": "not_applicable",
+                    "sync_deferred_count": 0,
+                    "issue_details": [] if latest else ["missing_accumulated_nav"],
+                    "source_note": "公开基金净值数据",
+                    "last_error_message": None,
+                    "is_stale": latest is None or (today - latest).days > STALE_DATA_DAYS,
+                }
+            )
+            continue
+
+        raw = raw_by_code.get(metadata.code)
+        research = research_by_code.get(metadata.code)
+        etf_health = health_by_code.get(metadata.code)
+        raw_latest_date = raw.trade_date if raw else None
+        research_latest_date = research.trade_date if research else None
+        is_stale = research_latest_date is None or (today - research_latest_date).days > STALE_DATA_DAYS
+        issues: list[str] = []
+        if raw is None:
+            issues.append("missing_raw_daily_price")
+        if research is None:
+            issues.append("missing_research_price_provenance")
+        if raw is not None and raw.decision_eligible is False and raw.decision_ineligibility_reason:
+            issues.append(raw.decision_ineligibility_reason)
+        if is_stale and research_latest_date is not None:
+            issues.append("stale_research_price")
+        if etf_health and etf_health.last_error_message:
+            issues.append(etf_health.last_error_message)
+        if sync_state == "deferred":
+            issues.append("daily_sync_deferred")
+
+        if etf_health and etf_health.status == "failed":
+            status = "failed"
+        elif raw is None:
+            status = "missing"
+        elif research is None:
+            status = "unavailable"
+        elif is_stale:
+            status = "stale"
+        else:
+            status = "success"
         rows.append(
             {
                 "asset_type": metadata.asset_type,
                 "code": metadata.code,
                 "name": metadata.name,
-                "status": "missing" if latest is None else "success",
-                "latest_date": latest,
-                "usable_days": len(series),
-                "provider": provider,
-                "source_note": "公开 ETF 日线数据" if metadata.asset_type == ASSET_TYPE_ETF else "公开基金净值数据",
-                "last_error_message": error_message,
+                "status": status,
+                "latest_date": research_latest_date,
+                "raw_latest_date": raw_latest_date,
+                "research_latest_date": research_latest_date,
+                "usable_days": research_count_by_code.get(metadata.code, 0),
+                "provider": (raw.data_provider if raw else None) or (etf_health.provider if etf_health else None),
+                "provider_version": raw.provider_version if raw else None,
+                "research_price_basis": research.research_price_basis if research else None,
+                "source_timestamp": raw.source_timestamp if raw else None,
+                "decision_eligible": raw.decision_eligible if raw else None,
+                "decision_ineligibility_reason": raw.decision_ineligibility_reason if raw else None,
+                "sync_state": sync_state,
+                "sync_deferred_count": deferred_count,
+                "issue_details": issues,
+                "source_note": "公开 ETF 原始日线及复权研究数据",
+                "last_error_message": etf_health.last_error_message if etf_health else None,
                 "is_stale": is_stale,
             }
         )

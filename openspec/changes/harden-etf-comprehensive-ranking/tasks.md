@@ -55,7 +55,7 @@
 - [x] 5.8 Map skipped, deferred, partial-provider, and coverage-failed business results to `skipped`, `partial`, or `failed` JobRun states instead of success.
 - [x] 5.9 Add a per-trade-date workflow lock and sequence universe refresh, daily sync, coverage check, full scoring, atomic publication, and optional downstream generation.
 - [x] 5.10 Register and expose freshness for ETF universe, theme/catalyst, daily repair, and intraday cleanup jobs.
-- [ ] 5.11 Expand data-health output to include raw/research dates, basis, provider, decision eligibility, skipped/deferred state, and issue details requested by the workbench.
+- [x] 5.11 Expand data-health output to include raw/research dates, basis, provider, decision eligibility, skipped/deferred state, and issue details requested by the workbench.
 - [ ] 5.12 Add regression tests for mixed trade dates, insufficient coverage, partial batch, provider-incompatible basis, sync cursor rotation, deactivation history, and JobRun state mapping.
 
 ## 6. Build The Single-Pass `final_score_v3` Pipeline

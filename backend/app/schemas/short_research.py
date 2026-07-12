@@ -12,8 +12,18 @@ class ShortResearchDataHealthOut(BaseModel):
     name: str
     status: str
     latest_date: date | None = None
+    raw_latest_date: date | None = None
+    research_latest_date: date | None = None
     usable_days: int
     provider: str | None = None
+    provider_version: str | None = None
+    research_price_basis: str | None = None
+    source_timestamp: datetime | None = None
+    decision_eligible: bool | None = None
+    decision_ineligibility_reason: str | None = None
+    sync_state: str = "waiting"
+    sync_deferred_count: int = 0
+    issue_details: list[str] = Field(default_factory=list)
     source_note: str
     last_error_message: str | None = None
     is_stale: bool
