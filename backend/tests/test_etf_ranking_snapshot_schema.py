@@ -1,6 +1,6 @@
 from sqlalchemy import Boolean, Date, DateTime, Float, Integer, String
 
-from app.models.entities import ShortResearchSignalItem, ShortResearchSignalRun
+from app.models.entities import EtfPriceHistory, ShortResearchSignalItem, ShortResearchSignalRun
 
 
 def test_signal_run_exposes_nullable_typed_snapshot_identity() -> None:
@@ -73,3 +73,28 @@ def test_signal_item_run_id_remains_the_source_snapshot_identity() -> None:
     indexes = {index.name: index for index in table.indexes}
     global_rank_index = indexes["ix_short_research_signal_items_run_global_rank"]
     assert [column.name for column in global_rank_index.columns] == ["run_id", "global_rank"]
+
+
+def test_etf_daily_history_keeps_research_price_provenance_separate_from_raw_ohlc() -> None:
+    table = EtfPriceHistory.__table__
+    expected_types = {
+        "raw_price_basis": String,
+        "research_adjusted_value": Float,
+        "research_price_basis": String,
+        "data_provider": String,
+        "provider_version": String,
+        "source_timestamp": DateTime,
+        "adjustment_version": String,
+        "decision_eligible": Boolean,
+        "decision_ineligibility_reason": String,
+    }
+
+    for column_name, expected_type in expected_types.items():
+        column = table.c[column_name]
+        assert column.nullable is True
+        assert isinstance(column.type, expected_type)
+
+    assert table.c.close.nullable is False
+    indexes = {index.name: index for index in table.indexes}
+    eligibility_index = indexes["ix_etf_price_history_trade_date_decision_eligible"]
+    assert [column.name for column in eligibility_index.columns] == ["trade_date", "decision_eligible"]

@@ -237,7 +237,10 @@ class TradableEtf(Base):
 
 class EtfPriceHistory(Base):
     __tablename__ = "etf_price_history"
-    __table_args__ = (UniqueConstraint("etf_code", "trade_date", name="uq_etf_price_history"),)
+    __table_args__ = (
+        UniqueConstraint("etf_code", "trade_date", name="uq_etf_price_history"),
+        SaIndex("ix_etf_price_history_trade_date_decision_eligible", "trade_date", "decision_eligible"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     etf_code: Mapped[str] = mapped_column(ForeignKey("tradable_etfs.code", ondelete="CASCADE"))
@@ -250,6 +253,15 @@ class EtfPriceHistory(Base):
     turnover: Mapped[float] = mapped_column(Float)
     pct_change: Mapped[float] = mapped_column(Float)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    raw_price_basis: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    research_adjusted_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    research_price_basis: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    data_provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    provider_version: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_timestamp: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    adjustment_version: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    decision_eligible: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    decision_ineligibility_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
 class EtfMetric(Base):
