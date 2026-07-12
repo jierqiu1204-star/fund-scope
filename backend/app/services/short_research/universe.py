@@ -254,18 +254,31 @@ async def refresh_etf_universe(
     session: AsyncSession,
     *,
     records: Iterable[EtfUniverseRecord] | None = None,
+    as_of_date: date | None = None,
 ) -> dict[str, Any]:
     discovered = list(records) if records is not None else await discover_etf_universe()
+    effective_date = as_of_date or date.today()
     inserted = 0
     updated = 0
     excluded = 0
+    activated = 0
+    deactivated = 0
     failed: list[dict[str, str]] = []
+    active_memberships = {
+        membership.etf_code: membership
+        for membership in (
+            await session.scalars(select(EtfUniverseMembership).where(EtfUniverseMembership.effective_to.is_(None)))
+        ).all()
+    }
+    eligible_codes: set[str] = set()
 
     for record in discovered:
         try:
             eligible = is_short_term_etf_eligible(record.name, code=record.code)
             if not eligible:
                 excluded += 1
+            else:
+                eligible_codes.add(record.code)
             existing = await session.scalar(select(TradableEtf).where(TradableEtf.code == record.code))
             if existing is None:
                 session.add(
@@ -289,10 +302,31 @@ async def refresh_etf_universe(
                 existing.trading_rule_label = record.trading_rule_label or existing.trading_rule_label
                 existing.asset_class = record.category or existing.asset_class
                 existing.is_short_term_eligible = eligible
-                existing.is_watchlist = bool(existing.is_watchlist or eligible)
+                existing.is_watchlist = eligible
                 updated += 1
+            active_membership = active_memberships.get(record.code)
+            if eligible and active_membership is None:
+                session.add(
+                    EtfUniverseMembership(
+                        etf_code=record.code,
+                        effective_from=effective_date,
+                        source=record.source,
+                    )
+                )
+                activated += 1
+            elif not eligible and active_membership is not None:
+                active_membership.effective_to = effective_date
+                active_membership.exclusion_reason = "ineligible_from_refresh"
+                deactivated += 1
         except Exception as exc:  # noqa: BLE001
             failed.append({"code": record.code, "error": str(exc)})
+
+    for code, membership in active_memberships.items():
+        if code in eligible_codes or membership.effective_to is not None:
+            continue
+        membership.effective_to = effective_date
+        membership.exclusion_reason = "missing_from_refresh"
+        deactivated += 1
 
     await session.commit()
     default_display = await session.scalar(
@@ -305,6 +339,8 @@ async def refresh_etf_universe(
         "discovered": len(discovered),
         "inserted": inserted,
         "updated": updated,
+        "activated": activated,
+        "deactivated": deactivated,
         "excluded": excluded,
         "default_display": int(default_display or 0),
         "failed": len(failed),

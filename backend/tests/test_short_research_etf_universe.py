@@ -9,13 +9,18 @@ from sqlalchemy import func, select
 
 from app.models.entities import (
     EtfPriceHistory,
+    EtfUniverseMembership,
     ShortResearchSignalItem,
     ShortResearchSignalRun,
     TrackedPosition,
     TradableEtf,
 )
 from app.services.short_research import service as short_research_service
-from app.services.short_research.universe import EtfUniverseRecord, refresh_etf_universe
+from app.services.short_research.universe import (
+    EtfUniverseRecord,
+    build_point_in_time_universe_snapshot,
+    refresh_etf_universe,
+)
 from app.services.workflows.short_research_data import (
     sync_short_research_data_with_tracking_priority,
 )
@@ -289,6 +294,35 @@ async def test_etf_universe_refresh_is_idempotent_excludes_unsuitable_and_preser
         money = await session.scalar(select(TradableEtf).where(TradableEtf.code == "511990"))
         assert money is not None
         assert money.is_short_term_eligible is False
+
+
+@pytest.mark.asyncio
+async def test_universe_refresh_closes_missing_memberships_and_preserves_historical_coverage(app) -> None:
+    record = EtfUniverseRecord(
+        code="588001",
+        name="科创50ETF",
+        exchange="SH",
+        category="broad",
+        theme_tags=["科创"],
+        trading_rule_label="证券账户 T+1 ETF",
+        source="pytest",
+    )
+    async with app.state.db.session() as session:
+        first = await refresh_etf_universe(session, records=[record], as_of_date=date(2026, 1, 2))
+        second = await refresh_etf_universe(session, records=[], as_of_date=date(2026, 1, 3))
+        membership = await session.scalar(
+            select(EtfUniverseMembership).where(EtfUniverseMembership.etf_code == "588001")
+        )
+        historical = await build_point_in_time_universe_snapshot(session, as_of_date=date(2026, 1, 2))
+        current = await build_point_in_time_universe_snapshot(session, as_of_date=date(2026, 1, 4))
+
+    assert first["activated"] == 1
+    assert second["deactivated"] == 1
+    assert membership is not None
+    assert membership.effective_to == date(2026, 1, 3)
+    assert membership.exclusion_reason == "missing_from_refresh"
+    assert [member["asset_code"] for member in historical.members] == ["588001"]
+    assert current.members == []
 
 
 @pytest.mark.asyncio
