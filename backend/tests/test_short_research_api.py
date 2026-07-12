@@ -29,6 +29,8 @@ from app.models.entities import (
     utcnow,
 )
 from app.services.short_research.service import (
+    _completed_outcome_payload,
+    _etf_series,
     _fund_series,
     _max_drawdown,
     _window_return,
@@ -260,6 +262,83 @@ async def test_fund_research_returns_use_accumulated_nav_while_display_keeps_uni
     assert [point.nav for point in series] == [1.0, 0.9, 0.95]
     assert _window_return(series, 2) == pytest.approx(0.1)
     assert _max_drawdown(series) == 0.0
+
+
+@pytest.mark.asyncio
+async def test_etf_research_series_uses_only_eligible_adjusted_values(app) -> None:
+    async with app.state.db.session() as session:
+        session.add(
+            TradableEtf(
+                code="510001",
+                name="调整价测试ETF",
+                exchange="SH",
+                theme_tags_json=["测试"],
+                trading_rule_label="T+1",
+                asset_class="broad_index",
+                is_short_term_eligible=True,
+                is_watchlist=True,
+            )
+        )
+        session.add_all(
+            [
+                EtfPriceHistory(
+                    etf_code="510001",
+                    trade_date=date(2026, 1, 2),
+                    open=1.0,
+                    high=1.1,
+                    low=0.9,
+                    close=1.0,
+                    volume=1_000_000,
+                    turnover=100_000_000,
+                    pct_change=0.0,
+                    research_adjusted_value=1.1,
+                    research_price_basis="total_return_adjusted",
+                    decision_eligible=True,
+                ),
+                EtfPriceHistory(
+                    etf_code="510001",
+                    trade_date=date(2026, 1, 3),
+                    open=0.5,
+                    high=0.55,
+                    low=0.45,
+                    close=0.5,
+                    volume=2_000_000,
+                    turnover=100_000_000,
+                    pct_change=-50.0,
+                    research_adjusted_value=1.1,
+                    research_price_basis="total_return_adjusted",
+                    decision_eligible=True,
+                ),
+                EtfPriceHistory(
+                    etf_code="510001",
+                    trade_date=date(2026, 1, 4),
+                    open=1.0,
+                    high=1.1,
+                    low=0.9,
+                    close=1.0,
+                    volume=1_000_000,
+                    turnover=100_000_000,
+                    pct_change=100.0,
+                    decision_eligible=False,
+                ),
+            ]
+        )
+        await session.commit()
+        series = await _etf_series(session, "510001")
+        rows = (
+            await session.scalars(
+                select(EtfPriceHistory)
+                .where(EtfPriceHistory.etf_code == "510001")
+                .order_by(EtfPriceHistory.trade_date.asc())
+            )
+        ).all()
+
+    assert [point.value for point in series] == [1.1, 1.1]
+    assert [point.close for point in series] == [1.0, 0.5]
+    assert _window_return(series, 1) == 0.0
+    status, outcome = _completed_outcome_payload(rows, 1)
+    assert status == "completed"
+    assert outcome["forward_return"] == 0.0
 
 
 async def _seed_opportunity_signal_run(app) -> None:

@@ -127,6 +127,13 @@ async def _seed_backtest_etfs(app, *, codes: list[str], days: int = 120, future_
                         volume=2_000_000,
                         turnover=180_000_000,
                         pct_change=daily * 100,
+                        research_adjusted_value=close,
+                        research_price_basis="total_return_adjusted",
+                        data_provider="fixture",
+                        provider_version="fixture-v1",
+                        source_timestamp=datetime.combine(current, datetime.min.time()),
+                        adjustment_version="fixture-total-return-v1",
+                        decision_eligible=True,
                     )
                 )
         await session.commit()

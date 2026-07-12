@@ -81,6 +81,7 @@ from app.services.short_research.service import (
     _portfolio_defensive_reason,
     _portfolio_layer_cap,
     _portfolio_raw_weight,
+    _research_adjusted_value,
     compute_asset_for_replay_from_series,
 )
 
@@ -274,12 +275,13 @@ async def _load_price_series(
     ).all()
     series: dict[str, list[PricePoint]] = defaultdict(list)
     for row in rows:
-        if row.close <= 0:
+        research_value = _research_adjusted_value(row)
+        if research_value is None:
             continue
         series[row.etf_code].append(
             PricePoint(
                 point_date=row.trade_date,
-                value=row.close,
+                value=research_value,
                 close=row.close,
                 turnover=row.turnover,
                 pct_change=row.pct_change / 100,

@@ -694,22 +694,39 @@ async def _fund_series(session: AsyncSession, code: str, as_of_date: date | None
     ]
 
 
+def _research_adjusted_value(row: EtfPriceHistory) -> float | None:
+    value = row.research_adjusted_value
+    if (
+        row.decision_eligible is not True
+        or row.research_price_basis != "total_return_adjusted"
+        or value is None
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        return None
+    return float(value)
+
+
 async def _etf_series(session: AsyncSession, code: str, as_of_date: date | None = None) -> list[PricePoint]:
     query = select(EtfPriceHistory).where(EtfPriceHistory.etf_code == code)
     if as_of_date is not None:
         query = query.where(EtfPriceHistory.trade_date <= as_of_date)
     rows = await session.scalars(query.order_by(EtfPriceHistory.trade_date.asc()))
-    return [
-        PricePoint(
-            point_date=row.trade_date,
-            value=row.close,
-            close=row.close,
-            turnover=row.turnover,
-            pct_change=row.pct_change / 100,
+    series: list[PricePoint] = []
+    for row in rows.all():
+        research_value = _research_adjusted_value(row)
+        if research_value is None:
+            continue
+        series.append(
+            PricePoint(
+                point_date=row.trade_date,
+                value=research_value,
+                close=row.close,
+                turnover=row.turnover,
+                pct_change=row.pct_change / 100,
+            )
         )
-        for row in rows.all()
-        if row.close > 0
-    ]
+    return series
 
 
 async def _series_for_asset(
@@ -1247,17 +1264,21 @@ async def _etf_price_rows_by_code_from(
 
 
 def _price_points_from_rows(rows: list[EtfPriceHistory]) -> list[PricePoint]:
-    return [
-        PricePoint(
-            point_date=row.trade_date,
-            value=row.close,
-            close=row.close,
-            turnover=row.turnover,
-            pct_change=row.pct_change / 100,
+    points: list[PricePoint] = []
+    for row in rows:
+        research_value = _research_adjusted_value(row)
+        if research_value is None:
+            continue
+        points.append(
+            PricePoint(
+                point_date=row.trade_date,
+                value=research_value,
+                close=row.close,
+                turnover=row.turnover,
+                pct_change=row.pct_change / 100,
+            )
         )
-        for row in rows
-        if row.close > 0
-    ]
+    return points
 
 
 def _completed_outcome_payload(
@@ -1268,11 +1289,15 @@ def _completed_outcome_payload(
         return "pending", {"exclusion_reason": "missing_future_price"}
     start = rows[0]
     end_row = rows[horizon_days]
-    signal_price = float(start.close or 0.0)
-    future_price = float(end_row.close or 0.0)
-    if signal_price <= 0 or future_price <= 0:
-        return "excluded", {"exclusion_reason": "invalid_price"}
-    path_returns = [float(row.close or 0.0) / signal_price - 1.0 for row in rows[1 : horizon_days + 1] if row.close]
+    signal_price = _research_adjusted_value(start)
+    future_price = _research_adjusted_value(end_row)
+    if signal_price is None or future_price is None:
+        return "excluded", {"exclusion_reason": "missing_research_price_provenance"}
+    path_returns = [
+        value / signal_price - 1.0
+        for row in rows[1 : horizon_days + 1]
+        if (value := _research_adjusted_value(row)) is not None
+    ]
     if len(path_returns) < horizon_days:
         return "excluded", {"exclusion_reason": "invalid_window_price"}
     return "completed", {
@@ -1669,15 +1694,22 @@ def _replay_sample(
     status: str,
     exclusion_reason: str | None = None,
 ) -> EtfLabelReplaySample:
-    entry_price = float(replay_row.close or 0.0) if replay_row.close else None
+    entry_price = _research_adjusted_value(replay_row)
     forward_return: float | None = None
     adverse_drawdown: float | None = None
     favorable_excursion: float | None = None
     horizon_end_date: date | None = None
-    if status == "completed" and entry_price and entry_price > 0:
+    if status == "completed" and entry_price is None:
+        status = "excluded"
+        exclusion_reason = "missing_research_price_provenance"
+    elif status == "completed" and entry_price > 0:
         end_row = future_rows[-1]
         horizon_end_date = end_row.trade_date
-        path_returns = [float(row.close or 0.0) / entry_price - 1.0 for row in future_rows if row.close and row.close > 0]
+        path_returns = [
+            value / entry_price - 1.0
+            for row in future_rows
+            if (value := _research_adjusted_value(row)) is not None
+        ]
         if len(path_returns) == horizon:
             forward_return = path_returns[-1]
             adverse_drawdown = min(path_returns)
@@ -1803,7 +1835,7 @@ async def run_etf_label_historical_replay(
             etf.code,
             from_date=date.today() - timedelta(days=max(days * 2 + 180, 540)),
         )
-        rows = [row for row in rows if row.close and row.close > 0]
+        rows = [row for row in rows if _research_adjusted_value(row) is not None]
         if not rows:
             continue
         evaluated_assets += 1
