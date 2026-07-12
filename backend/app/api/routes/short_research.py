@@ -960,14 +960,18 @@ async def run_short_research_advisor(
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
     payload = payload or ShortResearchAdvisorRunRequest()
-    return await run_advisor_generation(
-        session,
-        request.app.state.settings,
-        asset_type=payload.asset_type,
-        theme=payload.theme,
-        codes=payload.codes,
-        as_of_date=payload.as_of_date,
-    )
+    try:
+        return await run_advisor_generation(
+            session,
+            request.app.state.settings,
+            asset_type=payload.asset_type,
+            theme=payload.theme,
+            codes=payload.codes,
+            as_of_date=payload.as_of_date,
+            source_signal_run_id=payload.source_signal_run_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/signals/latest", response_model=ShortResearchSignalRunOut | None)

@@ -421,8 +421,17 @@ async def run_advisor_generation(
     theme: str | None = None,
     codes: list[str] | None = None,
     as_of_date: date | None = None,
+    source_signal_run_id: int | None = None,
 ) -> dict[str, Any]:
-    signal_run = await latest_signal_run(session, asset_type=asset_type, theme=theme, codes=codes)
+    signal_run = (
+        await session.get(ShortResearchSignalRun, source_signal_run_id)
+        if source_signal_run_id is not None
+        else await latest_signal_run(session, asset_type=asset_type, theme=theme, codes=codes)
+    )
+    if source_signal_run_id is not None and (
+        signal_run is None or signal_run.status != "success" or signal_run.finished_at is None
+    ):
+        raise ValueError("指定的顾问来源快照不存在或尚未完成。")
     if signal_run is None:
         signal_run = await run_signal_generation(
             session,
@@ -545,6 +554,7 @@ async def run_advisor_generation(
 
     return {
         "signal_run_id": signal_run.id,
+        "source_signal_run_id": signal_run.id,
         "as_of_date": signal_run.as_of_date.isoformat(),
         "selected": len(items),
         "succeeded": succeeded,

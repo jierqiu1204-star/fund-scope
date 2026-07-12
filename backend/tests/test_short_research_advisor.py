@@ -363,3 +363,17 @@ async def test_advisor_api_can_limit_to_fund_signal_run(client, app) -> None:
     assert body["id"] == fund_run_id
     assert all(item["asset_type"] == "fund" for item in body["items"])
     assert body["items"][0]["advisor_report"]["source"] == "fallback"
+
+
+@pytest.mark.asyncio
+async def test_advisor_api_uses_the_explicit_completed_source_snapshot(client, app) -> None:
+    source_run_id = await _seed_signal_run(app)
+    await _seed_fund_signal_run(app)
+
+    advisor = await client.post("/api/short-research/advisor/run", json={"source_signal_run_id": source_run_id})
+
+    assert advisor.status_code == 200
+    assert advisor.json()["source_signal_run_id"] == source_run_id
+
+    unavailable = await client.post("/api/short-research/advisor/run", json={"source_signal_run_id": 999_999})
+    assert unavailable.status_code == 409

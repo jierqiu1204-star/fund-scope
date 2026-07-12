@@ -687,6 +687,7 @@ export type ShortResearchAssetList = {
   total: number;
   generated_at: string | null;
   as_of_date: string | null;
+  snapshot?: EtfRankingSnapshotMetadata | null;
   theme_heat?: {
     theme: string;
     count: number;
@@ -1339,11 +1340,27 @@ export type IntradayEtfWatchStatus = {
   items: IntradayEtfWatchItem[];
 };
 
+export type EtfRankingSnapshotMetadata = {
+  snapshot_id?: number | null;
+  score_version?: string | null;
+  ranking_contract_hash?: string | null;
+  scope_kind?: string | null;
+  as_of_trade_date?: string | null;
+  generated_at?: string | null;
+  coverage_ratio?: number | null;
+  freshness_status?: string | null;
+  limitations?: string[];
+};
+
 export type IntradayEtfLiveRankingItem = {
   etf_code: string;
   etf_name: string | null;
   base_rank: number | null;
   live_rank: number | null;
+  base_global_rank?: number | null;
+  live_scope_rank?: number | null;
+  filtered_position?: number | null;
+  rank_scope?: string | null;
   rank_change: number | null;
   sources: string[];
   conclusion: string | null;
@@ -1354,6 +1371,7 @@ export type IntradayEtfLiveRankingItem = {
   score_version: string | null;
   score_breakdown: ShortResearchScoreBreakdown;
   score_contribution_reasons: string[];
+  intraday_component_status?: Record<string, Record<string, unknown>>;
   live_entry_timing_label: string;
   live_entry_timing_reason: string;
   daily_entry_timing_label: string;
@@ -1367,12 +1385,15 @@ export type IntradayEtfLiveRankingList = {
   message: string;
   quote_refresh_seconds: number;
   page_poll_seconds: number;
+  next_poll_seconds?: number;
   watched_count: number;
   total: number;
   signal_as_of_date: string | null;
   signal_status: string;
+  live_scope_hash?: string | null;
   latest_run: IntradayEtfWatchRun | null;
   items: IntradayEtfLiveRankingItem[];
+  snapshot?: EtfRankingSnapshotMetadata | null;
 };
 
 export type TrackedEtfIntradaySnapshot = {

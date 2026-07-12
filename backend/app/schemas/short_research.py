@@ -123,6 +123,7 @@ class ShortResearchAdvisorRunRequest(BaseModel):
     asset_type: str | None = None
     theme: str | None = None
     codes: list[str] | None = None
+    source_signal_run_id: int | None = None
 
 
 class ShortResearchChartPointOut(BaseModel):

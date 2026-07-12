@@ -19,6 +19,7 @@ import {
 } from "recharts";
 
 import { Panel, StatPill } from "@/components/ui";
+import { useAuth } from "../auth-provider";
 import { api } from "@/lib/api";
 import { formatCurrency, formatDate, formatPercent } from "@/lib/format";
 import type {
@@ -188,12 +189,24 @@ function percentMetric(metrics: Record<string, unknown>, key: string) {
 
 type LabelValidationWindow = {
   sample_count?: number;
+  unique_signal_date_count?: number;
+  effective_sample_count?: number;
+  asset_count?: number;
   avg_return?: number | null;
   median_return?: number | null;
   worst_forward_drawdown?: number | null;
   max_drawdown?: number | null;
   win_rate?: number | null;
   coverage?: number | null;
+  asset_coverage?: number | null;
+  turnover?: number | null;
+  cost_per_round_trip?: number | null;
+  paired_sample_count?: number;
+  paired_excess_return_mean?: number | null;
+  paired_excess_return_ci_95?: [number, number] | null;
+  effect_direction?: string;
+  sample_sufficiency?: string;
+  endpoint_type?: "primary" | "exploratory" | string;
   confidence?: string;
   insufficient_sample?: boolean;
 };
@@ -240,17 +253,35 @@ function scoreBucketWindowText(group: ScoreBucketValidationGroup, window: "5" | 
   }
   const median = item.median_return === null || item.median_return === undefined ? "暂无" : formatPercent(item.median_return * 100);
   const winRate = item.win_rate === null || item.win_rate === undefined ? "暂无" : formatPercent(item.win_rate * 100);
-  return `${median} / ${winRate}`;
+  const paired =
+    item.paired_excess_return_mean === null || item.paired_excess_return_mean === undefined
+      ? "暂无"
+      : formatPercent(item.paired_excess_return_mean * 100);
+  return item.endpoint_type === "primary" ? `净中位 ${median} / 配对超额 ${paired}` : `${median} / ${winRate}`;
 }
 
 function scoreBucketSampleText(group: ScoreBucketValidationGroup) {
   const window = group.windows?.["5"] ?? group.windows?.["10"] ?? group.windows?.["1"];
   const selectedCount = group.selected_count ?? group.selected_codes?.length;
   const sampleCount = window?.sample_count ?? 0;
+  const assetCount = window?.asset_count ?? 0;
   if (selectedCount !== undefined) {
-    return `${sampleCount}/${selectedCount}`;
+    return `${sampleCount} 日期 / ${assetCount || selectedCount} 资产`;
   }
   return `${sampleCount}`;
+}
+
+function scoreBucketPrimaryEndpointText(group: ScoreBucketValidationGroup | undefined) {
+  const window = group?.windows?.["5"];
+  if (!window) {
+    return "等待 Top 10 5 日配对样本。";
+  }
+  const interval = window.paired_excess_return_ci_95;
+  const intervalText = interval ? `${formatPercent(interval[0] * 100)} 至 ${formatPercent(interval[1] * 100)}` : "暂无";
+  const effect = window.effect_direction ?? "insufficient";
+  const label =
+    effect === "supportive" ? "支持" : effect === "negative" ? "负向" : effect === "inconclusive" ? "不确定" : "样本不足";
+  return `主终点：Top 10 5 日相对 all_scored 的配对净超额，${label}；95% 区间 ${intervalText}；独立日期 ${window.paired_sample_count ?? 0}。`;
 }
 
 function validationConfidenceLabel(confidence: string | undefined) {
@@ -515,7 +546,15 @@ function toEtfItemName(item: RankedAssetItem) {
 }
 
 function toEtfItemRank(item: RankedAssetItem) {
-  return isLiveRankingItem(item) ? item.live_rank : item.rank;
+  return isLiveRankingItem(item) ? item.live_scope_rank ?? item.live_rank : item.rank;
+}
+
+function etfGlobalRank(item: IntradayEtfLiveRankingItem) {
+  return item.base_global_rank ?? item.base_rank;
+}
+
+function etfFilteredPosition(item: IntradayEtfLiveRankingItem) {
+  return item.filtered_position;
 }
 
 function itemConclusion(item: RankedAssetItem) {
@@ -523,7 +562,10 @@ function itemConclusion(item: RankedAssetItem) {
 }
 
 function etfLiveRankChangeText(rankChange: number | null) {
-  if (rankChange === null || rankChange === 0) {
+  if (rankChange === null) {
+    return "暂无可比变化";
+  }
+  if (rankChange === 0) {
     return "持平";
   }
   if (rankChange > 0) {
@@ -957,11 +999,12 @@ function safeSummary(result: Record<string, unknown> | null) {
 }
 
 function todayInputValue() {
-  return new Date().toISOString().slice(0, 10);
+  const parts = shanghaiClockParts(Date.now());
+  return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
 function defaultOrderTimeBucket(): OrderTimeBucket {
-  return new Date().getHours() >= 15 ? "after_15" : "before_15";
+  return Number(shanghaiClockParts(Date.now()).hour) >= 15 ? "after_15" : "before_15";
 }
 
 function orderTimeBucketLabel(value: string) {
@@ -1282,21 +1325,26 @@ function formatUtcDateTime(value: string | null | undefined) {
   }).format(date);
 }
 
-function isAshareTradingPollWindow(timestamp: number) {
+function shanghaiClockParts(timestamp: number) {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "Asia/Shanghai",
     weekday: "short",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
     hourCycle: "h23"
   }).formatToParts(new Date(timestamp));
-  const value = (type: string) => parts.find((part) => part.type === type)?.value;
-  const weekday = value("weekday");
-  if (weekday === "Sat" || weekday === "Sun") {
-    return false;
-  }
-  const minutes = Number(value("hour")) * 60 + Number(value("minute"));
-  return (minutes >= 9 * 60 + 30 && minutes < 11 * 60 + 30) || (minutes >= 13 * 60 && minutes < 15 * 60);
+  const value = (type: string) => parts.find((part) => part.type === type)?.value ?? "";
+  return {
+    weekday: value("weekday"),
+    year: value("year"),
+    month: value("month"),
+    day: value("day"),
+    hour: value("hour"),
+    minute: value("minute")
+  };
 }
 
 function AssetPaginationBar({
@@ -1408,6 +1456,7 @@ function SectionKicker({ eyebrow, title, description }: { eyebrow: string; title
 
 function ShortTermClient() {
   const queryClient = useQueryClient();
+  const { user } = useAuth();
   const searchParams = useSearchParams();
   const requestedSection = searchParams.get("section");
   const holdingsSectionRef = useRef<HTMLDivElement | null>(null);
@@ -1442,21 +1491,30 @@ function ShortTermClient() {
   const [editConfirmedNav, setEditConfirmedNav] = useState("");
   const [editConfirmedShares, setEditConfirmedShares] = useState("");
   const [editNote, setEditNote] = useState("");
-  const [pollClock, setPollClock] = useState(() => Date.now());
   const [pendingDesktopScrollKey, setPendingDesktopScrollKey] = useState<string | null>(null);
   const mode = assetModes[assetType];
   const sortOptions = assetType === "etf" ? etfSortOptions : baseSortOptions;
-  const isEtfTradingPollWindow = assetType === "etf" && isAshareTradingPollWindow(pollClock);
   const labelFilterSignature = useMemo(() => JSON.stringify(labelFilters), [labelFilters]);
 
   const status = useQuery({
     queryKey: ["short-research", "status"],
-    queryFn: async () => (await api.get<ShortResearchStatus>("/api/short-research/status")).data
+    queryFn: async ({ signal }) => (await api.get<ShortResearchStatus>("/api/short-research/status", { signal })).data
+  });
+
+  const latestCompletedSignal = useQuery({
+    queryKey: ["short-research", "signals", "latest", assetType, theme],
+    queryFn: async ({ signal }) => {
+      const params = new URLSearchParams({ asset_type: assetType });
+      if (theme !== "all") {
+        params.set("theme", theme);
+      }
+      return (await api.get<ShortResearchSignalRun | null>(`/api/short-research/signals/latest?${params.toString()}`, { signal })).data;
+    }
   });
 
   const assets = useQuery({
     queryKey: ["short-research", "assets", assetType, theme, sort, keyword, assetOffset, labelFilterSignature],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       if (assetType === "etf" && sort === "score") {
         const params = new URLSearchParams();
         params.set("limit", String(ASSET_PAGE_SIZE));
@@ -1468,7 +1526,7 @@ function ShortTermClient() {
         if (keyword.trim()) {
           params.set("q", keyword.trim());
         }
-        return (await api.get<IntradayEtfLiveRankingList>(`/api/etf-quotes/live-rankings?${params.toString()}`)).data;
+        return (await api.get<IntradayEtfLiveRankingList>(`/api/etf-quotes/live-rankings?${params.toString()}`, { signal })).data;
       }
       const params = new URLSearchParams();
       params.set("asset_type", assetType);
@@ -1482,15 +1540,32 @@ function ShortTermClient() {
         params.set("q", keyword.trim());
       }
       params.set("sort", sort);
-      return (await api.get<ShortResearchAssetList>(`/api/short-research/assets?${params.toString()}`)).data;
+      return (await api.get<ShortResearchAssetList>(`/api/short-research/assets?${params.toString()}`, { signal })).data;
     },
     refetchInterval: (query) => {
       const data = query.state.data as RankedAssetResponse | undefined;
-      return isEtfTradingPollWindow && isLiveRankingResponse(data) && data.market_status === "open" ? 30_000 : false;
+      if (!isLiveRankingResponse(data)) {
+        return false;
+      }
+      const seconds = data.market_status === "open" ? data.page_poll_seconds : data.next_poll_seconds;
+      return seconds && seconds > 0 ? seconds * 1_000 : false;
+    }
+  });
+
+  const etfLiveStatusQuery = useQuery({
+    queryKey: ["etf-quotes", "live-ranking-status"],
+    enabled: assetType === "etf",
+    queryFn: async ({ signal }) =>
+      (await api.get<IntradayEtfLiveRankingList>("/api/etf-quotes/live-rankings?limit=1", { signal })).data,
+    refetchInterval: (query) => {
+      const data = query.state.data as IntradayEtfLiveRankingList | undefined;
+      const seconds = data?.market_status === "open" ? data.page_poll_seconds : data?.next_poll_seconds;
+      return seconds && seconds > 0 ? seconds * 1_000 : false;
     }
   });
 
   const etfLiveData = isLiveRankingResponse(assets.data) ? assets.data : null;
+  const effectiveEtfLiveStatus = etfLiveData ?? etfLiveStatusQuery.data ?? null;
   const isEtfLiveRanking = etfLiveData !== null && assetType === "etf";
   const shortAssetData = isEtfLiveRanking ? null : (assets.data as ShortResearchAssetList | undefined);
   const etfThemeSource = useQuery({
@@ -1504,20 +1579,20 @@ function ShortTermClient() {
       ).data,
     staleTime: 5 * 60_000
   });
-  const shouldRefreshIntradayQueries =
-    isEtfTradingPollWindow && isEtfLiveRanking && etfLiveData?.market_status === "open";
+  const shouldRefreshIntradayQueries = assetType === "etf" && effectiveEtfLiveStatus?.market_status === "open";
   const selectedEtfLiveData = useQuery({
     queryKey: ["etf-quotes", "selected-live-ranking", selected?.code],
     enabled: assetType === "etf" && selected?.asset_type === "etf" && Boolean(selected?.code),
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const params = new URLSearchParams();
       params.set("limit", "5");
       params.set("q", selected?.code ?? "");
-      return (await api.get<IntradayEtfLiveRankingList>(`/api/etf-quotes/live-rankings?${params.toString()}`)).data;
+      return (await api.get<IntradayEtfLiveRankingList>(`/api/etf-quotes/live-rankings?${params.toString()}`, { signal })).data;
     },
     refetchInterval: (query) => {
       const data = query.state.data as IntradayEtfLiveRankingList | undefined;
-      return isEtfTradingPollWindow && data?.market_status === "open" ? 30_000 : false;
+      const seconds = data?.market_status === "open" ? data.page_poll_seconds : data?.next_poll_seconds;
+      return seconds && seconds > 0 ? seconds * 1_000 : false;
     }
   });
 
@@ -1542,18 +1617,20 @@ function ShortTermClient() {
   const selectedDetail = useQuery({
     queryKey: ["short-research", "detail", selected?.asset_type, selected?.code],
     enabled: selected !== null,
-    queryFn: async () =>
+    queryFn: async ({ signal }) =>
       (
         await api.get<ShortResearchAssetDetail>(
-          `/api/short-research/assets/${selected?.asset_type}/${selected?.code}`
+          `/api/short-research/assets/${selected?.asset_type}/${selected?.code}`,
+          { signal }
         )
       ).data
   });
 
   const trackedPositions = useQuery({
-    queryKey: ["tracked-positions"],
-    queryFn: async () => (await api.get<TrackedPositionList>("/api/tracked-positions")).data,
-    refetchInterval: shouldRefreshIntradayQueries ? 30_000 : false
+    queryKey: ["tracked-positions", user?.id ?? "anonymous"],
+    enabled: Boolean(user),
+    queryFn: async ({ signal }) => (await api.get<TrackedPositionList>("/api/tracked-positions", { signal })).data,
+    refetchInterval: shouldRefreshIntradayQueries ? (etfLiveData?.page_poll_seconds ?? 30) * 1_000 : false
   });
 
   const rawAssets = useMemo(() => (assets.data?.items ?? []) as RankedAssetItem[], [assets.data?.items]);
@@ -1584,20 +1661,15 @@ function ShortTermClient() {
   const visibleAssets = rawAssets;
 
   useEffect(() => {
-    const timer = window.setInterval(() => setPollClock(Date.now()), 60_000);
-    return () => window.clearInterval(timer);
-  }, []);
-
-  const previousTradingPollWindow = useRef(isEtfTradingPollWindow);
-  useEffect(() => {
-    if (!previousTradingPollWindow.current && isEtfTradingPollWindow) {
-      void Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["short-research", "assets"] }),
-        queryClient.invalidateQueries({ queryKey: ["tracked-positions"] })
-      ]);
-    }
-    previousTradingPollWindow.current = isEtfTradingPollWindow;
-  }, [isEtfTradingPollWindow, queryClient]);
+    return () => {
+      void queryClient.cancelQueries({ queryKey: ["tracked-positions", user?.id ?? "anonymous"] });
+      queryClient.removeQueries({ queryKey: ["tracked-positions", user?.id ?? "anonymous"] });
+      void queryClient.cancelQueries({ queryKey: ["tracked-position", user?.id ?? "anonymous"] });
+      queryClient.removeQueries({ queryKey: ["tracked-position", user?.id ?? "anonymous"] });
+      void queryClient.cancelQueries({ queryKey: ["tracked-position-audit", user?.id ?? "anonymous"] });
+      queryClient.removeQueries({ queryKey: ["tracked-position-audit", user?.id ?? "anonymous"] });
+    };
+  }, [queryClient, user?.id]);
 
   useEffect(() => {
     setAssetOffset(0);
@@ -1691,20 +1763,29 @@ function ShortTermClient() {
   });
 
   const optimizedAllocationData = observationPortfolio.data?.optimized_allocation ?? etfOptimizedAllocation.data ?? null;
+  const advisorSourceRunId =
+    etfLiveData?.snapshot?.snapshot_id ?? shortAssetData?.snapshot?.snapshot_id ?? latestCompletedSignal.data?.id ?? null;
 
   const runAdvisor = useMutation({
-    mutationFn: async () =>
-      (
+    mutationFn: async () => {
+      if (advisorSourceRunId === null) {
+        throw new Error("等待已完成的研究快照后才能生成顾问说明。");
+      }
+      return (
         await api.post<Record<string, unknown>>("/api/short-research/advisor/run", {
           asset_type: assetType,
-          theme: theme === "all" ? null : theme
+          theme: theme === "all" ? null : theme,
+          source_signal_run_id: advisorSourceRunId
         })
-      ).data,
+      ).data;
+    },
     onSuccess: async (result) => {
       setLastResult(result);
       await queryClient.invalidateQueries({ queryKey: ["short-research"] });
     }
   });
+  const isResearchTaskPending =
+    syncData.isPending || runSignals.isPending || runAdvisor.isPending || runEtfOptimizedAllocation.isPending;
 
   const resetEditTracking = () => {
     setEditingTrackingId(null);
@@ -1809,8 +1890,8 @@ function ShortTermClient() {
       resetEditTracking();
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["tracked-positions"] }),
-        queryClient.invalidateQueries({ queryKey: ["tracked-position", updated.id] }),
-        queryClient.invalidateQueries({ queryKey: ["tracked-position-audit", updated.id] }),
+        queryClient.invalidateQueries({ queryKey: ["tracked-position"] }),
+        queryClient.invalidateQueries({ queryKey: ["tracked-position-audit"] }),
         queryClient.invalidateQueries({ queryKey: ["etf-quotes"] })
       ]);
     }
@@ -1837,7 +1918,7 @@ function ShortTermClient() {
     statusData?.latest_data_date ??
     (etfLiveData?.signal_as_of_date ?? shortAssetData?.as_of_date) ??
     null;
-  const etfLiveStatus = isEtfLiveRanking ? etfLiveData : null;
+  const etfLiveStatus = effectiveEtfLiveStatus;
   const currentDataIssueCount =
     assetType === "etf"
       ? (statusData?.etf_data_stale_count ?? 0) + (statusData?.etf_failed_count ?? 0)
@@ -1858,6 +1939,12 @@ function ShortTermClient() {
   const detailPoints = chartPoints(selectedDetailForCurrent);
   const windowPoints = returnWindowChart(selectedAsset ?? undefined);
   const totalAssetCount = assets.data?.total ?? 0;
+  useEffect(() => {
+    const lastValidOffset = Math.max(0, Math.floor(Math.max(0, totalAssetCount - 1) / ASSET_PAGE_SIZE) * ASSET_PAGE_SIZE);
+    if (assetOffset > lastValidOffset) {
+      setAssetOffset(lastValidOffset);
+    }
+  }, [assetOffset, totalAssetCount]);
   const latestIntradayQuoteTime = useMemo(() => {
     const quoteTimes = visibleAssets
       .map((item) => (isLiveRankingItem(item) ? item.quote?.quote_time : null))
@@ -1886,7 +1973,7 @@ function ShortTermClient() {
   const selectedLiveRankingItem =
     selectedLiveItem && isLiveRankingItem(selectedLiveItem) ? selectedLiveItem : selectedLiveFallbackItem;
   const selectedLiveQuote = selectedLiveRankingItem?.quote ?? null;
-  const selectedMarketStatus = etfLiveData?.market_status ?? selectedEtfLiveData.data?.market_status;
+  const selectedMarketStatus = etfLiveData?.market_status ?? selectedEtfLiveData.data?.market_status ?? effectiveEtfLiveStatus?.market_status;
   const selectedIntradayChange = intradayChangeDisplay(selectedLiveQuote, selectedMarketStatus);
   const selectedEntryTiming =
     assetType === "etf" && selectedLiveRankingItem
@@ -1917,6 +2004,9 @@ function ShortTermClient() {
   const scoreBucketCumulativeGroups = scoreBucketGroups.filter((item) => item.group_type === "cumulative");
   const scoreBucketMarginalGroups = scoreBucketGroups.filter((item) => item.group_type === "marginal");
   const scoreBucketBaselineGroup = scoreBucketGroups.find((item) => item.group_type === "baseline");
+  const scoreBucketPrimaryGroup = scoreBucketGroups.find(
+    (item) => item.label === "Top 10" && item.entry_timing_label === "cumulative"
+  );
   const scoreBucketValidation = statusData?.score_bucket_validation ?? {};
   const scoreBucketSourceRuns =
     typeof scoreBucketValidation.source_signal_run_count === "number" ? scoreBucketValidation.source_signal_run_count : 0;
@@ -1946,14 +2036,16 @@ function ShortTermClient() {
     primaryTracked?.latest_alert?.trigger_label ??
     "暂无持仓原因";
   const trackedDetail = useQuery({
-    queryKey: ["tracked-position", primaryTracked?.id],
-    enabled: primaryTracked !== null,
-    queryFn: async () => (await api.get<TrackedPositionDetail>(`/api/tracked-positions/${primaryTracked?.id}`)).data
+    queryKey: ["tracked-position", user?.id ?? "anonymous", primaryTracked?.id],
+    enabled: Boolean(user) && primaryTracked !== null,
+    queryFn: async ({ signal }) =>
+      (await api.get<TrackedPositionDetail>(`/api/tracked-positions/${primaryTracked?.id}`, { signal })).data
   });
   const trackedAudit = useQuery({
-    queryKey: ["tracked-position-audit", primaryTracked?.id],
-    enabled: primaryTracked !== null,
-    queryFn: async () => (await api.get<TrackedPositionAlertAuditList>(`/api/tracked-positions/${primaryTracked?.id}/audit`)).data
+    queryKey: ["tracked-position-audit", user?.id ?? "anonymous", primaryTracked?.id],
+    enabled: Boolean(user) && primaryTracked !== null,
+    queryFn: async ({ signal }) =>
+      (await api.get<TrackedPositionAlertAuditList>(`/api/tracked-positions/${primaryTracked?.id}/audit`, { signal })).data
   });
   const auditItems = trackedAudit.data?.items ?? [];
   const trackingPoints = trackingChartPoints(trackedDetail.data);
@@ -2469,6 +2561,14 @@ function ShortTermClient() {
           {assets.isLoading ? (
             <div className="rounded-[10px] border border-dashed border-ink/20 p-6 text-sm text-ink/55">正在加载榜单...</div>
           ) : null}
+          {assets.isError ? (
+            <div className="rounded-[10px] border border-rose-200 bg-rose-50 p-6 text-sm leading-6 text-rose-800">
+              榜单请求失败：{errorText(assets.error)}
+              <button type="button" className="ml-2 font-semibold underline underline-offset-2" onClick={() => void assets.refetch()}>
+                重试
+              </button>
+            </div>
+          ) : null}
           {visibleAssets.map((item) => {
             const itemAssetType = getItemAssetType(item);
             const itemCode = toEtfItemCode(item);
@@ -2561,7 +2661,10 @@ function ShortTermClient() {
                   {isLiveItem ? (
                     <>
                       <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
-                        实时排名 #{toEtfItemRank(item) ?? "-"}
+                        全局排名 #{etfGlobalRank(item) ?? "-"}
+                      </span>
+                      <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                        当前范围排名 #{toEtfItemRank(item) ?? "-"} · 筛选位置 #{etfFilteredPosition(item) ?? "-"}
                       </span>
                       <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
                         当前价：{quote ? (livePrice === null || livePrice === undefined ? "暂无" : livePrice.toFixed(4)) : "暂无"}
@@ -2634,7 +2737,7 @@ function ShortTermClient() {
               </button>
             </div>
           ) : null}
-          {!assets.isLoading && rawAssets.length === 0 ? (
+          {!assets.isLoading && !assets.isError && rawAssets.length === 0 ? (
             <div className="rounded-[10px] border border-dashed border-ink/20 p-6 text-sm leading-6 text-ink/55">
               {mode.noResults}
             </div>
@@ -3353,13 +3456,13 @@ function ShortTermClient() {
         <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-start">
           <SectionKicker eyebrow="短线研究工作台" title={mode.title} description={mode.description} />
           <div className="flex flex-wrap gap-2 xl:justify-end">
-            <TaskButton disabled={syncData.isPending} onClick={() => syncData.mutate()}>
+            <TaskButton disabled={isResearchTaskPending} onClick={() => syncData.mutate()}>
               {syncData.isPending ? "准备数据中" : mode.dataButton}
             </TaskButton>
-            <TaskButton variant="primary" disabled={runSignals.isPending} onClick={() => runSignals.mutate()}>
+            <TaskButton variant="primary" disabled={isResearchTaskPending} onClick={() => runSignals.mutate()}>
               {runSignals.isPending ? "排序生成中" : "生成短线排序"}
             </TaskButton>
-            <TaskButton disabled={runAdvisor.isPending} onClick={() => runAdvisor.mutate()}>
+            <TaskButton disabled={isResearchTaskPending || advisorSourceRunId === null} onClick={() => runAdvisor.mutate()}>
               {runAdvisor.isPending ? "报告生成中" : "AI 研究说明"}
             </TaskButton>
           </div>
@@ -3466,9 +3569,9 @@ function ShortTermClient() {
           <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
             <div>
               <p className="text-sm font-semibold text-accent">综合关注分层验证</p>
-              <h2 className="mt-1 text-xl font-semibold text-ink">Top 5/10/20/50 未来表现</h2>
+              <h2 className="mt-1 text-xl font-semibold text-ink">Top 5/10/20/50 的日期级净收益验证</h2>
               <p className="mt-2 text-sm leading-6 text-ink/60">
-                研究证据，不代表未来收益，不参与实时排序、持仓提醒或邮件。
+                预设主终点为 Top 10 五日相对 all_scored 的配对净超额；其他组合仅作探索性展示，不参与实时排序、持仓提醒或邮件。
               </p>
             </div>
             <div className="grid gap-2 text-sm sm:grid-cols-3">
@@ -3479,6 +3582,9 @@ function ShortTermClient() {
           </div>
           {scoreBucketGroups.length ? (
             <div className="mt-4 space-y-4">
+              <p className="rounded-[8px] bg-paper px-3 py-2 text-sm leading-6 text-ink/70">
+                {scoreBucketPrimaryEndpointText(scoreBucketPrimaryGroup)}
+              </p>
               <div className="overflow-x-auto rounded-[8px] border border-ink/10">
                 <table className="min-w-full divide-y divide-ink/10 text-left text-sm">
                   <thead className="bg-paper text-xs text-ink/55">
@@ -3535,7 +3641,8 @@ function ShortTermClient() {
               ) : null}
               <p className="text-xs leading-5 text-ink/50">
                 窗口：{formatDate(String(scoreBucketValidation.replay_start_date ?? ""))} - {formatDate(String(scoreBucketValidation.replay_end_date ?? ""))}；
-                排序字段：final_score_v2 最终决策分；缺失真实综合关注分的 ETF 已排除。
+                排序字段：{String(scoreBucketValidation.score_version ?? "final_score_v3")} / {String(scoreBucketValidation.score_field ?? "ranking_score")}；
+                执行：{String(scoreBucketValidation.execution_model ?? "等待执行模型")}；缺失真实综合关注分、复权价格或契约的 ETF 已排除。
               </p>
             </div>
           ) : (
@@ -3637,6 +3744,14 @@ function ShortTermClient() {
                 正在读取短线研究池...
               </div>
             ) : null}
+            {assets.isError ? (
+              <div className="rounded-[10px] border border-rose-200 bg-rose-50 p-6 text-sm leading-6 text-rose-800">
+                榜单请求失败：{errorText(assets.error)}
+                <button type="button" className="ml-2 font-semibold underline underline-offset-2" onClick={() => void assets.refetch()}>
+                  重试
+                </button>
+              </div>
+            ) : null}
             {visibleAssets.map((item) => {
               const itemAssetType = getItemAssetType(item);
               const itemCode = toEtfItemCode(item);
@@ -3704,7 +3819,10 @@ function ShortTermClient() {
                     {isLiveItem ? (
                       <>
                         <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
-                          实时排名 #{toEtfItemRank(item) ?? "-"}
+                          全局排名 #{etfGlobalRank(item) ?? "-"}
+                        </span>
+                        <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                          当前范围排名 #{toEtfItemRank(item) ?? "-"} · 筛选位置 #{etfFilteredPosition(item) ?? "-"}
                         </span>
                         <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
                           当前价：{quote ? (livePrice === null || livePrice === undefined ? "暂无" : livePrice.toFixed(4)) : "暂无"}
@@ -3751,7 +3869,7 @@ function ShortTermClient() {
                 </button>
               </div>
             ) : null}
-            {!assets.isLoading && rawAssets.length === 0 ? (
+            {!assets.isLoading && !assets.isError && rawAssets.length === 0 ? (
               <div className="rounded-[10px] border border-dashed border-ink/20 p-6 text-sm leading-6 text-ink/55">
                 {mode.noResults}
               </div>
@@ -4321,7 +4439,7 @@ function ShortTermClient() {
                 <button
                   type="button"
                   className="w-fit rounded-[6px] border border-ink bg-ink px-3 py-2 text-xs font-semibold text-white transition hover:bg-ink/85 disabled:opacity-60"
-                  disabled={runEtfOptimizedAllocation.isPending}
+                  disabled={isResearchTaskPending}
                   onClick={() => runEtfOptimizedAllocation.mutate()}
                 >
                   {runEtfOptimizedAllocation.isPending ? "正在优化..." : "运行优化对照"}
