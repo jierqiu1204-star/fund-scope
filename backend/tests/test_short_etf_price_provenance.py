@@ -10,6 +10,14 @@ from app.models.entities import EtfDataHealth, EtfPriceHistory, TradableEtf
 from app.services.short_etf import data
 
 
+class _Frame:
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        self.rows = rows
+
+    def iterrows(self):  # type: ignore[no-untyped-def]
+        return enumerate(self.rows)
+
+
 @pytest.mark.asyncio
 async def test_eastmoney_history_uses_required_headers_and_total_return_provenance(
     monkeypatch,
@@ -52,6 +60,47 @@ async def test_eastmoney_history_uses_required_headers_and_total_return_provenan
     assert rows[0]["research_price_basis"] == data.TOTAL_RETURN_PRICE_BASIS
     assert rows[0]["adjustment_version"] == "eastmoney.push2his.kline.hfq_v1"
     assert rows[0]["provider_version"] == "eastmoney.push2his.kline.hfq_v1"
+
+
+@pytest.mark.asyncio
+async def test_efinance_history_requests_raw_and_hfq_with_total_return_provenance(
+    monkeypatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    async def fake_to_thread(_func: object, *_args: object, **kwargs: object) -> _Frame:
+        calls.append(kwargs)
+        close = 1.0 if kwargs["fqt"] == 0 else 2.0
+        return _Frame(
+            [
+                {
+                    "日期": "2026-07-10",
+                    "开盘": close,
+                    "最高": close,
+                    "最低": close,
+                    "收盘": close,
+                    "成交量": 100.0,
+                    "成交额": 200.0,
+                    "涨跌幅": 0.0,
+                }
+            ]
+        )
+
+    monkeypatch.setattr(data.asyncio, "to_thread", fake_to_thread)
+
+    rows = await data.fetch_efinance_etf_price_history(
+        "510050", date(2026, 7, 10), date(2026, 7, 10)
+    )
+
+    assert [call["fqt"] for call in calls] == [0, 2]
+    assert all(call["beg"] == "20260710" for call in calls)
+    assert all(call["end"] == "20260710" for call in calls)
+    assert rows[0]["close"] == 1.0
+    assert rows[0]["research_adjusted_value"] == 2.0
+    assert rows[0]["research_price_basis"] == data.TOTAL_RETURN_PRICE_BASIS
+    assert rows[0]["adjustment_version"] == "efinance.stock.get_quote_history.fqt2_v1"
+    assert rows[0]["provider_version"] == "efinance.stock.get_quote_history.fqt2_v1"
+
 
 @pytest.mark.asyncio
 async def test_sync_records_primary_source_failure_for_raw_fallback(app, monkeypatch) -> None:

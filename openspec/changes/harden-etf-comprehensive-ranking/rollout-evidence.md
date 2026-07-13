@@ -27,7 +27,7 @@ Unresolved `2026-07-10` source/basis exclusions:
 - Clash selector was changed from `新加坡SG-HY2` to `自动选择` only for a single-code probe (`159611`).
 - The corrected HTTPS probe failed with `httpx.RemoteProtocolError: Server disconnected without sending a response`.
 - The selector was immediately restored to `新加坡SG-HY2`; no proxy setting remained changed.
-- Because the source remained blocked/rate-limited, no further long synchronization was started in this session.
+- Because the source remained blocked/rate-limited, no unbounded synchronization was allowed to continue in this session.
 
 ### Provider and ranking health
 
@@ -39,5 +39,15 @@ Unresolved `2026-07-10` source/basis exclusions:
 
 - A raw Sina/efinance fallback can no longer overwrite an existing decision-eligible adjusted row for the same ETF and trade date.
 - The regression failed before the fix and passed after it; the full price-provenance test file passes.
+
+### Follow-up recovery at 19:33 +08:00
+
+- Local efinance source inspection showed that `stock.get_quote_history` defaults to `fqt=1` (forward adjusted). The previous adapter incorrectly treated that default output as raw OHLC.
+- The adapter now explicitly requests `fqt=0` and `fqt=2`, joins them by trade date, and records `efinance.stock.get_quote_history.fqt2_v1`. Missing or unmatched adjusted values remain decision-ineligible.
+- Real single-day probes for `510050` and `159755` on `2026-07-10` returned `total_return_adjusted` rows through the corrected efinance adapter. A later `2026-07-13` probe was disconnected by the proxy; after a 30-second cooldown, a single `2026-07-10` probe succeeded again.
+- A low-frequency historical gap sync was then started for only the 21 unresolved ETFs, with zero provider-level retries and a five-second inter-ETF delay. The first three ETFs produced no coverage increase, so the process was terminated. Coverage stayed `62/83` (`74.70%`); the raw-only source split changed to efinance `4` and Sina `17` without promoting any row.
+- A final single-code Eastmoney probe with all HTTP(S) proxy environment variables removed still failed with `RemoteProtocolError: Server disconnected without sending a response`. Proxy bypass is therefore not a working recovery path on this host.
+- Upstream efinance reports Eastmoney IP-frequency limits and the same `RemoteDisconnected` failure mode: <https://github.com/Micro-sheep/efinance/discussions/216>. Its maintainer also notes that domestic access through a proxy can fail: <https://github.com/Micro-sheep/efinance/issues/159>.
+- The production database still has no publishable ranking snapshot, so this follow-up does not count as a successful task 11.9 session.
 
 Result: tasks 11.2 and 11.9 remain open.

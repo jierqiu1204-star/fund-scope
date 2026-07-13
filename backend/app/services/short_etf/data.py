@@ -43,6 +43,7 @@ CLOSE_SNAPSHOT_MIN_TIME = time(14, 55)
 RAW_PRICE_BASIS = "raw_ohlc"
 TOTAL_RETURN_PRICE_BASIS = "total_return_adjusted"
 EASTMONEY_HFQ_ADJUSTMENT_VERSION = "eastmoney.push2his.kline.hfq_v1"
+EFINANCE_HFQ_ADJUSTMENT_VERSION = "efinance.stock.get_quote_history.fqt2_v1"
 EASTMONEY_HISTORY_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 EASTMONEY_HISTORY_HEADERS = {
     "User-Agent": (
@@ -327,8 +328,28 @@ async def fetch_efinance_etf_price_history(code: str, from_date: date, to_date: 
     async def fetch_backup() -> list[dict[str, float | str]]:
         import efinance as ef  # type: ignore[import-untyped]
 
-        frame = await asyncio.to_thread(ef.stock.get_quote_history, code)
-        return parse_etf_history_frame(frame, from_date, to_date)
+        common_kwargs = {
+            "beg": from_date.strftime("%Y%m%d"),
+            "end": to_date.strftime("%Y%m%d"),
+            "suppress_error": False,
+        }
+        raw_frame = await asyncio.to_thread(
+            ef.stock.get_quote_history,
+            code,
+            **common_kwargs,
+            fqt=0,
+        )
+        hfq_frame = await asyncio.to_thread(
+            ef.stock.get_quote_history,
+            code,
+            **common_kwargs,
+            fqt=2,
+        )
+        return _attach_hfq_research_prices(
+            parse_etf_history_frame(raw_frame, from_date, to_date),
+            parse_etf_history_frame(hfq_frame, from_date, to_date),
+            EFINANCE_HFQ_ADJUSTMENT_VERSION,
+        )
 
     return await retry_async(
         "fetch_efinance_etf_price_history",
