@@ -61,6 +61,24 @@ def test_twenty_day_volatility_requires_twenty_one_eligible_closes() -> None:
     assert twenty_one_close_metrics["effective_windows"]["volatility_20d"]["return_count"] == 20
 
 
+def test_score_metrics_passes_adjusted_ranges_to_atr_context() -> None:
+    start = date(2026, 1, 1)
+    series = [
+        PricePoint(
+            point_date=start + timedelta(days=index),
+            value=1.0,
+            high=1.02,
+            low=0.98,
+            turnover=100_000_000,
+        )
+        for index in range(30)
+    ]
+
+    metrics = _score_metrics(_etf_metadata(), series, series[-1].point_date)
+
+    assert metrics["dynamic_threshold_context"]["atr_style_20d_pct"] == 4.0
+
+
 def test_score_metrics_do_not_synthesize_ma20_or_premium_inputs() -> None:
     metadata = _etf_metadata()
     short_metrics = _score_metrics(metadata, _price_series(19), date(2026, 1, 19))

@@ -178,6 +178,8 @@ class PricePoint:
     point_date: date
     value: float
     close: float | None = None
+    high: float | None = None
+    low: float | None = None
     nav: float | None = None
     turnover: float | None = None
     pct_change: float | None = None
@@ -769,11 +771,18 @@ async def _etf_series(session: AsyncSession, code: str, as_of_date: date | None 
         research_value = _research_adjusted_value(row)
         if research_value is None:
             continue
+        adjustment_factor = research_value / row.close if math.isfinite(row.close) and row.close > 0 else None
         series.append(
             PricePoint(
                 point_date=row.trade_date,
                 value=research_value,
                 close=row.close,
+                high=row.high * adjustment_factor
+                if adjustment_factor is not None and math.isfinite(row.high) and row.high > 0
+                else None,
+                low=row.low * adjustment_factor
+                if adjustment_factor is not None and math.isfinite(row.low) and row.low > 0
+                else None,
                 turnover=row.turnover,
                 pct_change=row.pct_change / 100,
             )
@@ -1057,7 +1066,7 @@ def _score_metrics(metadata: ShortResearchAsset, series: list[PricePoint], as_of
     )
     source_trade_date = latest_date.isoformat() if latest_date else None
     threshold_points = [
-        ThresholdPricePoint(value=item.value, pct_change=item.pct_change)
+        ThresholdPricePoint(value=item.value, high=item.high, low=item.low, pct_change=item.pct_change)
         for item in series
         if item.value > 0
     ]

@@ -345,6 +345,8 @@ async def test_etf_research_series_uses_only_eligible_adjusted_values(app) -> No
 
     assert [point.value for point in series] == [1.1, 1.1]
     assert [point.close for point in series] == [1.0, 0.5]
+    assert [point.high for point in series] == pytest.approx([1.21, 1.21])
+    assert [point.low for point in series] == pytest.approx([0.99, 0.99])
     assert _window_return(series, 1) == 0.0
     status, outcome = _completed_outcome_payload(rows, 1)
     assert status == "completed"
