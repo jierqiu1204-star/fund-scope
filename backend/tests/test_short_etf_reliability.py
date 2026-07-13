@@ -76,7 +76,7 @@ async def test_short_etf_sync_uses_backup_provider_and_records_health(client, mo
     monkeypatch.setenv("SHORT_ETF_SYNC_DELAY_SECONDS", "0")
 
     async def primary_fails(code: str, from_date: date, to_date: date):
-        raise RuntimeError("AKShare 临时失败")
+        raise RuntimeError("东方财富临时失败")
 
     async def backup_succeeds(code: str, from_date: date, to_date: date):
         return [
@@ -92,7 +92,7 @@ async def test_short_etf_sync_uses_backup_provider_and_records_health(client, mo
             }
         ]
 
-    monkeypatch.setattr(etf_data, "fetch_akshare_etf_price_history", primary_fails)
+    monkeypatch.setattr(etf_data, "fetch_eastmoney_etf_price_history", primary_fails)
     monkeypatch.setattr(etf_data, "fetch_efinance_etf_price_history", backup_succeeds)
 
     response = await client.post(
@@ -114,7 +114,7 @@ async def test_short_etf_sync_uses_backup_provider_and_records_health(client, mo
     assert item["provider"] == "efinance"
     assert item["latest_price_date"] == "2026-01-02"
     assert item["consecutive_failures"] == 0
-    assert item["last_error_message"] is None
+    assert item["last_error_message"] == "东方财富: 东方财富临时失败"
 
 
 @pytest.mark.asyncio
@@ -193,7 +193,7 @@ async def test_sync_persists_traceable_total_return_values_alongside_raw_ohlc(cl
             },
         ]
 
-    monkeypatch.setattr(etf_data, "fetch_akshare_etf_price_history", total_return_rows)
+    monkeypatch.setattr(etf_data, "fetch_eastmoney_etf_price_history", total_return_rows)
 
     async with app.state.db.session() as session:
         result = await sync_etf_price_history(session, date(2026, 1, 2), date(2026, 1, 6), ["159915"])
@@ -373,7 +373,7 @@ async def test_short_etf_sync_uses_sina_third_provider_when_primary_and_backup_f
             }
         ]
 
-    monkeypatch.setattr(etf_data, "fetch_akshare_etf_price_history", primary_fails)
+    monkeypatch.setattr(etf_data, "fetch_eastmoney_etf_price_history", primary_fails)
     monkeypatch.setattr(etf_data, "fetch_efinance_etf_price_history", backup_fails)
     monkeypatch.setattr(etf_data, "fetch_sina_etf_price_history", third_provider_succeeds)
 
@@ -420,7 +420,7 @@ async def test_short_etf_sync_waits_between_etfs_to_reduce_public_source_pressur
         ]
 
     monkeypatch.setattr(etf_data.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(etf_data, "fetch_akshare_etf_price_history", primary_succeeds)
+    monkeypatch.setattr(etf_data, "fetch_eastmoney_etf_price_history", primary_succeeds)
 
     response = await client.post(
         "/api/short-etf/data/sync",
@@ -459,7 +459,7 @@ async def test_short_etf_retry_failed_targets_only_failed_or_stale_etfs(client, 
             }
         ]
 
-    monkeypatch.setattr(etf_data, "fetch_akshare_etf_price_history", primary_fails)
+    monkeypatch.setattr(etf_data, "fetch_eastmoney_etf_price_history", primary_fails)
     monkeypatch.setattr(etf_data, "fetch_efinance_etf_price_history", backup_changes_after_first_failure)
 
     failed = await client.post(

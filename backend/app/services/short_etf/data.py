@@ -10,7 +10,6 @@ from math import isfinite, sqrt
 from statistics import mean, pstdev
 from typing import Any, cast
 
-import akshare as ak
 import httpx
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -39,11 +38,21 @@ DEFAULT_PROVIDER_RETRIES = 2
 DEFAULT_PROVIDER_RETRY_DELAY_SECONDS = 1.0
 
 INELIGIBLE_NAME_KEYWORDS = ("一年持有", "持有期", "定开", "封闭", "封闭期")
-PRICE_HISTORY_PROVIDER_NAMES = ("akshare", "efinance", "sina")
+PRICE_HISTORY_PROVIDER_NAMES = ("eastmoney", "efinance", "sina")
 CLOSE_SNAPSHOT_MIN_TIME = time(14, 55)
 RAW_PRICE_BASIS = "raw_ohlc"
 TOTAL_RETURN_PRICE_BASIS = "total_return_adjusted"
-AKSHARE_HFQ_ADJUSTMENT_VERSION = "akshare.fund_etf_hist_em.hfq_v1"
+EASTMONEY_HFQ_ADJUSTMENT_VERSION = "eastmoney.push2his.kline.hfq_v1"
+EASTMONEY_HISTORY_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+EASTMONEY_HISTORY_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
+    ),
+    "Accept": "application/json,text/plain,*/*",
+    "Referer": "https://quote.eastmoney.com/",
+    "Connection": "close",
+}
 
 PriceHistoryRows = list[dict[str, float | str]]
 PriceHistoryFetcher = Callable[[str, date, date], Awaitable[PriceHistoryRows]]
@@ -171,9 +180,10 @@ def parse_etf_history_frame(frame: Any, from_date: date, to_date: date) -> list[
     return rows
 
 
-def attach_akshare_hfq_research_prices(
+def _attach_hfq_research_prices(
     raw_rows: PriceHistoryRows,
     hfq_rows: PriceHistoryRows,
+    adjustment_version: str,
 ) -> PriceHistoryRows:
     adjusted_by_date = {
         str(row["date"]): adjusted_close
@@ -190,11 +200,88 @@ def attach_akshare_hfq_research_prices(
             {
                 "research_adjusted_value": adjusted_close,
                 "research_price_basis": TOTAL_RETURN_PRICE_BASIS,
-                "adjustment_version": AKSHARE_HFQ_ADJUSTMENT_VERSION,
-                "provider_version": AKSHARE_HFQ_ADJUSTMENT_VERSION,
+                "adjustment_version": adjustment_version,
+                "provider_version": adjustment_version,
             }
         )
     return raw_rows
+
+
+def parse_eastmoney_history_payload(
+    payload: Any,
+    from_date: date,
+    to_date: date,
+) -> PriceHistoryRows:
+    data = payload.get("data") if isinstance(payload, dict) else None
+    klines = data.get("klines") if isinstance(data, dict) else None
+    if not isinstance(klines, list):
+        return []
+    rows: PriceHistoryRows = []
+    for item in klines:
+        fields = str(item).split(",")
+        if len(fields) < 11:
+            raise ValueError("东方财富返回了不完整的 ETF 日线数据")
+        trade_date = _parse_date(fields[0])
+        if not from_date <= trade_date <= to_date:
+            continue
+        rows.append(
+            {
+                "date": trade_date.isoformat(),
+                "open": float(fields[1]),
+                "close": float(fields[2]),
+                "high": float(fields[3]),
+                "low": float(fields[4]),
+                "volume": float(fields[5]),
+                "turnover": float(fields[6]),
+                "pct_change": float(fields[8]),
+            }
+        )
+    return rows
+
+
+def _eastmoney_market_id(code: str) -> int:
+    return 1 if code.startswith(("5", "6")) else 0
+
+
+async def fetch_eastmoney_etf_price_history(
+    code: str,
+    from_date: date,
+    to_date: date,
+) -> PriceHistoryRows:
+    async def fetch_primary() -> PriceHistoryRows:
+        common_params = {
+            "fields1": "f1,f2,f3,f4,f5,f6",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+            "ut": "7eea3edcaed734bea9cbfc24409ed989",
+            "invt": "2",
+            "klt": "101",
+            "beg": from_date.strftime("%Y%m%d"),
+            "end": to_date.strftime("%Y%m%d"),
+            "secid": f"{_eastmoney_market_id(code)}.{code}",
+        }
+        async with httpx.AsyncClient(timeout=20, headers=EASTMONEY_HISTORY_HEADERS) as client:
+            raw_response = await client.get(
+                EASTMONEY_HISTORY_URL,
+                params={**common_params, "fqt": "0"},
+            )
+            raw_response.raise_for_status()
+            hfq_response = await client.get(
+                EASTMONEY_HISTORY_URL,
+                params={**common_params, "fqt": "2"},
+            )
+            hfq_response.raise_for_status()
+        return _attach_hfq_research_prices(
+            parse_eastmoney_history_payload(raw_response.json(), from_date, to_date),
+            parse_eastmoney_history_payload(hfq_response.json(), from_date, to_date),
+            EASTMONEY_HFQ_ADJUSTMENT_VERSION,
+        )
+
+    return await retry_async(
+        "fetch_eastmoney_etf_price_history",
+        fetch_primary,
+        retries=_provider_retries(),
+        base_delay=_provider_retry_delay_seconds(),
+    )
 
 
 def _sina_symbol(code: str) -> str:
@@ -234,37 +321,6 @@ def parse_sina_history_payload(payload: str, from_date: date, to_date: date) -> 
             }
         )
     return rows
-
-
-async def fetch_akshare_etf_price_history(code: str, from_date: date, to_date: date) -> list[dict[str, float | str]]:
-    async def fetch_primary() -> list[dict[str, float | str]]:
-        raw_frame = await asyncio.to_thread(
-            ak.fund_etf_hist_em,
-            symbol=code,
-            period="daily",
-            start_date=from_date.strftime("%Y%m%d"),
-            end_date=to_date.strftime("%Y%m%d"),
-            adjust="",
-        )
-        hfq_frame = await asyncio.to_thread(
-            ak.fund_etf_hist_em,
-            symbol=code,
-            period="daily",
-            start_date=from_date.strftime("%Y%m%d"),
-            end_date=to_date.strftime("%Y%m%d"),
-            adjust="hfq",
-        )
-        return attach_akshare_hfq_research_prices(
-            parse_etf_history_frame(raw_frame, from_date, to_date),
-            parse_etf_history_frame(hfq_frame, from_date, to_date),
-        )
-
-    return await retry_async(
-        "fetch_etf_price_history",
-        fetch_primary,
-        retries=_provider_retries(),
-        base_delay=_provider_retry_delay_seconds(),
-    )
 
 
 async def fetch_efinance_etf_price_history(code: str, from_date: date, to_date: date) -> list[dict[str, float | str]]:
@@ -337,7 +393,7 @@ async def fetch_etf_price_history_with_provider(
 
 def _price_history_provider_sequence() -> list[tuple[str, str, PriceHistoryFetcher]]:
     return [
-        ("akshare", "AKShare", fetch_akshare_etf_price_history),
+        ("eastmoney", "东方财富", fetch_eastmoney_etf_price_history),
         ("efinance", "efinance", fetch_efinance_etf_price_history),
         ("sina", "新浪财经", fetch_sina_etf_price_history),
     ]
@@ -620,6 +676,8 @@ async def sync_etf_price_history(
                         )
                     )
                     inserted += 1
+                elif existing.decision_eligible is True and values["decision_eligible"] is not True:
+                    continue
                 else:
                     for field, value in values.items():
                         setattr(existing, field, value)
@@ -746,7 +804,7 @@ async def data_status_summary(session: AsyncSession) -> dict[str, Any]:
         "fallback_used": sum(
             1
             for _, health, _ in rows
-            if health is not None and health.provider is not None and health.provider != "akshare"
+            if health is not None and health.provider is not None and health.provider != "eastmoney"
         ),
         "latest_price_date": max(latest_dates).isoformat() if latest_dates else None,
     }
