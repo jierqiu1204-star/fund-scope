@@ -271,6 +271,7 @@ async def refresh_etf_universe(
         ).all()
     }
     eligible_codes: set[str] = set()
+    memberships_to_activate: list[EtfUniverseRecord] = []
 
     for record in discovered:
         try:
@@ -306,14 +307,7 @@ async def refresh_etf_universe(
                 updated += 1
             active_membership = active_memberships.get(record.code)
             if eligible and active_membership is None:
-                session.add(
-                    EtfUniverseMembership(
-                        etf_code=record.code,
-                        effective_from=effective_date,
-                        source=record.source,
-                    )
-                )
-                activated += 1
+                memberships_to_activate.append(record)
             elif not eligible and active_membership is not None:
                 active_membership.effective_to = effective_date
                 active_membership.exclusion_reason = "ineligible_from_refresh"
@@ -328,6 +322,16 @@ async def refresh_etf_universe(
         membership.exclusion_reason = "missing_from_refresh"
         deactivated += 1
 
+    await session.flush()
+    for record in memberships_to_activate:
+        session.add(
+            EtfUniverseMembership(
+                etf_code=record.code,
+                effective_from=effective_date,
+                source=record.source,
+            )
+        )
+        activated += 1
     await session.commit()
     default_display = await session.scalar(
         select(func.count()).select_from(TradableEtf).where(

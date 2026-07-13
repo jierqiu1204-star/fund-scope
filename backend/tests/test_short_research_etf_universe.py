@@ -5,7 +5,7 @@ from datetime import date, timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from app.models.entities import (
     EtfPriceHistory,
@@ -329,6 +329,29 @@ async def test_universe_refresh_closes_missing_memberships_and_preserves_histori
     assert membership.exclusion_reason == "missing_from_refresh"
     assert [member["asset_code"] for member in historical.members] == ["588001"]
     assert current.members == []
+
+
+@pytest.mark.asyncio
+async def test_universe_refresh_flushes_new_etf_before_membership_insert(app) -> None:
+    record = EtfUniverseRecord(
+        code="159605",
+        name="新能源ETF",
+        exchange="SZ",
+        category="sector",
+        theme_tags=["新能源"],
+        trading_rule_label="证券账户 T+1 ETF",
+        source="pytest",
+    )
+    async with app.state.db.session() as session:
+        await session.execute(text("PRAGMA foreign_keys = ON"))
+        result = await refresh_etf_universe(session, records=[record], as_of_date=date(2026, 7, 13))
+        membership = await session.scalar(
+            select(EtfUniverseMembership).where(EtfUniverseMembership.etf_code == record.code)
+        )
+
+    assert result["inserted"] == 1
+    assert result["activated"] == 1
+    assert membership is not None
 
 
 @pytest.mark.asyncio

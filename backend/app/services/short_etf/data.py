@@ -43,6 +43,7 @@ PRICE_HISTORY_PROVIDER_NAMES = ("akshare", "efinance", "sina")
 CLOSE_SNAPSHOT_MIN_TIME = time(14, 55)
 RAW_PRICE_BASIS = "raw_ohlc"
 TOTAL_RETURN_PRICE_BASIS = "total_return_adjusted"
+AKSHARE_HFQ_ADJUSTMENT_VERSION = "akshare.fund_etf_hist_em.hfq_v1"
 
 PriceHistoryRows = list[dict[str, float | str]]
 PriceHistoryFetcher = Callable[[str, date, date], Awaitable[PriceHistoryRows]]
@@ -170,6 +171,32 @@ def parse_etf_history_frame(frame: Any, from_date: date, to_date: date) -> list[
     return rows
 
 
+def attach_akshare_hfq_research_prices(
+    raw_rows: PriceHistoryRows,
+    hfq_rows: PriceHistoryRows,
+) -> PriceHistoryRows:
+    adjusted_by_date = {
+        str(row["date"]): adjusted_close
+        for row in hfq_rows
+        if (adjusted_close := _optional_number(row, "close")) is not None
+        and isfinite(adjusted_close)
+        and adjusted_close > 0
+    }
+    for row in raw_rows:
+        adjusted_close = adjusted_by_date.get(str(row["date"]))
+        if adjusted_close is None:
+            continue
+        row.update(
+            {
+                "research_adjusted_value": adjusted_close,
+                "research_price_basis": TOTAL_RETURN_PRICE_BASIS,
+                "adjustment_version": AKSHARE_HFQ_ADJUSTMENT_VERSION,
+                "provider_version": AKSHARE_HFQ_ADJUSTMENT_VERSION,
+            }
+        )
+    return raw_rows
+
+
 def _sina_symbol(code: str) -> str:
     return f"sh{code}" if code.startswith(("5", "6", "9")) else f"sz{code}"
 
@@ -211,7 +238,7 @@ def parse_sina_history_payload(payload: str, from_date: date, to_date: date) -> 
 
 async def fetch_akshare_etf_price_history(code: str, from_date: date, to_date: date) -> list[dict[str, float | str]]:
     async def fetch_primary() -> list[dict[str, float | str]]:
-        frame = await asyncio.to_thread(
+        raw_frame = await asyncio.to_thread(
             ak.fund_etf_hist_em,
             symbol=code,
             period="daily",
@@ -219,7 +246,18 @@ async def fetch_akshare_etf_price_history(code: str, from_date: date, to_date: d
             end_date=to_date.strftime("%Y%m%d"),
             adjust="",
         )
-        return parse_etf_history_frame(frame, from_date, to_date)
+        hfq_frame = await asyncio.to_thread(
+            ak.fund_etf_hist_em,
+            symbol=code,
+            period="daily",
+            start_date=from_date.strftime("%Y%m%d"),
+            end_date=to_date.strftime("%Y%m%d"),
+            adjust="hfq",
+        )
+        return attach_akshare_hfq_research_prices(
+            parse_etf_history_frame(raw_frame, from_date, to_date),
+            parse_etf_history_frame(hfq_frame, from_date, to_date),
+        )
 
     return await retry_async(
         "fetch_etf_price_history",
@@ -474,6 +512,7 @@ async def upsert_etf_data_health_success(
     provider: str,
     latest_price_date: date | None,
     row_count: int,
+    fallback_error: str | None = None,
 ) -> EtfDataHealth:
     now = utcnow()
     health = await session.scalar(select(EtfDataHealth).where(EtfDataHealth.etf_code == etf_code))
@@ -484,7 +523,7 @@ async def upsert_etf_data_health_success(
     health.provider = provider
     health.latest_price_date = latest_price_date
     health.successful_rows = row_count
-    health.last_error_message = None
+    health.last_error_message = fallback_error
     health.consecutive_failures = 0
     health.last_attempted_at = now
     health.last_success_at = now
@@ -592,6 +631,7 @@ async def sync_etf_price_history(
                 provider=result.provider,
                 latest_price_date=latest_row_date,
                 row_count=len(rows),
+                fallback_error=result.primary_error,
             )
             await session.commit()
             await compute_etf_metric(session, etf.code, to_date)
