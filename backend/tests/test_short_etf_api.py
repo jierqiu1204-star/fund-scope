@@ -94,7 +94,8 @@ async def test_short_etf_data_sync_is_idempotent_and_reports_failures(client, mo
     async def fake_third_fetch(code: str, from_date: date, to_date: date):
         raise RuntimeError("第三数据源失败")
 
-    monkeypatch.setattr(etf_data, "fetch_eastmoney_etf_price_history", fake_primary_fetch)
+    monkeypatch.setattr(etf_data, "fetch_tickflow_etf_price_history", fake_primary_fetch)
+    monkeypatch.setattr(etf_data, "fetch_eastmoney_etf_price_history", fake_backup_fetch)
     monkeypatch.setattr(etf_data, "fetch_efinance_etf_price_history", fake_backup_fetch)
     monkeypatch.setattr(etf_data, "fetch_sina_etf_price_history", fake_third_fetch)
 

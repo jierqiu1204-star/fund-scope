@@ -17,5 +17,6 @@ async def test_new_signal_run_persists_explicit_code_scope(app) -> None:
             theme="人工智能",
             codes=["510300"],
         )
+        assert session.in_transaction() is False
 
     assert run.scope_kind == "codes"

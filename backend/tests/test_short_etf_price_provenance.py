@@ -102,6 +102,82 @@ async def test_efinance_history_requests_raw_and_hfq_with_total_return_provenanc
     assert rows[0]["provider_version"] == "efinance.stock.get_quote_history.fqt2_v1"
 
 
+def test_parse_tickflow_history_payload_filters_dates_and_calculates_change() -> None:
+    rows = data.parse_tickflow_history_payload(
+        {
+            "timestamp": [1783526400000, 1783612800000],
+            "open": [1.0, 1.1],
+            "high": [1.1, 1.2],
+            "low": [0.9, 1.0],
+            "close": [1.0, 1.1],
+            "volume": [100.0, 200.0],
+            "amount": [1000.0, 2200.0],
+        },
+        date(2026, 7, 10),
+        date(2026, 7, 10),
+    )
+
+    assert rows == [
+        {
+            "date": "2026-07-10",
+            "open": 1.1,
+            "high": 1.2,
+            "low": 1.0,
+            "close": 1.1,
+            "volume": 200.0,
+            "turnover": 2200.0,
+            "pct_change": pytest.approx(10.0),
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tickflow_history_requests_raw_and_backward_with_total_return_provenance(
+    monkeypatch,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        close = 1.0 if request.url.params["adjust"] == "none" else 2.0
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "timestamp": [1783612800000],
+                    "open": [close],
+                    "high": [close],
+                    "low": [close],
+                    "close": [close],
+                    "volume": [100.0],
+                    "amount": [200.0],
+                }
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    async_client = httpx.AsyncClient
+
+    def client_factory(*args: object, **kwargs: object) -> httpx.AsyncClient:
+        return async_client(*args, transport=transport, **kwargs)
+
+    monkeypatch.setattr(data.httpx, "AsyncClient", client_factory)
+
+    rows = await data.fetch_tickflow_etf_price_history(
+        "510050", date(2026, 7, 10), date(2026, 7, 10)
+    )
+
+    assert [request.url.params["adjust"] for request in requests] == ["none", "backward"]
+    assert all(request.url.params["symbol"] == "510050.SH" for request in requests)
+    assert all(request.url.params["period"] == "1d" for request in requests)
+    assert all(request.url.params["count"] == "10000" for request in requests)
+    assert rows[0]["close"] == 1.0
+    assert rows[0]["research_adjusted_value"] == 2.0
+    assert rows[0]["research_price_basis"] == data.TOTAL_RETURN_PRICE_BASIS
+    assert rows[0]["adjustment_version"] == "tickflow.free.klines.backward_v1"
+    assert rows[0]["provider_version"] == "tickflow.free.klines.backward_v1"
+
+
 @pytest.mark.asyncio
 async def test_sync_records_primary_source_failure_for_raw_fallback(app, monkeypatch) -> None:
     async with app.state.db.session() as session:

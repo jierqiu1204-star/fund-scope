@@ -9,6 +9,7 @@ from datetime import date, datetime, time, timedelta
 from math import isfinite, sqrt
 from statistics import mean, pstdev
 from typing import Any, cast
+from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import func, select
@@ -38,13 +39,15 @@ DEFAULT_PROVIDER_RETRIES = 2
 DEFAULT_PROVIDER_RETRY_DELAY_SECONDS = 1.0
 
 INELIGIBLE_NAME_KEYWORDS = ("一年持有", "持有期", "定开", "封闭", "封闭期")
-PRICE_HISTORY_PROVIDER_NAMES = ("eastmoney", "efinance", "sina")
+PRICE_HISTORY_PROVIDER_NAMES = ("tickflow", "eastmoney", "efinance", "sina")
 CLOSE_SNAPSHOT_MIN_TIME = time(14, 55)
 RAW_PRICE_BASIS = "raw_ohlc"
 TOTAL_RETURN_PRICE_BASIS = "total_return_adjusted"
 EASTMONEY_HFQ_ADJUSTMENT_VERSION = "eastmoney.push2his.kline.hfq_v1"
 EFINANCE_HFQ_ADJUSTMENT_VERSION = "efinance.stock.get_quote_history.fqt2_v1"
+TICKFLOW_BACKWARD_ADJUSTMENT_VERSION = "tickflow.free.klines.backward_v1"
 EASTMONEY_HISTORY_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+TICKFLOW_HISTORY_URL = "https://free-api.tickflow.org/v1/klines"
 EASTMONEY_HISTORY_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -285,6 +288,98 @@ async def fetch_eastmoney_etf_price_history(
     )
 
 
+def _tickflow_symbol(code: str) -> str:
+    return f"{code}.SH" if code.startswith(("5", "6")) else f"{code}.SZ"
+
+
+def _tickflow_timestamp(trade_date: date) -> int:
+    local_midnight = datetime.combine(trade_date, time.min, tzinfo=ZoneInfo("Asia/Shanghai"))
+    return int(local_midnight.timestamp() * 1000)
+
+
+def parse_tickflow_history_payload(
+    payload: Any,
+    from_date: date,
+    to_date: date,
+) -> PriceHistoryRows:
+    if not isinstance(payload, dict):
+        return []
+    columns = ("timestamp", "open", "high", "low", "close", "volume", "amount")
+    values = [payload.get(column) for column in columns]
+    if not all(isinstance(value, list) for value in values):
+        return []
+    column_values = cast(list[list[Any]], values)
+    lengths = {len(value) for value in column_values}
+    if len(lengths) != 1:
+        raise ValueError("TickFlow 返回了长度不一致的 ETF 日线数据")
+
+    rows: PriceHistoryRows = []
+    previous_close: float | None = None
+    for timestamp, open_, high, low, close, volume, amount in zip(*column_values, strict=True):
+        trade_date = datetime.fromtimestamp(
+            float(timestamp) / 1000,
+            tz=ZoneInfo("Asia/Shanghai"),
+        ).date()
+        close_value = float(close)
+        pct_change = close_value / previous_close * 100 - 100 if previous_close else 0.0
+        previous_close = close_value
+        if not from_date <= trade_date <= to_date:
+            continue
+        rows.append(
+            {
+                "date": trade_date.isoformat(),
+                "open": float(open_),
+                "high": float(high),
+                "low": float(low),
+                "close": close_value,
+                "volume": float(volume),
+                "turnover": float(amount),
+                "pct_change": pct_change,
+            }
+        )
+    return rows
+
+
+async def fetch_tickflow_etf_price_history(
+    code: str,
+    from_date: date,
+    to_date: date,
+) -> PriceHistoryRows:
+    async def fetch_backup() -> PriceHistoryRows:
+        common_params: dict[str, str | int] = {
+            "symbol": _tickflow_symbol(code),
+            "period": "1d",
+            "count": 10_000,
+            "start_time": _tickflow_timestamp(from_date - timedelta(days=7)),
+            "end_time": _tickflow_timestamp(to_date),
+        }
+        async with httpx.AsyncClient(timeout=20) as client:
+            raw_response = await client.get(
+                TICKFLOW_HISTORY_URL,
+                params={**common_params, "adjust": "none"},
+            )
+            raw_response.raise_for_status()
+            adjusted_response = await client.get(
+                TICKFLOW_HISTORY_URL,
+                params={**common_params, "adjust": "backward"},
+            )
+            adjusted_response.raise_for_status()
+        return _attach_hfq_research_prices(
+            parse_tickflow_history_payload(raw_response.json().get("data"), from_date, to_date),
+            parse_tickflow_history_payload(
+                adjusted_response.json().get("data"), from_date, to_date
+            ),
+            TICKFLOW_BACKWARD_ADJUSTMENT_VERSION,
+        )
+
+    return await retry_async(
+        "fetch_tickflow_etf_price_history",
+        fetch_backup,
+        retries=_provider_retries(),
+        base_delay=_provider_retry_delay_seconds(),
+    )
+
+
 def _sina_symbol(code: str) -> str:
     return f"sh{code}" if code.startswith(("5", "6", "9")) else f"sz{code}"
 
@@ -414,6 +509,7 @@ async def fetch_etf_price_history_with_provider(
 
 def _price_history_provider_sequence() -> list[tuple[str, str, PriceHistoryFetcher]]:
     return [
+        ("tickflow", "TickFlow", fetch_tickflow_etf_price_history),
         ("eastmoney", "东方财富", fetch_eastmoney_etf_price_history),
         ("efinance", "efinance", fetch_efinance_etf_price_history),
         ("sina", "新浪财经", fetch_sina_etf_price_history),

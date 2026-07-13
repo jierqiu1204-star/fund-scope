@@ -4303,7 +4303,6 @@ async def run_signal_generation(
             "v3_shadow_comparison": build_v3_shadow_comparison(assets),
         }
         await session.commit()
-        await session.refresh(run)
         return run
     except Exception as exc:  # noqa: BLE001
         run.status = RUN_STATUS_FAILED

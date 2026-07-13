@@ -51,3 +51,26 @@ Unresolved `2026-07-10` source/basis exclusions:
 - The production database still has no publishable ranking snapshot, so this follow-up does not count as a successful task 11.9 session.
 
 Result: tasks 11.2 and 11.9 remain open.
+
+### Coverage recovery and full-universe synchronization at 20:14 +08:00
+
+- TickFlow's independent free HTTPS K-line API was verified against `510050.SH` and `159755.SZ` using separate raw (`adjust=none`) and back-adjusted (`adjust=backward`) requests. The adapter records `tickflow.free.klines.backward_v1`; raw rows without matching adjusted values remain decision-ineligible.
+- The first bounded recovery request exposed TickFlow's default 100-bar limit. That result was not treated as a full-history synchronization. The adapter now explicitly requests `count=10000`, and the full run was repeated for the complete `83`-ETF universe from `2024-07-15` through `2026-07-13`.
+- Full-universe result: `83/83` ETF fetches succeeded, `49` rows were inserted, `40,039` rows were updated, and there were `0` terminal failures.
+- Publication coverage is now `83/83` (`100%`) on both the last previously complete session (`2026-07-10`) and the current exchange session (`2026-07-13`). Every counted row is `decision_eligible=true`, uses `total_return_adjusted`, and has TickFlow adjustment/provider provenance. There are no remaining source or price-basis exclusions for the publication barrier.
+- Provider health after the full run is TickFlow success `83`, failed `0`. Sina/efinance raw fallback rows were replaced only after verified adjusted values were available; no raw fallback was promoted to decision data.
+- TickFlow is now the first historical-price provider, with Eastmoney retained as a later verified-adjustment fallback. This prevents the known blocked Eastmoney endpoint from consuming its full retry budget for every ETF before reaching the healthy independent source.
+- Task 11.2 is complete because the full-universe adjusted-price synchronization and the 95% publication barrier both passed with real production data.
+
+### Exchange-session monitoring sample 1 of 3
+
+- A real full-scope signal generation was run for `2026-07-13` after coverage passed. The latest run (`id=2`) completed with `83` items, but remained a `final_score_v2` result with no canonical v3 snapshot identity. Publication failed closed with `SnapshotPublicationError: snapshot trade date is required`; the production database has `0` published snapshots.
+- The publication call initially exposed an implicit-transaction lifecycle defect after signal generation. A regression test now requires `run_signal_generation` to return without an open transaction; after the fix, the publication probe reached the intended fail-closed identity check above.
+- Snapshot age: unavailable because no canonical v3 snapshot was published.
+- Component availability from the real v3 shadow: sector trend `67/83`; premium/discount `0/83`; risk quality `0/83`; structure/liquidity `0/83`; technical momentum `0/83`; theme/catalyst `0/83`. V3 score coverage is `0/83`.
+- Cap violations and non-finite rejects: unavailable because no item reached eligible v3 ordering. `caps.applied_count=0` is recorded as a shadow diagnostic and is not interpreted as proof of zero violations.
+- Rank churn: unavailable because there are no two published canonical v3 snapshots to compare.
+- Validation exclusions: unavailable because the database contains `0` ETF validation runs. Shadow exclusion reasons are retained in run `id=2` and are dominated by unavailable or unreliable premium, structure, catalyst, peer-count, and quality-gate inputs.
+- This is the first distinct exchange session with a genuinely passing adjusted-price coverage gate. Task 11.9 remains open until two additional exchange sessions are observed and the required metrics can be evaluated without substituting legacy, simulated, or stale evidence.
+
+Result: task 11.2 is complete; task 11.9 remains open at `1/3` qualifying exchange sessions.

@@ -134,7 +134,7 @@
 ## 11. Migrate, Shadow, Publish, And Recompute
 
 - [x] 11.1 Deploy additive nullable schema before new writers and confirm old readers continue working against the migrated database.
-- [ ] 11.2 Run full universe and adjusted-price synchronization until the publication coverage gate passes, recording unresolved source and basis exclusions.
+- [x] 11.2 Run full universe and adjusted-price synchronization until the publication coverage gate passes, recording unresolved source and basis exclusions.
 - [x] 11.3 Generate v3 snapshots in shadow and require non-null identity, no non-finite score inputs, hard-cap invariants, expected coverage, and reviewed top-rank differences before promotion.
 - [x] 11.4 Switch canonical readers with one configured score-version selector while retaining a rollback path that never labels v2/legacy evidence as current.
 - [x] 11.5 Migrate the workbench, detail, live ranking, portfolio, and evidence consumers to explicit snapshot/rank fields before deprecating legacy aliases.
