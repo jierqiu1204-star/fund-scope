@@ -87,3 +87,12 @@ Result: task 11.2 is complete; task 11.9 remains open at `1/3` qualifying exchan
 - TickFlow's free quote and depth endpoints were checked once and rejected access (`FREE_TIER_RESTRICTED` for quotes and `NO_DEPTH_PERMISSION` for CN depth). They are not used as live structure or premium producers, and no repeated network probing was performed.
 - Cap violations and non-finite rejects remain unavailable because no item reached eligible v3 ordering; the shadow diagnostic still records no applied caps and must not be interpreted as proof of zero violations. Rank churn remains unavailable because there are not two published canonical v3 snapshots. Validation exclusions remain unavailable because there are `0` ETF validation runs; the run-level shadow exclusions above are retained separately.
 - This is follow-up evidence for the same `2026-07-13` exchange session, not a second session. Task 11.9 remains open at `1/3`; no simulated, stale, raw-price, or legacy evidence was substituted.
+
+### Post-adjusted-range shadow diagnostic at 22:36 +08:00
+
+- The real adjusted-price publication barrier still passes at `83/83` (`100%`) for `2026-07-13`; provider health remains TickFlow success `83`, failed `0`. No additional historical synchronization was run.
+- A fresh real shadow run (`id=5`) completed with `83` ETF items. It is follow-up evidence for the same exchange session and does not increase the task 11.9 session count beyond `1/3`.
+- The adjusted high/low propagation is now present throughout the metric input series: all `83/83` items expose a finite `dynamic_threshold_context.atr_style_20d_pct`.
+- The v3 `overextension_atr` primitive nevertheless remains unavailable for `83/83` items. Every item carries the contradictory status `unavailable_no_range_series`, even though its ATR-style range context is available.
+- The producer boundary is the confirmed root cause: `_score_metrics` currently writes `overextension_atr=None` and `overextension_atr_status=unavailable_no_range_series` unconditionally instead of deriving the contract primitive from the available range/ATR context. No default or fabricated value was substituted, so risk-quality availability remains `0/83` and v3 score coverage remains `0/83`.
+- Snapshot age, cap violations, non-finite rejects, rank churn, and validation exclusions remain unavailable for the same reasons recorded above. Task 11.9 remains open pending a contract-approved overextension definition and two additional qualifying exchange sessions.
