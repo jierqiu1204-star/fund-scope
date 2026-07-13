@@ -96,3 +96,11 @@ Result: task 11.2 is complete; task 11.9 remains open at `1/3` qualifying exchan
 - The v3 `overextension_atr` primitive nevertheless remains unavailable for `83/83` items. Every item carries the contradictory status `unavailable_no_range_series`, even though its ATR-style range context is available.
 - The producer boundary is the confirmed root cause: `_score_metrics` currently writes `overextension_atr=None` and `overextension_atr_status=unavailable_no_range_series` unconditionally instead of deriving the contract primitive from the available range/ATR context. No default or fabricated value was substituted, so risk-quality availability remains `0/83` and v3 score coverage remains `0/83`.
 - Snapshot age, cap violations, non-finite rejects, rank churn, and validation exclusions remain unavailable for the same reasons recorded above. Task 11.9 remains open pending a contract-approved overextension definition and two additional qualifying exchange sessions.
+
+### Intraday producer runtime audit at 22:49 +08:00
+
+- The acceptance database is the local PostgreSQL `fundscope` database. It contains `0` `etf_intraday_latest_quotes`, `0` `etf_intraday_quotes`, and `0` `job_runs`; therefore no real intraday collector execution can be attributed to this session.
+- The application scheduler does register minute-level `intraday_etf_watch` jobs for the exchange morning and afternoon sessions, and its scheduler tests cover those registrations. The missing rows are not caused by a missing schedule definition.
+- On the acceptance host PostgreSQL was running, but no backend/uvicorn process was running and the Docker daemon was unavailable. Consequently the scheduler never executed against this database during the exchange session.
+- This proves that the `0/83` structure/liquidity and premium/discount availability observed in runs `4` and `5` is caused first by absent real quote collection, not by a dropped persisted bid/ask, IOPV, or premium value. No after-close request was used to fabricate the missing point-in-time inputs.
+- A future qualifying session must keep the backend scheduler running during exchange hours, or perform an explicitly bounded pre-close collector run, before the post-close shadow can evaluate spread, structure quality, IOPV freshness, and provider consensus. This same-day audit does not change the `1/3` session count.
