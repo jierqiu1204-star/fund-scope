@@ -3,13 +3,19 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
+import pytest
+
 from app.defaults.short_research import ASSET_TYPE_ETF, ShortResearchAsset
+from app.models.entities import EtfIntradayLatestQuote, TradableEtf, utcnow
+from app.services.short_research import service as short_research_service
 from app.services.short_research.service import (
+    ComputedAsset,
     PricePoint,
     _score_metrics,
     _v3_premium_inputs,
     _v3_structure_inputs,
     _v3_theme_catalyst_inputs,
+    _with_final_score_v3_shadow,
     compute_asset_for_replay_from_series,
 )
 
@@ -162,3 +168,87 @@ def test_v3_structure_input_uses_only_a_fresh_quoted_spread_and_quality_gate() -
     assert structure["spread_bps"] == 19.98
     assert structure["structure_quality"] == 88.0
     assert structure["structure_input_reliability"] == "verified"
+
+
+@pytest.mark.asyncio
+async def test_v3_shadow_propagates_verified_premium_reliability(app, monkeypatch) -> None:
+    observed_at = utcnow()
+    metadata = _etf_metadata()
+    captured_inputs = {}
+
+    def capture_inputs(inputs, *, manifest):
+        captured_inputs.update({item.asset_code: item for item in inputs})
+        return {
+            item.asset_code: SimpleNamespace(
+                asset_bucket=item.asset_bucket,
+                ranking_score=None,
+                score_eligible=False,
+                component_scores={},
+                missing_by_component={},
+                metric_peer_counts={},
+                limitation_reasons=(),
+            )
+            for item in inputs
+        }
+
+    monkeypatch.setattr(short_research_service, "score_final_score_v3", capture_inputs)
+    async with app.state.db.session() as session:
+        session.add(
+            TradableEtf(
+                code=metadata.code,
+                name=metadata.name,
+                exchange=metadata.exchange,
+                theme_tags_json=list(metadata.theme_tags),
+                trading_rule_label=metadata.trading_rule_label,
+                asset_class=metadata.category,
+                is_short_term_eligible=True,
+                is_watchlist=True,
+            )
+        )
+        session.add(
+            EtfIntradayLatestQuote(
+                etf_code=metadata.code,
+                quote_time=observed_at,
+                trade_date=observed_at.date(),
+                latest_price=1.0,
+                premium_discount_pct=0.1,
+                source="fixture",
+                freshness_status="fresh",
+                raw_json={"premium_provider_consensus": 95.0},
+            )
+        )
+        await session.commit()
+        [updated] = await _with_final_score_v3_shadow(
+            session,
+            [
+                ComputedAsset(
+                    metadata=metadata,
+                    rank=1,
+                    total_score=60.0,
+                    conclusion="谨慎观察",
+                    latest_date=observed_at.date(),
+                    latest_value=1.0,
+                    usable_days=60,
+                    sample_level="充足",
+                    metrics={
+                        "ranking_asset_bucket": "broad-equity",
+                        "ranking_profile_version": "final_score_v3",
+                        "theme_profile": {},
+                        "default_display_eligible": True,
+                        "data_quality_score": 90.0,
+                        "component_reliability": {},
+                    },
+                    score_breakdown={},
+                    risk_flags=[],
+                    rationale={},
+                    source_note="fixture",
+                    entry_timing_label="跌破等待",
+                    entry_timing_reason="fixture",
+                )
+            ],
+            observed_at.date(),
+        )
+
+    assert updated.metrics["premium_input_reliability"] == "verified"
+    assert captured_inputs[metadata.code].values["component_reliability"]["premium_discount"] == "verified"
+    assert updated.metrics["component_reliability"]["premium_discount"] == "verified"

@@ -1068,6 +1068,26 @@ def test_quote_normalization_marks_missing_time_as_display_only() -> None:
     assert quote.raw["quote_time_is_fallback"] is True
 
 
+def test_quote_normalization_maps_akshare_etf_spot_fields() -> None:
+    quote = normalize_spot_record(
+        {
+            "代码": "510300",
+            "最新价": "4.123",
+            "买一": "4.122",
+            "卖一": "4.124",
+            "IOPV实时估值": "4.120",
+            "基金折价率": "0.07",
+            "更新时间": "2026-07-13 14:59:00+08:00",
+        }
+    )
+
+    assert quote is not None
+    assert quote.bid_price == 4.122
+    assert quote.ask_price == 4.124
+    assert quote.iopv == 4.12
+    assert quote.premium_discount_pct == 0.07
+
+
 def test_quote_normalization_parses_timezone_update_time() -> None:
     quote = normalize_spot_record(
         {

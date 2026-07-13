@@ -339,8 +339,15 @@ def normalize_spot_record(record: dict[str, Any], *, fallback_time: datetime | N
         turnover=_number(record, "成交额", "turnover", "amount"),
         bid_price=_number(record, "买一", "买入", "bid", "bid_price"),
         ask_price=_number(record, "卖一", "卖出", "ask", "ask_price"),
-        iopv=_number(record, "IOPV", "iopv"),
-        premium_discount_pct=_number(record, "折价率", "溢价率", "折溢价率", "premium_discount_pct"),
+        iopv=_number(record, "IOPV", "IOPV实时估值", "iopv"),
+        premium_discount_pct=_number(
+            record,
+            "基金折价率",
+            "折价率",
+            "溢价率",
+            "折溢价率",
+            "premium_discount_pct",
+        ),
         source=source,
         raw=raw,
     )

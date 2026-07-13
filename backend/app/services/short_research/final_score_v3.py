@@ -157,7 +157,7 @@ def _input_with_derived_peer_count(
         for primitive in component.primitive_inputs
     }
     peer_counts = [len(bucket_distributions.get(primitive_id, ())) for primitive_id in peer_primitives]
-    eligible_peer_count = min(peer_counts) if peer_counts and min(peer_counts) >= 2 else None
+    eligible_peer_count = max(peer_counts) if peer_counts and max(peer_counts) >= 2 else None
     return RankingInput(
         asset_code=ranking_input.asset_code,
         asset_bucket=ranking_input.asset_bucket,

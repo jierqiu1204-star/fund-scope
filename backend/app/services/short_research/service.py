@@ -3733,6 +3733,9 @@ async def _with_final_score_v3_shadow(
                     "structure_liquidity": str(
                         ranking_input.values.get("structure_input_reliability") or "unavailable"
                     ),
+                    "premium_discount": str(
+                        ranking_input.values.get("premium_input_reliability") or "unavailable"
+                    ),
                 },
             },
         )

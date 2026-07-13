@@ -74,3 +74,16 @@ Result: tasks 11.2 and 11.9 remain open.
 - This is the first distinct exchange session with a genuinely passing adjusted-price coverage gate. Task 11.9 remains open until two additional exchange sessions are observed and the required metrics can be evaluated without substituting legacy, simulated, or stale evidence.
 
 Result: task 11.2 is complete; task 11.9 remains open at `1/3` qualifying exchange sessions.
+
+### Same-session v3 producer audit at 20:55 +08:00
+
+- No additional historical synchronization was run. The real adjusted-price gate remains `83/83` (`100%`) for `2026-07-13`, and TickFlow historical provider health remains success `83`, failed `0`.
+- The production taxonomy job processed `83` ETFs: `71` classified and `12` unknown/low-confidence. The theme/catalyst job refreshed `4` configured production seeds and produced `4` available snapshots.
+- A fresh real signal run (`id=4`) still produced `0/83` eligible v3 scores and no published canonical snapshot. Snapshot age therefore remains unavailable.
+- Component availability from run `id=4`: technical momentum `68/83`, sector trend `67/83`, theme/catalyst `7/83`, risk quality `0/83`, structure/liquidity `0/83`, and premium/discount `0/83`.
+- Primary real exclusions are missing `overextension_atr` for risk quality; missing `spread_bps` and `structure_quality` for structure/liquidity; missing `premium_discount_bps`, `iopv_observed_at`, and `premium_provider_consensus` for premium/discount; missing broad catalyst evidence for `72` ETFs; and unknown/incompatible taxonomy buckets for `12` ETFs.
+- A cross-component peer-count defect had made technical momentum unavailable whenever an unrelated primitive was absent. The corrected derivation restores technical availability without bypassing primitive-specific peer checks. A separate reliability propagation defect dropped verified premium reliability before scoring; that path is now covered by an integration regression.
+- AKShare's actual ETF spot columns `IOPV实时估值` and `基金折价率` were not mapped by the normalizer. A failing regression reproduced the loss, and the minimal mapping fix now preserves those fields. This does not establish independent provider consensus and does not make current premium inputs decision-eligible by itself.
+- TickFlow's free quote and depth endpoints were checked once and rejected access (`FREE_TIER_RESTRICTED` for quotes and `NO_DEPTH_PERMISSION` for CN depth). They are not used as live structure or premium producers, and no repeated network probing was performed.
+- Cap violations and non-finite rejects remain unavailable because no item reached eligible v3 ordering; the shadow diagnostic still records no applied caps and must not be interpreted as proof of zero violations. Rank churn remains unavailable because there are not two published canonical v3 snapshots. Validation exclusions remain unavailable because there are `0` ETF validation runs; the run-level shadow exclusions above are retained separately.
+- This is follow-up evidence for the same `2026-07-13` exchange session, not a second session. Task 11.9 remains open at `1/3`; no simulated, stale, raw-price, or legacy evidence was substituted.

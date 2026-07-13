@@ -215,6 +215,28 @@ def test_v3_quality_gate_cannot_be_restored_by_later_enrichment() -> None:
     assert result.missing_by_component["theme_catalyst"] == ("quality_gate_rejected",)
 
 
+def test_missing_risk_primitive_does_not_invalidate_complete_technical_component() -> None:
+    def without_atr(code: str) -> RankingInput:
+        ranking_input = _input(code)
+        values = dict(ranking_input.values)
+        values["overextension_atr"] = None
+        return RankingInput(
+            asset_code=ranking_input.asset_code,
+            asset_bucket=ranking_input.asset_bucket,
+            price_basis=ranking_input.price_basis,
+            profile_version=ranking_input.profile_version,
+            values=values,
+        )
+
+    result = score_final_score_v3(
+        [without_atr("510300"), without_atr("510500"), without_atr("510880")],
+        manifest=_manifest(),
+    )["510300"]
+
+    assert "technical_momentum_cross_section" in result.component_scores
+    assert result.missing_by_component["risk_quality_cross_section"] == ("overextension_atr",)
+
+
 def test_v3_applies_final_risk_cap_once_after_component_aggregation() -> None:
     stale = _input("510300")
     stale_values = dict(stale.values)
