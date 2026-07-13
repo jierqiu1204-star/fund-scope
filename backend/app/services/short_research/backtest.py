@@ -4,7 +4,7 @@ from collections import defaultdict
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from statistics import mean, median, pstdev
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -215,13 +215,16 @@ async def mark_backtest_failed(
 
 
 async def latest_completed_backtest_run(session: AsyncSession) -> EtfPortfolioBacktestRun | None:
-    return await session.scalar(
+    return cast(
+        EtfPortfolioBacktestRun | None,
+        await session.scalar(
         select(EtfPortfolioBacktestRun)
         .where(
             EtfPortfolioBacktestRun.asset_type == ASSET_TYPE_ETF,
             EtfPortfolioBacktestRun.status == "success",
         )
         .order_by(EtfPortfolioBacktestRun.finished_at.desc(), EtfPortfolioBacktestRun.id.desc())
+        ),
     )
 
 
@@ -1574,18 +1577,20 @@ async def backtest_detail_payload(session: AsyncSession, run: EtfPortfolioBackte
             EtfPortfolioBacktestPosition.run_id == run.id
         )
     )
-    positions = []
+    positions: list[EtfPortfolioBacktestPosition] = []
     if latest_date is not None:
-        positions = (
-            await session.scalars(
-                select(EtfPortfolioBacktestPosition)
-                .where(
-                    EtfPortfolioBacktestPosition.run_id == run.id,
-                    EtfPortfolioBacktestPosition.snapshot_date == latest_date,
+        positions = list(
+            (
+                await session.scalars(
+                    select(EtfPortfolioBacktestPosition)
+                    .where(
+                        EtfPortfolioBacktestPosition.run_id == run.id,
+                        EtfPortfolioBacktestPosition.snapshot_date == latest_date,
+                    )
+                    .order_by(EtfPortfolioBacktestPosition.weight.desc())
                 )
-                .order_by(EtfPortfolioBacktestPosition.weight.desc())
-            )
-        ).all()
+            ).all()
+        )
     labels = (
         await session.scalars(
             select(EtfPortfolioBacktestLabelSummary)
@@ -1763,8 +1768,11 @@ def _comparison_target_weights(strategy_key: str, assets: list[ComputedAsset]) -
         return {asset.metadata.code: weight for asset in selected}, PORTFOLIO_MODE_RISK_ON
     if strategy_key in {"optimized_min_volatility", "optimized_risk_parity"}:
         method = "minimum_volatility" if strategy_key == "optimized_min_volatility" else "risk_parity"
-        weights = optimized_method_weights(method, _optimizer_candidates_from_assets(assets))
-        return (weights or {}, PORTFOLIO_MODE_RISK_ON if weights else PORTFOLIO_MODE_CASH_WAIT)
+        optimized_weights = optimized_method_weights(method, _optimizer_candidates_from_assets(assets))
+        return (
+            optimized_weights or {},
+            PORTFOLIO_MODE_RISK_ON if optimized_weights else PORTFOLIO_MODE_CASH_WAIT,
+        )
     selected = _positive_momentum_assets(assets, limit=4)
     if strategy_key == "momentum_regime_cash_filter":
         broad_returns = [
@@ -1778,13 +1786,16 @@ def _comparison_target_weights(strategy_key: str, assets: list[ComputedAsset]) -
         return {}, PORTFOLIO_MODE_CASH_WAIT
     if strategy_key == "momentum_volatility_weighted" or strategy_key == "momentum_regime_cash_filter":
         raw = [1.0 / max(0.006, float(asset.metrics.get("volatility_20d") or 0.025)) for asset in selected]
-        weights = _cap_normalized_weights_by_caps(
+        normalized_weights = _cap_normalized_weights_by_caps(
             raw,
             [PORTFOLIO_SINGLE_WEIGHT_CAP for _asset in selected],
             target_total=min(1.0, len(selected) * PORTFOLIO_SINGLE_WEIGHT_CAP),
         )
         return (
-            {asset.metadata.code: weight for asset, weight in zip(selected, weights or [], strict=False)},
+            {
+                asset.metadata.code: weight
+                for asset, weight in zip(selected, normalized_weights or [], strict=False)
+            },
             PORTFOLIO_MODE_RISK_ON,
         )
     weight = round(min(1.0 / len(selected), PORTFOLIO_SINGLE_WEIGHT_CAP), 4)
@@ -1894,11 +1905,11 @@ def _future_returns_after_exit(
     except ValueError:
         return None, None
     future_dates = trading_dates[start_index + 1 : start_index + 1 + horizon]
-    returns = [
-        price_map.get(code, {}).get(item) / exit_price - 1.0
-        for item in future_dates
-        if price_map.get(code, {}).get(item)
-    ]
+    returns: list[float] = []
+    for item in future_dates:
+        price = price_map.get(code, {}).get(item)
+        if price is not None and price != 0:
+            returns.append(price / exit_price - 1.0)
     if not returns:
         return None, None
     return max(returns), min(returns)
@@ -2253,10 +2264,13 @@ async def run_etf_strategy_comparison_backtest(
 
 
 async def latest_strategy_comparison_run(session: AsyncSession) -> EtfPortfolioBacktestRun | None:
-    return await session.scalar(
+    return cast(
+        EtfPortfolioBacktestRun | None,
+        await session.scalar(
         select(EtfPortfolioBacktestRun)
         .where(EtfPortfolioBacktestRun.asset_type == ASSET_TYPE_ETF, EtfPortfolioBacktestRun.rule_version == STRATEGY_COMPARISON_RULE_VERSION)
         .order_by(EtfPortfolioBacktestRun.finished_at.desc(), EtfPortfolioBacktestRun.id.desc())
+        ),
     )
 
 

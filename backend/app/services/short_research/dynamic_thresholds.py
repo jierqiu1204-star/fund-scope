@@ -137,6 +137,7 @@ def dynamic_threshold_context(
     current_move_vs_normal = None
     if today_return is not None and volatility_unit:
         current_move_vs_normal = today_return / volatility_unit
+    effective_realized_vol = realized_vol_20d if realized_vol_20d is not None else volatility_20d
     reasons = [
         f"按 {asset_bucket or 'unknown'} / {theme_group or 'unknown'} 口径计算，正常日波动约 {volatility_unit * 100:.2f}%。",
     ]
@@ -152,7 +153,9 @@ def dynamic_threshold_context(
         "volatility_unit_pct": round(volatility_unit * 100, 3),
         "volatility_source": "atr_or_realized_or_median_abs",
         "atr_style_20d_pct": _round(atr_style_20d * 100 if atr_style_20d is not None else None, 3),
-        "realized_vol_20d_pct": _round((realized_vol_20d or volatility_20d) * 100 if (realized_vol_20d or volatility_20d) is not None else None, 3),
+        "realized_vol_20d_pct": _round(
+            effective_realized_vol * 100 if effective_realized_vol is not None else None, 3
+        ),
         "median_abs_return_60d_pct": _round(median_abs_return_60d * 100 if median_abs_return_60d is not None else None, 3),
         "return_percentiles": return_percentiles,
         "premium_discount_pct": premium_discount_pct,

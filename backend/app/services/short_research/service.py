@@ -2024,7 +2024,7 @@ def _replay_sample(
     if status == "completed" and entry_price is None:
         status = "excluded"
         exclusion_reason = "missing_research_price_provenance"
-    elif status == "completed" and entry_price > 0:
+    elif status == "completed" and entry_price is not None and entry_price > 0:
         end_row = future_rows[-1]
         horizon_end_date = end_row.trade_date
         path_returns = [
@@ -2168,6 +2168,7 @@ async def run_etf_label_historical_replay(
             replay_start = replay_row.trade_date if replay_start is None else min(replay_start, replay_row.trade_date)
             replay_end = replay_row.trade_date if replay_end is None else max(replay_end, replay_row.trade_date)
             series = _price_points_from_rows(rows[: index + 1])
+            base_exclusion: str | None
             if len(series) < 20:
                 metrics = {
                     "entry_timing_label": ENTRY_TIMING_INSUFFICIENT,
@@ -2637,12 +2638,12 @@ async def run_etf_score_bucket_validation(
                 excluded_codes["unavailable_final_decision_score"],
                 [item["asset_code"] for item in score_exclusions],
             )
-            for item in score_exclusions:
-                key = item["key"]
-                _append_unique_codes(excluded_codes.setdefault(key, []), [item["asset_code"]])
+            for exclusion in score_exclusions:
+                key = exclusion["key"]
+                _append_unique_codes(excluded_codes.setdefault(key, []), [exclusion["asset_code"]])
                 bucket = excluded_items.setdefault(key, [])
-                if item not in bucket:
-                    bucket.append(item)
+                if exclusion not in bucket:
+                    bucket.append(exclusion)
         if not scored_items:
             continue
         source_signal_run_ids.append(source_run.id)
@@ -2669,8 +2670,8 @@ async def run_etf_score_bucket_validation(
                 selected_codes_by_group[group_key],
                 [item.asset_code for item, _score in group_items],
             )
-            for item, score in group_items:
-                rows = rows_by_code.get(item.asset_code, [])
+            for signal_item, score in group_items:
+                rows = rows_by_code.get(signal_item.asset_code, [])
                 for horizon in horizons:
                     if not rows or rows[0].trade_date != signal_date:
                         status = "pending"
@@ -2689,7 +2690,7 @@ async def run_etf_score_bucket_validation(
                         "final_decision_score": score,
                         "source_signal_run_id": source_run.id,
                         "source_signal_as_of_date": signal_date.isoformat(),
-                        "asset_code": item.asset_code,
+                        "asset_code": signal_item.asset_code,
                         "ranking_sort": "opportunity",
                     }
                     outcomes_by_horizon[horizon].append((status, metrics))
@@ -4333,22 +4334,22 @@ async def scheduled_etf_job_freshness(session: AsyncSession) -> dict[str, dict[s
     now = utcnow()
     freshness: dict[str, dict[str, Any]] = {}
     for job_name, max_age in ETF_JOB_FRESHNESS_WINDOWS.items():
-        row = latest_by_name.get(job_name)
-        if row is None:
+        latest_run = latest_by_name.get(job_name)
+        if latest_run is None:
             freshness[job_name] = {"status": "waiting", "finished_at": None, "last_job_status": None}
             continue
-        if row.status == "running":
+        if latest_run.status == "running":
             status = "running"
-        elif row.status != "success":
-            status = "degraded" if row.status in {"partial", "skipped"} else "failed"
-        elif row.finished_at is None or now - row.finished_at > max_age:
+        elif latest_run.status != "success":
+            status = "degraded" if latest_run.status in {"partial", "skipped"} else "failed"
+        elif latest_run.finished_at is None or now - latest_run.finished_at > max_age:
             status = "stale"
         else:
             status = "fresh"
         freshness[job_name] = {
             "status": status,
-            "finished_at": row.finished_at.isoformat() if row.finished_at else None,
-            "last_job_status": row.status,
+            "finished_at": latest_run.finished_at.isoformat() if latest_run.finished_at else None,
+            "last_job_status": latest_run.status,
         }
     return freshness
 

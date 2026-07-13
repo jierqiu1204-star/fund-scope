@@ -796,6 +796,8 @@ def build_asset_factor_payload(
     structure_score = _float(metrics.get("etf_structure_score"))
     if structure_score is None:
         structure_score = 75.0 if bool(metrics.get("default_display_eligible", True)) else 35.0
+    threshold_context = metrics.get("dynamic_threshold_context")
+    premium_state = threshold_context.get("premium_state") if isinstance(threshold_context, Mapping) else None
     factors.append(
         available_factor(
             "etf_structure_quality",
@@ -807,11 +809,7 @@ def build_asset_factor_payload(
                 "asset_name": asset_name,
                 "theme_tags": list(theme_tags),
                 "default_display_eligible": metrics.get("default_display_eligible", True),
-                "premium_state": (
-                    metrics.get("dynamic_threshold_context")
-                    if isinstance(metrics.get("dynamic_threshold_context"), Mapping)
-                    else {}
-                ).get("premium_state"),
+                "premium_state": premium_state,
             },
         )
     )

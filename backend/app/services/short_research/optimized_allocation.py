@@ -4,7 +4,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, timedelta
 from statistics import mean, pstdev
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -142,11 +142,14 @@ def optimized_method_weights(
 
 
 async def latest_optimized_allocation_snapshot(session: AsyncSession) -> EtfOptimizedAllocationSnapshot | None:
-    return await session.scalar(
-        select(EtfOptimizedAllocationSnapshot).order_by(
-            EtfOptimizedAllocationSnapshot.created_at.desc(),
-            EtfOptimizedAllocationSnapshot.id.desc(),
-        )
+    return cast(
+        EtfOptimizedAllocationSnapshot | None,
+        await session.scalar(
+            select(EtfOptimizedAllocationSnapshot).order_by(
+                EtfOptimizedAllocationSnapshot.created_at.desc(),
+                EtfOptimizedAllocationSnapshot.id.desc(),
+            )
+        ),
     )
 
 
@@ -248,11 +251,14 @@ async def optimized_allocation_payload(
 
 
 async def _latest_observation_snapshot(session: AsyncSession) -> EtfObservationPortfolioSnapshot | None:
-    return await session.scalar(
-        select(EtfObservationPortfolioSnapshot).order_by(
-            EtfObservationPortfolioSnapshot.as_of_date.desc(),
-            EtfObservationPortfolioSnapshot.id.desc(),
-        )
+    return cast(
+        EtfObservationPortfolioSnapshot | None,
+        await session.scalar(
+            select(EtfObservationPortfolioSnapshot).order_by(
+                EtfObservationPortfolioSnapshot.as_of_date.desc(),
+                EtfObservationPortfolioSnapshot.id.desc(),
+            )
+        ),
     )
 
 
@@ -340,10 +346,11 @@ async def _eligible_candidates(session: AsyncSession, signal_run: ShortResearchS
             validation_sample_count = int(sample_count_value) if sample_count_value is not None else None
         except (TypeError, ValueError):
             validation_sample_count = None
+        etf = etfs.get(signal.asset_code)
         candidates.append(
             OptimizerCandidate(
                 code=signal.asset_code,
-                name=etfs.get(signal.asset_code).name if signal.asset_code in etfs else signal.asset_code,
+                name=etf.name if etf is not None else signal.asset_code,
                 score=float(signal.total_score or 0.0),
                 theme_group=profile.theme_group if profile else str(metrics.get("theme_group") or "unknown"),
                 data_date=rows[-1].trade_date,

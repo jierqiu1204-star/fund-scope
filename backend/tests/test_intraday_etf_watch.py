@@ -127,6 +127,7 @@ async def _seed_signal_run(
                         "default_display_eligible": True,
                         "entry_timing_label": "趋势延续",
                         "entry_timing_reason": "日线趋势仍在。",
+                        **({"score_version": "final_score_v3"} if canonical else {}),
                         **(
                             {"ranking_asset_bucket": "equity", "volatility_20d": 0.01}
                             if canonical
@@ -522,7 +523,7 @@ async def test_live_rankings_exposes_fresh_quote_without_score_from_stale_daily_
 
 @pytest.mark.asyncio
 async def test_live_rankings_keep_base_rank_for_equal_scores(client, app, monkeypatch) -> None:
-    await _seed_signal_run(app, count=2, total_scores=[80.0, 80.0])
+    await _seed_signal_run(app, count=2, total_scores=[80.0, 80.0], canonical=True)
     now = datetime(2026, 6, 12, 16, 0, 0)
     monkeypatch.setattr(
         "app.services.intraday_etf.service.current_market_state",
@@ -886,6 +887,7 @@ async def test_live_rankings_filters_labels_before_pagination_and_keeps_daily_en
         count=3,
         conclusions=[CONCLUSION_WATCH, CONCLUSION_HIGH_WATCH, CONCLUSION_WATCH],
         total_scores=[100.0, 99.0, 98.0],
+        canonical=True,
     )
 
     now = datetime(2026, 6, 12, 16, 0, 0)
@@ -1633,7 +1635,7 @@ async def test_dynamic_trailing_profit_trend_and_structure_warnings(app) -> None
     assert trailing.exit_signal.level == "warning"
     assert trailing.dynamic_thresholds is not None
     assert trailing.dynamic_thresholds.trailing_giveback_pct is not None
-    assert trend.exit_signal.alert_type == "trend_weakening"
+    assert trend.exit_signal.alert_type == "confirmed_trend_weakening"
     assert trend.dynamic_thresholds is not None
     assert trend.dynamic_thresholds.trend_weakening is True
     assert structure.exit_signal.alert_type == "risk_warning"

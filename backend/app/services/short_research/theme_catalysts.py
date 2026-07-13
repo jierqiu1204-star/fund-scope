@@ -199,7 +199,8 @@ def score_theme_catalysts(
         confidence = _clamp(float(getattr(event, "confidence_score", NEUTRAL_COMPONENT_SCORE) or NEUTRAL_COMPONENT_SCORE))
         decay = _recency_decay(event, as_of_date)
         weighted.append(strength * (confidence / 100.0) * decay)
-        if _event_date(event) and (as_of_date - _event_date(event)).days <= 45:
+        event_date = _event_date(event)
+        if event_date is not None and (as_of_date - event_date).days <= 45:
             recent_count += 1
         metadata = _metadata(event)
         proxy_theme = proxy_theme or bool(metadata.get("proxy_theme"))
@@ -209,7 +210,7 @@ def score_theme_catalysts(
                 "summary": str(getattr(event, "summary", "") or ""),
                 "catalyst_type": str(getattr(event, "catalyst_type", "") or ""),
                 "source_url": _source_url(event),
-                "event_date": _event_date(event).isoformat() if _event_date(event) else None,
+                "event_date": event_date.isoformat() if event_date is not None else None,
                 "source_type": str(getattr(event, "source_type", "") or "manual"),
                 "strength_score": strength,
                 "confidence_score": confidence,
@@ -423,8 +424,16 @@ def build_asset_opportunity_payload(
         catalyst_theme_name = catalyst_theme_key or "未匹配主题"
         catalyst_breakdown: dict[str, Any] = {"score_version": CATALYST_SCORE_VERSION, "active_event_count": 0}
     else:
-        catalyst_score = float(matched_snapshot.catalyst_score)
-        sentiment_score = float(matched_snapshot.sentiment_heat_score)
+        catalyst_score = (
+            float(matched_snapshot.catalyst_score)
+            if matched_snapshot.catalyst_score is not None
+            else NEUTRAL_COMPONENT_SCORE
+        )
+        sentiment_score = (
+            float(matched_snapshot.sentiment_heat_score)
+            if matched_snapshot.sentiment_heat_score is not None
+            else NEUTRAL_COMPONENT_SCORE
+        )
         events = list(matched_snapshot.key_events_json or [])
         catalyst_summary = events[0]["summary"] if events else "主题催化事件已记录，但缺少摘要。"
         limitations = [
@@ -457,14 +466,14 @@ def build_asset_opportunity_payload(
     elif sector_available and catalyst_available:
         opportunity_score = _clamp(
             float(technical_score) * FULL_TECHNICAL_WEIGHT
-            + float(sector_score) * FULL_SECTOR_WEIGHT
+            + (sector_score or 0.0) * FULL_SECTOR_WEIGHT
             + catalyst_score * FULL_CATALYST_WEIGHT
             + sentiment_score * FULL_SENTIMENT_WEIGHT
         )
         opportunity_version = OPPORTUNITY_SCORE_FULL_VERSION
         components = {
             "technical": {"score": round(float(technical_score), 2), "weight": FULL_TECHNICAL_WEIGHT},
-            "sector_trend": {"score": round(float(sector_score), 2), "weight": FULL_SECTOR_WEIGHT},
+            "sector_trend": {"score": round(sector_score or 0.0, 2), "weight": FULL_SECTOR_WEIGHT},
             "theme_catalyst": {"score": round(catalyst_score, 2), "weight": FULL_CATALYST_WEIGHT},
             "news_sentiment_heat": {"score": round(sentiment_score, 2), "weight": FULL_SENTIMENT_WEIGHT},
         }
@@ -476,12 +485,12 @@ def build_asset_opportunity_payload(
         }
     elif sector_available:
         opportunity_score = _clamp(
-            float(technical_score) * SECTOR_ONLY_TECHNICAL_WEIGHT + float(sector_score) * SECTOR_ONLY_WEIGHT
+            float(technical_score) * SECTOR_ONLY_TECHNICAL_WEIGHT + (sector_score or 0.0) * SECTOR_ONLY_WEIGHT
         )
         opportunity_version = OPPORTUNITY_SCORE_SECTOR_ONLY_VERSION
         components = {
             "technical": {"score": round(float(technical_score), 2), "weight": SECTOR_ONLY_TECHNICAL_WEIGHT},
-            "sector_trend": {"score": round(float(sector_score), 2), "weight": SECTOR_ONLY_WEIGHT},
+            "sector_trend": {"score": round(sector_score or 0.0, 2), "weight": SECTOR_ONLY_WEIGHT},
         }
         weights = {"technical": SECTOR_ONLY_TECHNICAL_WEIGHT, "sector_trend": SECTOR_ONLY_WEIGHT}
     elif catalyst_available:

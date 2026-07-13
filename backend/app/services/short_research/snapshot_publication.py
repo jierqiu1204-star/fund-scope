@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import date
 
@@ -97,7 +98,7 @@ async def build_etf_coverage_barrier(
     return EtfCoverageBarrier(expected_codes=expected_codes, included_codes=included_codes, excluded=excluded)
 
 
-def _validate_publishable(run: ShortResearchSignalRun, items: list[ShortResearchSignalItem]) -> None:
+def _validate_publishable(run: ShortResearchSignalRun, items: Sequence[ShortResearchSignalItem]) -> None:
     if run.status != "success":
         raise SnapshotPublicationError("snapshot status must be success")
     if run.scope_kind != "full":

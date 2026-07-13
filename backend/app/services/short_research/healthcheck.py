@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
 from statistics import mean
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -184,11 +184,14 @@ def aggregate_replay_samples_by_metric(
 
 
 async def latest_healthcheck_snapshot(session: AsyncSession) -> EtfStrategyHealthcheckSnapshot | None:
-    return await session.scalar(
-        select(EtfStrategyHealthcheckSnapshot).order_by(
-            EtfStrategyHealthcheckSnapshot.created_at.desc(),
-            EtfStrategyHealthcheckSnapshot.id.desc(),
-        )
+    return cast(
+        EtfStrategyHealthcheckSnapshot | None,
+        await session.scalar(
+            select(EtfStrategyHealthcheckSnapshot).order_by(
+                EtfStrategyHealthcheckSnapshot.created_at.desc(),
+                EtfStrategyHealthcheckSnapshot.id.desc(),
+            )
+        ),
     )
 
 

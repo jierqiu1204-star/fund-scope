@@ -1660,6 +1660,8 @@ _SNAPSHOT_ITEM_FIELDS = ("run_id", "rank", "global_rank", "total_score", "rankin
 
 def _changed_fields(instance: object, fields: tuple[str, ...]) -> bool:
     state = inspect(instance)
+    if state is None:
+        return False
     return any(state.attrs[field].history.has_changes() for field in fields)
 
 

@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from statistics import pstdev
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -421,7 +421,9 @@ async def _load_daily_series(
             .order_by(TradableEtf.code.asc())
         )
     ).all()
-    row_by_code = {row[0].code: row for row in etf_rows}
+    row_by_code: dict[str, tuple[TradableEtf, EtfThemeProfile | None]] = {
+        row[0].code: (row[0], row[1]) for row in etf_rows
+    }
     ordered_rows = [row_by_code[code] for code in codes if code in row_by_code]
     if not ordered_rows:
         return [], None
@@ -468,7 +470,9 @@ async def _load_intraday_series(
             .order_by(TradableEtf.code.asc())
         )
     ).all()
-    row_by_code = {row[0].code: row for row in etf_rows}
+    row_by_code: dict[str, tuple[TradableEtf, EtfThemeProfile | None]] = {
+        row[0].code: (row[0], row[1]) for row in etf_rows
+    }
     ordered_rows = [row_by_code[code] for code in codes if code in row_by_code]
     if not ordered_rows:
         return [], None
@@ -583,7 +587,7 @@ async def run_etf_exit_credibility(
         summaries = _group_events(events)
         item_by_key: dict[tuple[str, str, str], EtfExitSignalCredibilityItem] = {}
         for summary in summaries:
-            item = EtfExitSignalCredibilityItem(
+            summary_item = EtfExitSignalCredibilityItem(
                 run_id=run.id,
                 signal_type=summary["signal_type"],
                 group_type=summary["group_type"],
@@ -599,9 +603,9 @@ async def run_etf_exit_credibility(
                 metrics_json=summary["metrics"],
                 created_at=utcnow(),
             )
-            session.add(item)
+            session.add(summary_item)
             await session.flush()
-            item_by_key[(item.group_type, item.group_key, item.signal_type)] = item
+            item_by_key[(summary_item.group_type, summary_item.group_key, summary_item.signal_type)] = summary_item
 
         sample_events = sorted(events, key=lambda event: event.signal_date, reverse=True)[: EVENT_SAMPLE_LIMIT * len(EXIT_SIGNALS)]
         for event in sample_events:
@@ -706,11 +710,14 @@ async def latest_etf_exit_credibility_run(
     query = select(EtfExitSignalCredibilityRun)
     if execution_model is not None:
         query = query.where(EtfExitSignalCredibilityRun.execution_model == execution_model)
-    return await session.scalar(
-        query.order_by(
-            desc(EtfExitSignalCredibilityRun.finished_at),
-            desc(EtfExitSignalCredibilityRun.id),
-        ).limit(1)
+    return cast(
+        EtfExitSignalCredibilityRun | None,
+        await session.scalar(
+            query.order_by(
+                desc(EtfExitSignalCredibilityRun.finished_at),
+                desc(EtfExitSignalCredibilityRun.id),
+            ).limit(1)
+        ),
     )
 
 

@@ -179,7 +179,7 @@ def _correlation(left: tuple[float, ...], right: tuple[float, ...]) -> float | N
     right_var = sum((b - right_mean) ** 2 for b in right_values)
     if left_var <= 0 or right_var <= 0:
         return None
-    return numerator / (left_var * right_var) ** 0.5
+    return float(numerator / (left_var * right_var) ** 0.5)
 
 
 def black_litterman_covariance_summary(

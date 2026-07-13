@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from itertools import product
 from statistics import pstdev
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1065,10 +1066,10 @@ def rolling_validation_metrics(
             if len(intraday_points) < window_size:
                 continue
             for start in range(0, len(intraday_points) - window_size + 1, step_size):
-                window = intraday_points[start : start + window_size]
+                intraday_window = intraday_points[start : start + window_size]
                 results.append(
                     simulate_intraday_exit_rule(
-                        window,
+                        intraday_window,
                         params,
                         asset_bucket=item.asset_bucket,
                         daily_points=item.points,
@@ -1080,8 +1081,8 @@ def rolling_validation_metrics(
         if len(points) < window_size:
             continue
         for start in range(0, len(points) - window_size + 1, step_size):
-            window = points[start : start + window_size]
-            results.append(simulate_exit_rule(window, params, asset_bucket=item.asset_bucket))
+            daily_window = points[start : start + window_size]
+            results.append(simulate_exit_rule(daily_window, params, asset_bucket=item.asset_bucket))
 
     usable = [row for row in results if row.get("total_return") is not None]
     if not usable:
@@ -1193,7 +1194,7 @@ def best_candidate_for_bucket(
             train_metrics=train_metrics,
             oos_metrics=oos_metrics,
             baseline_metrics=baseline_oos_metrics,
-            rolling_metrics=None,
+            rolling_metrics={},
         )
         candidate = {
             "params": params,
@@ -1341,7 +1342,7 @@ async def _load_series(
             batch_size=batch_size,
         )
         return [], coverage, None
-    history_rows = []
+    history_rows: list[tuple[str, date, float]] = []
     for code_batch in _chunks(codes, batch_size):
         rows = await session.execute(
             select(EtfPriceHistory.etf_code, EtfPriceHistory.trade_date, EtfPriceHistory.close)
@@ -1352,7 +1353,7 @@ async def _load_series(
             )
             .order_by(EtfPriceHistory.etf_code.asc(), EtfPriceHistory.trade_date.asc())
         )
-        history_rows.extend(rows.all())
+        history_rows.extend(rows.tuples().all())
     history_by_code: dict[str, list[HyperoptPricePoint]] = {}
     for etf_code, trade_date, close in history_rows:
         history_by_code.setdefault(etf_code, []).append(HyperoptPricePoint(trade_date, float(close)))
@@ -1361,7 +1362,7 @@ async def _load_series(
     latest_intraday_time: datetime | None = None
     if execution_model == EXECUTION_MODEL_INTRADAY_ALERT:
         intraday_start_date = max(start_date, end_date - timedelta(days=MAX_INTRADAY_HYPEROPT_DAYS))
-        intraday_rows = []
+        intraday_rows: list[tuple[str, datetime, float]] = []
         for code_batch in _chunks(codes, batch_size):
             rows = await session.execute(
                 select(EtfIntradayQuote.etf_code, EtfIntradayQuote.quote_time, EtfIntradayQuote.latest_price)
@@ -1375,7 +1376,9 @@ async def _load_series(
                 )
                 .order_by(EtfIntradayQuote.etf_code.asc(), EtfIntradayQuote.quote_time.asc())
             )
-            intraday_rows.extend(rows.all())
+            intraday_rows.extend(
+                cast(Sequence[tuple[str, datetime, float]], rows.tuples().all())
+            )
         for etf_code, quote_time, latest_price in intraday_rows:
             intraday_by_code.setdefault(etf_code, []).append(
                 HyperoptIntradayPoint(quote_time, float(latest_price), True)
@@ -1672,8 +1675,13 @@ async def run_etf_exit_hyperopt(
 
 
 async def latest_etf_exit_hyperopt_run(session: AsyncSession) -> EtfExitHyperoptRun | None:
-    return await session.scalar(
-        select(EtfExitHyperoptRun).order_by(desc(EtfExitHyperoptRun.finished_at), desc(EtfExitHyperoptRun.id)).limit(1)
+    return cast(
+        EtfExitHyperoptRun | None,
+        await session.scalar(
+            select(EtfExitHyperoptRun)
+            .order_by(desc(EtfExitHyperoptRun.finished_at), desc(EtfExitHyperoptRun.id))
+            .limit(1)
+        ),
     )
 
 

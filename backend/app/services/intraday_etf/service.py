@@ -592,8 +592,8 @@ async def fetch_spot_quotes_with_metadata(fetcher: Any | None = None) -> SpotQuo
     if fetcher is not None:
         results = [await _fetch_akshare_provider(fetcher)]
     else:
-        results = await asyncio.gather(_fetch_akshare_provider(), _fetch_eastmoney_provider())
-    return select_consensus_quotes(list(results))
+        results = list(await asyncio.gather(_fetch_akshare_provider(), _fetch_eastmoney_provider()))
+    return select_consensus_quotes(results)
 
 
 async def fetch_spot_quotes(fetcher: Any | None = None) -> dict[str, NormalizedQuote]:
@@ -728,7 +728,7 @@ async def quote_name_map(session: AsyncSession, codes: list[str]) -> dict[str, s
 
 
 def quote_out(
-    quote: EtfIntradayQuote,
+    quote: QuoteRow,
     *,
     etf_name: str | None = None,
     now: datetime | None = None,

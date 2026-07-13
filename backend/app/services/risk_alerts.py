@@ -502,8 +502,8 @@ def calculate_position_sizing(
     raw_amount = target_market_value - current_market_value
     if action in {POSITION_ACTION_TRIM, POSITION_ACTION_REDUCE, POSITION_ACTION_EXIT}:
         raw_amount = current_market_value - target_market_value
-    trade_amount = _round_trade_amount(max(0.0, raw_amount))
-    if trade_amount <= 0:
+    trade_amount: float | None = _round_trade_amount(max(0.0, raw_amount))
+    if trade_amount is not None and trade_amount <= 0:
         trade_amount = None
     trade_shares = _round_trade_shares(trade_amount / current_price) if trade_amount is not None else None
     return PositionSizingRecommendation(

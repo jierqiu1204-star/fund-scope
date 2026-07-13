@@ -39,7 +39,7 @@ async def try_acquire_etf_daily_workflow_lock(session: AsyncSession, trade_date:
             details_json={},
         )
     )
-    if updated.rowcount:
+    if getattr(updated, "rowcount", 0):
         await session.commit()
         return True
 

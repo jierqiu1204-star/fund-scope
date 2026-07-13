@@ -67,17 +67,19 @@ async def daily_short_research_data_job(session: AsyncSession) -> dict[str, Any]
             to_date=today,
             asset_type=asset_type,
         )
-    result = {
+    asset_count = sum(_count(item, "asset_count") for item in results.values())
+    failed_count = sum(_count(item, "failed") for item in results.values())
+    result: dict[str, Any] = {
         "from_date": (today - timedelta(days=120)).isoformat(),
         "to_date": today.isoformat(),
         "asset_types": SHORT_RESEARCH_DAILY_ASSET_TYPES,
         "fund": results[ASSET_TYPE_FUND],
         "etf": results[ASSET_TYPE_ETF],
-        "asset_count": sum(_count(item, "asset_count") for item in results.values()),
-        "failed": sum(_count(item, "failed") for item in results.values()),
+        "asset_count": asset_count,
+        "failed": failed_count,
     }
-    if result["failed"]:
-        result["job_status"] = "partial" if result["failed"] < result["asset_count"] else "failed"
+    if failed_count:
+        result["job_status"] = "partial" if failed_count < asset_count else "failed"
         result["job_message"] = "daily data provider returned incomplete results"
     elif _count(results[ASSET_TYPE_ETF].get("etfs", {}), "skipped"):
         result["job_status"] = "partial"

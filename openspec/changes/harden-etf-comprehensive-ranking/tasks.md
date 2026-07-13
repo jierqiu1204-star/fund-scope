@@ -147,7 +147,7 @@
 
 - [x] 12.1 Run ranking, evidence, API, sector/factor/theme, intraday, data-sync, scheduler, migration, and validation tests with explicit timeouts; keep the two former failures as passing regression tests.
 - [x] 12.2 Run `uv run pytest tests/test_backend_domain_boundaries.py` and confirm the new tracking filters remain in API/workflow orchestration.
-- [ ] 12.3 Run `uv run ruff check .`, backend type checks used by the repository, frontend typecheck, frontend lint, and frontend unit/component tests.
+- [x] 12.3 Run `uv run ruff check .`, backend type checks used by the repository, frontend typecheck, frontend lint, and frontend unit/component tests.
 - [x] 12.4 Run `openspec validate harden-etf-comprehensive-ranking --strict` and fix every schema, requirement, and scenario error.
 - [x] 12.5 Compare unfiltered and filtered static/live responses from one snapshot and automatically prove stable global rank, explicit filtered position, compatible rank change, user isolation, and pagination invariants.
 - [x] 12.6 Verify every audited P0/P1 path: partial-run pollution, stale cache, mixed dates, legacy score fallback, fabricated hash, validation feedback, cap bypass, raw-price distortion, sector input gaps, filtered-rank fabrication, and cross-user leakage.

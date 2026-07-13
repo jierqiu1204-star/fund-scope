@@ -1625,16 +1625,19 @@ async def _latest_etf_observation_target(
     )
     if snapshot is None:
         return None
-    return await session.scalar(
-        select(EtfObservationPortfolioItem)
-        .where(
-            EtfObservationPortfolioItem.snapshot_id == snapshot.id,
-            EtfObservationPortfolioItem.asset_code == asset_code,
-            EtfObservationPortfolioItem.item_type == "primary",
-            EtfObservationPortfolioItem.target_weight > 0,
-        )
-        .order_by(EtfObservationPortfolioItem.target_weight.desc(), EtfObservationPortfolioItem.rank_order.asc())
-        .limit(1)
+    return cast(
+        EtfObservationPortfolioItem | None,
+        await session.scalar(
+            select(EtfObservationPortfolioItem)
+            .where(
+                EtfObservationPortfolioItem.snapshot_id == snapshot.id,
+                EtfObservationPortfolioItem.asset_code == asset_code,
+                EtfObservationPortfolioItem.item_type == "primary",
+                EtfObservationPortfolioItem.target_weight > 0,
+            )
+            .order_by(EtfObservationPortfolioItem.target_weight.desc(), EtfObservationPortfolioItem.rank_order.asc())
+            .limit(1)
+        ),
     )
 
 
@@ -1743,6 +1746,7 @@ async def position_sizing_recommendation(
     target_weight = None
     entry_timing_label = None
     target = None
+    effective_alert_type: str | None
     if alert_type is not None:
         effective_alert_type = alert_type
     elif exit_signal is not None:

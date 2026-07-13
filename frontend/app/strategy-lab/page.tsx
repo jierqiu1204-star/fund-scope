@@ -2119,6 +2119,9 @@ function StrategyLabClient() {
                     <span className="rounded-full bg-ink px-3 py-1 text-xs font-semibold text-white">
                       评分 {item.total_score.toFixed(1)}
                     </span>
+                    <span className="rounded-full bg-accentSoft px-3 py-1 text-xs font-semibold text-ink">
+                      {item.safe_label}
+                    </span>
                     <span className={`rounded-full px-3 py-1 text-xs font-semibold ${verdictTone(reviewItem?.verdict)}`}>
                       {reviewItem?.verdict ?? "未审查"}
                     </span>
