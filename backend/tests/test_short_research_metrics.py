@@ -45,6 +45,21 @@ def _price_series(count: int) -> list[PricePoint]:
     ]
 
 
+def _flat_then_gap_series(final_value: float) -> list[PricePoint]:
+    start = date(2026, 1, 1)
+    values = [100.0] * 20 + [final_value]
+    return [
+        PricePoint(
+            point_date=start + timedelta(days=index),
+            value=value,
+            high=value + 1.0,
+            low=value - 1.0,
+            turnover=100_000_000,
+        )
+        for index, value in enumerate(values)
+    ]
+
+
 def test_twenty_day_volatility_requires_twenty_one_eligible_closes() -> None:
     metadata = _etf_metadata()
     twenty_close_metrics = _score_metrics(metadata, _price_series(20), date(2026, 1, 20))
@@ -77,6 +92,44 @@ def test_score_metrics_passes_adjusted_ranges_to_atr_context() -> None:
     metrics = _score_metrics(_etf_metadata(), series, series[-1].point_date)
 
     assert metrics["dynamic_threshold_context"]["atr_style_20d_pct"] == 4.0
+
+
+def test_overextension_atr_uses_adjusted_atr20_and_penalizes_both_directions() -> None:
+    upward = _flat_then_gap_series(110.0)
+    downward = _flat_then_gap_series(90.0)
+
+    upward_metrics = _score_metrics(_etf_metadata(), upward, upward[-1].point_date)
+    downward_metrics = _score_metrics(_etf_metadata(), downward, downward[-1].point_date)
+
+    expected = 9.5 / ((19 * 2.0 + 11.0) / 20)
+    assert upward_metrics["overextension_atr"] == pytest.approx(expected)
+    assert downward_metrics["overextension_atr"] == pytest.approx(expected)
+    assert upward_metrics["overextension_atr_status"] == "available_adjusted_atr20"
+    assert upward_metrics["effective_windows"]["overextension_atr"] == {
+        "close_count": 21,
+        "true_range_count": 20,
+        "required_close_count": 21,
+        "required_true_range_count": 20,
+    }
+
+
+def test_overextension_atr_fails_closed_without_adjusted_ranges() -> None:
+    metrics = _score_metrics(_etf_metadata(), _price_series(21), date(2026, 1, 21))
+    zero_range = [
+        PricePoint(
+            point_date=date(2026, 1, 1) + timedelta(days=index),
+            value=100.0,
+            high=100.0,
+            low=100.0,
+        )
+        for index in range(21)
+    ]
+    zero_range_metrics = _score_metrics(_etf_metadata(), zero_range, zero_range[-1].point_date)
+
+    assert metrics["overextension_atr"] is None
+    assert metrics["overextension_atr_status"] == "unavailable_missing_adjusted_range"
+    assert zero_range_metrics["overextension_atr"] is None
+    assert zero_range_metrics["overextension_atr_status"] == "unavailable_non_positive_adjusted_atr20"
 
 
 def test_score_metrics_do_not_synthesize_ma20_or_premium_inputs() -> None:

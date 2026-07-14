@@ -57,7 +57,21 @@
             {"primitive": "realized_volatility_20d", "weight": 0.25, "direction": "lower_is_better", "normalization": "bucket_percentile"},
             {"primitive": "downside_volatility_20d", "weight": 0.25, "direction": "lower_is_better", "normalization": "bucket_percentile"},
             {"primitive": "max_drawdown_20d", "weight": 0.3, "direction": "lower_absolute_loss_is_better", "normalization": "bucket_percentile"},
-            {"primitive": "overextension_atr", "weight": 0.2, "direction": "lower_is_better", "normalization": "winsorized_bucket_percentile"}
+            {
+              "primitive": "overextension_atr",
+              "weight": 0.2,
+              "direction": "lower_is_better",
+              "normalization": "winsorized_bucket_percentile",
+              "definition": {
+                "formula": "abs(adjusted_close - adjusted_ma20) / adjusted_atr20",
+                "adjusted_ma20": "arithmetic_mean_last_20_adjusted_closes",
+                "adjusted_atr20": "arithmetic_mean_last_20_adjusted_true_ranges",
+                "adjusted_true_range": "max(adjusted_high - adjusted_low, abs(adjusted_high - previous_adjusted_close), abs(adjusted_low - previous_adjusted_close))",
+                "required_adjusted_ohlc_points": 21,
+                "penalized_directions": ["above_ma20", "below_ma20"],
+                "missing_data_behavior": "score_unavailable"
+              }
+            }
           ]
         },
         "required_inputs": [

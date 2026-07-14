@@ -863,6 +863,40 @@ def _distance_to_average(current: float | None, average: float | None) -> float 
     return current / average - 1
 
 
+def _adjusted_atr20_overextension(
+    series: list[PricePoint],
+    ma20: float | None,
+) -> tuple[float | None, str, int]:
+    points = series[-21:]
+    if len(points) < 21:
+        return None, "unavailable_insufficient_adjusted_range_history", 0
+    if ma20 is None or not math.isfinite(ma20) or ma20 <= 0:
+        return None, "unavailable_invalid_adjusted_close", 0
+
+    true_ranges: list[float] = []
+    for previous, current in zip(points[:-1], points[1:], strict=True):
+        if current.high is None or current.low is None:
+            return None, "unavailable_missing_adjusted_range", len(true_ranges)
+        values = (previous.value, current.value, current.high, current.low)
+        if any(not math.isfinite(value) or value <= 0 for value in values) or current.high < current.low:
+            return None, "unavailable_invalid_adjusted_range", len(true_ranges)
+        true_ranges.append(
+            max(
+                current.high - current.low,
+                abs(current.high - previous.value),
+                abs(current.low - previous.value),
+            )
+        )
+
+    adjusted_atr20 = mean(true_ranges)
+    if not math.isfinite(adjusted_atr20) or adjusted_atr20 <= 0:
+        return None, "unavailable_non_positive_adjusted_atr20", len(true_ranges)
+    overextension_atr = abs(points[-1].value - ma20) / adjusted_atr20
+    if not math.isfinite(overextension_atr):
+        return None, "unavailable_non_finite_overextension_atr", len(true_ranges)
+    return overextension_atr, "available_adjusted_atr20", len(true_ranges)
+
+
 def _latest_day_return(series: list[PricePoint]) -> float | None:
     if not series:
         return None
@@ -1058,6 +1092,10 @@ def _score_metrics(metadata: ShortResearchAsset, series: list[PricePoint], as_of
     ma20 = _mean_value(last_20, required_count=20)
     distance_to_ma5 = _distance_to_average(latest_value, ma5)
     distance_to_ma20 = _distance_to_average(latest_value, ma20)
+    overextension_atr, overextension_atr_status, atr20_true_range_count = _adjusted_atr20_overextension(
+        series,
+        ma20,
+    )
     trend_consistency = (
         sum(1 for item in returns_20 if item > 0) / len(returns_20) if len(returns_20) == 20 else None
     )
@@ -1173,8 +1211,8 @@ def _score_metrics(metadata: ShortResearchAsset, series: list[PricePoint], as_of
         "average_turnover_60d": average_turnover_60d,
         "distance_to_ma20_pct": distance_to_ma20,
         "trend_consistency": trend_consistency,
-        "overextension_atr": None,
-        "overextension_atr_status": "unavailable_no_range_series",
+        "overextension_atr": overextension_atr,
+        "overextension_atr_status": overextension_atr_status,
         "spread_bps": None,
         "structure_quality": None,
         "premium_discount_bps": None,
@@ -1210,6 +1248,12 @@ def _score_metrics(metadata: ShortResearchAsset, series: list[PricePoint], as_of
                 "required_return_count": 20,
             },
             "ma20": {"close_count": min(len(series), 20), "required_close_count": 20},
+            "overextension_atr": {
+                "close_count": min(len(series), 21),
+                "true_range_count": atr20_true_range_count,
+                "required_close_count": 21,
+                "required_true_range_count": 20,
+            },
             "max_drawdown_20d": {"close_count": len(last_20), "required_close_count": 20},
             "max_drawdown_60d": {"close_count": len(last_60), "required_close_count": 60},
             "average_turnover_20d": {"observation_count": turnover_20_count, "required_count": 20},
