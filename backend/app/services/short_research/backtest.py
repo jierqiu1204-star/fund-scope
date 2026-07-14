@@ -33,10 +33,12 @@ from app.services.etf_research_evidence import (
     EXIT_V2_EVIDENCE_CONTRACT_VERSION,
     FEE_MODEL_SIMPLE_RATE,
     REENTRY_CONTRACT_VERSION,
+    REPLAY_CONTRACT_VERSION,
     build_evidence_summary,
     build_exit_v2_baseline_comparison,
     build_exit_v2_evidence_contract,
     build_replay_contract,
+    stable_contract_hash,
 )
 from app.services.portfolio_allocation import (
     PORTFOLIO_LAYER_DEFENSIVE,
@@ -102,6 +104,11 @@ LABEL_HORIZONS = (1, 3, 5, 10)
 BENCHMARK_CODES = ("510300", "159919", "510500", "512880", "588000")
 WEAK_ENTRY_LABELS = {"跌破等待", "放量转弱", "数据不足", "行情滞后"}
 EXIT_V2_COOLDOWN_DAYS = 3
+CURRENT_ACTION_TARGET_SEMANTICS = "absolute_exposure_baseline"
+CURRENT_ACTION_EVENT_SOURCE = "unique_action_decision"
+LEGACY_ACTION_TARGET_SEMANTICS = "legacy_current_position"
+LEGACY_ACTION_EVENT_SOURCE = "repeated_risk_evaluation"
+LEGACY_BACKTEST_ROLE = "legacy_diagnostic"
 
 
 @dataclass
@@ -157,6 +164,12 @@ async def _create_backtest_run(
         "min_holdings_for_full_exposure": MIN_WEIGHTABLE_HOLDINGS,
         "partial_allocation_allowed": True,
         "execution": execution_label,
+        "run_role": LEGACY_BACKTEST_ROLE,
+        "action_lifecycle_version": exit_rule_version,
+        "target_semantics": LEGACY_ACTION_TARGET_SEMANTICS,
+        "action_event_source": LEGACY_ACTION_EVENT_SOURCE,
+        "research_only": True,
+        "promotion_eligible": False,
     }
     if execution_model == EXECUTION_MODEL_DAILY_CLOSE:
         config["no_intraday_fill"] = True
@@ -186,6 +199,9 @@ async def _create_backtest_run(
         replay_run_id=run.id,
         signal_rule_version=BACKTEST_RANKING_VERSION,
         allocation_version=BACKTEST_ALLOCATION_VERSION,
+        action_lifecycle_version=exit_rule_version,
+        target_semantics=LEGACY_ACTION_TARGET_SEMANTICS,
+        action_event_source=LEGACY_ACTION_EVENT_SOURCE,
         execution_model=execution_model,
         fee_model=FEE_MODEL_SIMPLE_RATE,
         start_date=start_date,
@@ -556,7 +572,10 @@ def _risk_action(position: ReplayPosition, asset: ComputedAsset, price: float) -
         "trailing_giveback_pct": round(giveback, 4),
         "trend_weakening": trend_weak,
     }
-    if asset.conclusion in {CONCLUSION_REJECT, CONCLUSION_INSUFFICIENT}:
+    if asset.conclusion == CONCLUSION_INSUFFICIENT:
+        context.update(data_state="data_waiting", reason_code="ranking_data_insufficient")
+        return None, 0.0, context
+    if asset.conclusion == CONCLUSION_REJECT:
         return ALERT_EXIT_WATCH, 1.0, context
     if profit_pct <= hard_stop:
         return ALERT_HARD_STOP, 1.0, context
@@ -1665,28 +1684,177 @@ async def backtest_detail_payload(session: AsyncSession, run: EtfPortfolioBackte
     }
 
 
+def backtest_uses_current_action_contract(run: EtfPortfolioBacktestRun) -> bool:
+    replay_contract = dict((run.config_json or {}).get("replay_contract") or {})
+    claimed_hash = replay_contract.pop("contract_hash", None)
+    contract_hash_valid = bool(
+        isinstance(claimed_hash, str)
+        and claimed_hash
+        and stable_contract_hash(replay_contract) == claimed_hash
+    )
+    return bool(
+        contract_hash_valid
+        and replay_contract.get("replay_contract_version") == REPLAY_CONTRACT_VERSION
+        and replay_contract.get("action_lifecycle_version") == EXIT_ACTION_CONTRACT_VERSION
+        and replay_contract.get("target_semantics") == CURRENT_ACTION_TARGET_SEMANTICS
+        and replay_contract.get("action_event_source") == CURRENT_ACTION_EVENT_SOURCE
+    )
+
+
+def classify_backtest_evidence_status(run: EtfPortfolioBacktestRun) -> str:
+    replay_contract = dict((run.config_json or {}).get("replay_contract") or {})
+    if not replay_contract or not backtest_uses_current_action_contract(run):
+        return EVIDENCE_STATUS_LEGACY
+    if run.status != "success":
+        return EVIDENCE_STATUS_WAITING
+    return EVIDENCE_STATUS_SAME_CONTRACT
+
+
+def _backtest_evidence_dimensions(
+    run: EtfPortfolioBacktestRun,
+    *,
+    execution_model: str | None,
+) -> dict[str, Any]:
+    config = dict(run.config_json or {})
+    metrics = dict(run.metrics_json or {})
+    coverage = dict(run.data_coverage_json or {})
+    is_intraday = execution_model == EXECUTION_MODEL_INTRADAY_ALERT
+    current_action_contract = backtest_uses_current_action_contract(run)
+    policy_semantics = (
+        CURRENT_ACTION_TARGET_SEMANTICS
+        if current_action_contract
+        else LEGACY_ACTION_TARGET_SEMANTICS
+    )
+
+    action_metrics = metrics.get("action_evidence")
+    if not isinstance(action_metrics, dict):
+        action_metrics = {}
+    notification_metrics = metrics.get("notification_evidence")
+    if not isinstance(notification_metrics, dict):
+        notification_metrics = {}
+
+    def sample_count(source: dict[str, Any]) -> int | None:
+        value = source.get("sample_count")
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+        return None
+
+    action_samples = sample_count(action_metrics)
+    notification_samples = sample_count(notification_metrics)
+    quote_count = coverage.get("intraday_quote_count")
+    has_intraday_quotes = (
+        isinstance(quote_count, int)
+        and not isinstance(quote_count, bool)
+        and quote_count > 0
+    )
+    notes = coverage.get("data_limitation_notes")
+    if not isinstance(notes, list) or not all(isinstance(item, str) for item in notes):
+        notes = [
+            "盘中模型只使用已保存的历史快照，不能证明完整盘口、SMTP 送达或用户真实执行。"
+            if is_intraday
+            else "日线模型不能验证盘中硬止损、bid/ask、IOPV 或邮件触达后的真实执行。"
+        ]
+    else:
+        notes = list(notes)
+    if not current_action_contract:
+        notes.append("旧相对仓位动作语义仅供诊断，不可作为当前 v2 动作策略证据。")
+
+    action_status = (
+        "available" if action_samples else "not_computed"
+    ) if current_action_contract else "legacy_diagnostic"
+    notification_status = (
+        "available" if notification_samples else "not_computed"
+    ) if current_action_contract else "legacy_diagnostic"
+
+    return {
+        "action_evidence": {
+            "scenario_label": "动作建议完全执行情景",
+            "status": action_status,
+            "sample_count": action_samples,
+            "execution_provenance": "simulated_not_observed",
+            "observed_user_execution": False,
+            "policy_semantics": policy_semantics,
+            "research_only": True,
+            "promotion_eligible": False,
+        },
+        "notification_evidence": {
+            "scenario_label": "仅 SMTP 已接受邮件被执行敏感性",
+            "status": notification_status,
+            "sample_count": notification_samples,
+            "smtp_semantics": "accepted_not_delivered",
+            "execution_provenance": "simulated_not_observed",
+            "observed_user_execution": False,
+        },
+        "execution_evidence": {
+            "model": execution_model,
+            "label": "盘中历史快照模拟" if is_intraday else "日线收盘模拟",
+            "base_fill_field": config.get("base_fill_field")
+            or (
+                "stored_intraday_quote_after_fixed_delay"
+                if is_intraday
+                else "legacy_daily_close"
+            ),
+            "execution_delay_minutes": config.get("execution_delay_minutes")
+            if is_intraday
+            else None,
+            "execution_provenance": "simulated_not_observed",
+            "observed_user_execution": False,
+        },
+        "coverage_evidence": {
+            "asset_count": coverage.get("asset_count"),
+            "priced_asset_count": coverage.get("priced_asset_count"),
+            "intraday_asset_count": coverage.get("intraday_asset_count"),
+            "trading_days": coverage.get("intraday_trade_days")
+            if is_intraday
+            else coverage.get("trading_days"),
+            "intraday_quote_count": quote_count if is_intraday else None,
+            "start_date": coverage.get("start_date"),
+            "end_date": coverage.get("end_date"),
+        },
+        "time_resolution_limitations": {
+            "resolution": "stored_intraday_snapshots" if is_intraday else "daily_bars",
+            "intraday_trigger_replayed": is_intraday and has_intraday_quotes,
+            "bid_ask_iopv_verified": False,
+            "smtp_delivery_verified": False,
+            "user_execution_verified": False,
+            "notes": notes,
+        },
+    }
+
+
 def backtest_summary_payload(run: EtfPortfolioBacktestRun) -> dict[str, Any]:
     replay_contract = dict((run.config_json or {}).get("replay_contract") or {})
     execution_model = replay_contract.get("execution_model") or (run.config_json or {}).get("execution")
-    evidence_status = (
-        EVIDENCE_STATUS_SAME_CONTRACT
-        if replay_contract and run.status == "success"
-        else EVIDENCE_STATUS_WAITING
-        if replay_contract
-        else EVIDENCE_STATUS_LEGACY
+    evidence_status = classify_backtest_evidence_status(run)
+    current_action_contract = backtest_uses_current_action_contract(run)
+    metrics = dict(run.metrics_json or {})
+    action_metrics = metrics.get("action_evidence")
+    action_sample_count = (
+        action_metrics.get("sample_count")
+        if isinstance(action_metrics, dict)
+        and isinstance(action_metrics.get("sample_count"), int)
+        and not isinstance(action_metrics.get("sample_count"), bool)
+        and action_metrics.get("sample_count", -1) >= 0
+        else 0
     )
+    caveats = list(run.caveats_json or [])
+    if not current_action_contract:
+        caveats.append("该回测使用旧相对仓位动作语义，仅供诊断，不可证明当前 v2 动作策略。")
     evidence_summary = build_evidence_summary(
-        current_contract=replay_contract or None,
+        current_contract=replay_contract if current_action_contract else None,
         validation_evidence={
             "contract_hash": replay_contract.get("contract_hash"),
-            "sample_count": 20 if run.status == "success" and replay_contract else 0,
+            "sample_count": action_sample_count,
         }
-        if replay_contract
+        if current_action_contract
         else None,
-        backtest_metrics=dict(run.metrics_json or {}),
-        caveats=list(run.caveats_json or []),
+        backtest_metrics=metrics,
+        caveats=caveats,
     )
-    evidence_summary["evidence_status"] = evidence_status
+    evidence_dimensions = _backtest_evidence_dimensions(
+        run,
+        execution_model=str(execution_model) if execution_model else None,
+    )
     return {
         "id": run.id,
         "status": run.status,
@@ -1696,14 +1864,17 @@ def backtest_summary_payload(run: EtfPortfolioBacktestRun) -> dict[str, Any]:
         "end_date": run.end_date,
         "initial_cash": run.initial_cash,
         "fee_rate": run.fee_rate,
-        "metrics": dict(run.metrics_json or {}),
+        "metrics": metrics,
         "benchmark": dict(run.benchmark_json or {}),
         "data_coverage": dict(run.data_coverage_json or {}),
-        "caveats": list(run.caveats_json or []),
+        "caveats": caveats,
         "execution_model": str(execution_model) if execution_model else None,
         "replay_contract": replay_contract,
         "evidence_status": evidence_status,
         "evidence_summary": evidence_summary,
+        "research_only": True,
+        "promotion_eligible": False,
+        **evidence_dimensions,
         "error_message": run.error_message,
     }
 
@@ -2216,6 +2387,9 @@ async def run_etf_strategy_comparison_backtest(
                 replay_run_id=run.id,
                 signal_rule_version=BACKTEST_RANKING_VERSION,
                 allocation_version=BACKTEST_ALLOCATION_VERSION,
+                action_lifecycle_version=BACKTEST_EXIT_RULE_VERSION,
+                target_semantics=LEGACY_ACTION_TARGET_SEMANTICS,
+                action_event_source=LEGACY_ACTION_EVENT_SOURCE,
                 execution_model=EXECUTION_MODEL_DAILY_CLOSE,
                 fee_model=FEE_MODEL_SIMPLE_RATE,
                 start_date=trading_dates[0],

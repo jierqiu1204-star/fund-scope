@@ -1,3 +1,5 @@
+> **Lifecycle reconciliation:** Checked tasks below record the legacy implementation completed by this change. They MUST NOT be used to restore relative reductions, infer execution/cooldown from a proposed or sent recommendation, let notification cooldown decide action eligibility, or map `take_profit_watch` to trim/reduce. Current production remediation and acceptance are owned by `harden-etf-alert-action-lifecycle`; legacy behavior remains diagnostic/research-only until that change cuts over.
+
 ## 1. Evidence And Contracts
 
 - [x] 1.1 Add exit risk validation contract fields to research evidence payloads using existing JSON fields where possible.
@@ -23,7 +25,7 @@
 
 ## 4. Protection Guards
 
-- [x] 4.1 Add cooldown guard that suppresses duplicate ETF holding emails and records the suppression reason.
+- [x] 4.1 Add a notification cooldown guard that suppresses duplicate ETF holding emails and records the suppression reason without changing action eligibility, action status, or execution-origin reentry cooldown.
 - [x] 4.2 Add repeated stop-loss guard that blocks add reminders or downgrades urgency after repeated loss events.
 - [x] 4.3 Add portfolio drawdown guard for tracked ETF holdings using owner-scoped positions.
 - [x] 4.4 Add low-profit ETF guard that can downgrade repeat low-quality ETF actions.
@@ -53,3 +55,8 @@
 - [x] 7.5 Verify `uv run pytest tests/test_backend_domain_boundaries.py`.
 - [x] 7.6 Verify `uv run ruff check .`.
 - [x] 7.7 Verify frontend type checking (`pnpm exec tsc --noEmit` is blocked by approve-builds; `./node_modules/.bin/tsc.cmd --noEmit` passed).
+
+## 8. Alert Action Lifecycle Reconciliation
+
+- [x] 8.1 Reconcile this change's proposal, design, and specs with immutable exposure baselines, absolute targets, owner-confirmed execution facts, notification/action separation, and `take_profit_watch=hold`.
+- [ ] 8.2 Before archiving or promoting this change, complete the implementation remediation and cutover in `harden-etf-alert-action-lifecycle`; legacy path-replay or notification-cooldown tests cannot satisfy current lifecycle acceptance.

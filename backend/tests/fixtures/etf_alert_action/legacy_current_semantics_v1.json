@@ -1,0 +1,27 @@
+{
+  "schema_version": "etf-alert-action-diagnostic-v1",
+  "policy_key": "legacy_current_semantics",
+  "evidence_label": "old_contract_research_only",
+  "initial_shares": 1000.0,
+  "relative_reduction_path": [
+    {
+      "notification_slot": "2026-06-02",
+      "relative_sell_fraction": 0.5,
+      "remaining_shares": 500.0
+    },
+    {
+      "notification_slot": "2026-06-03",
+      "relative_sell_fraction": 0.5,
+      "remaining_shares": 250.0
+    },
+    {
+      "notification_slot": "2026-06-04",
+      "relative_sell_fraction": 0.5,
+      "remaining_shares": 125.0
+    }
+  ],
+  "trade_count": 3,
+  "final_remaining_fraction": 0.125,
+  "research_only": true,
+  "promotion_eligible": false
+}

@@ -904,6 +904,51 @@ export type EtfPortfolioBacktestRunSummary = {
   replay_contract?: Record<string, unknown>;
   evidence_status?: string;
   evidence_summary?: Record<string, unknown>;
+  research_only: boolean;
+  promotion_eligible: boolean;
+  action_evidence: {
+    scenario_label: string;
+    status: string;
+    sample_count: number | null;
+    execution_provenance: string;
+    observed_user_execution: boolean;
+    policy_semantics: string;
+    research_only: boolean;
+    promotion_eligible: boolean;
+  };
+  notification_evidence: {
+    scenario_label: string;
+    status: string;
+    sample_count: number | null;
+    smtp_semantics: string;
+    execution_provenance: string;
+    observed_user_execution: boolean;
+  };
+  execution_evidence: {
+    model: string | null;
+    label: string;
+    base_fill_field: string;
+    execution_delay_minutes: number | null;
+    execution_provenance: string;
+    observed_user_execution: boolean;
+  };
+  coverage_evidence: {
+    asset_count: number | null;
+    priced_asset_count: number | null;
+    intraday_asset_count: number | null;
+    trading_days: number | null;
+    intraday_quote_count: number | null;
+    start_date: string | null;
+    end_date: string | null;
+  };
+  time_resolution_limitations: {
+    resolution: string;
+    intraday_trigger_replayed: boolean;
+    bid_ask_iopv_verified: boolean;
+    smtp_delivery_verified: boolean;
+    user_execution_verified: boolean;
+    notes: string[];
+  };
   error_message: string | null;
 };
 
@@ -1177,6 +1222,138 @@ export type TrackedPositionAlert = {
   threshold_context: Record<string, unknown>;
 };
 
+export type TrackedPositionAlertState =
+  | "normal"
+  | "pending"
+  | "firing"
+  | "recovering"
+  | "resolved";
+
+export type TrackedPositionDataState =
+  | "eligible"
+  | "data_waiting"
+  | "no_data"
+  | "error"
+  | "unknown";
+
+export type TrackedPositionActionStatus =
+  | "proposed"
+  | "acknowledged"
+  | "partially_executed"
+  | "executed"
+  | "expired"
+  | "cancelled"
+  | "superseded";
+
+export type TrackedPositionLifecycleState = {
+  alert_state: TrackedPositionAlertState | string;
+  data_state: TrackedPositionDataState | string;
+  data_reason_code: string | null;
+};
+
+export type TrackedPositionNotificationDelivery = {
+  item_status: string | null;
+  suppression_reason: string | null;
+  repeat_slot: string | null;
+  envelope_status:
+    | "pending"
+    | "claimed"
+    | "smtp_accepted"
+    | "failed"
+    | "unknown"
+    | string
+    | null;
+  message_id: string | null;
+  attempt_count: number | null;
+  first_attempt_at: string | null;
+  last_attempt_at: string | null;
+  smtp_accepted_at: string | null;
+};
+
+export type TrackedPositionAuditCorrelation = {
+  event_id: string | null;
+  event_schema_version: string | null;
+  position_episode_id: string | null;
+  exposure_version: number | null;
+  action_cycle_id: string | null;
+  alert_episode_id: string | null;
+  action_decision_id: number | null;
+  notification_item_id: number | null;
+  notification_envelope_id: number | null;
+  policy_version: string | null;
+  input_snapshot_hash: string | null;
+  from_state: string | null;
+  to_state: string | null;
+  actor_id: number | null;
+  request_id: string | null;
+  causation_id: string | null;
+  occurred_at: string | null;
+  recorded_at: string;
+  execution_provenance: string | null;
+};
+
+export type TrackedPositionActionSummary = {
+  id: number;
+  status: TrackedPositionActionStatus;
+  is_current: boolean;
+  policy_version: string;
+  data_state: TrackedPositionDataState | string;
+  target_remaining_fraction: number;
+  target_normalized_quantity: number;
+  target_account_weight: number | null;
+  baseline_normalized_quantity: number;
+  cumulative_executed_quantity: number;
+  remaining_execution_quantity: number;
+  contributing_rules: string[];
+  execution_provenance: string;
+  status_reason: string | null;
+  valid_until: string | null;
+  acknowledged_at: string | null;
+  executed_at: string | null;
+  expired_at: string | null;
+  cancelled_at: string | null;
+  superseded_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type TrackedPositionExecutionPriceSource =
+  | "owner_reported"
+  | "broker_confirmation"
+  | "trade_statement"
+  | "owner_broker_statement";
+
+export type TrackedPositionActionExecutionInput = {
+  executed_at: string;
+  quantity: number;
+  price: number;
+  price_source: TrackedPositionExecutionPriceSource;
+  fees: number;
+  resulting_shares: number;
+  close_fact: boolean;
+};
+
+export type TrackedPositionActionTransitionRequest = {
+  transition: "acknowledge" | "execute" | "cancel";
+  expected_position_state_version: number;
+  execution?: TrackedPositionActionExecutionInput;
+};
+
+export type TrackedPositionActionTransitionResponse = {
+  action_id: number;
+  transition: string;
+  action_status: TrackedPositionActionStatus;
+  target_remaining_fraction: number;
+  target_normalized_quantity: number;
+  cumulative_executed_quantity: number;
+  execution_provenance: string;
+  position_state_version: number;
+  resulting_shares: number | null;
+  close_fact: boolean | null;
+  executed_at: string | null;
+  idempotent_replay: boolean;
+};
+
 export type TrackedPositionAlertAudit = {
   id: number;
   tracked_position_id: number;
@@ -1198,11 +1375,14 @@ export type TrackedPositionAlertAudit = {
   quote_time: string | null;
   created_at: string;
   audit_summary: string;
+  correlation: TrackedPositionAuditCorrelation | null;
+  delivery: TrackedPositionNotificationDelivery | null;
 };
 
 export type TrackedPositionAlertAuditList = {
   items: TrackedPositionAlertAudit[];
   total: number;
+  next_cursor?: string | null;
 };
 
 export type TrackedPositionChartPoint = {
@@ -1259,11 +1439,16 @@ export type TrackedPosition = {
   dynamic_thresholds: DynamicExitThresholds | null;
   recent_intraday_alerts: TrackedPositionAlert[];
   latest_alert: TrackedPositionAlert | null;
+  exit_state_version: number;
+  lifecycle_state: TrackedPositionLifecycleState;
+  current_action: TrackedPositionActionSummary | null;
 };
 
 export type TrackedPositionDetail = TrackedPosition & {
   chart: TrackedPositionChartPoint[];
   alerts: TrackedPositionAlert[];
+  action_history: TrackedPositionActionSummary[];
+  action_history_next_cursor: string | null;
 };
 
 export type TrackedPositionList = {

@@ -1,3 +1,5 @@
+> **Lifecycle reconciliation:** Checked tasks below record the legacy implementation completed by this change. They MUST NOT be used to restore relative `current * fraction` reductions, treat a proposed/sent recommendation as execution, start reentry cooldown without an owner-confirmed partial/full execution fact, let notification cooldown decide action eligibility, or map `take_profit_watch` to trim/reduce. Current production remediation and acceptance are owned by `harden-etf-alert-action-lifecycle`; legacy behavior remains diagnostic/research-only until that change cuts over.
+
 ## 1. Boundary And Data Contract
 
 - [x] 1.1 Add an exit V2 contract version constant for position actions, reentry rules, bucket thresholds, and evidence output.
@@ -59,3 +61,8 @@
 - [x] 8.4 Run frontend type checking using the project-approved non-hanging command path.
 - [ ] 8.5 On server, run Top 5/10/20/50 exit V2 validation and compare against TopN fixed hold.
 - [ ] 8.6 Summarize whether exit V2 improves risk-adjusted results enough to remain research-only or become a candidate for manual approval.
+
+## 9. Alert Action Lifecycle Reconciliation
+
+- [x] 9.1 Reconcile this change's proposal, design, and specs with immutable exposure baselines, absolute targets, execution-origin cooldown, notification/action separation, and `take_profit_watch=hold`.
+- [ ] 9.2 Before archiving or promoting this change, complete the implementation remediation and cutover in `harden-etf-alert-action-lifecycle`; do not satisfy this item with legacy relative-action tests or historical email evidence.

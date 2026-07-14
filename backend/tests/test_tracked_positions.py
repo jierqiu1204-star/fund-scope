@@ -14,6 +14,7 @@ from app.models.entities import (
     ShortResearchAdvisorReport,
     ShortResearchSignalItem,
     ShortResearchSignalRun,
+    TrackedPosition,
     TrackedPositionAlert,
     TrackedPositionAlertAudit,
     TradableEtf,
@@ -73,7 +74,28 @@ def test_position_sizing_trailing_take_profit_reduces_half() -> None:
     assert sizing.recommended_trade_shares == 750.0
 
 
-def test_position_sizing_take_profit_watch_trims_to_seventy_percent() -> None:
+def test_repeated_half_reduction_keeps_one_exposure_baseline_target() -> None:
+    current_market_value = 3000.0
+    target_weights: list[float | None] = []
+
+    for _ in range(3):
+        sizing = calculate_position_sizing(
+            asset_type="etf",
+            alert_type=ALERT_TRAILING_TAKE_PROFIT,
+            current_market_value=current_market_value,
+            current_price=2.0,
+            etf_trading_capital=10000.0,
+            allow_full_exit=True,
+            exposure_baseline_quantity=1500.0,
+        )
+        target_weights.append(sizing.target_account_weight)
+        current_market_value = float(sizing.target_account_weight or 0.0) * 10000.0
+
+    assert target_weights == [0.15, 0.15, 0.15]
+    assert current_market_value == 1500.0
+
+
+def test_position_sizing_take_profit_watch_is_observation_only() -> None:
     sizing = calculate_position_sizing(
         asset_type="etf",
         alert_type=ALERT_TAKE_PROFIT_WATCH,
@@ -83,10 +105,11 @@ def test_position_sizing_take_profit_watch_trims_to_seventy_percent() -> None:
         allow_full_exit=True,
     )
 
-    assert sizing.action == "trim"
-    assert sizing.target_account_weight == 0.21
-    assert sizing.recommended_trade_amount == 900.0
-    assert sizing.recommended_trade_shares == 450.0
+    assert sizing.action == "hold"
+    assert sizing.target_account_weight == 0.3
+    assert sizing.recommended_trade_amount is None
+    assert sizing.recommended_trade_shares is None
+    assert sizing.action_class == "soft_watch"
 
 
 def test_position_sizing_add_uses_single_etf_cap() -> None:
@@ -953,6 +976,105 @@ async def test_trailing_take_profit_triggers_after_profit_giveback(client, app, 
 
 
 @pytest.mark.asyncio
+async def test_etf_email_proposal_does_not_write_executed_action_or_start_reentry_cooldown(
+    client,
+    app,
+    settings,
+) -> None:
+    now = datetime.now(ASIA_SHANGHAI).replace(tzinfo=None)
+    entry_date = now.date() - timedelta(days=3)
+    async with app.state.db.session() as session:
+        session.add(
+            TradableEtf(
+                code="513520",
+                name="日经ETF",
+                exchange="SH",
+                theme_tags_json=["跨境"],
+                trading_rule_label="T+1",
+                asset_class="ETF",
+            )
+        )
+        session.add_all(
+            [
+                EtfPriceHistory(
+                    etf_code="513520",
+                    trade_date=entry_date,
+                    open=1.0,
+                    high=1.01,
+                    low=0.99,
+                    close=1.0,
+                    volume=1_000_000,
+                    turnover=1_000_000,
+                    pct_change=0.0,
+                ),
+                EtfPriceHistory(
+                    etf_code="513520",
+                    trade_date=now.date() - timedelta(days=1),
+                    open=1.06,
+                    high=1.09,
+                    low=1.05,
+                    close=1.08,
+                    volume=1_000_000,
+                    turnover=1_080_000,
+                    pct_change=8.0,
+                ),
+                EtfIntradayQuote(
+                    etf_code="513520",
+                    quote_time=now,
+                    trade_date=now.date(),
+                    latest_price=1.05,
+                    change_percent=-2.8,
+                    turnover=5_000_000,
+                    source="test_fresh_quote",
+                    freshness_status="fresh",
+                    raw_json={},
+                ),
+            ]
+        )
+        await session.commit()
+
+    created = await client.post(
+        "/api/tracked-positions",
+        json={
+            "asset_type": "etf",
+            "asset_code": "513520",
+            "buy_date": entry_date.isoformat(),
+            "confirmed_nav": 1.0,
+            "confirmed_shares": 1000,
+            "buy_amount": 1000,
+        },
+    )
+    assert created.status_code == 201
+
+    async with app.state.db.session() as session:
+        position = await session.get(TrackedPosition, created.json()["id"])
+        assert position is not None
+        alert, _ = await create_alert_if_needed(session, position, settings, evaluation_mode="intraday")
+        await session.refresh(position)
+
+    assert alert is not None
+    assert alert.alert_type == "trailing_take_profit"
+    assert "latest_position_action" not in dict(position.exit_state_json or {})
+
+
+@pytest.mark.asyncio
+async def test_data_insufficient_signal_does_not_create_exit_watch_or_action(client, app, settings) -> None:
+    await _seed_nav_series(app, [(date(2026, 6, 1), 1.5), (date(2026, 6, 5), 1.5)])
+    await _seed_signal(app, conclusion="数据不足", risk_flags=["数据滞后"], action_label="等待数据")
+    await client.post(
+        "/api/tracked-positions",
+        json={"asset_type": "fund", "asset_code": "270042", "buy_date": "2026-06-01"},
+    )
+
+    async with app.state.db.session() as session:
+        result = await daily_tracked_position_alerts_job(session, settings)
+        alerts = (await session.scalars(select(TrackedPositionAlert))).all()
+
+    assert result["alerts_created"] == 0
+    assert alerts == []
+
+
+@pytest.mark.asyncio
 async def test_trend_weakening_triggers_when_price_breaks_short_averages(client, app, settings, monkeypatch) -> None:
     await _seed_nav_series(
         app,
@@ -1253,7 +1375,7 @@ async def test_tracked_position_audit_endpoint_returns_owner_events(client, app)
 
     assert audit_response.status_code == 200
     body = audit_response.json()
-    assert body["total"] == 1
+    assert body["total"] == 2
     item = body["items"][0]
     assert item["outcome"] == "data_ineligible"
     assert item["quote_freshness"] == "stale_quote"

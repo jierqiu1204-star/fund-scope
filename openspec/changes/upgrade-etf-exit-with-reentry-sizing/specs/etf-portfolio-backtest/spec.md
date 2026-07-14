@@ -12,11 +12,15 @@ ETF portfolio backtests SHALL compare exit V2 against TopN fixed hold, current l
 - **THEN** the result marks exit V2 as not validated for live promotion
 
 ### Requirement: ETF portfolio backtest simulates reentry after exit
-ETF portfolio backtests SHALL simulate reentry after a reduction or exit using only data available at the replay time.
+ETF portfolio backtests SHALL simulate reentry after a unique absolute-target reduction or exit execution using only data available at the replay time; notification sends, retries, repeats, or suppressions SHALL NOT create trades or start simulated reentry cooldown.
 
 #### Scenario: Reentry conditions are met
-- **WHEN** a previously exited ETF returns to an accepted ranking bucket after cooldown and has a valid entry timing state
+- **WHEN** a previously simulated executed ETF action has started its execution-origin cooldown, the cooldown has elapsed, and the ETF returns to an accepted ranking bucket with a valid entry timing state
 - **THEN** the backtest records a simulated reentry according to target weight and position sizing rules
+
+#### Scenario: Persistent recommendation is replayed
+- **WHEN** the same alert episode or multiple notification dates refer to the same absolute-target action cycle
+- **THEN** the backtest executes the action at most once and records later notifications only in notification metrics
 
 #### Scenario: Reentry conditions are not met
 - **WHEN** a previously exited ETF remains weak or data is ineligible

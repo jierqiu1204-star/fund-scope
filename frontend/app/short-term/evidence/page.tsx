@@ -179,6 +179,24 @@ function backtestExecutionLabel(data: EtfPortfolioBacktestDetail | undefined) {
   return backtestExecutionModel(data) === "intraday_alert_v1" ? "盘中提醒执行回测" : "日线收盘模拟";
 }
 
+function backtestEvidenceSampleText(status: string | undefined, sampleCount: number | null | undefined) {
+  if (status === "legacy_diagnostic") {
+    return "旧口径诊断样本，不计入当前结论";
+  }
+  return status === "available" && sampleCount !== null && sampleCount !== undefined
+    ? `独立样本 ${sampleCount}`
+    : "尚未生成独立样本";
+}
+
+function backtestFillFieldLabel(value: string | undefined) {
+  const labels: Record<string, string> = {
+    adjusted_open: "次日复权开盘",
+    legacy_daily_close: "旧日线收盘口径",
+    stored_intraday_quote_after_fixed_delay: "固定延迟后的已存盘中快照"
+  };
+  return labels[value ?? ""] ?? value ?? "暂无";
+}
+
 function evidenceContractText(status: string | undefined, summary: Record<string, unknown> | undefined) {
   if (!summary) {
     return "等待生成证据契约。";
@@ -442,6 +460,8 @@ export default function EtfEvidencePage() {
 
   const detail = backtestDetail.data;
   const isIntradayBacktest = backtestExecutionModel(detail) === "intraday_alert_v1";
+  const coverageEvidence = detail?.coverage_evidence;
+  const timeLimitations = detail?.time_resolution_limitations;
   const optimized = observationPortfolio.data?.optimized_allocation ?? optimizedAllocation.data ?? null;
   const labelEvidenceRows = useMemo(() => buildLabelEvidenceRows(detail?.label_summaries ?? []), [detail?.label_summaries]);
   const exitV2Rows = useMemo(() => exitV2BaselineRows(strategyComparison.data), [strategyComparison.data]);
@@ -633,6 +653,58 @@ export default function EtfEvidencePage() {
           <p className="mt-3 rounded-[8px] border border-border bg-paper px-3 py-2 text-xs leading-5 text-ink/60">
             {evidenceContractText(detail?.evidence_status, detail?.evidence_summary)}
           </p>
+          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+            <EvidenceDimension
+              label="动作"
+              value={detail?.action_evidence.scenario_label ?? "动作建议完全执行情景"}
+              detail={backtestEvidenceSampleText(
+                detail?.action_evidence.status,
+                detail?.action_evidence.sample_count
+              )}
+            />
+            <EvidenceDimension
+              label="通知"
+              value={detail?.notification_evidence.scenario_label ?? "仅 SMTP 已接受邮件被执行敏感性"}
+              detail={`${backtestEvidenceSampleText(
+                detail?.notification_evidence.status,
+                detail?.notification_evidence.sample_count
+              )}；SMTP 接受不等于送达或执行`}
+            />
+            <EvidenceDimension
+              label="执行模型"
+              value={detail?.execution_evidence.label ?? "等待回测"}
+              detail={backtestFillFieldLabel(detail?.execution_evidence.base_fill_field)}
+            />
+            <EvidenceDimension
+              label="数据覆盖"
+              value={
+                coverageEvidence
+                  ? `${coverageEvidence.priced_asset_count ?? 0} / ${coverageEvidence.asset_count ?? 0} 只 ETF`
+                  : "暂无"
+              }
+              detail={
+                coverageEvidence
+                  ? `${coverageEvidence.trading_days ?? 0} 个交易日${
+                      coverageEvidence.intraday_quote_count
+                        ? ` · ${coverageEvidence.intraday_quote_count} 条盘中快照`
+                        : ""
+                    }`
+                  : "等待覆盖统计"
+              }
+            />
+            <EvidenceDimension
+              label="时间粒度限制"
+              value={
+                timeLimitations?.resolution === "stored_intraday_snapshots"
+                  ? "已存盘中快照"
+                  : "仅日线"
+              }
+              detail={
+                timeLimitations?.notes?.[0] ??
+                "盘中触发、bid/ask、IOPV、SMTP 送达和用户真实执行均未验证。"
+              }
+            />
+          </div>
           <div className="mt-4 grid gap-3 md:grid-cols-4">
             <EvidenceStat label="历史收益" value={metricPercent(detail?.metrics, "cumulative_return")} />
             <EvidenceStat label="最大回撤" value={metricPercent(detail?.metrics, "max_drawdown")} />
@@ -1045,6 +1117,16 @@ function EvidenceStat({ label, value }: { label: string; value: string }) {
     <div className="rounded-[10px] border border-border bg-white px-4 py-3">
       <p className="text-xs text-ink/45">{label}</p>
       <p className="mt-1 text-lg font-semibold text-ink">{value}</p>
+    </div>
+  );
+}
+
+function EvidenceDimension({ label, value, detail }: { label: string; value: string; detail: string }) {
+  return (
+    <div className="rounded-[10px] border border-border bg-paper/45 px-3 py-3">
+      <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-ink/45">{label}</p>
+      <p className="mt-1 text-sm font-semibold leading-5 text-ink">{value}</p>
+      <p className="mt-1 text-xs leading-5 text-ink/55">{detail}</p>
     </div>
   );
 }

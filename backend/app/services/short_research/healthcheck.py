@@ -28,6 +28,7 @@ from app.services.etf_research_evidence import (
     EXECUTION_MODEL_INTRADAY_ALERT,
     stable_contract_hash,
 )
+from app.services.short_research.backtest import classify_backtest_evidence_status
 
 HEALTHCHECK_CONCLUSION_OK = "可继续观察"
 HEALTHCHECK_CONCLUSION_WATCH = "待验证"
@@ -336,20 +337,18 @@ async def run_etf_strategy_healthcheck(session: AsyncSession) -> EtfStrategyHeal
     if validation_run is None:
         conclusion = HEALTHCHECK_CONCLUSION_INSUFFICIENT
 
+    if backtest_run is None:
+        backtest_evidence_status = EVIDENCE_STATUS_WAITING
+    else:
+        backtest_evidence_status = classify_backtest_evidence_status(backtest_run)
     intraday_available = bool(
         backtest_run
+        and backtest_evidence_status == EVIDENCE_STATUS_SAME_CONTRACT
         and (
             (backtest_run.config_json or {}).get("replay_contract", {}).get("execution_model")
             in {EXECUTION_MODEL_INTRADAY_ALERT, "intraday_alert"}
         )
     )
-    replay_contract = dict((backtest_run.config_json or {}).get("replay_contract") or {}) if backtest_run else {}
-    if backtest_run is None:
-        backtest_evidence_status = EVIDENCE_STATUS_WAITING
-    elif not replay_contract:
-        backtest_evidence_status = EVIDENCE_STATUS_LEGACY
-    else:
-        backtest_evidence_status = EVIDENCE_STATUS_SAME_CONTRACT
     label_stats = publishable_healthcheck_groups(label_stats, evidence_status=validation_evidence_status)
     entry_stats = publishable_healthcheck_groups(entry_stats, evidence_status=validation_evidence_status)
     theme_stats = publishable_healthcheck_groups(theme_stats, evidence_status=validation_evidence_status)
@@ -395,7 +394,7 @@ async def run_etf_strategy_healthcheck(session: AsyncSession) -> EtfStrategyHeal
     if validation_evidence_status == EVIDENCE_STATUS_VERSION_MISMATCH:
         caveats.append("标签验证来自旧信号快照，只能作为旧口径证据。")
     if backtest_evidence_status == EVIDENCE_STATUS_LEGACY:
-        caveats.append("最近回测缺少证据契约，只能作为旧口径结果。")
+        caveats.append("最近回测未绑定当前绝对目标动作契约，只能作为旧口径诊断结果。")
 
     snapshot = EtfStrategyHealthcheckSnapshot(
         status="success" if validation_run else "waiting",

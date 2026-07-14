@@ -6,6 +6,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     Float,
@@ -17,6 +18,7 @@ from sqlalchemy import (
     event,
     inspect,
     select,
+    text,
 )
 from sqlalchemy import (
     Index as SaIndex,
@@ -31,6 +33,22 @@ def utcnow() -> datetime:
 
 
 class PublishedSnapshotImmutableError(ValueError):
+    pass
+
+
+class NotificationEnvelopeImmutableError(ValueError):
+    pass
+
+
+class TrackedPositionAuditImmutableError(ValueError):
+    pass
+
+
+class TrackedPositionLifecycleShadowImmutableError(ValueError):
+    pass
+
+
+class EtfActionValidationImmutableError(ValueError):
     pass
 
 
@@ -1254,6 +1272,100 @@ class EtfPortfolioBacktestLabelSummary(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class EtfActionValidationRun(Base):
+    __tablename__ = "etf_action_validation_runs"
+    __table_args__ = (
+        UniqueConstraint("run_key", name="uq_etf_action_validation_run_key"),
+        SaIndex("ix_etf_action_validation_runs_policy", "policy_version", "sealed_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_key: Mapped[str] = mapped_column(String(128))
+    policy_version: Mapped[str] = mapped_column(String(64))
+    candidate_registry_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    candidate_registry_hash: Mapped[str] = mapped_column(String(64))
+    validation_contract_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    validation_contract_hash: Mapped[str] = mapped_column(String(64))
+    sealed_at: Mapped[datetime] = mapped_column(DateTime)
+    development_outcomes_calculated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
+    development_gate_artifact_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True
+    )
+    development_gate_artifact_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    holdout_first_consumed_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
+    holdout_input_snapshot_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+
+
+@event.listens_for(Session, "before_flush")
+def _prevent_etf_action_validation_contract_mutation(
+    session: Session,
+    _flush_context: object,
+    _instances: object,
+) -> None:
+    frozen_fields = (
+        "run_key",
+        "policy_version",
+        "candidate_registry_json",
+        "candidate_registry_hash",
+        "validation_contract_json",
+        "validation_contract_hash",
+        "sealed_at",
+    )
+    write_once_fields = (
+        "development_outcomes_calculated_at",
+        "development_gate_artifact_json",
+        "development_gate_artifact_hash",
+        "holdout_first_consumed_at",
+        "holdout_input_snapshot_hash",
+    )
+    for instance in session.new:
+        if isinstance(instance, EtfActionValidationRun) and any(
+            getattr(instance, field) is not None for field in write_once_fields
+        ):
+            raise EtfActionValidationImmutableError(
+                "ETF action validation evidence markers are write-once service outputs"
+            )
+    for instance in session.dirty:
+        if not isinstance(instance, EtfActionValidationRun):
+            continue
+        state = inspect(instance)
+        if any(state.attrs[field].history.has_changes() for field in frozen_fields):
+            raise EtfActionValidationImmutableError(
+                "sealed ETF action validation candidate and run contracts are immutable"
+            )
+        changed_write_once_fields = tuple(
+            field
+            for field in write_once_fields
+            if state.attrs[field].history.has_changes()
+        )
+        holdout_is_being_consumed = any(
+            field in changed_write_once_fields
+            for field in (
+                "holdout_first_consumed_at",
+                "holdout_input_snapshot_hash",
+            )
+        )
+        if holdout_is_being_consumed and not (
+            isinstance(instance.development_gate_artifact_json, dict)
+            and instance.development_gate_artifact_json.get("holdout_ready") is True
+        ):
+            raise EtfActionValidationImmutableError(
+                "holdout cannot be consumed before the persisted development gate passes"
+            )
+        if changed_write_once_fields:
+            raise EtfActionValidationImmutableError(
+                "ETF action validation evidence markers are write-once service outputs"
+            )
+
+
 class ShortResearchAdvisorReport(Base):
     __tablename__ = "short_research_advisor_reports"
     __table_args__ = (
@@ -1320,10 +1432,430 @@ class TrackedPosition(Base):
     entry_price_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     estimated_shares: Mapped[float | None] = mapped_column(Float, nullable=True)
     exit_state_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    exit_state_version: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(32), default="active")
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class TrackedPositionActionDecision(Base):
+    __tablename__ = "tracked_position_action_decisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "position_episode_id",
+            "exposure_version",
+            "policy_version",
+            "action_cycle_id",
+            "target_stage",
+            name="uq_tracked_action_target_stage",
+        ),
+        CheckConstraint(
+            "target_remaining_fraction >= 0 AND target_remaining_fraction <= 1",
+            name="ck_tracked_action_target_fraction",
+        ),
+        CheckConstraint(
+            "status IN ('proposed','acknowledged','partially_executed','executed','expired','cancelled','superseded')",
+            name="ck_tracked_action_status",
+        ),
+        SaIndex(
+            "uq_tracked_action_current_slot",
+            "tracked_position_id",
+            unique=True,
+            sqlite_where=text("is_current = 1"),
+            postgresql_where=text("is_current"),
+        ),
+        SaIndex(
+            "ix_tracked_action_history",
+            "tracked_position_id",
+            "created_at",
+            "id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    tracked_position_id: Mapped[int] = mapped_column(
+        ForeignKey("tracked_positions.id", ondelete="CASCADE")
+    )
+    position_episode_id: Mapped[str] = mapped_column(String(64))
+    exposure_version: Mapped[int] = mapped_column(Integer)
+    policy_version: Mapped[str] = mapped_column(String(64))
+    action_cycle_id: Mapped[str] = mapped_column(String(64))
+    target_stage: Mapped[str] = mapped_column(String(32))
+    target_remaining_fraction: Mapped[float] = mapped_column(Float)
+    baseline_normalized_quantity: Mapped[float] = mapped_column(Float)
+    baseline_account_weight: Mapped[float | None] = mapped_column(Float, nullable=True)
+    baseline_adjustment_factor: Mapped[float] = mapped_column(Float, default=1.0)
+    baseline_source: Mapped[str] = mapped_column(String(64))
+    target_normalized_quantity: Mapped[float] = mapped_column(Float)
+    target_account_weight: Mapped[float | None] = mapped_column(Float, nullable=True)
+    input_snapshot_hash: Mapped[str] = mapped_column(String(64))
+    data_state: Mapped[str] = mapped_column(String(32), default="eligible")
+    status: Mapped[str] = mapped_column(String(32), default="proposed")
+    execution_provenance: Mapped[str] = mapped_column(String(32), default="none")
+    cumulative_executed_quantity: Mapped[float] = mapped_column(Float, default=0.0)
+    contributing_rules_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    alert_episode_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    status_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    valid_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True)
+    superseded_by_action_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tracked_position_action_decisions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    expired_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class TrackedPositionActionExecution(Base):
+    __tablename__ = "tracked_position_action_executions"
+    __table_args__ = (
+        UniqueConstraint("user_id", "idempotency_key", name="uq_tracked_action_execution_request"),
+        CheckConstraint("execution_quantity > 0", name="ck_tracked_execution_quantity"),
+        CheckConstraint("execution_price > 0", name="ck_tracked_execution_price"),
+        CheckConstraint("fees >= 0", name="ck_tracked_execution_fees"),
+        SaIndex(
+            "ix_tracked_action_execution_history",
+            "action_decision_id",
+            "executed_at",
+            "id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    action_decision_id: Mapped[int] = mapped_column(
+        ForeignKey("tracked_position_action_decisions.id", ondelete="CASCADE")
+    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    tracked_position_id: Mapped[int] = mapped_column(
+        ForeignKey("tracked_positions.id", ondelete="CASCADE")
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    execution_provenance: Mapped[str] = mapped_column(String(32), default="owner_confirmed")
+    execution_quantity: Mapped[float] = mapped_column(Float)
+    execution_price: Mapped[float] = mapped_column(Float)
+    price_source: Mapped[str] = mapped_column(String(64))
+    fees: Mapped[float] = mapped_column(Float, default=0.0)
+    before_normalized_quantity: Mapped[float] = mapped_column(Float)
+    resulting_normalized_quantity: Mapped[float] = mapped_column(Float)
+    resulting_position_state_version: Mapped[int] = mapped_column(Integer)
+    executed_at: Mapped[datetime] = mapped_column(DateTime)
+    actor_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class TrackedPositionActionTransitionReceipt(Base):
+    __tablename__ = "tracked_position_action_transition_receipts"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "idempotency_key",
+            name="uq_tracked_action_transition_request",
+        ),
+        SaIndex(
+            "ix_tracked_action_transition_history",
+            "action_decision_id",
+            "created_at",
+            "id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    action_decision_id: Mapped[int] = mapped_column(
+        ForeignKey("tracked_position_action_decisions.id", ondelete="CASCADE")
+    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    tracked_position_id: Mapped[int] = mapped_column(
+        ForeignKey("tracked_positions.id", ondelete="CASCADE")
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    transition: Mapped[str] = mapped_column(String(32))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    response_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class TrackedPositionLifecycleShadowEvidence(Base):
+    __tablename__ = "tracked_position_lifecycle_shadow_evidence"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "tracked_position_id",
+            "policy_version",
+            "position_episode_id",
+            "exposure_version",
+            "stream_sequence",
+            name="uq_tracked_lifecycle_shadow_stream_sequence",
+        ),
+        SaIndex(
+            "ix_tracked_lifecycle_shadow_history",
+            "user_id",
+            "tracked_position_id",
+            "policy_version",
+            "position_episode_id",
+            "exposure_version",
+            "stream_sequence",
+            "id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    tracked_position_id: Mapped[int] = mapped_column(
+        ForeignKey("tracked_positions.id", ondelete="CASCADE")
+    )
+    policy_version: Mapped[str] = mapped_column(String(64))
+    position_episode_id: Mapped[str] = mapped_column(String(64))
+    exposure_version: Mapped[int] = mapped_column(Integer)
+    stream_sequence: Mapped[int] = mapped_column(Integer)
+    predecessor_event_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    event_id: Mapped[str] = mapped_column(String(64), unique=True)
+    event_schema_version: Mapped[str] = mapped_column(String(32))
+    trade_session: Mapped[date] = mapped_column(Date)
+    repeat_slot: Mapped[str] = mapped_column(String(64))
+    sealed_snapshot_hash: Mapped[str] = mapped_column(String(64))
+    production_position_state_version: Mapped[int] = mapped_column(Integer)
+    rule_states_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    transitions_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    action_evidence_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    data_state: Mapped[str] = mapped_column(String(32))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+@event.listens_for(Session, "before_flush")
+def _prevent_tracked_position_lifecycle_shadow_mutation(
+    session: Session,
+    _flush_context: object,
+    _instances: object,
+) -> None:
+    if any(
+        isinstance(instance, TrackedPositionLifecycleShadowEvidence)
+        and session.is_modified(instance, include_collections=True)
+        for instance in session.dirty
+    ):
+        raise TrackedPositionLifecycleShadowImmutableError(
+            "tracked position lifecycle shadow evidence is immutable during retention"
+        )
+
+
+class TrackedPositionNotificationEnvelope(Base):
+    __tablename__ = "tracked_position_notification_envelopes"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "trade_session",
+            "route",
+            "severity",
+            "channel",
+            "sealed_snapshot_hash",
+            "digest_revision",
+            name="uq_tracked_notification_envelope_identity",
+        ),
+        SaIndex(
+            "ix_tracked_notification_envelope_pending",
+            "status",
+            "lease_expires_at",
+            "id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    trade_session: Mapped[date] = mapped_column(Date)
+    route: Mapped[str] = mapped_column(String(64))
+    severity: Mapped[str] = mapped_column(String(32))
+    channel: Mapped[str] = mapped_column(String(32))
+    sealed_snapshot_hash: Mapped[str] = mapped_column(String(64))
+    digest_revision: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(32), default="pending")
+    claim_token: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    claimed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    message_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    template_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    template_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    sealed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    first_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    smtp_accepted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    rendered_subject: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rendered_body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rendered_content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_error_redacted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class TrackedPositionNotificationItem(Base):
+    __tablename__ = "tracked_position_notification_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "alert_episode_id",
+            "transition",
+            "recipient",
+            "channel",
+            "repeat_slot",
+            name="uq_tracked_notification_item_identity",
+        ),
+        SaIndex(
+            "ix_tracked_notification_item_repeat",
+            "tracked_position_id",
+            "repeat_slot",
+            "created_at",
+            "id",
+        ),
+        SaIndex(
+            "ix_tracked_notification_item_envelope",
+            "envelope_id",
+            "id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    tracked_position_id: Mapped[int] = mapped_column(
+        ForeignKey("tracked_positions.id", ondelete="CASCADE")
+    )
+    action_decision_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tracked_position_action_decisions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    alert_episode_id: Mapped[str] = mapped_column(String(64))
+    transition: Mapped[str] = mapped_column(String(32))
+    recipient: Mapped[str] = mapped_column(String(255))
+    channel: Mapped[str] = mapped_column(String(32))
+    repeat_slot: Mapped[str] = mapped_column(String(64))
+    route: Mapped[str] = mapped_column(String(64))
+    severity: Mapped[str] = mapped_column(String(32))
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(32), default="pending")
+    suppression_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    next_eligible_repeat_slot: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    envelope_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tracked_position_notification_envelopes.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+_SEALED_NOTIFICATION_ITEM_FIELDS = frozenset(
+    {
+        "user_id",
+        "tracked_position_id",
+        "action_decision_id",
+        "alert_episode_id",
+        "transition",
+        "recipient",
+        "channel",
+        "repeat_slot",
+        "route",
+        "severity",
+        "payload_json",
+        "status",
+        "suppression_reason",
+        "next_eligible_repeat_slot",
+        "envelope_id",
+    }
+)
+_SEALED_NOTIFICATION_ENVELOPE_FIELDS = frozenset(
+    {
+        "user_id",
+        "trade_session",
+        "route",
+        "severity",
+        "channel",
+        "sealed_snapshot_hash",
+        "digest_revision",
+        "message_id",
+        "template_name",
+        "template_version",
+        "sealed_at",
+        "rendered_subject",
+        "rendered_body",
+        "rendered_content_hash",
+    }
+)
+
+
+def _notification_was_sealed(instance: object, *, item: bool) -> bool:
+    state = inspect(instance)
+    if item:
+        status = state.attrs.status
+        return "sealed" in status.history.deleted or (
+            getattr(instance, "status", None) == "sealed" and not status.history.has_changes()
+        )
+    sealed_at = state.attrs.sealed_at
+    first_attempt_at = state.attrs.first_attempt_at
+    return (
+        any(value is not None for value in sealed_at.history.deleted)
+        or (getattr(instance, "sealed_at", None) is not None and not sealed_at.history.has_changes())
+        or any(value is not None for value in first_attempt_at.history.deleted)
+        or (
+            getattr(instance, "first_attempt_at", None) is not None
+            and not first_attempt_at.history.has_changes()
+        )
+    )
+
+
+@event.listens_for(Session, "before_flush")
+def _prevent_sealed_notification_mutation(
+    session: Session,
+    _flush_context: object,
+    _instances: object,
+) -> None:
+    assigned_envelope_ids: set[int] = set()
+    for instance in session.dirty:
+        if isinstance(instance, TrackedPositionNotificationItem):
+            if _notification_was_sealed(instance, item=True) and _changed_fields(
+                instance, _SEALED_NOTIFICATION_ITEM_FIELDS
+            ):
+                raise NotificationEnvelopeImmutableError("sealed notification item is immutable")
+        elif isinstance(instance, TrackedPositionNotificationEnvelope):
+            if _notification_was_sealed(instance, item=False) and _changed_fields(
+                instance, _SEALED_NOTIFICATION_ENVELOPE_FIELDS
+            ):
+                raise NotificationEnvelopeImmutableError("sealed notification envelope is immutable")
+    for instance in (*session.new, *session.dirty):
+        if not isinstance(instance, TrackedPositionNotificationItem):
+            continue
+        envelope_id = instance.envelope_id
+        envelope_history = inspect(instance).attrs.envelope_id.history
+        if envelope_id is not None and (
+            instance in session.new or envelope_history.has_changes()
+        ):
+            assigned_envelope_ids.add(envelope_id)
+    if not assigned_envelope_ids:
+        return
+    sealed_envelope_ids = set(
+        session.scalars(
+            select(TrackedPositionNotificationEnvelope.id).where(
+                TrackedPositionNotificationEnvelope.id.in_(assigned_envelope_ids),
+                (TrackedPositionNotificationEnvelope.sealed_at.is_not(None))
+                | (TrackedPositionNotificationEnvelope.first_attempt_at.is_not(None)),
+            )
+        )
+    )
+    sealed_envelope_ids.update(
+        envelope.id
+        for envelope in session.new
+        if isinstance(envelope, TrackedPositionNotificationEnvelope)
+        and envelope.id in assigned_envelope_ids
+        and (envelope.sealed_at is not None or envelope.first_attempt_at is not None)
+    )
+    if sealed_envelope_ids:
+        raise NotificationEnvelopeImmutableError(
+            "late notification item cannot attach to a sealed envelope"
+        )
 
 
 class TrackedPositionAlert(Base):
@@ -1349,6 +1881,22 @@ class TrackedPositionAlert(Base):
     quote_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     alert_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
     suppression_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    alert_episode_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    alert_transition: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    action_decision_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tracked_position_action_decisions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    notification_item_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tracked_position_notification_items.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    notification_envelope_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tracked_position_notification_envelopes.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    policy_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    data_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
     email_status: Mapped[str] = mapped_column(String(32), default="pending")
     email_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -1358,6 +1906,14 @@ class TrackedPositionAlert(Base):
 
 class TrackedPositionAlertAudit(Base):
     __tablename__ = "tracked_position_alert_audits"
+    __table_args__ = (
+        SaIndex(
+            "ix_tracked_alert_audit_cursor",
+            "tracked_position_id",
+            "created_at",
+            "id",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     tracked_position_id: Mapped[int] = mapped_column(
@@ -1381,8 +1937,52 @@ class TrackedPositionAlertAudit(Base):
     cooldown_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     smtp_result: Mapped[str | None] = mapped_column(String(32), nullable=True)
     smtp_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    event_id: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    event_schema_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    alert_episode_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    alert_transition: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    action_decision_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tracked_position_action_decisions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    notification_item_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tracked_position_notification_items.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    notification_envelope_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tracked_position_notification_envelopes.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    policy_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    data_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    from_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    to_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    actor_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    causation_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    occurred_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    execution_provenance: Mapped[str | None] = mapped_column(String(32), nullable=True)
     quote_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+@event.listens_for(Session, "before_flush")
+def _prevent_tracked_position_audit_mutation(
+    session: Session,
+    _flush_context: object,
+    _instances: object,
+) -> None:
+    if any(
+        isinstance(instance, TrackedPositionAlertAudit)
+        and session.is_modified(instance, include_collections=True)
+        for instance in session.dirty
+    ):
+        raise TrackedPositionAuditImmutableError(
+            "tracked position audit events are immutable during retention"
+        )
 
 
 class NewsItem(Base):

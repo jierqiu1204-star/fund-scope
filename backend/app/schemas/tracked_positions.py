@@ -3,11 +3,64 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, model_validator
 
 from app.schemas.etf_quotes import DynamicExitThresholdsOut, TrackedEtfIntradaySnapshotOut
 
 OrderTimeBucket = Literal["before_15", "after_15", "unknown"]
+ExposureMutationIntentInput = Literal[
+    "correction",
+    "net_add",
+    "net_reduce",
+    "close",
+    "reopen",
+    "corporate_action",
+    "tracking_status",
+]
+ActionTransitionInput = Literal["acknowledge", "execute", "cancel"]
+
+
+class TrackedPositionActionExecutionInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    executed_at: datetime
+    quantity: FiniteFloat = Field(gt=0)
+    price: FiniteFloat = Field(gt=0)
+    price_source: str = Field(min_length=1, max_length=64)
+    fees: FiniteFloat = Field(default=0, ge=0)
+    resulting_shares: FiniteFloat = Field(ge=0)
+    close_fact: bool = False
+
+
+class TrackedPositionActionTransitionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    transition: ActionTransitionInput
+    expected_position_state_version: int = Field(ge=0)
+    execution: TrackedPositionActionExecutionInput | None = None
+
+    @model_validator(mode="after")
+    def validate_execution_shape(self) -> TrackedPositionActionTransitionRequest:
+        if self.transition == "execute" and self.execution is None:
+            raise ValueError("execution facts are required for execute")
+        if self.transition != "execute" and self.execution is not None:
+            raise ValueError("execution facts are only valid for execute")
+        return self
+
+
+class TrackedPositionActionTransitionOut(BaseModel):
+    action_id: int
+    transition: str
+    action_status: str
+    target_remaining_fraction: float
+    target_normalized_quantity: float
+    cumulative_executed_quantity: float
+    execution_provenance: str
+    position_state_version: int
+    resulting_shares: float | None = None
+    close_fact: bool | None = None
+    executed_at: str | None = None
+    idempotent_replay: bool = False
 
 
 class TrackedPositionCreate(BaseModel):
@@ -31,11 +84,15 @@ class TrackedPositionUpdate(BaseModel):
     buy_amount: float | None = Field(default=None, gt=0)
     note: str | None = None
     status: Literal["active", "handled", "closed", "stopped"] | None = None
+    expected_exit_state_version: int | None = Field(default=None, ge=0)
+    exposure_mutation_intent: ExposureMutationIntentInput | None = None
+    mutation_reason: str | None = None
 
 
 class TrackedPositionCloseRequest(BaseModel):
     status: Literal["handled", "closed", "stopped"] = "closed"
     note: str | None = None
+    expected_exit_state_version: int | None = Field(default=None, ge=0)
 
 
 class TrackedPositionSnapshot(BaseModel):
@@ -99,6 +156,40 @@ class TrackedPositionAlertOut(BaseModel):
     threshold_context: dict[str, Any] = Field(default_factory=dict)
 
 
+class TrackedPositionAuditCorrelationOut(BaseModel):
+    event_id: str | None = None
+    event_schema_version: str | None = None
+    position_episode_id: str | None = None
+    exposure_version: int | None = None
+    action_cycle_id: str | None = None
+    alert_episode_id: str | None = None
+    action_decision_id: int | None = None
+    notification_item_id: int | None = None
+    notification_envelope_id: int | None = None
+    policy_version: str | None = None
+    input_snapshot_hash: str | None = None
+    from_state: str | None = None
+    to_state: str | None = None
+    actor_id: int | None = None
+    request_id: str | None = None
+    causation_id: str | None = None
+    occurred_at: datetime | None = None
+    recorded_at: datetime
+    execution_provenance: str | None = None
+
+
+class TrackedPositionAuditDeliveryOut(BaseModel):
+    item_status: str | None = None
+    suppression_reason: str | None = None
+    repeat_slot: str | None = None
+    envelope_status: str | None = None
+    message_id: str | None = None
+    attempt_count: int | None = None
+    first_attempt_at: datetime | None = None
+    last_attempt_at: datetime | None = None
+    smtp_accepted_at: datetime | None = None
+
+
 class TrackedPositionAlertAuditOut(BaseModel):
     id: int
     tracked_position_id: int
@@ -120,11 +211,14 @@ class TrackedPositionAlertAuditOut(BaseModel):
     quote_time: datetime | None = None
     created_at: datetime
     audit_summary: str
+    correlation: TrackedPositionAuditCorrelationOut | None = None
+    delivery: TrackedPositionAuditDeliveryOut | None = None
 
 
 class TrackedPositionAlertAuditListOut(BaseModel):
     items: list[TrackedPositionAlertAuditOut]
     total: int
+    next_cursor: str | None = None
 
 
 class TrackedPositionChartPoint(BaseModel):
@@ -136,6 +230,37 @@ class TrackedPositionChartPoint(BaseModel):
     is_high: bool = False
     is_current: bool = False
     trailing_stop_pnl_pct: float | None = None
+
+
+class TrackedPositionActionSummaryOut(BaseModel):
+    id: int
+    status: str
+    is_current: bool
+    policy_version: str
+    data_state: str
+    target_remaining_fraction: float
+    target_normalized_quantity: float
+    target_account_weight: float | None = None
+    baseline_normalized_quantity: float
+    cumulative_executed_quantity: float
+    remaining_execution_quantity: float
+    contributing_rules: list[str] = Field(default_factory=list)
+    execution_provenance: str
+    status_reason: str | None = None
+    valid_until: datetime | None = None
+    acknowledged_at: datetime | None = None
+    executed_at: datetime | None = None
+    expired_at: datetime | None = None
+    cancelled_at: datetime | None = None
+    superseded_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class TrackedPositionLifecycleStateOut(BaseModel):
+    alert_state: str
+    data_state: str
+    data_reason_code: str | None = None
 
 
 class TrackedPositionOut(BaseModel):
@@ -181,11 +306,16 @@ class TrackedPositionOut(BaseModel):
     dynamic_thresholds: DynamicExitThresholdsOut | None = None
     recent_intraday_alerts: list[TrackedPositionAlertOut] = Field(default_factory=list)
     latest_alert: TrackedPositionAlertOut | None = None
+    exit_state_version: int = 0
+    lifecycle_state: TrackedPositionLifecycleStateOut
+    current_action: TrackedPositionActionSummaryOut | None = None
 
 
 class TrackedPositionDetailOut(TrackedPositionOut):
     chart: list[TrackedPositionChartPoint]
     alerts: list[TrackedPositionAlertOut]
+    action_history: list[TrackedPositionActionSummaryOut] = Field(default_factory=list)
+    action_history_next_cursor: str | None = None
 
 
 class TrackedPositionListOut(BaseModel):

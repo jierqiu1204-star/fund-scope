@@ -1,0 +1,8 @@
+<h2>{{ title }}</h2>
+{% for item in items %}
+<section>
+  <h3>{{ item.asset_name }}（{{ item.asset_code }}）</h3>
+  <p>当前无法复核，因此不重复发送历史动作建议。</p>
+  <p>数据状态：{{ item.data_state }}</p>
+</section>
+{% endfor %}

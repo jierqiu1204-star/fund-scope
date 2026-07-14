@@ -1,11 +1,15 @@
 ## ADDED Requirements
 
 ### Requirement: ETF evidence contract records exit V2 versions
-The ETF research evidence contract SHALL record exit action version, reentry version, bucket-threshold version, and whether the evidence can influence live rules.
+The ETF research evidence contract SHALL record exit action version, immutable exposure-baseline and absolute-target semantics, execution provenance, reentry version, notification policy version, bucket-threshold version, and whether the evidence can influence live rules.
 
 #### Scenario: Exit V2 evidence is created
 - **WHEN** ETF exit V2 validation runs
-- **THEN** the evidence records signal contract hash, exit action version, reentry version, bucket-threshold version, execution model, data cutoff, and research-only status
+- **THEN** the evidence records signal contract hash, exit action version, exposure/action-cycle identity, absolute target semantics, simulated or owner-confirmed execution provenance, reentry version, notification policy version, bucket-threshold version, execution model, data cutoff, and research-only status
+
+#### Scenario: Legacy relative-action evidence is read
+- **WHEN** historical evidence compounds relative reductions, derives cooldown from recommendation/email state, or treats notification repeats as trades
+- **THEN** the contract marks it as `legacy_current_semantics/old_contract`, keeps it research-only, and MUST NOT present it as current lifecycle proof
 
 #### Scenario: Evidence is not approved
 - **WHEN** exit V2 evidence is a candidate or has insufficient samples

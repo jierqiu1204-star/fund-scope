@@ -1,0 +1,13 @@
+<h2>{{ title }}</h2>
+{% for item in items %}
+<section>
+  <h3>{{ item.asset_name }}（{{ item.asset_code }}）</h3>
+  <p>{{ item.alert_title }}</p>
+  <p>决策数据截止：{{ item.cutoff_time }}；可决策数据时间：{{ item.eligible_data_time }}</p>
+  <p>数据来源：{{ item.data_source }}；新鲜度：{{ item.quote_freshness }}</p>
+  <p>策略版本：{{ item.policy_version }}；证据哈希：{{ item.evidence_hash }}</p>
+  <p>动作 #{{ item.action_id }}；状态：{{ item.action_status }}</p>
+  <p>相对 exposure baseline 的绝对剩余目标：基准标准化数量 {{ item.baseline_normalized_quantity }} × 剩余比例 {{ item.target_remaining_fraction }} = 目标标准化数量 {{ item.target_normalized_quantity }}（{{ item.target_stage }}）</p>
+  <p>等待用户执行/确认；FundScope 未自动执行。</p>
+</section>
+{% endfor %}

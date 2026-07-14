@@ -7,7 +7,9 @@ Current ETF exit evidence shows hard stop, trend weakening, and exit-watch signa
 - Reframe ETF hard stop as loss insurance and tail-risk control, not a directional prediction signal.
 - Convert ETF trailing take-profit into a tracked-position state machine using entry price, high-water profit, activation threshold, giveback, and data eligibility.
 - Downgrade trend weakening from a direct sell signal into a reduce-risk or no-add guard unless confirmed by position loss, drawdown, or broader market deterioration.
-- Add protection guards such as cooldown, repeated stop-loss guard, portfolio drawdown guard, low-profit ETF guard, and market-regime guard.
+- Express actionable reduce/exit decisions as absolute remaining-position targets against an immutable exposure baseline; persistent or cross-rule same-target signals cannot repeatedly reduce the current remainder, and `take_profit_watch` is always `hold/observation-only`.
+- Add protection guards such as execution-origin reentry cooldown, notification repeat cooldown, repeated stop-loss guard, portfolio drawdown guard, low-profit ETF guard, and market-regime guard. Notification cooldown affects delivery only and never proves execution or changes action eligibility.
+- Separate proposed actions, owner-confirmed partial/full execution facts, and notification delivery; only a real owner-confirmed fill may advance action progress or start reentry cooldown.
 - Add a research-only ETF exit risk validation capability that compares hold baseline, current default rules, candidate policies, and protection-guard policies on real tracked-position paths.
 - Keep candidate exit parameters as research evidence until explicitly approved; no automatic change to live emails, ranking, or tracked-position behavior.
 - Update UI and API wording so low-confidence or guard-only signals are not presented as reliable sell instructions.
@@ -29,3 +31,4 @@ Current ETF exit evidence shows hard stop, trend weakening, and exit-watch signa
 - Frontend: `/short-term` holding cards, selected ETF detail panel, research evidence page, and admin task controls.
 - Data: use existing JSON fields where possible for research metadata; add migration only if live position-state persistence cannot be safely stored in existing tracked-position fields.
 - Dependencies: no broker integration and no automatic trading; external AI is not required for deterministic risk decisions.
+- Lifecycle reconciliation: this change keeps its risk-classification and validation goals, while action, execution, notification, and cooldown semantics follow the later `harden-etf-alert-action-lifecycle` contract. Historical relative-action or email-derived execution evidence remains legacy/research-only.

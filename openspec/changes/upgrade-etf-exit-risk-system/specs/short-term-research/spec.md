@@ -8,8 +8,12 @@ The short-term research workbench SHALL distinguish ETF observation labels, acti
 - **THEN** the UI presents it as observation evidence and MUST NOT imply that the label decides how an existing holding should be sold
 
 #### Scenario: Holding has actionable exit signal
-- **WHEN** a tracked ETF has `hard_stop`, `trailing_take_profit`, `confirmed_trend_weakening`, `exit_watch`, or eligible `take_profit_watch`
-- **THEN** the UI shows it in the holding action area with threshold context, data source, email eligibility, and latest email status
+- **WHEN** a tracked ETF has a proposed action from `hard_stop`, `trailing_take_profit`, `confirmed_trend_weakening`, or eligible `exit_watch`
+- **THEN** the UI shows it in the holding action area with immutable-baseline absolute target, action status, execution provenance, threshold context, data source, email eligibility, and notification status
+
+#### Scenario: Holding has take-profit watch
+- **WHEN** a tracked ETF only has eligible `take_profit_watch`
+- **THEN** the UI shows `hold/仅观察/未生成减仓动作` in the soft-watch area and MUST NOT style it as an actionable reduce or exit
 
 #### Scenario: Holding has guard-only risk state
 - **WHEN** a tracked ETF only has unconfirmed trend weakening, cooldown, repeated-stop guard, portfolio drawdown guard, or market-regime guard
@@ -35,7 +39,7 @@ The short-term research workbench SHALL explain when protection guards suppress,
 
 #### Scenario: Cooldown suppresses duplicate email
 - **WHEN** a tracked ETF alert is suppressed by cooldown
-- **THEN** the holding card explains the cooldown reason and shows when the guard can expire if available
+- **THEN** the holding card identifies it as notification suppression, explains the reason and next eligible notification slot, and does not imply that action eligibility, execution state, or reentry cooldown changed
 
 #### Scenario: Portfolio guard is active
 - **WHEN** portfolio drawdown or repeated stop-loss guard is active

@@ -31,6 +31,8 @@ from app.models.entities import (
     ShortResearchSignalItem,
     ShortResearchSignalRun,
     TrackedPosition,
+    TrackedPositionActionDecision,
+    TrackedPositionActionExecution,
     TrackedPositionAlert,
     TrackedPositionAlertAudit,
     TradableEtf,
@@ -109,7 +111,6 @@ from app.services.risk_alerts import (
     ETF_TRAILING_PROFIT_START_MAX_PCT,
     ETF_TRAILING_PROFIT_START_MIN_PCT,
     ETF_TRAILING_PROFIT_START_VOL_MULTIPLIER,
-    EXIT_ACTION_VERSION,
     HARD_STOP_LOSS_PCT,
     TAKE_PROFIT_WATCH_COOLDOWN_DAYS,
     TAKE_PROFIT_WATCH_PCT,
@@ -137,6 +138,14 @@ from app.services.short_research.service import (
     list_signal_items,
 )
 from app.services.short_research.theme_taxonomy import classify_etf_theme
+from app.services.tracked_positions.exposure_repository import (
+    ExposureMutationCommand,
+    ExposureMutationIntent,
+    ExposureMutationSource,
+    InitializeTrackedPositionCommand,
+    apply_exposure_mutation,
+    initialize_tracked_position,
+)
 
 ACTIVE_STATUS = "active"
 ORDER_BEFORE_15 = "before_15"
@@ -965,7 +974,7 @@ def _performance_analysis(
         trailing_threshold is not None
         and profit_giveback_pct >= max(1.0, trailing_threshold * 0.75)
     )
-    trend_confirmed_by_ranking = current_label in {"不适合短线", "数据不足"}
+    trend_confirmed_by_ranking = current_label == "不适合短线"
     confirmed_trend_weakening = bool(
         trend_weakening
         and (trend_confirmed_by_loss or trend_confirmed_by_giveback or trend_confirmed_by_ranking)
@@ -1388,28 +1397,32 @@ async def create_position(
         confirmed_nav_date=confirmed_nav_date,
         confirmed_nav=confirmed_nav,
     )
-    position = TrackedPosition(
-        user_id=user_id,
-        asset_type=asset_type,
-        asset_code=asset_code,
-        asset_name=asset_name,
-        buy_date=buy_date,
-        order_time_bucket=order_time_bucket,
-        confirmed_nav_date=effective_confirmed_nav_date,
-        confirmed_nav=confirmed_nav,
-        confirmed_shares=confirmed_shares,
-        buy_amount=round(buy_amount, 2),
-        entry_price=entry.price if entry else None,
-        entry_price_date=entry.price_date if entry else None,
-        estimated_shares=estimated_shares_for_position(
-            buy_amount=buy_amount,
+    now = utcnow()
+    position = await initialize_tracked_position(
+        session,
+        InitializeTrackedPositionCommand(
+            owner_id=user_id,
+            asset_type=asset_type,
+            asset_code=asset_code,
+            asset_name=asset_name,
+            buy_date=buy_date,
+            order_time_bucket=order_time_bucket,
+            confirmed_nav_date=effective_confirmed_nav_date,
+            confirmed_nav=confirmed_nav,
             confirmed_shares=confirmed_shares,
-            entry=entry,
+            buy_amount=round(buy_amount, 2),
+            entry_price=entry.price if entry else None,
+            entry_price_date=entry.price_date if entry else None,
+            estimated_shares=estimated_shares_for_position(
+                buy_amount=buy_amount,
+                confirmed_shares=confirmed_shares,
+                entry=entry,
+            ),
+            note=note,
+            occurred_at=now,
+            request_id=f"create:{asset_type}:{asset_code}:{now.isoformat()}",
         ),
-        status=ACTIVE_STATUS,
-        note=note,
     )
-    session.add(position)
     await session.commit()
     await session.refresh(position)
     return position
@@ -1431,24 +1444,39 @@ async def recalculate_entry(session: AsyncSession, position: TrackedPosition) ->
         confirmed_nav_date=position.confirmed_nav_date,
         confirmed_nav=position.confirmed_nav,
     )
-    position.confirmed_nav_date = effective_confirmed_nav_date
-    position.entry_price = entry.price if entry else None
-    position.entry_price_date = entry.price_date if entry else None
-    position.estimated_shares = estimated_shares_for_position(
+    next_entry_price = entry.price if entry else None
+    next_entry_price_date = entry.price_date if entry else None
+    next_estimated_shares = estimated_shares_for_position(
         buy_amount=position.buy_amount,
         confirmed_shares=position.confirmed_shares,
         entry=entry,
     )
     after = (
-        position.confirmed_nav_date,
-        position.entry_price,
-        position.entry_price_date,
-        position.estimated_shares,
+        effective_confirmed_nav_date,
+        next_entry_price,
+        next_entry_price_date,
+        next_estimated_shares,
     )
-    if after != before:
-        position.updated_at = utcnow()
-        return True
-    return False
+    if after == before:
+        return False
+    now = utcnow()
+    await apply_exposure_mutation(
+        session,
+        ExposureMutationCommand(
+            owner_id=position.user_id,
+            position_id=position.id,
+            expected_exit_state_version=position.exit_state_version,
+            intent=ExposureMutationIntent.SYSTEM_ESTIMATE,
+            source=ExposureMutationSource.RECALCULATION,
+            occurred_at=now,
+            request_id=f"recalculate:{position.id}:{position.exit_state_version}",
+            new_estimated_shares=next_estimated_shares,
+            new_confirmed_nav_date=effective_confirmed_nav_date,
+            new_entry_price=next_entry_price,
+            new_entry_price_date=next_entry_price_date,
+        ),
+    )
+    return True
 
 
 async def refresh_entry_if_waiting(session: AsyncSession, position: TrackedPosition) -> bool:
@@ -1655,15 +1683,59 @@ def _rank_bucket(rank_order: int | None) -> str | None:
     return "outside"
 
 
-def _parse_action_date(value: Any) -> date | None:
-    if isinstance(value, date):
-        return value
-    if isinstance(value, str):
-        try:
-            return date.fromisoformat(value)
-        except ValueError:
-            return None
-    return None
+async def latest_owner_confirmed_exit_execution_context(
+    session: AsyncSession,
+    *,
+    owner_id: int,
+    position_id: int,
+) -> tuple[str | None, date | None]:
+    latest = (
+        await session.execute(
+            select(TrackedPositionActionExecution, TrackedPositionActionDecision)
+            .join(
+                TrackedPositionActionDecision,
+                TrackedPositionActionDecision.id
+                == TrackedPositionActionExecution.action_decision_id,
+            )
+            .where(
+                TrackedPositionActionExecution.user_id == owner_id,
+                TrackedPositionActionExecution.tracked_position_id == position_id,
+                TrackedPositionActionExecution.execution_provenance == "owner_confirmed",
+            )
+            .order_by(
+                TrackedPositionActionExecution.executed_at.desc(),
+                TrackedPositionActionExecution.id.desc(),
+            )
+            .limit(1)
+        )
+    ).first()
+    if latest is None:
+        return None, None
+    latest_execution, latest_action = latest
+    if latest_action.target_remaining_fraction >= 1.0:
+        return None, None
+    first_fill_at = await session.scalar(
+        select(func.min(TrackedPositionActionExecution.executed_at))
+        .join(
+            TrackedPositionActionDecision,
+            TrackedPositionActionDecision.id
+            == TrackedPositionActionExecution.action_decision_id,
+        )
+        .where(
+            TrackedPositionActionExecution.user_id == owner_id,
+            TrackedPositionActionExecution.tracked_position_id == position_id,
+            TrackedPositionActionExecution.execution_provenance == "owner_confirmed",
+            TrackedPositionActionDecision.position_episode_id
+            == latest_action.position_episode_id,
+            TrackedPositionActionDecision.action_cycle_id == latest_action.action_cycle_id,
+        )
+    )
+    if first_fill_at is None:
+        return None, None
+    last_action = (
+        "exit" if latest_execution.resulting_normalized_quantity <= 1e-8 else "reduce"
+    )
+    return last_action, first_fill_at.date()
 
 
 async def _owner_etf_protection_guard_context(
@@ -1758,6 +1830,12 @@ async def position_sizing_recommendation(
         if target is not None:
             target_weight = target.target_weight
             entry_timing_label = target.entry_timing_label
+    lifecycle_state = dict(position.exit_state_json or {})
+    exposure_baseline = dict(lifecycle_state.get("exposure_baseline") or {})
+    baseline_quantity_value = exposure_baseline.get("normalized_quantity")
+    exposure_baseline_quantity = (
+        float(baseline_quantity_value) if isinstance(baseline_quantity_value, (int, float)) else None
+    )
     recommendation = calculate_position_sizing(
         asset_type=position.asset_type,
         alert_type=effective_alert_type,
@@ -1768,6 +1846,7 @@ async def position_sizing_recommendation(
         target_portfolio_weight=target_weight,
         entry_timing_label=entry_timing_label,
         trend_weakening=_exit_state_trend_weakening(position) if trend_weakening is None else trend_weakening,
+        exposure_baseline_quantity=exposure_baseline_quantity,
     )
     if position.asset_type == ASSET_TYPE_ETF and recommendation.action == "add":
         guard_context = await _owner_etf_protection_guard_context(session, user.id)
@@ -1781,11 +1860,14 @@ async def position_sizing_recommendation(
                 reason="；".join(guard_context["reasons"]),
             )
     if position.asset_type == ASSET_TYPE_ETF and effective_alert_type is None and recommendation.action == "hold":
-        state = dict(position.exit_state_json or {})
-        action_context = dict(state.get("latest_position_action") or {})
+        last_action, last_action_date = await latest_owner_confirmed_exit_execution_context(
+            session,
+            owner_id=position.user_id,
+            position_id=position.id,
+        )
         reentry = evaluate_reentry_state(
-            last_action=action_context.get("position_action"),
-            last_action_date=_parse_action_date(action_context.get("action_date")),
+            last_action=last_action,
+            last_action_date=last_action_date,
             today=date.today(),
             ranking_bucket=_rank_bucket(target.rank_order if target is not None else None),
             entry_timing_label=entry_timing_label,
@@ -2125,13 +2207,21 @@ async def evaluate_alert_decision(
         return None, None
     if item is None:
         return None, run.as_of_date
+    if item.conclusion == "数据不足":
+        state = dict(position.exit_state_json or {})
+        state["evaluation_data_outcome"] = {
+            "state": "data_waiting",
+            "reason_code": "ranking_data_insufficient",
+        }
+        position.exit_state_json = state
+        return None, run.as_of_date
     trigger_label = report.action_label if report is not None else conservative_action_for_item(item, is_held=True)
     risk_flags = list(item.risk_flags_json or [])
     exit_risks = sorted(set(risk_flags).intersection(EXIT_RISKS))
     analysis = await position_analysis(session, position, item=item)
     technical_signal = analysis.exit_signal if analysis.exit_signal.alert_type is not None else None
 
-    if item.conclusion in {"不适合短线", "数据不足"}:
+    if item.conclusion == "不适合短线":
         alert_type = ALERT_EXIT_WATCH
         reasons = [f"短线研究标签变为“{item.conclusion}”，不再适合作为短线持有观察对象。"]
     elif exit_risks:
@@ -2167,6 +2257,14 @@ async def evaluate_alert_decision_v2(
     position: TrackedPosition,
 ) -> tuple[AlertDecision | None, date | None]:
     run, item, report = await latest_signal_context(session, position)
+    if item is not None and item.conclusion == "数据不足":
+        state = dict(position.exit_state_json or {})
+        state["evaluation_data_outcome"] = {
+            "state": "data_waiting",
+            "reason_code": "ranking_data_insufficient",
+        }
+        position.exit_state_json = state
+        return None, run.as_of_date if run is not None else date.today()
     analysis = await position_analysis(session, position, item=item)
     merge_exit_state(position, analysis)
     technical_signal = analysis.exit_signal if analysis.exit_signal.alert_type is not None else None
@@ -2210,7 +2308,7 @@ async def evaluate_alert_decision_v2(
             "该资产未进入最新短线榜单上下文，本提醒只基于你的持仓价格和动态线计算。",
         ]
         alert_level = technical_signal.level
-    elif item.conclusion in {"不适合短线", "数据不足"}:
+    elif item.conclusion == "不适合短线":
         alert_type = ALERT_EXIT_WATCH
         reasons = [f"短线研究标签变为“{item.conclusion}”，不再适合作为短线持有观察对象。"]
     elif exit_risks:
@@ -2399,20 +2497,6 @@ async def create_alert_if_needed(
         email_status="pending",
     )
     alert.threshold_context_json = _alert_threshold_context(position, alert, decision, position_sizing)
-    if position_sizing.action in {"trim", "reduce", "exit"}:
-        state = dict(position.exit_state_json or {})
-        state["latest_position_action"] = {
-            "position_action": position_sizing.action,
-            "recommended_action_label": position_sizing.label,
-            "trigger_signal": decision.alert_type,
-            "action_date": signal_date.isoformat(),
-            "action_time": utcnow().isoformat(),
-            "reference_price": snapshot.current_price,
-            "cooldown_end": (signal_date + timedelta(days=3)).isoformat(),
-            "exit_action_version": EXIT_ACTION_VERSION,
-            "reentry_rule_version": position_sizing.reentry_rule_version,
-        }
-        position.exit_state_json = state
     session.add(alert)
     await session.commit()
     await session.refresh(alert)

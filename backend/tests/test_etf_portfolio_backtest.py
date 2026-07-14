@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from sqlalchemy import func, select
@@ -207,7 +209,10 @@ async def test_etf_portfolio_backtest_api_create_list_and_detail(client, app) ->
     assert created_body["status"] == "success"
     assert created_body["metrics"]["trade_count"] > 0
     assert created_body["replay_contract"]["contract_hash"]
-    assert created_body["evidence_status"] == "同源已验证"
+    assert created_body["evidence_status"] == "旧口径结果"
+    assert created_body["research_only"] is True
+    assert created_body["promotion_eligible"] is False
+    assert created_body["action_evidence"]["policy_semantics"] == "legacy_current_position"
 
     listed = await client.get("/api/short-research/etf-backtests?limit=5")
     assert listed.status_code == 200
@@ -358,6 +363,39 @@ def test_backtest_trailing_take_profit_daily_action() -> None:
     assert alert_type == "trailing_take_profit"
     assert fraction == 0.5
     assert context["profit_giveback_pct"] > context["trailing_giveback_pct"]
+
+
+def test_backtest_data_insufficient_is_frozen_not_exit_watch() -> None:
+    position = ReplayPosition(
+        code="513520",
+        name="日经ETF",
+        shares=1000,
+        avg_cost=1.0,
+        entry_date=date(2026, 6, 1),
+    )
+
+    alert_type, fraction, context = _risk_action(
+        position,
+        _computed_asset("513520", conclusion="数据不足"),
+        0.95,
+    )
+
+    assert alert_type is None
+    assert fraction == 0.0
+    assert context["data_state"] == "data_waiting"
+    assert context["reason_code"] == "ranking_data_insufficient"
+
+
+def test_legacy_current_semantics_fixture_is_research_only_and_non_promotable() -> None:
+    fixture_path = Path(__file__).parent / "fixtures" / "etf_alert_action" / "legacy_current_semantics_v1.json"
+    payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    assert payload["schema_version"] == "etf-alert-action-diagnostic-v1"
+    assert payload["policy_key"] == "legacy_current_semantics"
+    assert [step["remaining_shares"] for step in payload["relative_reduction_path"]] == [500.0, 250.0, 125.0]
+    assert payload["final_remaining_fraction"] == 0.125
+    assert payload["research_only"] is True
+    assert payload["promotion_eligible"] is False
 
 
 def test_intraday_alert_execution_uses_first_quote_after_delay() -> None:

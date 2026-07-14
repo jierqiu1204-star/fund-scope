@@ -14,7 +14,6 @@ from app.services.risk_alerts import (
     POSITION_ACTION_NO_ADD,
     POSITION_ACTION_REENTRY_CANDIDATE,
     POSITION_ACTION_REDUCE,
-    POSITION_ACTION_TRIM,
     REENTRY_STATE_BLOCKED,
     REENTRY_STATE_CANDIDATE,
     REENTRY_STATE_WAITING_COOLDOWN,
@@ -92,9 +91,9 @@ def test_hard_stop_exit_watch_trailing_and_take_profit_have_explicit_actions() -
     assert hard_stop.action == POSITION_ACTION_EXIT
     assert exit_watch.action == POSITION_ACTION_EXIT
     assert trailing.action == POSITION_ACTION_REDUCE
-    assert watch.action == POSITION_ACTION_TRIM
+    assert watch.action == "hold"
     assert trailing.recommended_trade_amount == 1500
-    assert watch.recommended_trade_amount == 900
+    assert watch.recommended_trade_amount is None
 
 
 def test_reentry_candidate_requires_cooldown_rank_entry_timing_and_reliable_data() -> None:

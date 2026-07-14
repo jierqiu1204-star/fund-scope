@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
+from dataclasses import asdict
 from datetime import date, timedelta
 from typing import cast
 
@@ -11,6 +13,7 @@ from app.core.config import get_settings
 from app.core.db import DatabaseManager
 from app.models.entities import Index, IndexValuationHistory
 from app.services.index_data import fetch_index_valuation
+from app.services.tracked_positions.lifecycle_backfill import backfill_position_lifecycle_batch
 from app.services.valuation import compute_percentile
 
 
@@ -52,7 +55,26 @@ async def backfill_valuation(index_code: str, years: int) -> None:
     await db.engine.dispose()
 
 
-def main() -> None:
+async def backfill_etf_alert_lifecycle(
+    position_ids: list[int],
+    cutoff: date,
+    max_items: int,
+) -> None:
+    settings = get_settings()
+    db = DatabaseManager(settings.database_url)
+    async with db.session() as session:
+        result = await backfill_position_lifecycle_batch(
+            session,
+            position_ids=position_ids,
+            cutoff=cutoff,
+            max_items=max_items,
+        )
+        await session.commit()
+    await db.engine.dispose()
+    print(json.dumps(asdict(result), ensure_ascii=False, sort_keys=True))
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="FundScope CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -60,9 +82,21 @@ def main() -> None:
     backfill.add_argument("--index", required=True)
     backfill.add_argument("--years", type=int, default=10)
 
+    lifecycle = subparsers.add_parser("backfill-etf-alert-lifecycle")
+    lifecycle.add_argument("--position-id", dest="position_ids", action="append", type=int, required=True)
+    lifecycle.add_argument("--cutoff", type=date.fromisoformat, required=True)
+    lifecycle.add_argument("--max-items", type=int, default=100)
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
+
     args = parser.parse_args()
     if args.command == "backfill-valuation":
         asyncio.run(backfill_valuation(args.index, args.years))
+    elif args.command == "backfill-etf-alert-lifecycle":
+        asyncio.run(backfill_etf_alert_lifecycle(args.position_ids, args.cutoff, args.max_items))
 
 
 if __name__ == "__main__":

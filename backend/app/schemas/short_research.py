@@ -424,6 +424,13 @@ class EtfPortfolioBacktestRunSummaryOut(BaseModel):
     replay_contract: dict[str, Any] = Field(default_factory=dict)
     evidence_status: str = "等待验证"
     evidence_summary: dict[str, Any] = Field(default_factory=dict)
+    research_only: bool = True
+    promotion_eligible: bool = False
+    action_evidence: dict[str, Any] = Field(default_factory=dict)
+    notification_evidence: dict[str, Any] = Field(default_factory=dict)
+    execution_evidence: dict[str, Any] = Field(default_factory=dict)
+    coverage_evidence: dict[str, Any] = Field(default_factory=dict)
+    time_resolution_limitations: dict[str, Any] = Field(default_factory=dict)
     error_message: str | None = None
 
 

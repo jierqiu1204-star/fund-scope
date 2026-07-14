@@ -1,11 +1,11 @@
 ## ADDED Requirements
 
 ### Requirement: ETF exit risk validation compares policy paths
-The system SHALL validate ETF exit policies by replaying full position paths and comparing hold baseline, current default rules, candidate parameters, and protection-guard policies.
+The system SHALL validate ETF exit policies by replaying full position paths and comparing hold baseline, current default rules, candidate parameters, and protection-guard policies. Current-policy candidates SHALL use immutable exposure baselines, unique absolute-target action cycles, and execution-origin cooldown; legacy relative-action behavior may appear only as a diagnostic old-contract baseline.
 
 #### Scenario: Policy path validation is generated
 - **WHEN** ETF exit risk validation runs for a selected ETF universe
-- **THEN** the result includes metrics for `hold_baseline`, `current_default`, `candidate_params`, and `guard_enabled_policy`
+- **THEN** the result includes metrics for `hold_baseline`, `current_default`, `candidate_params`, and `guard_enabled_policy`, and separately records unique actions, simulated executions, and notification events
 
 #### Scenario: Hold baseline is always present
 - **WHEN** a validation sample has enough forward price data
@@ -16,7 +16,7 @@ The system SHALL validate ETF exit policies by replaying full position paths and
 - **THEN** the system marks it as `candidate` and MUST NOT automatically apply it to live tracked-position alerts
 
 ### Requirement: ETF exit risk validation uses realistic entry and holding state
-The system SHALL validate trailing and profit-protection rules using entry price, high-water profit, current profit, giveback, holding age, and decision-eligible price data.
+The system SHALL validate trailing and profit-protection rules using entry price, immutable exposure baseline/version, high-water profit, current profit, giveback, holding age, action/execution provenance, and decision-eligible price data.
 
 #### Scenario: Tracked position history is available
 - **WHEN** validation can use a real tracked ETF position with entry price and historical prices
@@ -49,8 +49,12 @@ The system SHALL grade ETF exit validation confidence using sample count, rollin
 The system SHALL validate protection guards separately from per-position exit thresholds.
 
 #### Scenario: Cooldown guard is tested
-- **WHEN** a simulated ETF exits and the same ETF generates another entry or add signal within the cooldown window
-- **THEN** the validation records whether the cooldown guard would suppress the repeated action and its outcome
+- **WHEN** a simulated owner-equivalent partial/full execution starts reentry cooldown and the same ETF generates another entry or add signal within that execution-origin window
+- **THEN** the validation records whether the reentry guard would suppress the new add/reentry action and its outcome without using notification history as execution proof
+
+#### Scenario: Notification cooldown is tested separately
+- **WHEN** the same alert episode produces repeated notification opportunities
+- **THEN** validation records notification suppression/repetition separately, does not create another trade, and does not change action eligibility or reentry cooldown
 
 #### Scenario: Repeated stop-loss guard is tested
 - **WHEN** multiple stop-loss events occur within the configured lookback window

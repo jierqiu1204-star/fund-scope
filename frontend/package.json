@@ -10,6 +10,8 @@
     "lint": "next lint",
     "test:recommendations": "node ./scripts/check-recommendations-page.mjs",
     "test:short-pagination": "node ./scripts/check-short-term-pagination.mjs",
+    "test:alert-actions": "node ./scripts/check-etf-alert-action-lifecycle.mjs",
+    "test:backtest-evidence": "node ./scripts/check-etf-backtest-evidence-dimensions.mjs",
     "format": "prettier --check ."
   },
   "dependencies": {

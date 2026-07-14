@@ -1,6 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { isAxiosError } from "axios";
 import { useSearchParams } from "next/navigation";
 import type { ReactNode } from "react";
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
@@ -33,8 +34,13 @@ import type {
   IntradayEtfLiveRankingItem,
   IntradayEtfLiveRankingList,
   TrackedPosition,
+  TrackedPositionActionExecutionInput,
+  TrackedPositionActionSummary,
+  TrackedPositionActionTransitionRequest,
+  TrackedPositionActionTransitionResponse,
   TrackedPositionAlertAuditList,
   TrackedPositionDetail,
+  TrackedPositionExecutionPriceSource,
   TrackedPositionList
 } from "@/lib/types";
 
@@ -57,8 +63,35 @@ type TrackedPositionPatchPayload = {
   note?: string;
 };
 
+type ActionExecutionDraft = {
+  executedAt: string;
+  quantity: string;
+  price: string;
+  priceSource: TrackedPositionExecutionPriceSource;
+  fees: string;
+  resultingShares: string;
+  closeFact: boolean;
+};
+type ActionTransitionMutationRequest = {
+  positionId: number;
+  actionId: number;
+  expectedPositionStateVersion: number;
+  transition: TrackedPositionActionTransitionRequest["transition"];
+  execution?: TrackedPositionActionExecutionInput;
+};
+
 const ASSET_PAGE_SIZE = 12;
 const emptyLabelFilters: LabelFilterState = { observation: [], entry: [], tracking: [] };
+
+const executionPriceSourceOptions: Array<{
+  value: TrackedPositionExecutionPriceSource;
+  label: string;
+}> = [
+  { value: "owner_reported", label: "用户自行报告" },
+  { value: "broker_confirmation", label: "券商确认" },
+  { value: "trade_statement", label: "成交回单" },
+  { value: "owner_broker_statement", label: "用户提供券商交割单" }
+];
 
 const baseSortOptions: Array<{ key: SortKey; label: string }> = [
   { key: "score", label: "综合排序" },
@@ -444,31 +477,6 @@ function observationPortfolioText(asset: ShortResearchAsset | null | undefined) 
   }
   const reason = context.exclusion_explanation || context.exclusion_reason || context.risk_reasons?.[0] || "未进入主观察组合";
   return `ETF 资金配置：${context.status === "watch_only" ? "只观察不配权" : "未配权"}，${reason}`;
-}
-
-function auditOutcomeLabel(outcome: string) {
-  const labels: Record<string, string> = {
-    sent: "已发邮件",
-    failed: "发送失败",
-    skipped: "已跳过",
-    suppressed: "冷却抑制",
-    web_only: "仅网页提示",
-    data_ineligible: "数据不可决策"
-  };
-  return labels[outcome] ?? outcome;
-}
-
-function auditTone(outcome: string) {
-  if (outcome === "sent") {
-    return "bg-emerald-50 text-emerald-800";
-  }
-  if (outcome === "failed" || outcome === "data_ineligible") {
-    return "bg-rose-50 text-rose-700";
-  }
-  if (outcome === "suppressed" || outcome === "skipped") {
-    return "bg-amber-50 text-amber-800";
-  }
-  return "bg-sky-50 text-sky-800";
 }
 
 function thresholdExplanationLine(position: TrackedPosition | null | undefined) {
@@ -1101,21 +1109,117 @@ function alertDeliveryLabel(alert: {
   alert_type: string;
   email_status: string;
   suppression_status: string | null;
+  delivery_status?: string | null;
   quote_time?: string | null;
 }) {
-  if (alert.suppression_status === "web_only" || !isEmailExitAlert(alert.alert_type)) {
+  if (
+    alert.suppression_status === "web_only" ||
+    !isEmailExitAlert(alert.alert_type)
+  ) {
     return "仅网页提示";
   }
   if (alert.suppression_status === "suppressed") {
     return "已去重";
   }
-  if (alert.email_status === "sent") {
-    return "已发邮件";
+  const status = alert.delivery_status ?? alert.email_status;
+  if (status === "smtp_accepted" || status === "sent") {
+    return "SMTP 已接受";
+  }
+  if (status === "failed") {
+    return "发送失败";
+  }
+  if (status === "unknown") {
+    return "状态未知";
   }
   if (alert.quote_time === null || alert.quote_time === undefined) {
     return "等待数据";
   }
   return "仅网页提示";
+}
+
+function actionStatusLabel(status: TrackedPositionActionSummary["status"]) {
+  const labels: Record<TrackedPositionActionSummary["status"], string> = {
+    proposed: "建议待确认",
+    acknowledged: "已确认，待执行",
+    partially_executed: "部分执行",
+    executed: "已执行",
+    expired: "已过期",
+    cancelled: "已取消",
+    superseded: "已被更严格建议替代"
+  };
+  return labels[status];
+}
+
+function alertStateLabel(state: string | null | undefined) {
+  const labels: Record<string, string> = {
+    normal: "正常",
+    pending: "等待确认",
+    firing: "风险持续",
+    recovering: "恢复观察",
+    resolved: "已解除"
+  };
+  return state ? (labels[state] ?? state) : "暂无";
+}
+
+function dataStateLabel(state: string | null | undefined) {
+  const labels: Record<string, string> = {
+    eligible: "数据可决策",
+    decision_eligible: "数据可决策",
+    data_waiting: "等待数据",
+    no_data: "等待数据",
+    error: "数据异常",
+    unknown: "等待数据"
+  };
+  return state ? (labels[state] ?? state) : "暂无";
+}
+
+function trackedLifecycleLabel(position: TrackedPosition) {
+  const dataState =
+    position.lifecycle_state?.data_state ?? position.current_action?.data_state;
+  if (
+    ["data_waiting", "no_data", "error", "unknown"].includes(dataState ?? "") ||
+    position.exit_signal.action_class === "data_waiting"
+  ) {
+    return "等待数据";
+  }
+  if (position.exit_signal.action_class === "soft_watch") {
+    return "仅观察";
+  }
+  return position.current_action
+    ? actionStatusLabel(position.current_action.status)
+    : "仅观察";
+}
+
+function notificationDeliveryLabel(status: string | null | undefined) {
+  if (status === "smtp_accepted" || status === "sent") {
+    return "SMTP 已接受";
+  }
+  if (status === "failed") {
+    return "发送失败";
+  }
+  if (status === "unknown") {
+    return "状态未知";
+  }
+  if (status === "pending" || status === "claimed") {
+    return "等待发送";
+  }
+  return status ?? "未产生邮件";
+}
+
+function stableActionRequestKey(
+  keys: Map<string, string>,
+  requestIdentity: string
+) {
+  const existing = keys.get(requestIdentity);
+  if (existing) {
+    return existing;
+  }
+  const key =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `action-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  keys.set(requestIdentity, key);
+  return key;
 }
 function latestAlertTone(alert: {
   alert_type: string;
@@ -1497,6 +1601,17 @@ function ShortTermClient() {
   const [editConfirmedNav, setEditConfirmedNav] = useState("");
   const [editConfirmedShares, setEditConfirmedShares] = useState("");
   const [editNote, setEditNote] = useState("");
+  const [actionExecutionDrafts, setActionExecutionDrafts] = useState<
+    Record<number, ActionExecutionDraft>
+  >({});
+  const [actionNotice, setActionNotice] = useState<{
+    actionId: number;
+    text: string;
+  } | null>(null);
+  const actionRequestKeys = useRef(new Map<string, string>());
+  const actionRequestPayloads = useRef(
+    new Map<string, TrackedPositionActionTransitionRequest>()
+  );
   const [pendingDesktopScrollKey, setPendingDesktopScrollKey] = useState<string | null>(null);
   const mode = assetModes[assetType];
   const sortOptions = assetType === "etf" ? etfSortOptions : baseSortOptions;
@@ -2060,13 +2175,149 @@ function ShortTermClient() {
     queryKey: ["tracked-position-audit", user?.id ?? "anonymous", primaryTracked?.id],
     enabled: Boolean(user) && primaryTracked !== null,
     queryFn: async ({ signal }) =>
-      (await api.get<TrackedPositionAlertAuditList>(`/api/tracked-positions/${primaryTracked?.id}/audit`, { signal })).data
+      (await api.get<TrackedPositionAlertAuditList>(`/api/tracked-positions/${primaryTracked?.id}/audit?limit=20`, { signal })).data
   });
   const auditItems = trackedAudit.data?.items ?? [];
   const trackingPoints = trackingChartPoints(trackedDetail.data);
   const trackingEntry = trackingPoints.find((point) => point.isEntry);
   const trackingHigh = trackingPoints.find((point) => point.isHigh);
   const trackingCurrent = trackingPoints.find((point) => point.isCurrent);
+
+  const refreshTrackedLifecycle = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["tracked-positions"] }),
+      queryClient.invalidateQueries({ queryKey: ["tracked-position"] }),
+      queryClient.invalidateQueries({ queryKey: ["tracked-position-audit"] })
+    ]);
+  };
+
+  const emptyActionExecutionDraft = (): ActionExecutionDraft => ({
+    executedAt: "",
+    quantity: "",
+    price: "",
+    priceSource: "owner_reported",
+    fees: "0",
+    resultingShares: "",
+    closeFact: false
+  });
+
+  const actionExecutionDraft = (actionId: number) =>
+    actionExecutionDrafts[actionId] ?? emptyActionExecutionDraft();
+
+  const updateActionExecutionDraft = (
+    actionId: number,
+    patch: Partial<ActionExecutionDraft>
+  ) => {
+    setActionExecutionDrafts((current) => ({
+      ...current,
+      [actionId]: {
+        ...(current[actionId] ?? emptyActionExecutionDraft()),
+        ...patch
+      }
+    }));
+  };
+
+  const executionFactsFromDraft = (
+    actionId: number
+  ): TrackedPositionActionExecutionInput => {
+    const draft = actionExecutionDraft(actionId);
+    const executedAt = new Date(draft.executedAt);
+    const quantity = Number(draft.quantity);
+    const price = Number(draft.price);
+    const fees = Number(draft.fees);
+    const resultingShares = Number(draft.resultingShares);
+    if (!draft.executedAt || Number.isNaN(executedAt.getTime())) {
+      throw new Error("请填写实际执行时间");
+    }
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      throw new Error("实际卖出份额必须大于 0");
+    }
+    if (!Number.isFinite(price) || price <= 0) {
+      throw new Error("实际成交价必须大于 0");
+    }
+    if (!Number.isFinite(fees) || fees < 0) {
+      throw new Error("费用不能为负数");
+    }
+    if (!Number.isFinite(resultingShares) || resultingShares < 0) {
+      throw new Error("执行后剩余份额不能为负数");
+    }
+    return {
+      executed_at: executedAt.toISOString(),
+      quantity,
+      price,
+      price_source: draft.priceSource,
+      fees,
+      resulting_shares: resultingShares,
+      close_fact: draft.closeFact
+    };
+  };
+
+  const actionTransition = useMutation({
+    mutationFn: async (request: ActionTransitionMutationRequest) => {
+      const requestedPayload: TrackedPositionActionTransitionRequest = {
+        transition: request.transition,
+        expected_position_state_version: request.expectedPositionStateVersion,
+        ...(request.execution ? { execution: request.execution } : {})
+      };
+      const requestIdentity = JSON.stringify([
+        request.positionId,
+        request.actionId,
+        request.transition,
+        request.execution ?? null
+      ]);
+      const payload =
+        actionRequestPayloads.current.get(requestIdentity) ?? requestedPayload;
+      actionRequestPayloads.current.set(requestIdentity, payload);
+      const idempotencyKey = stableActionRequestKey(
+        actionRequestKeys.current,
+        requestIdentity
+      );
+      try {
+        const result = (
+          await api.post<TrackedPositionActionTransitionResponse>(
+            `/api/tracked-positions/${request.positionId}/actions/${request.actionId}/transitions`,
+            payload,
+            { headers: { "Idempotency-Key": idempotencyKey } }
+          )
+        ).data;
+        return { result, requestIdentity };
+      } catch (error) {
+        const response = isAxiosError(error) ? error.response : undefined;
+        if (response?.status === 409) {
+          actionRequestKeys.current.delete(requestIdentity);
+          actionRequestPayloads.current.delete(requestIdentity);
+          setActionNotice({
+            actionId: request.actionId,
+            text: "持仓状态已变化，已刷新；请核对最新目标后重新提交。"
+          });
+          await refreshTrackedLifecycle();
+        } else if (response) {
+          actionRequestKeys.current.delete(requestIdentity);
+          actionRequestPayloads.current.delete(requestIdentity);
+        } else {
+          setActionNotice({
+            actionId: request.actionId,
+            text: "请求结果未知。请勿修改执行事实，直接重试会复用同一请求。"
+          });
+        }
+        throw error;
+      }
+    },
+    onSuccess: async ({ result, requestIdentity }) => {
+      actionRequestKeys.current.delete(requestIdentity);
+      actionRequestPayloads.current.delete(requestIdentity);
+      setActionNotice({
+        actionId: result.action_id,
+        text: `操作已记录：${actionStatusLabel(result.action_status)}`
+      });
+      setActionExecutionDrafts((current) => {
+        const next = { ...current };
+        delete next[result.action_id];
+        return next;
+      });
+      await refreshTrackedLifecycle();
+    }
+  });
 
   const mobileTabs: Array<{ id: MobileTab; label: string }> = [
     { id: "ranking", label: "榜单" },
@@ -3092,6 +3343,394 @@ function ShortTermClient() {
       </>
     );
   };
+  function renderActionLifecyclePanel(item: TrackedPosition) {
+    const detail =
+      trackedDetail.data?.id === item.id ? trackedDetail.data : null;
+    const currentAction = detail?.current_action ?? item.current_action;
+    const historyLoaded = detail !== null;
+    const actionHistory = detail?.action_history ?? [];
+    const lifecycleLabel = currentAction
+      ? actionStatusLabel(currentAction.status)
+      : trackedLifecycleLabel(item);
+    const dataState =
+      item.lifecycle_state?.data_state ?? currentAction?.data_state;
+    const alertState = item.lifecycle_state?.alert_state;
+    const relatedAudits = item.id === primaryTracked?.id ? auditItems : [];
+    const mutableStatuses = new Set([
+      "proposed",
+      "acknowledged",
+      "partially_executed"
+    ]);
+    const activeAction =
+      currentAction &&
+      currentAction.is_current &&
+      mutableStatuses.has(currentAction.status)
+        ? currentAction
+        : null;
+    const actionPending =
+      actionTransition.isPending &&
+      actionTransition.variables?.actionId === activeAction?.id;
+
+    return (
+      <section className="mt-4 rounded-[8px] border border-ink/10 bg-paper p-3 text-sm leading-6 text-ink/70">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-accent">
+              动作生命周期
+            </p>
+            <p className="mt-1 font-semibold text-ink">{lifecycleLabel}</p>
+          </div>
+          <div className="text-right text-xs text-ink/50">
+            <p>告警：{alertStateLabel(alertState)}</p>
+            <p>数据：{dataStateLabel(dataState)}</p>
+          </div>
+        </div>
+
+        {!currentAction && item.exit_signal.action_class === "soft_watch" ? (
+          <p className="mt-2 rounded-[6px] bg-white px-3 py-2">
+            hold / 仅观察 / 未生成减仓动作
+          </p>
+        ) : null}
+        {!currentAction && lifecycleLabel === "等待数据" ? (
+          <p className="mt-2 rounded-[6px] bg-white px-3 py-2">
+            当前无法复核，等待合格数据；不会据此生成交易动作。
+          </p>
+        ) : null}
+
+        {currentAction ? (
+          <div className="mt-3 rounded-[8px] bg-white p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="font-semibold text-ink">服务器绝对目标</p>
+              <span className="rounded-full bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-800">
+                {actionStatusLabel(currentAction.status)}
+              </span>
+            </div>
+            <p className="mt-1">
+              剩余{" "}
+              {formatPercent(currentAction.target_remaining_fraction * 100)} ·
+              复权归一化目标{" "}
+              {currentAction.target_normalized_quantity.toFixed(2)}
+            </p>
+            <p className="text-xs text-ink/55">
+              复权归一化冻结基准{" "}
+              {currentAction.baseline_normalized_quantity.toFixed(2)} · 已执行{" "}
+              {currentAction.cumulative_executed_quantity.toFixed(2)} · 待执行{" "}
+              {currentAction.remaining_execution_quantity.toFixed(2)}
+            </p>
+            <p className="text-xs text-ink/55">
+              券商当前实际份额：
+              {(item.confirmed_shares ?? item.estimated_shares)?.toFixed(2) ??
+                "等待确认"}
+            </p>
+            <p className="mt-1 text-xs text-ink/55">
+              原因：
+              {currentAction.contributing_rules.length
+                ? currentAction.contributing_rules
+                    .map(alertTypeLabel)
+                    .join("、")
+                : "等待规则原因"}
+            </p>
+          </div>
+        ) : null}
+
+        {activeAction ? (
+          <div className="mt-3 rounded-[8px] border border-ink/10 bg-white p-3">
+            <p className="font-semibold text-ink">由持仓所有者确认</p>
+            <p className="mt-1 text-xs text-ink/55">
+              系统只记录你提供的真实执行事实，不会把邮件或建议当成成交。
+            </p>
+            <p className="mt-1 text-xs text-ink/55">
+              上方目标是复权归一化数量；执行事实请按券商实际份额填写，服务端会校验持仓调整因子。
+            </p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {activeAction.status === "proposed" ? (
+                <button
+                  className="rounded-[6px] border border-border px-3 py-2 text-xs font-semibold text-ink disabled:opacity-50"
+                  disabled={actionPending}
+                  onClick={() => {
+                    setActionNotice(null);
+                    actionTransition.mutate({
+                      positionId: item.id,
+                      actionId: activeAction.id,
+                      expectedPositionStateVersion:
+                        detail?.exit_state_version ?? item.exit_state_version,
+                      transition: "acknowledge"
+                    });
+                  }}
+                >
+                  确认已看到
+                </button>
+              ) : null}
+              <button
+                className="rounded-[6px] border border-rose-200 px-3 py-2 text-xs font-semibold text-rose-700 disabled:opacity-50"
+                disabled={actionPending}
+                onClick={() => {
+                  setActionNotice(null);
+                  actionTransition.mutate({
+                    positionId: item.id,
+                    actionId: activeAction.id,
+                    expectedPositionStateVersion:
+                      detail?.exit_state_version ?? item.exit_state_version,
+                    transition: "cancel"
+                  });
+                }}
+              >
+                取消建议
+              </button>
+            </div>
+
+            <div className="mt-3 grid gap-2 sm:grid-cols-2">
+              <label className="grid gap-1 text-xs font-medium text-ink/70">
+                实际执行时间
+                <input
+                  className="rounded-[6px] border border-border px-2 py-1.5 text-sm text-ink"
+                  type="datetime-local"
+                  value={actionExecutionDraft(activeAction.id).executedAt}
+                  onChange={(event) =>
+                    updateActionExecutionDraft(activeAction.id, {
+                      executedAt: event.target.value
+                    })
+                  }
+                />
+              </label>
+              <label className="grid gap-1 text-xs font-medium text-ink/70">
+                实际卖出份额
+                <input
+                  className="rounded-[6px] border border-border px-2 py-1.5 text-sm text-ink"
+                  inputMode="decimal"
+                  value={actionExecutionDraft(activeAction.id).quantity}
+                  onChange={(event) =>
+                    updateActionExecutionDraft(activeAction.id, {
+                      quantity: event.target.value
+                    })
+                  }
+                />
+              </label>
+              <label className="grid gap-1 text-xs font-medium text-ink/70">
+                实际成交价
+                <input
+                  className="rounded-[6px] border border-border px-2 py-1.5 text-sm text-ink"
+                  inputMode="decimal"
+                  value={actionExecutionDraft(activeAction.id).price}
+                  onChange={(event) =>
+                    updateActionExecutionDraft(activeAction.id, {
+                      price: event.target.value
+                    })
+                  }
+                />
+              </label>
+              <label className="grid gap-1 text-xs font-medium text-ink/70">
+                价格来源
+                <select
+                  className="rounded-[6px] border border-border px-2 py-1.5 text-sm text-ink"
+                  value={actionExecutionDraft(activeAction.id).priceSource}
+                  onChange={(event) =>
+                    updateActionExecutionDraft(activeAction.id, {
+                      priceSource: event.target
+                        .value as TrackedPositionExecutionPriceSource
+                    })
+                  }
+                >
+                  {executionPriceSourceOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="grid gap-1 text-xs font-medium text-ink/70">
+                税费
+                <input
+                  className="rounded-[6px] border border-border px-2 py-1.5 text-sm text-ink"
+                  inputMode="decimal"
+                  value={actionExecutionDraft(activeAction.id).fees}
+                  onChange={(event) =>
+                    updateActionExecutionDraft(activeAction.id, {
+                      fees: event.target.value
+                    })
+                  }
+                />
+              </label>
+              <label className="grid gap-1 text-xs font-medium text-ink/70">
+                执行后剩余份额
+                <input
+                  className="rounded-[6px] border border-border px-2 py-1.5 text-sm text-ink"
+                  inputMode="decimal"
+                  value={actionExecutionDraft(activeAction.id).resultingShares}
+                  onChange={(event) =>
+                    updateActionExecutionDraft(activeAction.id, {
+                      resultingShares: event.target.value
+                    })
+                  }
+                />
+              </label>
+            </div>
+            <label className="mt-2 flex items-center gap-2 text-xs text-ink/65">
+              <input
+                type="checkbox"
+                checked={actionExecutionDraft(activeAction.id).closeFact}
+                onChange={(event) =>
+                  updateActionExecutionDraft(activeAction.id, {
+                    closeFact: event.target.checked
+                  })
+                }
+              />
+              已确认持仓完全关闭（仅 0% 目标适用）
+            </label>
+            <button
+              className="mt-3 rounded-[6px] bg-ink px-3 py-2 text-xs font-semibold text-white disabled:opacity-50"
+              disabled={actionPending}
+              onClick={() => {
+                try {
+                  setActionNotice(null);
+                  actionTransition.mutate({
+                    positionId: item.id,
+                    actionId: activeAction.id,
+                    expectedPositionStateVersion:
+                      detail?.exit_state_version ?? item.exit_state_version,
+                    transition: "execute",
+                    execution: executionFactsFromDraft(activeAction.id)
+                  });
+                } catch (error) {
+                  setActionNotice({
+                    actionId: activeAction.id,
+                    text: errorText(error)
+                  });
+                }
+              }}
+            >
+              {actionPending ? "提交中..." : "记录实际执行"}
+            </button>
+            {actionNotice?.actionId === activeAction.id ? (
+              <p className="mt-2 text-xs text-ink/60">{actionNotice.text}</p>
+            ) : null}
+            {actionTransition.error &&
+            actionTransition.variables?.actionId === activeAction.id &&
+            actionNotice?.actionId !== activeAction.id ? (
+              <p className="mt-2 text-xs text-rose-700">
+                操作失败：{errorText(actionTransition.error)}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+
+        {!historyLoaded ? (
+          <p className="mt-3 rounded-[6px] bg-white px-3 py-2 text-xs text-ink/55">
+            历史与通知尝试未加载；在榜单中选择该标的后查看最近一页记录。
+          </p>
+        ) : actionHistory.length ? (
+          <div className="mt-3">
+            <p className="font-semibold text-ink">最近一页动作周期路径</p>
+            <p className="text-xs text-ink/50">
+              同一动作可以有多个风险原因和多次通知尝试，不会显示成多笔卖出决定。
+            </p>
+            {detail?.action_history_next_cursor ||
+            trackedAudit.data?.next_cursor ? (
+              <p className="mt-1 text-xs text-amber-700">
+                还有更早记录，当前未加载。
+              </p>
+            ) : null}
+            <div className="mt-2 grid gap-2">
+              {actionHistory.map((action) => {
+                const attempts = relatedAudits.filter(
+                  (audit) =>
+                    audit.correlation?.action_decision_id === action.id &&
+                    audit.alert_type === "notification_delivery"
+                );
+                return (
+                  <div key={action.id} className="rounded-[8px] bg-white p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-semibold text-ink">
+                        {actionStatusLabel(action.status)}
+                      </span>
+                      <span className="text-xs text-ink/45">
+                        目标剩余{" "}
+                        {formatPercent(action.target_remaining_fraction * 100)}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-xs text-ink/55">
+                      {action.contributing_rules.length
+                        ? action.contributing_rules
+                            .map(alertTypeLabel)
+                            .join(" + ")
+                        : "未记录附加规则原因"}
+                    </p>
+                    <p className="mt-1 text-xs text-ink/55">
+                      进度：已执行{" "}
+                      {action.cumulative_executed_quantity.toFixed(2)}，剩余{" "}
+                      {action.remaining_execution_quantity.toFixed(2)}
+                    </p>
+                    {attempts.length ? (
+                      <div className="mt-2 border-l-2 border-ink/10 pl-3 text-xs text-ink/55">
+                        {attempts.map((attempt) => (
+                          <p
+                            key={`${attempt.id}-${attempt.correlation?.notification_envelope_id ?? "none"}`}
+                          >
+                            {formatDateTime(attempt.created_at)} ·{" "}
+                            {notificationDeliveryLabel(
+                              attempt.smtp_result ?? attempt.outcome
+                            )}
+                            {recordNumber(
+                              attempt.decision_context,
+                              "attempt_count"
+                            )
+                              ? ` · 第 ${recordNumber(attempt.decision_context, "attempt_count")} 次尝试`
+                              : ""}
+                          </p>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="mt-2 text-xs text-ink/45">
+                        当前已加载范围内暂无关联通知尝试。
+                      </p>
+                    )}
+                    <details className="mt-2 text-xs text-ink/50">
+                      <summary className="cursor-pointer font-semibold text-ink/65">
+                        技术标识与审计上下文
+                      </summary>
+                      <div className="mt-1 grid gap-1 break-all font-mono">
+                        <span>action_id: {action.id}</span>
+                        <span>policy_version: {action.policy_version}</span>
+                        <span>
+                          execution_provenance: {action.execution_provenance}
+                        </span>
+                        {attempts.map((attempt) => (
+                          <span key={`technical-${attempt.id}`}>
+                            event: {attempt.correlation?.event_id ?? attempt.id}{" "}
+                            · item:{" "}
+                            {attempt.correlation?.notification_item_id ?? "-"} ·
+                            envelope:{" "}
+                            {attempt.correlation?.notification_envelope_id ??
+                              "-"}
+                          </span>
+                        ))}
+                      </div>
+                      {attempts[0] ? (
+                        <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-[6px] bg-paper p-2">
+                          {JSON.stringify(
+                            {
+                              threshold: attempts[0].threshold_context,
+                              decision: attempts[0].decision_context
+                            },
+                            null,
+                            2
+                          )}
+                        </pre>
+                      ) : null}
+                    </details>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="mt-2 text-xs text-ink/50">
+              SMTP
+              已接受只表示服务器接收。外部邮件可能重复，但不会重复生成仓位动作。
+            </p>
+          </div>
+        ) : null}
+      </section>
+    );
+  }
   const renderMobileTrackingPanel = () => (
     <Panel className="rounded-[12px]">
       {activeTracked.length ? (
@@ -3142,7 +3781,9 @@ function ShortTermClient() {
                   暂无追踪告警。
                 </p>
               )}
-              <div className="mt-4 flex flex-wrap gap-2">
+              {renderActionLifecyclePanel(item)}
+
+            <div className="mt-4 flex flex-wrap gap-2">
                 <button
                   className="rounded-[6px] border border-border px-3 py-2 text-sm font-medium text-ink transition hover:border-ink/30 hover:text-ink disabled:opacity-60"
                   disabled={updateTracking.isPending}
@@ -3278,38 +3919,7 @@ function ShortTermClient() {
               </p>
             )}
 
-            {item.id === primaryTracked?.id ? (
-              <div className="mt-4 rounded-[8px] border border-ink/10 bg-white p-3 text-sm leading-6">
-                <div className="flex items-center justify-between gap-3">
-                  <p className="font-semibold text-ink">提醒审计</p>
-                  <span className="text-xs text-ink/45">{auditItems.length ? `最近 ${Math.min(auditItems.length, 3)} 条` : "暂无"}</span>
-                </div>
-                {auditItems.length ? (
-                  <div className="mt-3 grid gap-2">
-                    {auditItems.slice(0, 3).map((audit) => (
-                      <div key={audit.id} className="rounded-[8px] bg-paper px-3 py-2">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${auditTone(audit.outcome)}`}>
-                            {auditOutcomeLabel(audit.outcome)}
-                          </span>
-                          <span className="text-xs text-ink/45">
-                            {formatDateTime(audit.quote_time ?? audit.created_at)} · {priceSourceLabel(audit.data_source)} · {reliabilityLabel(audit.quote_freshness)}
-                          </span>
-                        </div>
-                        <p className="mt-1 text-xs text-ink/60">{audit.audit_summary}</p>
-                        {audit.duplicate_reason || audit.cooldown_reason || audit.smtp_error_message ? (
-                          <p className="mt-1 text-xs text-ink/45">
-                            {audit.duplicate_reason ?? audit.cooldown_reason ?? audit.smtp_error_message}
-                          </p>
-                        ) : null}
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="mt-2 text-xs text-ink/55">暂无审计记录，后续触发、跳过、抑制提醒后会显示。</p>
-                )}
-              </div>
-            ) : null}
+            {renderActionLifecyclePanel(item)}
 
             <details className="mt-3 rounded-[8px] bg-paper p-3 text-xs leading-5 text-ink/60">
               <summary className="cursor-pointer font-semibold text-ink">更多风控数据</summary>

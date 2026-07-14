@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -96,6 +97,33 @@ class AlertDecision:
 
 
 @dataclass(frozen=True)
+class EvaluatedRiskRule:
+    rule_id: str
+    data_state: str
+    data_reason_code: str
+    condition_met: bool
+    recovery_met: bool
+    target_remaining_fraction: float | None
+    reason: str
+    hard_stop: bool = False
+    confirmation_required: int = 2
+    recovery_required: int = 2
+
+    def __post_init__(self) -> None:
+        if not self.rule_id.strip() or not self.reason.strip():
+            raise ValueError("rule_id and reason are required")
+        if self.data_state not in {"eligible", "data_waiting", "no_data", "error"}:
+            raise ValueError("unsupported evaluation data state")
+        if not self.data_reason_code.strip():
+            raise ValueError("data_reason_code is required")
+        target = self.target_remaining_fraction
+        if target is not None and (not math.isfinite(target) or not 0.0 <= target <= 1.0):
+            raise ValueError("target_remaining_fraction must be a finite fraction")
+        if self.confirmation_required < 1 or self.recovery_required < 1:
+            raise ValueError("confirmation and recovery thresholds must be positive")
+
+
+@dataclass(frozen=True)
 class PositionSizingRecommendation:
     action: str
     label: str
@@ -134,8 +162,12 @@ class PositionActionDecision:
     action: str
     action_class: str
     label: str
-    target_fraction: float | None
+    target_remaining_fraction: float | None
     reason: str
+
+    @property
+    def target_fraction(self) -> float | None:
+        return self.target_remaining_fraction
 
 
 @dataclass(frozen=True)
@@ -229,15 +261,40 @@ def map_exit_signal_to_position_action(
     loss_confirmed: bool = False,
     giveback_confirmed: bool = False,
     market_regime_weak: bool = False,
+    evidence_eligible: bool = True,
+    exit_watch_target_remaining_fraction: float | None = None,
 ) -> PositionActionDecision:
-    if alert_type in {ALERT_HARD_STOP, ALERT_EXIT_WATCH}:
-        action = POSITION_ACTION_EXIT if allow_full_exit else POSITION_ACTION_REDUCE
+    if alert_type == ALERT_HARD_STOP:
+        return PositionActionDecision(
+            action=POSITION_ACTION_EXIT,
+            action_class=ACTION_CLASS_ACTIONABLE_EXIT,
+            label=position_action_label(POSITION_ACTION_EXIT),
+            target_remaining_fraction=0.0,
+            reason="触发硬止损，绝对目标为当前 exposure baseline 的 0%。",
+        )
+    if alert_type == ALERT_EXIT_WATCH:
+        if not evidence_eligible:
+            return PositionActionDecision(
+                action=POSITION_ACTION_HOLD,
+                action_class=ACTION_CLASS_NONE,
+                label=position_action_label(POSITION_ACTION_HOLD),
+                target_remaining_fraction=None,
+                reason="退出观察缺少同源、有效的排名或研究证据，不生成动作。",
+            )
+        target = (
+            exit_watch_target_remaining_fraction
+            if exit_watch_target_remaining_fraction is not None
+            else (0.0 if allow_full_exit else 0.5)
+        )
+        if target not in {0.0, 0.5}:
+            raise ValueError("exit-watch target must be the versioned 0% or 50% absolute target")
+        action = POSITION_ACTION_EXIT if target == 0.0 else POSITION_ACTION_REDUCE
         return PositionActionDecision(
             action=action,
             action_class=ACTION_CLASS_ACTIONABLE_EXIT,
             label=position_action_label(action),
-            target_fraction=0.0 if action == POSITION_ACTION_EXIT else 0.5,
-            reason="触发硬止损或退出观察，进入明确持仓处理状态。",
+            target_remaining_fraction=target,
+            reason="有效退出观察证据触发版本化绝对持仓目标。",
         )
     if alert_type == ALERT_TRAILING_TAKE_PROFIT:
         if trend_weakening and allow_full_exit:
@@ -245,14 +302,14 @@ def map_exit_signal_to_position_action(
                 action=POSITION_ACTION_EXIT,
                 action_class=ACTION_CLASS_ACTIONABLE_EXIT,
                 label=position_action_label(POSITION_ACTION_EXIT),
-                target_fraction=0.0,
+                target_remaining_fraction=0.0,
                 reason="移动止盈同时叠加趋势转弱，允许清仓参考。",
             )
         return PositionActionDecision(
             action=POSITION_ACTION_REDUCE,
             action_class=ACTION_CLASS_ACTIONABLE_EXIT,
             label=position_action_label(POSITION_ACTION_REDUCE),
-            target_fraction=0.5,
+            target_remaining_fraction=0.5,
             reason="触发移动止盈，优先明显减仓保护利润，不默认清仓。",
         )
     if alert_type == ALERT_CONFIRMED_TREND_WEAKENING:
@@ -260,7 +317,7 @@ def map_exit_signal_to_position_action(
             action=POSITION_ACTION_REDUCE,
             action_class=ACTION_CLASS_ACTIONABLE_EXIT,
             label=position_action_label(POSITION_ACTION_REDUCE),
-            target_fraction=0.5,
+            target_remaining_fraction=0.5,
             reason="趋势转弱已被亏损、回吐或榜单转弱确认，降低一半暴露。",
         )
     if alert_type == ALERT_TREND_WEAKENING:
@@ -270,29 +327,29 @@ def map_exit_signal_to_position_action(
                 action=POSITION_ACTION_REDUCE,
                 action_class=ACTION_CLASS_ACTIONABLE_EXIT,
                 label=position_action_label(POSITION_ACTION_REDUCE),
-                target_fraction=0.5,
+                target_remaining_fraction=0.5,
                 reason="趋势转弱叠加亏损、回吐、排名或市场确认，升级为减仓参考。",
             )
         return PositionActionDecision(
             action=POSITION_ACTION_NO_ADD,
             action_class=ACTION_CLASS_GUARD_ONLY,
             label=position_action_label(POSITION_ACTION_NO_ADD),
-            target_fraction=1.0,
+            target_remaining_fraction=1.0,
             reason="趋势转弱未被确认，先暂停加仓，不作为卖出邮件。",
         )
     if alert_type == ALERT_TAKE_PROFIT_WATCH:
         return PositionActionDecision(
-            action=POSITION_ACTION_TRIM,
+            action=POSITION_ACTION_HOLD,
             action_class=ACTION_CLASS_SOFT_WATCH,
-            label=position_action_label(POSITION_ACTION_TRIM),
-            target_fraction=0.7,
-            reason="触发止盈观察，先按轻度减仓保护利润。",
+            label=position_action_label(POSITION_ACTION_HOLD),
+            target_remaining_fraction=1.0,
+            reason="触发止盈观察，仅观察并保持当前仓位，不生成减仓动作。",
         )
     return PositionActionDecision(
         action=POSITION_ACTION_HOLD,
         action_class=ACTION_CLASS_NONE,
         label=position_action_label(POSITION_ACTION_HOLD),
-        target_fraction=1.0,
+        target_remaining_fraction=1.0,
         reason="暂无持仓处理信号。",
     )
 
@@ -443,6 +500,7 @@ def calculate_position_sizing(
     target_portfolio_weight: float | None = None,
     entry_timing_label: str | None = None,
     trend_weakening: bool = False,
+    exposure_baseline_quantity: float | None = None,
 ) -> PositionSizingRecommendation:
     if asset_type != ASSET_TYPE_ETF:
         return PositionSizingRecommendation(
@@ -459,6 +517,19 @@ def calculate_position_sizing(
         )
     current_weight = current_market_value / capital
     target_weight = current_weight
+    if exposure_baseline_quantity is not None and (
+        not math.isfinite(exposure_baseline_quantity) or exposure_baseline_quantity <= 0
+    ):
+        return PositionSizingRecommendation(
+            action=POSITION_ACTION_HOLD,
+            label=position_action_label(POSITION_ACTION_HOLD),
+            current_market_value=round(current_market_value, 2),
+            current_account_weight=round(current_weight, 4),
+            target_account_weight=round(current_weight, 4),
+            reason="等待有效的不可变 exposure baseline 后再计算仓位金额。",
+        )
+    baseline_quantity = exposure_baseline_quantity or (current_market_value / current_price)
+    baseline_weight = baseline_quantity * current_price / capital
     action_decision = map_exit_signal_to_position_action(
         alert_type=alert_type,
         allow_full_exit=allow_full_exit,
@@ -466,8 +537,13 @@ def calculate_position_sizing(
     )
     action = action_decision.action
     reason = action_decision.reason
-    if action_decision.target_fraction is not None:
-        target_weight = current_weight * action_decision.target_fraction
+    if action_decision.target_remaining_fraction is not None:
+        absolute_target_weight = baseline_weight * action_decision.target_remaining_fraction
+        target_weight = (
+            min(current_weight, absolute_target_weight)
+            if action in {POSITION_ACTION_TRIM, POSITION_ACTION_REDUCE, POSITION_ACTION_EXIT}
+            else current_weight
+        )
 
     if alert_type is None and target_portfolio_weight is not None and entry_timing_allows_add(entry_timing_label):
         capped_target = min(max(target_portfolio_weight, 0.0), ETF_SINGLE_WEIGHT_CAP)

@@ -1,11 +1,11 @@
 ## ADDED Requirements
 
 ### Requirement: ETF exit risk evidence is part of the research contract
-The ETF research evidence contract SHALL record exit-policy validation metadata alongside signal, allocation, replay, and label evidence.
+The ETF research evidence contract SHALL record exit-policy validation metadata alongside signal, allocation, replay, and label evidence, including immutable exposure-baseline semantics, absolute-target action cycles, execution provenance, and notification-policy provenance.
 
 #### Scenario: Exit validation contract is created
 - **WHEN** ETF exit risk validation completes
-- **THEN** the system records exit policy version, protection guard version, execution model, data window, universe scope, source signal run, selected codes, baseline policies, candidate policy id, evidence status, and contract hash
+- **THEN** the system records exit policy version, action-cycle/idempotency version, immutable exposure-baseline and absolute-target semantics, protection guard version, execution and notification models, data window, universe scope, source signal run, selected codes, baseline policies, candidate policy id, evidence status, and contract hash
 
 #### Scenario: Exit evidence uses current signal source
 - **WHEN** validation is scoped to latest comprehensive TopN ETFs
@@ -14,6 +14,10 @@ The ETF research evidence contract SHALL record exit-policy validation metadata 
 #### Scenario: Evidence is research-only
 - **WHEN** exit evidence has not been manually approved for live tracked-position use
 - **THEN** the contract records `research_only=true` and `approved_for_live=false`
+
+#### Scenario: Evidence uses legacy lifecycle semantics
+- **WHEN** evidence compounds relative reductions, treats recommendation/email state as execution, derives reentry cooldown from notification history, or counts repeated notifications as trades
+- **THEN** the contract labels it `legacy_current_semantics/old_contract`, keeps it research-only, and MUST NOT present it as proof for the current action lifecycle
 
 ### Requirement: Exit evidence approval status is explicit
 The ETF research evidence contract SHALL distinguish default rules, candidate parameters, approved parameters, guard-only evidence, and unavailable evidence.

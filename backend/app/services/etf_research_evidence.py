@@ -9,7 +9,7 @@ from typing import Any
 EVIDENCE_SCHEMA_VERSION = "etf_research_evidence_v1"
 SIGNAL_CONTRACT_VERSION = "short_research_signal_v1"
 ALLOCATION_CONTRACT_VERSION = "etf_portfolio_allocation_contract_v1"
-REPLAY_CONTRACT_VERSION = "etf_replay_contract_v1"
+REPLAY_CONTRACT_VERSION = "etf_replay_contract_v2"
 EXIT_CALIBRATION_CONTRACT_VERSION = "etf_exit_calibration_contract_v1"
 EXIT_ACTION_CONTRACT_VERSION = "etf_exit_action_v2"
 REENTRY_CONTRACT_VERSION = "etf_reentry_rule_v1"
@@ -109,6 +109,9 @@ class ReplayContract:
     replay_run_id: int | None
     signal_rule_version: str
     allocation_version: str
+    action_lifecycle_version: str
+    target_semantics: str
+    action_event_source: str
     execution_model: str
     fee_model: str
     date_range: dict[str, str | None]
@@ -240,6 +243,9 @@ def build_replay_contract(
     replay_run_id: int | None,
     signal_rule_version: str,
     allocation_version: str,
+    action_lifecycle_version: str,
+    target_semantics: str,
+    action_event_source: str,
     execution_model: str,
     fee_model: str,
     start_date: date | None,
@@ -250,6 +256,9 @@ def build_replay_contract(
         replay_run_id=replay_run_id,
         signal_rule_version=signal_rule_version,
         allocation_version=allocation_version,
+        action_lifecycle_version=action_lifecycle_version,
+        target_semantics=target_semantics,
+        action_event_source=action_event_source,
         execution_model=execution_model,
         fee_model=fee_model,
         date_range={
