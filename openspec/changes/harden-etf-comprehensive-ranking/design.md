@@ -144,7 +144,7 @@ The minimum correct validation design avoids a large modeling framework:
 - calculate one equal-weight observation per signal date and Top-N bucket instead of treating N ETFs as N independent time samples;
 - use non-overlapping signal dates for each 1/3/5/10-day horizon;
 - define the primary endpoint as Top 10, five-trading-day net excess return versus the same-date `all_scored` baseline;
-- use T+1 adjusted close as the versioned conservative entry model, an adjusted close after the horizon as exit, and fixed versioned two-sided cost/slippage;
+- use T+1 adjusted close as the versioned conservative entry model, hold H full trading sessions after entry before exiting at adjusted close, and apply fixed versioned two-sided cost/slippage;
 - report unique/effective sample dates, asset and price coverage, mean/median net return, paired excess return, win rate, drawdown, turnover, exclusions, and a date-block bootstrap 95% confidence interval;
 - keep Top 5/20/50 and other horizons exploratory.
 

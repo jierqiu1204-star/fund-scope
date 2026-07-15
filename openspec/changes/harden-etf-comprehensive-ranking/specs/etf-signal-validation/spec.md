@@ -97,11 +97,11 @@ For each source date and horizon, the system SHALL construct one equal-weight To
 - **THEN** the primary validation uses non-overlapping dates for that horizon and reports skipped overlapping dates
 
 ### Requirement: Validation Execution Model Is Conservative And Versioned
-The primary ETF validation SHALL model a signal generated after trade-date close, entry at the next trading day's eligible adjusted close, exit after the declared trading-day horizon, and fixed versioned two-sided fee and slippage assumptions.
+The primary ETF validation SHALL model a signal generated after trade-date close, entry at the next trading day's eligible adjusted close, exit after H full trading sessions measured from that entry, and fixed versioned two-sided fee and slippage assumptions.
 
 #### Scenario: Future outcome is calculated
 - **WHEN** a source snapshot on date T has compatible prices through horizon H
-- **THEN** net return uses T+1 entry, the versioned H-day exit definition, and the stored fee/slippage parameters
+- **THEN** net return uses T+1 entry, exits at the adjusted close after H full post-entry trading sessions, and uses the stored fee/slippage parameters
 
 #### Scenario: T+1 entry is unavailable
 - **WHEN** the next trading-day eligible entry price is missing

@@ -331,7 +331,7 @@ async def test_etf_score_bucket_validation_job_defaults_to_opportunity_topn(monk
             status="success",
             validation_mode="score_bucket_replay",
             as_of_date=date(2026, 7, 3),
-            rule_version="score_bucket_replay_v1",
+            rule_version="score_bucket_replay_v2",
             summary_json={
                 "score_basis": "opportunity",
                 "top_n": [5, 10, 20, 50],

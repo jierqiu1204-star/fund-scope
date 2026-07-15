@@ -1312,7 +1312,7 @@ _LABEL_REPLAY_MIN_SAMPLES = 30
 _LABEL_REPLAY_SUFFICIENT_SAMPLES = 100
 _LABEL_REPLAY_SCOPE_ALL_ELIGIBLE = "all_eligible"
 _LABEL_REPLAY_SCOPE_LIMITED = "eligible_limited"
-_SCORE_BUCKET_VALIDATION_RULE_VERSION = "score_bucket_replay_v1"
+_SCORE_BUCKET_VALIDATION_RULE_VERSION = "score_bucket_replay_v2"
 _SCORE_BUCKET_DEFAULT_DAYS = 180
 _SCORE_BUCKET_DEFAULT_TOP_N = (5, 10, 20, 50)
 _SCORE_BUCKET_SCORE_BASIS = "opportunity"
@@ -1320,7 +1320,7 @@ _SCORE_BUCKET_BASELINE = "all_scored"
 _SCORE_BUCKET_SCORE_VERSION = "final_score_v3"
 _SCORE_BUCKET_SCORE_FIELD = "ranking_score"
 _SCORE_BUCKET_PRICE_BASIS = "total_return_adjusted"
-_SCORE_BUCKET_EXECUTION_MODEL = "t_plus_1_adjusted_close_v1"
+_SCORE_BUCKET_EXECUTION_MODEL = "t_plus_1_adjusted_close_full_horizon_v2"
 _SCORE_BUCKET_FEE_BPS_PER_SIDE = 5
 _SCORE_BUCKET_SLIPPAGE_BPS_PER_SIDE = 5
 _SCORE_BUCKET_ROUND_TRIP_COST = 2 * (
@@ -1501,10 +1501,10 @@ def _score_bucket_outcome_payload(
     rows: list[EtfPriceHistory],
     horizon_days: int,
 ) -> tuple[str, dict[str, Any]]:
-    if len(rows) <= horizon_days:
+    if len(rows) <= horizon_days + 1:
         return "pending", {"exclusion_reason": "missing_future_price"}
     entry_row = rows[1]
-    exit_row = rows[horizon_days]
+    exit_row = rows[horizon_days + 1]
     entry_price = _research_adjusted_value(entry_row)
     exit_price = _research_adjusted_value(exit_row)
     if entry_price is None:
@@ -1513,7 +1513,7 @@ def _score_bucket_outcome_payload(
         return "excluded", {"exclusion_reason": "missing_horizon_exit_price"}
     path_returns = [
         value / entry_price - 1.0 - _SCORE_BUCKET_ROUND_TRIP_COST
-        for row in rows[1 : horizon_days + 1]
+        for row in rows[2 : horizon_days + 2]
         if (value := _research_adjusted_value(row)) is not None
     ]
     if len(path_returns) != horizon_days:
@@ -2878,7 +2878,7 @@ async def run_etf_score_bucket_validation(
         "sample_policy": (
             "每天只取已发布的全范围 final_score_v3 ETF 快照，按其声明的 ranking_score 排序；"
             "缺失、非有限或不具备决策资格的 ranking_score 均排除，不回退 total_score；"
-            "收益以 T+1 合格复权收盘入场、信号日 T+h 合格复权收盘出场，并扣除固定双边成本；"
+            "收益以 T+1 合格复权收盘入场、入场后第 h 个交易日合格复权收盘出场，并扣除固定双边成本；"
             "旧的无 hash、partial、legacy-score 或未声明复权口径结果不进入当前合计。"
         ),
         "research_only": True,

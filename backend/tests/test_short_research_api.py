@@ -353,7 +353,8 @@ async def test_etf_research_series_uses_only_eligible_adjusted_values(app) -> No
     assert outcome["forward_return"] == 0.0
 
 
-def test_score_bucket_outcome_uses_t_plus_one_adjusted_close_and_round_trip_cost() -> None:
+@pytest.mark.parametrize("horizon_days", [1, 3, 5, 10])
+def test_score_bucket_outcome_counts_full_horizon_after_t_plus_one_entry(horizon_days: int) -> None:
     rows = [
         EtfPriceHistory(
             etf_code="510099",
@@ -369,18 +370,23 @@ def test_score_bucket_outcome_uses_t_plus_one_adjusted_close_and_round_trip_cost
             research_price_basis="total_return_adjusted",
             decision_eligible=True,
         )
-        for index, value in enumerate([100.0, 110.0, 121.0], start=1)
+        for index, value in enumerate([100.0 + offset for offset in range(12)], start=1)
     ]
 
-    status, outcome = _score_bucket_outcome_payload(rows, 2)
+    status, outcome = _score_bucket_outcome_payload(rows, horizon_days)
+    pending_status, pending_outcome = _score_bucket_outcome_payload(rows[: horizon_days + 1], horizon_days)
 
     assert status == "completed"
     assert outcome["entry_date"] == "2026-01-02"
-    assert outcome["entry_price"] == 110.0
-    assert outcome["exit_date"] == "2026-01-03"
-    assert outcome["gross_return"] == pytest.approx(0.1)
+    assert outcome["entry_price"] == 101.0
+    assert outcome["exit_date"] == date(2026, 1, horizon_days + 2).isoformat()
+    assert outcome["gross_return"] == pytest.approx((101.0 + horizon_days) / 101.0 - 1.0)
     assert outcome["forward_return"] < outcome["gross_return"]
-    assert outcome["execution_model"] == "t_plus_1_adjusted_close_v1"
+    assert outcome["adverse_drawdown"] == pytest.approx(102.0 / 101.0 - 1.0 - 0.002)
+    assert outcome["favorable_excursion"] == pytest.approx(outcome["forward_return"])
+    assert outcome["execution_model"] == "t_plus_1_adjusted_close_full_horizon_v2"
+    assert pending_status == "pending"
+    assert pending_outcome == {"exclusion_reason": "missing_future_price"}
 
 
 def test_score_bucket_metrics_keep_duplicate_signal_dates_from_increasing_confidence() -> None:
@@ -645,7 +651,7 @@ async def _seed_score_bucket_signal_runs(app) -> dict[str, Any]:
             ],
             start=1,
         ):
-            for offset in range(11):
+            for offset in range(12):
                 close = 1.0 + (code_index * 0.001 * offset)
                 previous = 1.0 + (code_index * 0.001 * (offset - 1)) if offset else close
                 session.add(
@@ -1748,10 +1754,11 @@ async def test_score_bucket_validation_requires_current_full_ranking_contract(cl
     body = response.json()
     summary = body["summary"]
     assert body["validation_mode"] == "score_bucket_replay"
+    assert body["rule_version"] == "score_bucket_replay_v2"
     assert summary["score_field"] == "ranking_score"
     assert summary["top_n"] == [5, 10, 20, 50]
     assert summary["baseline"] == "all_scored"
-    assert summary["execution_model"] == "t_plus_1_adjusted_close_v1"
+    assert summary["execution_model"] == "t_plus_1_adjusted_close_full_horizon_v2"
     assert summary["round_trip_cost"] > 0
     assert summary["primary_endpoint"] == "Top 10 / cumulative / 5d paired net excess return vs all_scored"
     assert summary["source_signal_run_ids"] == [seeded["latest_run_id"]]
