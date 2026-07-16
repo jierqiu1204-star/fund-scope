@@ -6,9 +6,12 @@ from pathlib import Path
 
 import pytest
 
+from app.models.entities import ShortResearchSignalRun
 from app.services.short_research.ranking_contract import (
     RankingInput,
+    _final_score_v3_contract_path,
     build_ranking_contract,
+    final_score_v3_contract,
     final_score_v3_manifest,
     parse_ranking_manifest,
     scope_kind_for_filters,
@@ -70,7 +73,7 @@ def test_final_score_v3_manifest_has_typed_score_inputs_and_missing_policy() -> 
 
     momentum = manifest.components["technical_momentum_cross_section"]
     assert momentum.score_bearing is True
-    assert momentum.weight == 0.3
+    assert momentum.weight == pytest.approx(1 / 3)
     assert momentum.primitive_lineage == (
         "return_5d",
         "return_10d",
@@ -92,6 +95,41 @@ def test_runtime_v3_manifest_uses_the_frozen_contract() -> None:
 
     assert manifest.score_version == "final_score_v3"
     assert manifest.components["premium_discount"].primitive_inputs[0].primitive_id == "premium_discount_bps"
+
+
+def test_runtime_v3_contract_is_bundled_with_the_backend_package() -> None:
+    runtime_path = _final_score_v3_contract_path()
+    openspec_path = (
+        Path(__file__).resolve().parents[2]
+        / "openspec"
+        / "changes"
+        / "harden-etf-comprehensive-ranking"
+        / "final-score-v3-contract.json"
+    )
+
+    assert runtime_path.parent == Path(__file__).resolve().parents[1] / "app/services/short_research"
+    assert json.loads(runtime_path.read_text(encoding="utf-8")) == json.loads(openspec_path.read_text(encoding="utf-8"))
+
+
+def test_final_score_v3_contract_exposes_rule_and_premium_consensus() -> None:
+    contract = final_score_v3_contract()
+
+    assert contract["contract_id"] == "final_score_v3"
+    assert contract["rule_version"] == "final_score_v3_rule_v2"
+    components = contract["calculation"]["components"]
+    assert next(item for item in components if item["id"] == "theme_catalyst")["score_bearing"] is False
+    assert sum(item["weight"] for item in components if item["score_bearing"]) == pytest.approx(1.0)
+    assert "theme_catalyst" in contract["explanatory_only"]
+    consensus = contract["freshness"]["premium_discount"]["provider_consensus"]
+    assert consensus["minimum_independent_providers"] == 2
+    assert consensus["maximum_premium_dispersion_bps"] == 30
+
+
+def test_dual_coverage_columns_are_nullable() -> None:
+    run_columns = ShortResearchSignalRun.__table__.c
+
+    assert run_columns.decision_data_item_count.nullable is True
+    assert run_columns.decision_data_coverage_ratio.nullable is True
 
 
 def test_ranking_input_fails_closed_when_a_required_v3_input_is_missing() -> None:

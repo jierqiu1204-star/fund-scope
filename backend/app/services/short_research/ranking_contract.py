@@ -49,6 +49,22 @@ _PRIMITIVE_UNITS = {
     "iopv_observed_at": "datetime",
 }
 
+_REQUIRED_STRATEGY_SEMANTICS = frozenset(
+    {
+        "schema_version",
+        "contract_id",
+        "rule_version",
+        "selector",
+        "calculation",
+        "freshness",
+        "reliability",
+        "eligibility",
+        "hard_limits",
+        "asset_buckets",
+        "ordering",
+    }
+)
+
 
 @dataclass(frozen=True)
 class RankingInput:
@@ -215,16 +231,28 @@ def parse_ranking_manifest(contract: Mapping[str, Any]) -> RankingManifest:
     )
 
 
+def _final_score_v3_contract_path() -> Path:
+    return Path(__file__).with_name("final-score-v3-contract.json")
+
+
+@lru_cache(maxsize=1)
+def final_score_v3_contract() -> Mapping[str, Any]:
+    loaded: object = json.loads(_final_score_v3_contract_path().read_text(encoding="utf-8"))
+    if not isinstance(loaded, dict):
+        raise ValueError("ranking contract must be a JSON object")
+    return {str(key): value for key, value in loaded.items()}
+
+
+def ranking_strategy_semantics(contract: Mapping[str, Any]) -> dict[str, Any]:
+    missing = sorted(_REQUIRED_STRATEGY_SEMANTICS - set(contract))
+    if missing:
+        raise ValueError(f"ranking strategy semantics are incomplete: {', '.join(missing)}")
+    return {str(key): value for key, value in contract.items()}
+
+
 @lru_cache(maxsize=1)
 def final_score_v3_manifest() -> RankingManifest:
-    contract_path = (
-        Path(__file__).resolve().parents[4]
-        / "openspec"
-        / "changes"
-        / "harden-etf-comprehensive-ranking"
-        / "final-score-v3-contract.json"
-    )
-    return parse_ranking_manifest(json.loads(contract_path.read_text(encoding="utf-8")))
+    return parse_ranking_manifest(final_score_v3_contract())
 
 
 def _canonical(value: Any) -> Any:

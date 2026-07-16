@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.defaults.short_research import ASSET_TYPE_ETF, ShortResearchAsset
-from app.models.entities import EtfIntradayLatestQuote, TradableEtf, utcnow
+from app.models.entities import EtfIntradayQuote, TradableEtf
 from app.services.short_research import service as short_research_service
 from app.services.short_research.service import (
     ComputedAsset,
@@ -172,23 +172,154 @@ def test_replay_production_path_persists_missing_v3_market_inputs() -> None:
 
 
 def test_v3_premium_input_requires_a_fresh_same_day_decision_quote() -> None:
-    now = datetime(2026, 3, 1, 10, 5)
+    decision_cutoff = datetime(2026, 3, 1, 15, 0)
     fresh_quote = SimpleNamespace(
         trade_date=date(2026, 3, 1),
-        quote_time=datetime(2026, 3, 1, 10),
+        quote_time=datetime(2026, 3, 1, 14, 50),
+        latest_price=1.0033,
+        iopv=1.0,
         premium_discount_pct=0.33,
         freshness_status="fresh",
-        raw_json={"premium_provider_consensus": 95.0},
+        raw_json={
+            "quote_time_is_fallback": False,
+            "decision_eligible": True,
+            "premium_consensus_status": "consistent",
+            "premium_provider_consensus": 100,
+            "premium_provider_count": 2,
+            "premium_dispersion_bps": 5.0,
+            "consensus_status": "consistent",
+            "provider_quotes": [
+                {
+                    "provider": "akshare",
+                    "quote_time": "2026-03-01T14:50:00",
+                    "latest_price": 1.0033,
+                    "iopv": 1.0,
+                    "quote_time_is_fallback": False,
+                },
+                {
+                    "provider": "eastmoney",
+                    "quote_time": "2026-03-01T14:50:00",
+                    "latest_price": 1.0038,
+                    "iopv": 1.0,
+                    "quote_time_is_fallback": False,
+                },
+            ],
+        },
     )
 
-    fresh = _v3_premium_inputs(fresh_quote, as_of_date=date(2026, 3, 1), now=now)
-    stale = _v3_premium_inputs(fresh_quote, as_of_date=date(2026, 3, 2), now=now)
+    fresh = _v3_premium_inputs(
+        fresh_quote,
+        as_of_date=date(2026, 3, 1),
+        decision_cutoff=decision_cutoff,
+    )
+    stale = _v3_premium_inputs(
+        fresh_quote,
+        as_of_date=date(2026, 3, 2),
+        decision_cutoff=decision_cutoff,
+    )
 
     assert fresh["premium_discount_bps"] == 33.0
-    assert fresh["premium_provider_consensus"] == 95.0
+    assert fresh["premium_provider_consensus"] == 100.0
     assert fresh["premium_input_reliability"] == "verified"
     assert stale["premium_discount_bps"] is None
     assert stale["premium_input_reliability"] == "stale"
+
+
+def test_v3_premium_rejects_quote_after_decision_cutoff() -> None:
+    quote = SimpleNamespace(
+        trade_date=date(2026, 3, 1),
+        quote_time=datetime(2026, 3, 1, 15, 1),
+        latest_price=1.001,
+        iopv=1.0,
+        premium_discount_pct=0.1,
+        freshness_status="fresh",
+        raw_json={
+            "quote_time_is_fallback": False,
+            "decision_eligible": True,
+            "premium_consensus_status": "consistent",
+            "premium_provider_consensus": 100,
+            "premium_provider_count": 2,
+            "premium_dispersion_bps": 5.0,
+        },
+    )
+
+    result = _v3_premium_inputs(
+        quote,
+        as_of_date=date(2026, 3, 1),
+        decision_cutoff=datetime(2026, 3, 1, 15, 0),
+    )
+
+    assert result["premium_discount_bps"] is None
+    assert result["premium_input_status"] == "after_decision_cutoff"
+    assert result["premium_input_reliability"] == "unavailable"
+
+
+def test_v3_premium_maps_single_and_diverged_provider_reliability() -> None:
+    base_quote = {
+        "trade_date": date(2026, 3, 1),
+        "quote_time": datetime(2026, 3, 1, 14, 50),
+        "latest_price": 1.001,
+        "iopv": 1.0,
+        "premium_discount_pct": 0.1,
+        "freshness_status": "fresh",
+    }
+    single = SimpleNamespace(
+        **base_quote,
+        raw_json={
+            "quote_time_is_fallback": False,
+            "decision_eligible": True,
+            "premium_consensus_status": "single_provider",
+            "premium_provider_consensus": 60,
+            "premium_provider_count": 1,
+            "consensus_status": "single_provider",
+            "provider_quotes": [
+                {
+                    "provider": "akshare",
+                    "quote_time": "2026-03-01T14:50:00",
+                    "latest_price": 1.001,
+                    "iopv": 1.0,
+                    "quote_time_is_fallback": False,
+                }
+            ],
+        },
+    )
+    diverged = SimpleNamespace(
+        **base_quote,
+        raw_json={
+            "quote_time_is_fallback": False,
+            "decision_eligible": True,
+            "premium_consensus_status": "diverged",
+            "premium_provider_consensus": None,
+            "premium_provider_count": 2,
+            "premium_dispersion_bps": 31.0,
+            "consensus_status": "consistent",
+            "provider_quotes": [
+                {
+                    "provider": "akshare",
+                    "quote_time": "2026-03-01T14:50:00",
+                    "latest_price": 1.001,
+                    "iopv": 1.0,
+                    "quote_time_is_fallback": False,
+                },
+                {
+                    "provider": "eastmoney",
+                    "quote_time": "2026-03-01T14:50:00",
+                    "latest_price": 1.001,
+                    "iopv": 0.99,
+                    "quote_time_is_fallback": False,
+                },
+            ],
+        },
+    )
+    cutoff = datetime(2026, 3, 1, 15, 0)
+
+    single_result = _v3_premium_inputs(single, as_of_date=date(2026, 3, 1), decision_cutoff=cutoff)
+    diverged_result = _v3_premium_inputs(diverged, as_of_date=date(2026, 3, 1), decision_cutoff=cutoff)
+
+    assert single_result["premium_provider_consensus"] == 60.0
+    assert single_result["premium_input_reliability"] == "alternate_provider"
+    assert diverged_result["premium_provider_consensus"] is None
+    assert diverged_result["premium_input_reliability"] == "unavailable"
 
 
 def test_v3_theme_input_requires_current_sourced_effective_event() -> None:
@@ -227,13 +358,18 @@ def test_v3_structure_input_uses_only_a_fresh_quoted_spread_and_quality_gate() -
         bid_price=1.0,
         ask_price=1.002,
         freshness_status="fresh",
+        raw_json={
+            "quote_time_is_fallback": False,
+            "decision_eligible": True,
+            "consensus_status": "consistent",
+        },
     )
 
     structure = _v3_structure_inputs(
         quote,
         metrics={"data_quality_score": 88.0, "default_display_eligible": True},
         as_of_date=date(2026, 3, 1),
-        now=datetime(2026, 3, 1, 10, 5),
+        decision_cutoff=datetime(2026, 3, 1, 10, 5),
     )
 
     assert structure["spread_bps"] == 19.98
@@ -243,7 +379,8 @@ def test_v3_structure_input_uses_only_a_fresh_quoted_spread_and_quality_gate() -
 
 @pytest.mark.asyncio
 async def test_v3_shadow_propagates_verified_premium_reliability(app, monkeypatch) -> None:
-    observed_at = utcnow()
+    observed_at = datetime(2026, 3, 1, 14, 50)
+    decision_cutoff = datetime(2026, 3, 1, 15, 0)
     metadata = _etf_metadata()
     captured_inputs = {}
 
@@ -277,15 +414,41 @@ async def test_v3_shadow_propagates_verified_premium_reliability(app, monkeypatc
             )
         )
         session.add(
-            EtfIntradayLatestQuote(
+            EtfIntradayQuote(
                 etf_code=metadata.code,
                 quote_time=observed_at,
                 trade_date=observed_at.date(),
                 latest_price=1.0,
+                iopv=0.9999,
                 premium_discount_pct=0.1,
-                source="fixture",
-                freshness_status="fresh",
-                raw_json={"premium_provider_consensus": 95.0},
+                    source="fixture",
+                    freshness_status="fresh",
+                    created_at=observed_at - timedelta(hours=8),
+                    raw_json={
+                    "quote_time_is_fallback": False,
+                    "decision_eligible": True,
+                    "consensus_status": "consistent",
+                    "premium_consensus_status": "consistent",
+                    "premium_provider_consensus": 100,
+                    "premium_provider_count": 2,
+                    "premium_dispersion_bps": 5.0,
+                    "provider_quotes": [
+                        {
+                            "provider": "akshare",
+                            "quote_time": "2026-03-01T14:50:00",
+                            "latest_price": 1.0,
+                            "iopv": 0.9999,
+                            "quote_time_is_fallback": False,
+                        },
+                        {
+                            "provider": "eastmoney",
+                            "quote_time": "2026-03-01T14:50:00",
+                            "latest_price": 1.0001,
+                            "iopv": 1.0,
+                            "quote_time_is_fallback": False,
+                        },
+                    ],
+                },
             )
         )
         await session.commit()
@@ -318,6 +481,7 @@ async def test_v3_shadow_propagates_verified_premium_reliability(app, monkeypatc
                 )
             ],
             observed_at.date(),
+            decision_cutoff=decision_cutoff,
         )
 
     assert updated.metrics["premium_input_reliability"] == "verified"

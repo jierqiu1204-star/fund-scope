@@ -184,6 +184,32 @@ This change does not duplicate already-correct cross-sectional, sector, theme, o
 
 The conflicting “label evidence contributes to final score” behavior is superseded explicitly. Existing tests that still expect opportunity/theme heat to determine the comprehensive ordering are migrated to assert final-score semantics while preserving theme evidence as explanation.
 
+### 13. The production generator materializes v3 before publication
+
+Production inspection after the initial implementation found that `run_signal_generation()` still writes only legacy `total_score` items and stores v3 as shadow metrics. The publication and selector contracts exist, but no production caller builds the ranking contract or persists v3 `ranking_score`, `score_eligible`, identity, hashes, and publication counts. This is a correctness gap, not permission to relax validation.
+
+For a full ETF run, the generator freezes the point-in-time universe, decision-data barrier, declared decision cutoff, component input snapshot, raw v3 manifest, and reliability policy before persistence. It calls the existing pure v3 scorer, retains only finite score-eligible items in the canonical ordered cohort, assigns continuous global ranks, builds the canonical contract, writes every typed run/item identity, and leaves the run `unpublished` until the atomic publisher revalidates it. Partial/theme/code and fund runs remain non-canonical compatibility paths. Legacy runs are never backfilled with guessed v3 identity.
+
+Publication records two different gates. `decision_data_item_count` and `decision_data_coverage_ratio` describe same-date total-return-adjusted price coverage. Existing `eligible_item_count` and `coverage_ratio` describe final score-eligible coverage. Both use the expected point-in-time universe denominator, both must pass the configured threshold, and score-eligible codes must be a subset of decision-data-eligible codes. Component exclusions remain separately reported.
+
+V3 quote inputs are selected from immutable `EtfIntradayQuote` rows by ETF, trade date, and `quote_time <= decision_cutoff`; `EtfIntradayLatestQuote` cannot answer a historical/cutoff query. Freshness is measured relative to the declared cutoff, so a valid 14:50 quote for a 15:00 decision does not become stale because the job executes at 15:50. Provider consensus is derived from persisted real provider evidence: consistent fresh multi-provider evidence maps to the declared consensus value, eligible single-provider evidence is explicitly degraded, and diverged/stale/missing evidence remains unavailable. No post-close or estimated quote is fabricated.
+
+Alternative considered: copy v2 `total_score` into `ranking_score` or mark the six existing runs published. Rejected because those runs lack v3 inputs and immutable identities and would create false historical evidence.
+
+### 14. Market time and knowledge time are separate, bounded frontiers
+
+The production v3 run has two explicit cutoffs. `decision_cutoff` is the 15:00 market frontier used only for immutable intraday quote facts (`quote_time` and receipt `created_at`). `source_availability_cutoff` is the later same-session knowledge frontier used for total-return-adjusted daily rows fetched after the close. The materializer stores the latter as `data_cutoff`, records both in its input snapshot, and passes them separately to the scorer. A 21:00 adjusted row therefore cannot contaminate a 15:00 quote decision, but it is not incorrectly discarded merely because the post-close provider delivered it after 15:00.
+
+On a 2-core/4-GB deployment, adjusted-price work advances in same-trade-date batches of at most 20 ETFs. Missing rows are attempted before already-fresh rows, completed per-code progress is committed, scheduled slices never overlap, and materialization runs only after the accumulated same-day coverage gate passes. The full-universe scorer prefetches only the bounded metric window for all candidates in constant-count database queries, streams rows, batch-loads health, and emits a SHA-256 digest of the exact cutoff-eligible adjusted rows actually consumed. A crashed daily workflow lock becomes reclaimable after a bounded lease.
+
+### 15. Sparse context cannot make the score structurally unpublished
+
+`final_score_v3_rule_v2` treats theme/catalyst evidence as versioned explanatory context with zero score weight. It remains visible with freshness and availability state but cannot improve, restore, or block the comprehensive score. The five score-bearing components are renormalized once in the declared contract; runtime reweighting remains prohibited.
+
+The taxonomy does not solve missing classifications with a blanket `sector -> equity` fallback. Audited power, coal, materials, breeding, media/game, real-estate, smart-vehicle, and infrastructure names use explicit keyword rules; genuinely unmatched assets remain `unknown` and fail closed. Universe discovery itself must be authoritative: provider failure or a suspicious shrink preserves the frozen membership and stops publication instead of silently falling back to seed ETFs or deactivating members.
+
+Legacy ETF generation endpoints are not an alternative producer. ETF refresh resolves only the canonical v3 state, while the legacy generator remains fund-only; generic latest/status readers exclude legacy and unpublished ETF runs.
+
 ## Risks / Trade-offs
 
 - [Strict selection initially leaves the workbench in `等待数据`] → Deploy schema and producer changes first, generate a shadow v3 full snapshot, and promote only after coverage and comparison gates pass.
@@ -195,6 +221,8 @@ The conflicting “label evidence contributes to final score” behavior is supe
 - [Date-level validation accumulates sufficient samples more slowly] → Report `insufficient` honestly and keep exploratory metrics separate from the primary endpoint.
 - [Current active changes can reintroduce superseded behavior] → Add an explicit overlap checklist and run architecture/contract regression tests before completing this change.
 - [Auth cache clearing may cause additional refetches] → Clear only private query namespaces and retain public immutable data where safe.
+- [Adjusted-price coverage can pass while v3 component coverage is zero] → Persist price and score coverage separately, require both gates, and report component exclusions without claiming publication readiness.
+- [A valid quote is evaluated long after its declared decision cutoff] → Select by immutable trade-date/cutoff history and evaluate freshness against the cutoff rather than job wall-clock time.
 
 ## Migration Plan
 
@@ -207,6 +235,7 @@ The conflicting “label evidence contributes to final score” behavior is supe
 7. Switch daily, detail, live, portfolio, and frontend consumers to the current v3 snapshot selector; retain explicit degraded status if rollback selects legacy data.
 8. Recompute ranking history and research-only validation under the v3 contract. Evidence remains `等待验证` or `样本不足` until independent-date thresholds are met.
 9. Remove deprecated read aliases only in a later change after all consumers have migrated.
+10. Repair the full-ETF production materializer, dual coverage gates, cutoff-bound quote selection, and consensus producer before resuming the three-session publication monitor.
 
 Rollback selects the previous reader version through one configured score-version selector and disables v3 publication; it never rewrites or deletes v3 snapshots. Any v2 results shown after rollback remain explicitly old/degraded evidence and cannot regain current-contract status.
 

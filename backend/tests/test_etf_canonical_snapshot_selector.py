@@ -4,10 +4,17 @@ from datetime import date, datetime, timedelta
 
 import pytest
 
-from app.models.entities import ShortResearchSignalItem, ShortResearchSignalRun
+from app.models.entities import (
+    ShortResearchSignalItem,
+    ShortResearchSignalRun,
+    authorize_snapshot_publication,
+)
 from app.services.short_research.snapshot_selector import (
+    required_etf_snapshot_trade_date,
     resolve_canonical_etf_snapshot,
     select_canonical_etf_snapshot,
+    select_current_canonical_etf_snapshot,
+    snapshot_metadata,
 )
 
 
@@ -16,12 +23,16 @@ async def _seed_run(
     *,
     scope_kind: str,
     score_version: str = "final_score_v3",
+    rule_version: str = "final_score_v3_rule_v2",
     contract_hash: str = "current-contract",
+    score_field: str = "ranking_score",
     price_basis: str = "total_return_adjusted",
     trade_date: date = date(2026, 1, 2),
     asset_type: str = "etf",
     extra_asset_types: tuple[str, ...] = (),
     status: str = "success",
+    decision_data_coverage_ratio: float = 1.0,
+    score_coverage_ratio: float = 1.0,
     published_at: datetime = datetime(2026, 1, 2, 16, 0),
 ) -> int:
     async with app.state.db.session() as session:
@@ -29,10 +40,24 @@ async def _seed_run(
             status=status,
             as_of_date=trade_date,
             scope_kind=scope_kind,
+            scope_hash=f"scope-{scope_kind}-{trade_date.isoformat()}",
+            universe_snapshot_hash=f"universe-{trade_date.isoformat()}",
+            input_snapshot_hash=f"input-{published_at.isoformat()}",
             score_version=score_version,
+            rule_version=rule_version,
             ranking_contract_hash=contract_hash,
+            score_field=score_field,
+            data_cutoff=datetime.combine(trade_date, datetime.min.time()).replace(hour=15),
             price_basis=price_basis,
             as_of_trade_date=trade_date,
+            expected_item_count=1,
+            decision_data_item_count=1,
+            decision_data_coverage_ratio=decision_data_coverage_ratio,
+            eligible_item_count=1,
+            coverage_ratio=score_coverage_ratio,
+            idempotency_key=(
+                f"seed-{scope_kind}-{score_version}-{contract_hash}-{published_at.isoformat()}-{asset_type}-{trade_date}"
+            ),
             publication_state=None,
             published_at=None,
         )
@@ -46,14 +71,19 @@ async def _seed_run(
                     asset_code=f"{run.id:05d}{index}",
                     rank=index + 1,
                     total_score=80.0,
+                    ranking_score=80.0,
+                    score_eligible=True,
+                    global_rank=index + 1,
                     conclusion="观察",
                 )
                 for index, item_asset_type in enumerate((asset_type, *extra_asset_types))
             ]
         )
         await session.commit()
-        run.publication_state = "published"
-        run.published_at = published_at
+        with authorize_snapshot_publication(session.sync_session, run_id=run.id):
+            run.publication_state = "published"
+            run.published_at = published_at
+            await session.flush()
         await session.commit()
         return run.id
 
@@ -166,3 +196,60 @@ async def test_canonical_selector_reports_legacy_when_only_legacy_runs_exist(app
             required_trade_date=date(2026, 1, 2),
         )
     assert legacy.state == "legacy"
+
+
+@pytest.mark.asyncio
+async def test_current_selector_rejects_wrong_rule_field_date_and_coverage(app) -> None:
+    canonical_id = await _seed_run(app, scope_kind="full")
+    await _seed_run(
+        app,
+        scope_kind="full",
+        rule_version="obsolete-rule",
+        published_at=datetime(2026, 1, 2, 17, 0),
+    )
+    await _seed_run(
+        app,
+        scope_kind="full",
+        score_field="total_score",
+        published_at=datetime(2026, 1, 2, 18, 0),
+    )
+    await _seed_run(
+        app,
+        scope_kind="full",
+        score_coverage_ratio=0.94,
+        published_at=datetime(2026, 1, 2, 19, 0),
+    )
+    await _seed_run(
+        app,
+        scope_kind="full",
+        trade_date=date(2026, 1, 1),
+        published_at=datetime(2026, 1, 2, 20, 0),
+    )
+
+    async with app.state.db.session() as session:
+        selected = await select_current_canonical_etf_snapshot(
+            session,
+            required_trade_date=date(2026, 1, 2),
+        )
+
+    assert selected is not None
+    assert selected.id == canonical_id
+
+
+def test_required_etf_snapshot_trade_date_uses_completed_exchange_session() -> None:
+    assert required_etf_snapshot_trade_date(datetime(2026, 7, 15, 14, 59)) == date(2026, 7, 14)
+    assert required_etf_snapshot_trade_date(datetime(2026, 7, 15, 15, 0)) == date(2026, 7, 15)
+    assert required_etf_snapshot_trade_date(datetime(2026, 7, 18, 12, 0)) == date(2026, 7, 17)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_metadata_exposes_decision_and_score_coverage(app) -> None:
+    run_id = await _seed_run(app, scope_kind="full")
+    async with app.state.db.session() as session:
+        run = await session.get(ShortResearchSignalRun, run_id)
+        metadata = snapshot_metadata(run)
+
+    assert metadata["decision_data_item_count"] == 1
+    assert metadata["decision_data_coverage_ratio"] == 1.0
+    assert metadata["score_eligible_item_count"] == 1
+    assert metadata["score_coverage_ratio"] == 1.0

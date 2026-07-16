@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -10,13 +10,36 @@ from app.defaults.short_research import ASSET_TYPE_ETF, ASSET_TYPE_FUND
 from app.services.short_research import jobs as jobs_module
 
 
+class _CoverageBarrier:
+    def __init__(self, included: int, expected: int = 2) -> None:
+        self.expected_codes = [f"5103{index:02d}" for index in range(expected)]
+        self.included_codes = self.expected_codes[:included]
+        self.excluded = [
+            {"asset_code": code, "reason": "missing_trade_date_price"}
+            for code in self.expected_codes[included:]
+        ]
+
+    @property
+    def coverage_ratio(self) -> float:
+        return len(self.included_codes) / len(self.expected_codes)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "expected_count": len(self.expected_codes),
+            "included_count": len(self.included_codes),
+            "coverage_ratio": self.coverage_ratio,
+        }
+
+
 @pytest.mark.asyncio
 async def test_daily_short_research_data_job_syncs_funds_and_etfs(monkeypatch) -> None:
     calls: list[str] = []
+    ranges: dict[str, tuple[date, date]] = {}
 
     async def fake_sync_short_research_data(_session: object, **kwargs: Any) -> dict[str, Any]:
         asset_type = kwargs["asset_type"]
         calls.append(asset_type)
+        ranges[asset_type] = (kwargs["from_date"], kwargs["to_date"])
         return {"asset_count": 1, "failed": 0, "asset_type": asset_type}
 
     monkeypatch.setattr(jobs_module, "sync_short_research_data", fake_sync_short_research_data)
@@ -24,6 +47,8 @@ async def test_daily_short_research_data_job_syncs_funds_and_etfs(monkeypatch) -
     result = await jobs_module.daily_short_research_data_job(object())  # type: ignore[arg-type]
 
     assert calls == [ASSET_TYPE_FUND, ASSET_TYPE_ETF]
+    assert ranges[ASSET_TYPE_FUND] == (date.today() - timedelta(days=120), date.today())
+    assert ranges[ASSET_TYPE_ETF] == (date.today(), date.today())
     assert result["asset_types"] == [ASSET_TYPE_FUND, ASSET_TYPE_ETF]
     assert result["asset_count"] == 2
     assert result["failed"] == 0
@@ -57,6 +82,7 @@ async def test_daily_etf_universe_job_reports_refresh_counts(monkeypatch) -> Non
             "default_display": 2,
             "failed": 0,
             "failures": [],
+            "authoritative": True,
         }
 
     async def fake_refresh_etf_theme_profiles(_session: object) -> dict[str, Any]:
@@ -96,7 +122,7 @@ async def test_daily_etf_theme_catalyst_job_reports_refresh_counts(monkeypatch) 
 
 
 @pytest.mark.asyncio
-async def test_daily_short_research_signals_job_generates_fund_and_etf_runs(monkeypatch) -> None:
+async def test_daily_short_research_signals_job_never_generates_legacy_etf_run(monkeypatch) -> None:
     calls: list[str] = []
 
     async def fake_run_signal_generation(_session: object, **kwargs: Any) -> SimpleNamespace:
@@ -119,11 +145,12 @@ async def test_daily_short_research_signals_job_generates_fund_and_etf_runs(monk
 
     result = await jobs_module.daily_short_research_signals_job(object())  # type: ignore[arg-type]
 
-    assert calls == [ASSET_TYPE_FUND, ASSET_TYPE_ETF]
+    assert calls == [ASSET_TYPE_FUND]
     assert result["asset_types"] == [ASSET_TYPE_FUND, ASSET_TYPE_ETF]
-    assert result["items"] == 8
+    assert result["items"] == 3
     assert result["fund"]["funds"] == 3
-    assert result["etf"]["etfs"] == 5
+    assert result["etf"]["status"] == "delegated_to_canonical_v3"
+    assert result["etf"]["etfs"] == 0
 
 
 @pytest.mark.asyncio
@@ -146,6 +173,42 @@ async def test_daily_short_research_advisor_job_generates_fund_and_etf_reports(m
     assert result["failed"] == 0
     assert result["fund"]["asset_type"] == ASSET_TYPE_FUND
     assert result["etf"]["asset_type"] == ASSET_TYPE_ETF
+
+
+@pytest.mark.asyncio
+async def test_daily_advisor_job_keeps_fund_result_when_canonical_etf_is_waiting(monkeypatch) -> None:
+    async def fake_run_advisor_generation(
+        _session: object,
+        _settings: object,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        if kwargs["asset_type"] == ASSET_TYPE_ETF:
+            raise ValueError("当前 canonical ETF 排名快照不可用（waiting）。")
+        return {
+            "selected": 1,
+            "succeeded": 1,
+            "failed": 0,
+            "asset_type": ASSET_TYPE_FUND,
+        }
+
+    monkeypatch.setattr(jobs_module, "run_advisor_generation", fake_run_advisor_generation)
+
+    result = await jobs_module.daily_short_research_advisor_job(
+        object(),
+        settings=object(),
+    )  # type: ignore[arg-type]
+
+    assert result["selected"] == 1
+    assert result["succeeded"] == 1
+    assert result["failed"] == 0
+    assert result["etf"] == {
+        "asset_type": ASSET_TYPE_ETF,
+        "status": "waiting",
+        "selected": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "reason": "canonical_etf_snapshot_unavailable",
+    }
 
 
 @pytest.mark.asyncio
@@ -358,16 +421,16 @@ async def test_etf_score_bucket_validation_job_defaults_to_opportunity_topn(monk
 
 
 @pytest.mark.asyncio
-async def test_post_close_etf_signals_job_generates_only_etf_run(monkeypatch) -> None:
-    calls: list[str] = []
+async def test_post_close_etf_signals_job_materializes_and_publishes_without_sync(monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
 
-    async def fake_run_signal_generation(_session: object, **kwargs: Any) -> SimpleNamespace:
-        asset_type = kwargs["asset_type"]
-        calls.append(asset_type)
+    async def fake_generate_and_publish(_session: object, **kwargs: Any) -> SimpleNamespace:
+        calls.append(kwargs)
         return SimpleNamespace(
             id=7,
             status="success",
             as_of_date=date(2026, 6, 25),
+            publication_state="published",
             summary_json={
                 "item_count": 9,
                 "fund_count": 0,
@@ -376,15 +439,167 @@ async def test_post_close_etf_signals_job_generates_only_etf_run(monkeypatch) ->
             },
         )
 
-    monkeypatch.setattr(jobs_module, "run_signal_generation", fake_run_signal_generation)
+    async def fail_legacy_generation(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("post-close ETF job must not call the legacy writer")
+
+    async def fake_authoritative(*_args: Any, **_kwargs: Any) -> tuple[bool, str | None]:
+        return True, None
+
+    async def fake_selection(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(state="waiting", run=None)
+
+    async def fake_barrier(*_args: Any, **_kwargs: Any) -> _CoverageBarrier:
+        return _CoverageBarrier(2)
+
+    monkeypatch.setattr(jobs_module, "generate_and_publish_etf_snapshot", fake_generate_and_publish)
+    monkeypatch.setattr(jobs_module, "run_signal_generation", fail_legacy_generation)
+    monkeypatch.setattr(jobs_module, "_latest_authoritative_etf_universe_refresh", fake_authoritative)
+    monkeypatch.setattr(jobs_module, "resolve_current_canonical_etf_snapshot", fake_selection)
+    monkeypatch.setattr(jobs_module, "build_etf_coverage_barrier", fake_barrier)
+    monkeypatch.setattr(
+        jobs_module,
+        "etf_source_availability_cutoff",
+        lambda _trade_date: datetime(2026, 6, 25, 15, 5),
+    )
+    monkeypatch.setattr(
+        jobs_module,
+        "post_close_etf_decision_context",
+        lambda: (date(2026, 6, 25), datetime(2026, 6, 25, 15, 0)),
+    )
 
     result = await jobs_module.post_close_etf_signals_job(object())  # type: ignore[arg-type]
 
-    assert calls == [ASSET_TYPE_ETF]
+    assert calls == [
+        {
+            "trade_date": date(2026, 6, 25),
+            "decision_cutoff": datetime(2026, 6, 25, 15, 0),
+            "source_availability_cutoff": datetime(2026, 6, 25, 15, 5),
+        }
+    ]
     assert result["asset_type"] == ASSET_TYPE_ETF
     assert result["run_id"] == 7
     assert result["items"] == 9
     assert result["etfs"] == 9
+    assert result["publication_state"] == "published"
+
+
+@pytest.mark.asyncio
+async def test_post_close_etf_signals_job_waits_without_authoritative_universe(monkeypatch) -> None:
+    async def not_authoritative(*_args: Any, **_kwargs: Any) -> tuple[bool, str | None]:
+        return False, "proxy connection refused"
+
+    async def unexpected_generation(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("stale universe must not publish a full snapshot")
+
+    monkeypatch.setattr(jobs_module, "_latest_authoritative_etf_universe_refresh", not_authoritative)
+    monkeypatch.setattr(jobs_module, "generate_and_publish_etf_snapshot", unexpected_generation)
+    monkeypatch.setattr(
+        jobs_module,
+        "post_close_etf_decision_context",
+        lambda: (date(2026, 6, 25), datetime(2026, 6, 25, 15, 0)),
+    )
+
+    result = await jobs_module.post_close_etf_signals_job(object())  # type: ignore[arg-type]
+
+    assert result["status"] == "waiting"
+    assert result["publication_state"] == "not_run"
+    assert result["reason"] == "universe_not_authoritative"
+
+
+@pytest.mark.asyncio
+async def test_adjusted_sync_job_resumes_one_bounded_batch_then_publishes_at_coverage_gate(monkeypatch) -> None:
+    coverage_calls = 0
+    sync_calls: list[dict[str, Any]] = []
+    publish_calls: list[dict[str, Any]] = []
+
+    async def fake_authoritative(*_args: Any, **_kwargs: Any) -> tuple[bool, str | None]:
+        return True, None
+
+    async def fake_selection(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(state="waiting", run=None)
+
+    async def fake_barrier(*_args: Any, **_kwargs: Any) -> _CoverageBarrier:
+        nonlocal coverage_calls
+        coverage_calls += 1
+        return _CoverageBarrier(0 if coverage_calls == 1 else 2)
+
+    async def fake_sync(_session: object, **kwargs: Any) -> dict[str, Any]:
+        sync_calls.append(kwargs)
+        return {"asset_count": 2, "failed": 0, "etfs": {"processed": 2, "skipped": 0}}
+
+    async def fake_publish(_session: object, **kwargs: Any) -> SimpleNamespace:
+        publish_calls.append(kwargs)
+        return SimpleNamespace(
+            id=88,
+            status="success",
+            as_of_date=date(2026, 6, 25),
+            publication_state="published",
+            summary_json={"item_count": 2, "fund_count": 0, "etf_count": 2},
+        )
+
+    monkeypatch.setattr(jobs_module, "_latest_authoritative_etf_universe_refresh", fake_authoritative)
+    monkeypatch.setattr(jobs_module, "resolve_current_canonical_etf_snapshot", fake_selection)
+    monkeypatch.setattr(jobs_module, "build_etf_coverage_barrier", fake_barrier)
+    monkeypatch.setattr(jobs_module, "sync_short_research_data", fake_sync)
+    monkeypatch.setattr(jobs_module, "generate_and_publish_etf_snapshot", fake_publish)
+    monkeypatch.setattr(
+        jobs_module,
+        "post_close_etf_decision_context",
+        lambda: (date(2026, 6, 25), datetime(2026, 6, 25, 15, 0)),
+    )
+    monkeypatch.setattr(
+        jobs_module,
+        "etf_source_availability_cutoff",
+        lambda _trade_date: datetime(2026, 6, 25, 21, 5),
+    )
+
+    result = await jobs_module.post_close_etf_adjusted_sync_job(object())  # type: ignore[arg-type]
+
+    assert sync_calls == [
+        {
+            "from_date": date(2026, 6, 25),
+            "to_date": date(2026, 6, 25),
+            "asset_type": ASSET_TYPE_ETF,
+        }
+    ]
+    assert publish_calls == [
+        {
+            "trade_date": date(2026, 6, 25),
+            "decision_cutoff": datetime(2026, 6, 25, 15, 0),
+            "source_availability_cutoff": datetime(2026, 6, 25, 21, 5),
+        }
+    ]
+    assert result["publication_state"] == "published"
+    assert result["coverage"]["coverage_ratio"] == 1.0
+
+
+def test_post_close_etf_decision_context_requires_a_completed_trading_session() -> None:
+    assert jobs_module.post_close_etf_decision_context(datetime(2026, 6, 25, 14, 59)) is None
+    assert jobs_module.post_close_etf_decision_context(datetime(2026, 6, 20, 16, 0)) is None
+    assert jobs_module.post_close_etf_decision_context(datetime(2026, 6, 19, 16, 0)) is None
+    assert jobs_module.post_close_etf_decision_context(datetime(2027, 7, 15, 16, 0)) is None
+    assert jobs_module.post_close_etf_decision_context(datetime(2026, 6, 25, 15, 0)) == (
+        date(2026, 6, 25),
+        datetime(2026, 6, 25, 15, 0),
+    )
+
+
+@pytest.mark.asyncio
+async def test_post_close_etf_signals_job_skips_without_a_completed_trading_session(monkeypatch) -> None:
+    async def unexpected_generation(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("an incomplete exchange session must not generate a snapshot")
+
+    monkeypatch.setattr(jobs_module, "generate_and_publish_etf_snapshot", unexpected_generation)
+    monkeypatch.setattr(jobs_module, "post_close_etf_decision_context", lambda: None)
+
+    result = await jobs_module.post_close_etf_signals_job(object())  # type: ignore[arg-type]
+
+    assert result == {
+        "asset_type": ASSET_TYPE_ETF,
+        "status": "skipped",
+        "publication_state": "not_run",
+        "reason": "no_completed_trading_session",
+    }
 
 
 @pytest.mark.asyncio

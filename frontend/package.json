@@ -11,6 +11,7 @@
     "test:recommendations": "node ./scripts/check-recommendations-page.mjs",
     "test:short-pagination": "node ./scripts/check-short-term-pagination.mjs",
     "test:alert-actions": "node ./scripts/check-etf-alert-action-lifecycle.mjs",
+    "test:v3-display": "node ./scripts/check-etf-v3-score-display.mjs",
     "test:backtest-evidence": "node ./scripts/check-etf-backtest-evidence-dimensions.mjs",
     "format": "prettier --check ."
   },

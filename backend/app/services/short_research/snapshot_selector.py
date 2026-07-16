@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
-from typing import Literal, TypedDict
+from datetime import date, datetime, timedelta
+from typing import Any, Literal, TypedDict
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.models.entities import ShortResearchSignalItem, ShortResearchSignalRun
+from app.services.intraday_etf.exchange_calendar import (
+    AFTERNOON_CLOSE,
+    is_trading_day,
+    localize_exchange_time,
+)
+from app.services.short_research.ranking_contract import final_score_v3_contract
 
 
 @dataclass(frozen=True)
@@ -24,13 +30,23 @@ class SnapshotMetadata(TypedDict):
     scope_kind: str | None
     as_of_trade_date: date | None
     generated_at: datetime | None
+    expected_item_count: int | None
+    decision_data_item_count: int | None
+    decision_data_coverage_ratio: float | None
+    score_eligible_item_count: int | None
+    score_coverage_ratio: float | None
     coverage_ratio: float | None
     freshness_status: str
     limitations: list[str]
 
 
-def snapshot_metadata(run: ShortResearchSignalRun | None) -> SnapshotMetadata:
+def snapshot_metadata(
+    run: ShortResearchSignalRun | None,
+    *,
+    selection_state: str | None = None,
+) -> SnapshotMetadata:
     if run is None:
+        freshness_status = selection_state or "waiting"
         return {
             "snapshot_id": None,
             "score_version": None,
@@ -38,12 +54,30 @@ def snapshot_metadata(run: ShortResearchSignalRun | None) -> SnapshotMetadata:
             "scope_kind": None,
             "as_of_trade_date": None,
             "generated_at": None,
+            "expected_item_count": None,
+            "decision_data_item_count": None,
+            "decision_data_coverage_ratio": None,
+            "score_eligible_item_count": None,
+            "score_coverage_ratio": None,
             "coverage_ratio": None,
-            "freshness_status": "waiting",
-            "limitations": ["no_snapshot"],
+            "freshness_status": freshness_status,
+            "limitations": ["no_snapshot", f"canonical_snapshot_{freshness_status}"],
         }
     limitations: list[str] = []
-    for field in ("score_version", "ranking_contract_hash", "scope_kind", "as_of_trade_date", "coverage_ratio"):
+    for field in (
+        "score_version",
+        "rule_version",
+        "ranking_contract_hash",
+        "score_field",
+        "scope_kind",
+        "as_of_trade_date",
+        "price_basis",
+        "expected_item_count",
+        "decision_data_item_count",
+        "decision_data_coverage_ratio",
+        "eligible_item_count",
+        "coverage_ratio",
+    ):
         if getattr(run, field) is None:
             limitations.append(f"missing_{field}")
     if run.scope_kind not in {None, "full"}:
@@ -54,7 +88,7 @@ def snapshot_metadata(run: ShortResearchSignalRun | None) -> SnapshotMetadata:
     elif limitations:
         freshness_status = "legacy"
     else:
-        freshness_status = "unverified"
+        freshness_status = selection_state or "ready"
     return {
         "snapshot_id": run.id,
         "score_version": run.score_version,
@@ -62,6 +96,11 @@ def snapshot_metadata(run: ShortResearchSignalRun | None) -> SnapshotMetadata:
         "scope_kind": run.scope_kind,
         "as_of_trade_date": run.as_of_trade_date,
         "generated_at": run.published_at or run.finished_at or run.started_at,
+        "expected_item_count": run.expected_item_count,
+        "decision_data_item_count": run.decision_data_item_count,
+        "decision_data_coverage_ratio": run.decision_data_coverage_ratio,
+        "score_eligible_item_count": run.eligible_item_count,
+        "score_coverage_ratio": run.coverage_ratio,
         "coverage_ratio": run.coverage_ratio,
         "freshness_status": freshness_status,
         "limitations": limitations,
@@ -86,6 +125,129 @@ def _etf_item_clauses() -> tuple[ColumnElement[bool], ColumnElement[bool]]:
         .exists()
     )
     return has_etf_item, has_non_etf_item
+
+
+def required_etf_snapshot_trade_date(now: datetime | None = None) -> date:
+    local_now = localize_exchange_time(now)
+    candidate = local_now.date()
+    if is_trading_day(candidate) and local_now.time() >= AFTERNOON_CLOSE:
+        return candidate
+    candidate -= timedelta(days=1)
+    while not is_trading_day(candidate):
+        candidate -= timedelta(days=1)
+    return candidate
+
+
+def _current_contract_fields() -> dict[str, Any]:
+    contract = final_score_v3_contract()
+    selector = contract.get("selector")
+    calculation = contract.get("calculation")
+    if not isinstance(selector, dict) or not isinstance(calculation, dict):
+        raise ValueError("final_score_v3 selector contract is invalid")
+    return {
+        "score_version": str(selector.get("target_score_version") or contract.get("contract_id") or ""),
+        "rule_version": str(contract.get("rule_version") or ""),
+        "score_field": str(selector.get("score_field") or ""),
+        "scope_kind": str(selector.get("required_scope") or ""),
+        "price_basis": str(calculation.get("price_basis") or ""),
+    }
+
+
+def _current_contract_clauses() -> tuple[ColumnElement[bool], ...]:
+    fields = _current_contract_fields()
+    return (
+        ShortResearchSignalRun.status == "success",
+        ShortResearchSignalRun.publication_state == "published",
+        ShortResearchSignalRun.scope_kind == fields["scope_kind"],
+        ShortResearchSignalRun.score_version == fields["score_version"],
+        ShortResearchSignalRun.rule_version == fields["rule_version"],
+        ShortResearchSignalRun.score_field == fields["score_field"],
+        ShortResearchSignalRun.price_basis == fields["price_basis"],
+        ShortResearchSignalRun.scope_hash.is_not(None),
+        ShortResearchSignalRun.universe_snapshot_hash.is_not(None),
+        ShortResearchSignalRun.input_snapshot_hash.is_not(None),
+        ShortResearchSignalRun.ranking_contract_hash.is_not(None),
+        ShortResearchSignalRun.data_cutoff.is_not(None),
+        ShortResearchSignalRun.expected_item_count.is_not(None),
+        ShortResearchSignalRun.decision_data_item_count.is_not(None),
+        ShortResearchSignalRun.decision_data_coverage_ratio >= 0.95,
+        ShortResearchSignalRun.eligible_item_count.is_not(None),
+        ShortResearchSignalRun.coverage_ratio >= 0.95,
+        ShortResearchSignalRun.idempotency_key.is_not(None),
+    )
+
+
+async def select_current_canonical_etf_snapshot(
+    session: AsyncSession,
+    *,
+    required_trade_date: date,
+) -> ShortResearchSignalRun | None:
+    has_etf_item, has_non_etf_item = _etf_item_clauses()
+    rows = await session.scalars(
+        select(ShortResearchSignalRun)
+        .where(
+            *_current_contract_clauses(),
+            ShortResearchSignalRun.as_of_trade_date == required_trade_date,
+            has_etf_item,
+            ~has_non_etf_item,
+        )
+        .order_by(ShortResearchSignalRun.published_at.desc(), ShortResearchSignalRun.id.desc())
+    )
+    return rows.first()
+
+
+async def resolve_current_canonical_etf_snapshot(
+    session: AsyncSession,
+    *,
+    required_trade_date: date,
+) -> CanonicalSnapshotSelection:
+    run = await select_current_canonical_etf_snapshot(
+        session,
+        required_trade_date=required_trade_date,
+    )
+    if run is not None:
+        return CanonicalSnapshotSelection("ready", run)
+
+    has_etf_item, has_non_etf_item = _etf_item_clauses()
+    item_clauses = (has_etf_item, ~has_non_etf_item)
+    stale = await session.scalar(
+        select(ShortResearchSignalRun.id).where(
+            *_current_contract_clauses(),
+            ShortResearchSignalRun.as_of_trade_date != required_trade_date,
+            *item_clauses,
+        )
+    )
+    if stale is not None:
+        return CanonicalSnapshotSelection("stale", None)
+    fields = _current_contract_fields()
+    mismatch = await session.scalar(
+        select(ShortResearchSignalRun.id).where(
+            ShortResearchSignalRun.status == "success",
+            ShortResearchSignalRun.publication_state == "published",
+            ShortResearchSignalRun.scope_kind == "full",
+            ShortResearchSignalRun.as_of_trade_date == required_trade_date,
+            (
+                (ShortResearchSignalRun.score_version != fields["score_version"])
+                | (ShortResearchSignalRun.rule_version != fields["rule_version"])
+                | (ShortResearchSignalRun.score_field != fields["score_field"])
+                | (ShortResearchSignalRun.price_basis != fields["price_basis"])
+            ),
+            *item_clauses,
+        )
+    )
+    if mismatch is not None:
+        return CanonicalSnapshotSelection("version_mismatch", None)
+    legacy = await session.scalar(
+        select(ShortResearchSignalRun.id).where(
+            ShortResearchSignalRun.status == "success",
+            (
+                ShortResearchSignalRun.scope_kind.is_(None)
+                | ShortResearchSignalRun.score_version.is_(None)
+                | ShortResearchSignalRun.ranking_contract_hash.is_(None)
+            ),
+        )
+    )
+    return CanonicalSnapshotSelection("legacy" if legacy is not None else "waiting", None)
 
 
 async def select_canonical_etf_snapshot(

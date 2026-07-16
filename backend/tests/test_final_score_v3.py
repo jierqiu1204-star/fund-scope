@@ -212,7 +212,67 @@ def test_v3_quality_gate_cannot_be_restored_by_later_enrichment() -> None:
     result = score_final_score_v3([gated, _input("510500"), _input("510880")], manifest=_manifest())["510300"]
 
     assert result.ranking_score is None
-    assert result.missing_by_component["theme_catalyst"] == ("quality_gate_rejected",)
+    assert result.missing_by_component["technical_momentum_cross_section"] == ("quality_gate_rejected",)
+
+
+def test_v3_missing_sparse_theme_catalyst_remains_explanatory_without_neutral_fill() -> None:
+    inputs: list[RankingInput] = []
+    for code in ("510300", "510500"):
+        item = _input(code)
+        values = dict(item.values)
+        values.update(
+            {
+                "catalyst_quality": None,
+                "catalyst_confidence": None,
+                "catalyst_effective_at": None,
+                "catalyst_expires_at": None,
+                "catalyst_source": None,
+                "component_reliability": {
+                    **dict(values["component_reliability"]),
+                    "theme_catalyst": "unavailable",
+                },
+            }
+        )
+        inputs.append(
+            RankingInput(
+                asset_code=item.asset_code,
+                asset_bucket=item.asset_bucket,
+                price_basis=item.price_basis,
+                profile_version=item.profile_version,
+                values=values,
+            )
+        )
+
+    result = score_final_score_v3(inputs, manifest=_manifest())["510300"]
+
+    assert result.score_eligible is True
+    assert result.ranking_score is not None
+    assert "theme_catalyst" not in result.component_scores
+    assert "theme_catalyst" not in result.missing_by_component
+
+
+def test_v3_quality_rejected_asset_cannot_change_eligible_peer_distributions() -> None:
+    clean = [_input("510300", return_5d=0.08), _input("510500", return_5d=0.02)]
+    dirty = _input("510880", return_5d=99.0)
+    dirty_values = dict(dirty.values)
+    dirty_values["quality_gate_rejected"] = True
+    dirty = RankingInput(
+        asset_code=dirty.asset_code,
+        asset_bucket=dirty.asset_bucket,
+        price_basis=dirty.price_basis,
+        profile_version=dirty.profile_version,
+        values=dirty_values,
+    )
+
+    baseline = score_final_score_v3(clean, manifest=_manifest())["510300"]
+    contaminated = score_final_score_v3([*clean, dirty], manifest=_manifest())["510300"]
+    baseline_sector = build_final_score_v3_sector_inputs(clean)["510300"]
+    contaminated_sector = build_final_score_v3_sector_inputs([*clean, dirty])["510300"]
+
+    assert contaminated.ranking_score == baseline.ranking_score
+    assert contaminated.component_scores == baseline.component_scores
+    assert contaminated.metric_peer_counts == baseline.metric_peer_counts
+    assert contaminated_sector == baseline_sector
 
 
 def test_missing_risk_primitive_does_not_invalidate_complete_technical_component() -> None:

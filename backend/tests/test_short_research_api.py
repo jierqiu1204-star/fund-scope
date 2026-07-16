@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
 import pytest
@@ -27,8 +27,10 @@ from app.models.entities import (
     TrackedPositionAlert,
     TradableEtf,
     User,
+    authorize_snapshot_publication,
     utcnow,
 )
+from app.services.short_research.ranking_contract import final_score_v3_contract
 from app.services.short_research.service import (
     _completed_outcome_payload,
     _etf_series,
@@ -40,8 +42,12 @@ from app.services.short_research.service import (
     _window_return,
     allowed_conclusions,
     ensure_short_research_universe,
+    latest_signal_run,
     run_etf_observation_portfolio_optimization,
+    run_signal_generation,
+    status_summary,
 )
+from app.services.short_research.snapshot_selector import required_etf_snapshot_trade_date
 
 
 async def _seed_short_research_history(app) -> None:
@@ -191,15 +197,42 @@ async def _seed_exit_hyperopt_run(
 async def _seed_observation_portfolio_signal_run(
     app,
     *,
-    run_as_of_date: date = date(2026, 6, 15),
+    run_as_of_date: date | None = None,
     items: list[dict[str, Any]],
 ) -> None:
     async with app.state.db.session() as session:
+        contract = final_score_v3_contract()
+        selector = contract["selector"]
+        calculation = contract["calculation"]
+        trade_date = run_as_of_date or required_etf_snapshot_trade_date()
         run = ShortResearchSignalRun(
             status="success",
-            as_of_date=run_as_of_date,
+            as_of_date=trade_date,
+            scope_kind=str(selector["required_scope"]),
+            scope_hash="api-observation-etf-full-scope",
+            universe_snapshot_hash="api-observation-etf-universe",
+            input_snapshot_hash="api-observation-etf-input",
+            score_version=str(selector["target_score_version"]),
+            rule_version=str(contract["rule_version"]),
+            ranking_contract_hash="api-observation-etf-contract",
+            score_field=str(selector["score_field"]),
+            data_cutoff=datetime.combine(trade_date, time(15, 0)),
+            as_of_trade_date=trade_date,
+            price_basis=str(calculation["price_basis"]),
+            expected_item_count=len(items),
+            decision_data_item_count=len(items),
+            decision_data_coverage_ratio=1.0,
+            eligible_item_count=len(items),
+            coverage_ratio=1.0,
+            publication_state="unpublished",
+            idempotency_key=f"api-observation-etf-{trade_date.isoformat()}-{len(items)}",
             config_json={"asset_type": "etf", "language": "research_only"},
-            summary_json={"item_count": len(items)},
+            summary_json={
+                "item_count": len(items),
+                "fund_count": 0,
+                "etf_count": len(items),
+                "score_version": str(selector["target_score_version"]),
+            },
         )
         session.add(run)
         await session.commit()
@@ -233,9 +266,18 @@ async def _seed_observation_portfolio_signal_run(
                     asset_type="etf",
                     asset_code=item["code"],
                     rank=index + 1,
+                    global_rank=index + 1,
                     total_score=float(item["total_score"]),
+                    ranking_score=float(item["total_score"]),
+                    score_eligible=True,
                     conclusion=item["conclusion"],
-                    score_breakdown_json={},
+                    score_breakdown_json={
+                        "final_score_v3": {
+                            "score_version": str(selector["target_score_version"]),
+                            "ranking_score": float(item["total_score"]),
+                            "score_eligible": True,
+                        }
+                    },
                     risk_flags_json=item.get("risk_flags", []),
                     rationale_json={"entry_timing_reason": item["entry_timing_reason"]},
                     metrics_json={
@@ -246,11 +288,19 @@ async def _seed_observation_portfolio_signal_run(
                         "max_drawdown_60d": item.get("max_drawdown_60d", -0.04),
                         "volatility_20d": item.get("volatility_20d", 0.015),
                         "default_display_eligible": item.get("default_display_eligible", True),
+                        "score_version": str(selector["target_score_version"]),
+                        "ranking_score": float(item["total_score"]),
+                        "score_eligible": True,
                     },
                 )
                 for index, item in enumerate(items)
             ]
         )
+        await session.flush()
+        with authorize_snapshot_publication(session.sync_session, run_id=run.id):
+            run.publication_state = "published"
+            run.published_at = datetime.combine(trade_date, time(15, 1))
+            await session.flush()
         await session.commit()
 
 
@@ -446,6 +496,10 @@ def test_score_bucket_metrics_distinguish_negative_and_inconclusive_intervals() 
 
 async def _seed_opportunity_signal_run(app) -> None:
     async with app.state.db.session() as session:
+        contract = final_score_v3_contract()
+        selector = contract["selector"]
+        calculation = contract["calculation"]
+        trade_date = required_etf_snapshot_trade_date()
         session.add_all(
             [
                 TradableEtf(
@@ -472,9 +526,29 @@ async def _seed_opportunity_signal_run(app) -> None:
         )
         run = ShortResearchSignalRun(
             status="success",
-            as_of_date=date(2026, 7, 3),
+            started_at=utcnow(),
+            finished_at=utcnow(),
+            as_of_date=trade_date,
+            scope_kind=str(selector["required_scope"]),
+            scope_hash="api-opportunity-full-scope",
+            universe_snapshot_hash="api-opportunity-universe",
+            input_snapshot_hash="api-opportunity-input",
+            score_version=str(selector["target_score_version"]),
+            rule_version=str(contract["rule_version"]),
+            ranking_contract_hash="api-opportunity-contract",
+            score_field=str(selector["score_field"]),
+            data_cutoff=datetime.combine(trade_date, time(15, 0)),
+            as_of_trade_date=trade_date,
+            price_basis=str(calculation["price_basis"]),
+            expected_item_count=2,
+            decision_data_item_count=2,
+            decision_data_coverage_ratio=1.0,
+            eligible_item_count=2,
+            coverage_ratio=1.0,
+            publication_state="unpublished",
+            idempotency_key=f"api-opportunity-{trade_date.isoformat()}",
             config_json={"asset_type": "etf", "language": "research_only"},
-            summary_json={"item_count": 2, "score_version": "final_score_v2"},
+            summary_json={"item_count": 2, "score_version": "final_score_v3"},
         )
         session.add(run)
         await session.flush()
@@ -485,9 +559,17 @@ async def _seed_opportunity_signal_run(app) -> None:
                     asset_type="etf",
                     asset_code="159001",
                     rank=1,
+                    global_rank=1,
                     total_score=70,
+                    ranking_score=70,
+                    score_eligible=True,
                     conclusion="高位观察",
                     score_breakdown_json={
+                        "final_score_v3": {
+                            "score_version": "final_score_v3",
+                            "ranking_score": 70,
+                            "score_eligible": True,
+                        },
                         "opportunity_score_v1": {"opportunity_score": 80},
                         "factor_profile_v1": {
                             "score_version": "etf_factor_profile_v1_degraded",
@@ -499,6 +581,9 @@ async def _seed_opportunity_signal_run(app) -> None:
                     metrics_json={
                         "entry_timing_label": "冲高别追",
                         "entry_timing_reason": "强势但冲高。",
+                        "score_version": "final_score_v3",
+                        "ranking_score": 70,
+                        "score_eligible": True,
                         "latest_date": "2026-07-03",
                         "latest_value": 1.2,
                         "usable_days": 120,
@@ -577,14 +662,27 @@ async def _seed_opportunity_signal_run(app) -> None:
                     asset_type="etf",
                     asset_code="159002",
                     rank=2,
+                    global_rank=2,
                     total_score=78,
+                    ranking_score=78,
+                    score_eligible=True,
                     conclusion="短线观察",
-                    score_breakdown_json={"opportunity_score_v1": {"opportunity_score": 69}},
+                    score_breakdown_json={
+                        "final_score_v3": {
+                            "score_version": "final_score_v3",
+                            "ranking_score": 78,
+                            "score_eligible": True,
+                        },
+                        "opportunity_score_v1": {"opportunity_score": 69},
+                    },
                     risk_flags_json=[],
                     rationale_json={"entry_timing_reason": "趋势延续。"},
                     metrics_json={
                         "entry_timing_label": "趋势延续",
                         "entry_timing_reason": "趋势延续。",
+                        "score_version": "final_score_v3",
+                        "ranking_score": 78,
+                        "score_eligible": True,
                         "latest_date": "2026-07-03",
                         "latest_value": 1.1,
                         "usable_days": 120,
@@ -601,6 +699,11 @@ async def _seed_opportunity_signal_run(app) -> None:
                 ),
             ]
         )
+        await session.flush()
+        with authorize_snapshot_publication(session.sync_session, run_id=run.id):
+            run.publication_state = "published"
+            run.published_at = utcnow()
+            await session.flush()
         await session.commit()
 
 
@@ -891,10 +994,14 @@ async def _seed_score_bucket_signal_runs(app) -> dict[str, Any]:
             ]
         )
         await session.commit()
-        latest_run.publication_state = "published"
-        latest_run.published_at = utcnow()
-        mismatched_contract_run.publication_state = "published"
-        mismatched_contract_run.published_at = utcnow()
+        with authorize_snapshot_publication(session.sync_session, run_id=latest_run.id):
+            latest_run.publication_state = "published"
+            latest_run.published_at = utcnow()
+            await session.flush()
+        with authorize_snapshot_publication(session.sync_session, run_id=mismatched_contract_run.id):
+            mismatched_contract_run.publication_state = "published"
+            mismatched_contract_run.published_at = utcnow()
+            await session.flush()
         await session.commit()
         return {
             "latest_run_id": latest_run.id,
@@ -1134,10 +1241,11 @@ async def _seed_observation_price_series(
         for offset in range(days):
             period_return = 0.0 if offset == 0 else daily_return + (0.001 if offset % 2 else -0.001)
             close = close if offset == 0 else close * (1 + period_return)
+            trade_date = start + timedelta(days=offset)
             session.add(
                 EtfPriceHistory(
                     etf_code=code,
-                    trade_date=start + timedelta(days=offset),
+                    trade_date=trade_date,
                     open=close * 0.995,
                     high=close * 1.01,
                     low=close * 0.99,
@@ -1145,6 +1253,13 @@ async def _seed_observation_price_series(
                     volume=2_000_000,
                     turnover=160_000_000,
                     pct_change=period_return * 100,
+                    research_adjusted_value=close,
+                    research_price_basis="total_return_adjusted",
+                    data_provider="eastmoney",
+                    provider_version="eastmoney.push2his.kline.hfq_v1",
+                    source_timestamp=datetime.combine(trade_date, time(7, 0)),
+                    adjustment_version="eastmoney.push2his.kline.hfq_v1",
+                    decision_eligible=True,
                 )
             )
         await session.commit()
@@ -1169,35 +1284,56 @@ async def test_short_research_status_seeds_about_200_assets(client) -> None:
 
 
 @pytest.mark.asyncio
-async def test_short_research_signal_generation_is_deterministic_and_research_only(client, app) -> None:
+async def test_generic_latest_and_status_ignore_newer_unpublished_legacy_etf_run(app) -> None:
+    async with app.state.db.session() as session:
+        fund_run = ShortResearchSignalRun(
+            status="success",
+            started_at=datetime(2026, 6, 18, 7, 0),
+            finished_at=datetime(2026, 6, 18, 7, 1),
+            as_of_date=date(2026, 6, 18),
+            config_json={"asset_type": "fund"},
+            summary_json={"item_count": 0},
+        )
+        legacy_etf_run = ShortResearchSignalRun(
+            status="success",
+            started_at=datetime(2026, 6, 19, 7, 0),
+            finished_at=datetime(2026, 6, 19, 7, 1),
+            as_of_date=date(2026, 6, 19),
+            publication_state="unpublished",
+            config_json={"asset_type": "etf"},
+            summary_json={"item_count": 0},
+        )
+        session.add_all([fund_run, legacy_etf_run])
+        await session.commit()
+
+        latest = await latest_signal_run(session)
+        status = await status_summary(session)
+
+    assert latest is not None
+    assert latest.id == fund_run.id
+    assert status["signal_date"] == fund_run.as_of_date
+
+
+@pytest.mark.asyncio
+async def test_fund_signal_generation_is_deterministic_and_research_only(client, app) -> None:
     await _seed_short_research_history(app)
 
-    response = await client.post("/api/short-research/signals/run", json={"as_of_date": "2026-06-05"})
+    response = await client.post(
+        "/api/short-research/signals/run",
+        json={"as_of_date": "2026-06-05", "asset_type": "fund"},
+    )
 
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "success"
-    assert body["summary"]["item_count"] == 200
+    assert body["summary"]["item_count"] == 117
     assert body["summary"]["research_only"] is True
     assert body["summary"]["experiment"]["portfolio_single_weight_cap"] == 0.3
     assert body["summary"]["label_validation"]["rule_version"] == "label_validation_v1"
     assert body["summary"]["label_validation"]["outcome_source"] == "stored_signal_items"
-    assert body["summary"]["v3_shadow_comparison"]["coverage"]["total"] > 0
-    assert body["summary"]["v3_shadow_comparison"]["exclusion_reasons"]
     assert body["items"]
     assert {item["conclusion"] for item in body["items"]}.issubset(allowed_conclusions())
     assert any(item["code"] == "110020" and item["asset_type"] == "fund" for item in body["items"])
-    hot_etf = next(item for item in body["items"] if item["code"] == "512480")
-    assert hot_etf["conclusion"] in {"高位观察", "谨慎观察", "短线观察"}
-    assert "key_reason" in hot_etf["rationale"]
-    assert hot_etf["rationale"]["research_only"] is True
-    assert hot_etf["rationale"]["no_trade_instruction"] is True
-    assert hot_etf["metrics"]["v3_score_version"] == "final_score_v3"
-    assert hot_etf["metrics"]["v3_score_eligible"] is False
-    assert hot_etf["metrics"]["v3_metric_peer_counts"]
-    assert hot_etf["metrics"]["v3_missing_by_component"]
-    assert hot_etf["metrics"]["v3_observation_label"] == "数据不足"
-    assert hot_etf["metrics"]["v3_score_limitation_reasons"]
 
     payload_text = json.dumps(body, ensure_ascii=False).lower()
     for forbidden in ["buy", "sell", "stop_loss", "take_profit", "target_price", "expected_return", "guaranteed_profit"]:
@@ -1220,6 +1356,24 @@ async def test_short_research_signal_generation_is_deterministic_and_research_on
     latest_fund = await client.get("/api/short-research/signals/latest?asset_type=fund")
     assert latest_fund.status_code == 200
     assert latest_fund.json()["id"] == fund_body["id"]
+
+
+@pytest.mark.asyncio
+async def test_etf_signal_post_cannot_create_a_legacy_snapshot(client, app) -> None:
+    async with app.state.db.session() as session:
+        before = await session.scalar(select(func.count()).select_from(ShortResearchSignalRun))
+
+    response = await client.post(
+        "/api/short-research/signals/run",
+        json={"asset_type": "etf"},
+    )
+
+    async with app.state.db.session() as session:
+        after = await session.scalar(select(func.count()).select_from(ShortResearchSignalRun))
+
+    assert response.status_code == 409
+    assert "canonical v3" in response.json()["detail"]
+    assert after == before
 
 
 @pytest.mark.asyncio
@@ -1486,17 +1640,27 @@ async def test_short_research_entry_timing_labels_are_explained(client, app) -> 
     await _seed_entry_timing_etf(app, code="560813", closes=weak_volume, turnovers=weak_turnovers)
     await _seed_entry_timing_etf(app, code="560814", closes=stale, latest_date=date(2026, 5, 20))
 
-    response = await client.post(
-        "/api/short-research/signals/run",
-        json={
-            "as_of_date": "2026-06-05",
-            "asset_type": "etf",
-            "codes": ["560810", "560811", "560812", "560813", "560814"],
-        },
-    )
-
-    assert response.status_code == 200
-    items = {item["code"]: item for item in response.json()["items"]}
+    async with app.state.db.session() as session:
+        run = await run_signal_generation(
+            session,
+            as_of_date=date(2026, 6, 5),
+            asset_type="etf",
+            codes=["560810", "560811", "560812", "560813", "560814"],
+        )
+        rows = (
+            await session.scalars(
+                select(ShortResearchSignalItem).where(ShortResearchSignalItem.run_id == run.id)
+            )
+        ).all()
+    items = {
+        item.asset_code: {
+            "entry_timing_label": (item.metrics_json or {}).get("entry_timing_label"),
+            "entry_timing_reason": (item.rationale_json or {}).get("entry_timing_reason"),
+            "metrics": item.metrics_json or {},
+            "rationale": item.rationale_json or {},
+        }
+        for item in rows
+    }
     assert items["560810"]["entry_timing_label"] == "健康回踩"
     assert items["560811"]["entry_timing_label"] == "冲高别追"
     assert items["560812"]["entry_timing_label"] == "跌破等待"
@@ -1516,9 +1680,18 @@ async def test_short_research_entry_timing_labels_are_explained(client, app) -> 
 
 
 @pytest.mark.asyncio
-async def test_etf_signal_validation_run_records_forward_outcomes(client, app) -> None:
+async def test_etf_signal_validation_run_records_forward_outcomes(client, app, monkeypatch) -> None:
+    from app.services.short_research import service as short_research_service
+
+    signal_date = date(2026, 6, 15)
+    monkeypatch.setattr(
+        short_research_service,
+        "required_etf_snapshot_trade_date",
+        lambda _now=None: signal_date,
+    )
     await _seed_observation_portfolio_signal_run(
         app,
+        run_as_of_date=signal_date,
         items=[
             {
                 "code": "562001",
@@ -1537,7 +1710,7 @@ async def test_etf_signal_validation_run_records_forward_outcomes(client, app) -
     body = response.json()
     assert body["status"] == "success"
     assert body["source_ranking_snapshot"]["snapshot_id"] == body["source_signal_run_id"]
-    assert body["source_ranking_snapshot"]["freshness_status"] in {"legacy", "unpublished", "unverified"}
+    assert body["source_ranking_snapshot"]["freshness_status"] == "ready"
     assert body["summary"]["evaluated_asset_count"] == 1
     items = body["items"]
     assert {item["horizon_days"] for item in items} >= {1, 3, 5, 10}
@@ -1561,9 +1734,18 @@ async def test_etf_signal_validation_run_records_forward_outcomes(client, app) -
 
 
 @pytest.mark.asyncio
-async def test_etf_signal_validation_marks_insufficient_samples(client, app) -> None:
+async def test_etf_signal_validation_marks_insufficient_samples(client, app, monkeypatch) -> None:
+    from app.services.short_research import service as short_research_service
+
+    signal_date = date(2026, 6, 15)
+    monkeypatch.setattr(
+        short_research_service,
+        "required_etf_snapshot_trade_date",
+        lambda _now=None: signal_date,
+    )
     await _seed_observation_portfolio_signal_run(
         app,
+        run_as_of_date=signal_date,
         items=[
             {
                 "code": "562002",
@@ -1897,8 +2079,10 @@ async def test_score_bucket_validation_skips_overlapping_signal_windows(client, 
             ]
         )
         await session.flush()
-        overlapping_run.publication_state = "published"
-        overlapping_run.published_at = source_run.published_at
+        with authorize_snapshot_publication(session.sync_session, run_id=overlapping_run.id):
+            overlapping_run.publication_state = "published"
+            overlapping_run.published_at = source_run.published_at
+            await session.flush()
         await session.commit()
 
     response = await client.post("/api/short-research/validation/score-buckets/run?days=180")
@@ -2069,21 +2253,8 @@ async def test_short_research_asset_detail_returns_charts_and_beginner_explanati
 
 
 @pytest.mark.asyncio
-async def test_short_research_filters_sort_and_data_sync_endpoint(client, app, monkeypatch) -> None:
+async def test_short_research_data_sync_endpoint(client, app, monkeypatch) -> None:
     await _seed_short_research_history(app)
-    signal = await client.post(
-        "/api/short-research/signals/run",
-        json={"as_of_date": "2026-06-05", "asset_type": "etf"},
-    )
-    assert signal.status_code == 200
-
-    filtered = await client.get("/api/short-research/assets?asset_type=etf&theme=半导体&sort=return_20d")
-
-    assert filtered.status_code == 200
-    items = filtered.json()["items"]
-    assert items
-    assert all(item["asset_type"] == "etf" for item in items)
-    assert any(item["code"] == "512480" for item in items)
 
     from app.services.short_research import service as short_research_service
 
@@ -2181,7 +2352,7 @@ async def test_short_research_observation_portfolio_filters_out_high_watch_and_b
     body = response.json()
     assert body["asset_type"] == "etf"
     assert body["source_ranking_snapshot"]["snapshot_id"] is not None
-    assert body["source_ranking_snapshot"]["freshness_status"] in {"legacy", "unpublished", "unverified"}
+    assert body["source_ranking_snapshot"]["freshness_status"] == "ready"
     assert body["cash_weight"] == 0.0
     assert body["weight_sum"] == 1.0
     assert body["portfolio_mode"] == "risk_on"

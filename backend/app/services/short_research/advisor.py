@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.defaults.short_research import SHORT_RESEARCH_ASSET_BY_KEY
+from app.defaults.short_research import ASSET_TYPE_ETF, SHORT_RESEARCH_ASSET_BY_KEY
 from app.models.entities import (
     ShortResearchAdvisorAttempt,
     ShortResearchAdvisorReport,
@@ -19,6 +19,7 @@ from app.models.entities import (
 )
 from app.services.llm import LLMClient
 from app.services.short_research.service import (
+    current_etf_snapshot_selection,
     latest_signal_run,
     list_signal_items,
     run_signal_generation,
@@ -423,16 +424,66 @@ async def run_advisor_generation(
     as_of_date: date | None = None,
     source_signal_run_id: int | None = None,
 ) -> dict[str, Any]:
-    signal_run = (
+    explicit_signal_run = (
         await session.get(ShortResearchSignalRun, source_signal_run_id)
+        if source_signal_run_id is not None
+        else None
+    )
+    explicit_source_has_etf = (
+        explicit_signal_run is not None
+        and await session.scalar(
+            select(ShortResearchSignalItem.id)
+            .where(
+                ShortResearchSignalItem.run_id == explicit_signal_run.id,
+                ShortResearchSignalItem.asset_type == ASSET_TYPE_ETF,
+            )
+            .limit(1)
+        )
+        is not None
+    )
+    canonical_etf_run = None
+    default_source_request = asset_type is None and source_signal_run_id is None
+    if asset_type == ASSET_TYPE_ETF or explicit_source_has_etf or default_source_request:
+        canonical_selection = await current_etf_snapshot_selection(session)
+        canonical_etf_run = canonical_selection.run
+        if canonical_etf_run is None and (asset_type == ASSET_TYPE_ETF or explicit_source_has_etf):
+            raise ValueError(
+                f"当前 canonical ETF 排名快照不可用（{canonical_selection.state}）。"
+            )
+        if (
+            source_signal_run_id is not None
+            and canonical_etf_run is not None
+            and source_signal_run_id != canonical_etf_run.id
+        ):
+            raise ValueError("指定的 ETF 顾问来源不是当前 canonical 排名快照。")
+    signal_run = (
+        canonical_etf_run
+        if canonical_etf_run is not None
+        else explicit_signal_run
         if source_signal_run_id is not None
         else await latest_signal_run(session, asset_type=asset_type, theme=theme, codes=codes)
     )
+    if default_source_request and canonical_etf_run is None and signal_run is not None:
+        latest_source_has_etf = (
+            await session.scalar(
+                select(ShortResearchSignalItem.id)
+                .where(
+                    ShortResearchSignalItem.run_id == signal_run.id,
+                    ShortResearchSignalItem.asset_type == ASSET_TYPE_ETF,
+                )
+                .limit(1)
+            )
+            is not None
+        )
+        if latest_source_has_etf:
+            raise ValueError("当前 canonical ETF 排名快照不可用，不能回退旧 ETF 顾问来源。")
     if source_signal_run_id is not None and (
         signal_run is None or signal_run.status != "success" or signal_run.finished_at is None
     ):
         raise ValueError("指定的顾问来源快照不存在或尚未完成。")
     if signal_run is None:
+        if default_source_request:
+            raise ValueError("当前没有可用的 canonical ETF 或基金顾问来源快照。")
         signal_run = await run_signal_generation(
             session,
             as_of_date=as_of_date,

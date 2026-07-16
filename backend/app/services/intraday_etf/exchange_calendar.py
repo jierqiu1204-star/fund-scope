@@ -26,6 +26,10 @@ _SSE_HOLIDAYS_2026 = frozenset(
 _HOLIDAYS_BY_YEAR = {2026: _SSE_HOLIDAYS_2026}
 
 
+class ExchangeCalendarUnavailableError(ValueError):
+    """Raised when a future trading day cannot be derived from a verified calendar."""
+
+
 def localize_exchange_time(value: datetime | None = None) -> datetime:
     current = value or datetime.now(ASIA_SHANGHAI)
     if current.tzinfo is None:
@@ -34,14 +38,17 @@ def localize_exchange_time(value: datetime | None = None) -> datetime:
 
 
 def is_trading_day(value: date) -> bool:
-    return value.weekday() < 5 and value not in _HOLIDAYS_BY_YEAR.get(value.year, frozenset())
+    holidays = _HOLIDAYS_BY_YEAR.get(value.year)
+    return holidays is not None and value.weekday() < 5 and value not in holidays
 
 
 def next_trading_day(value: date) -> date:
     candidate = value + timedelta(days=1)
-    while not is_trading_day(candidate):
+    while candidate.year in _HOLIDAYS_BY_YEAR:
+        if is_trading_day(candidate):
+            return candidate
         candidate += timedelta(days=1)
-    return candidate
+    raise ExchangeCalendarUnavailableError(f"exchange calendar is unavailable for {candidate.year}")
 
 
 def market_session(value: datetime | None = None) -> tuple[str, str | None]:
@@ -68,5 +75,8 @@ def next_poll_seconds(value: datetime | None = None) -> int:
     elif is_trading_day(local.date()) and local.time() < MORNING_OPEN:
         boundary = datetime.combine(local.date(), MORNING_OPEN, tzinfo=ASIA_SHANGHAI)
     else:
-        boundary = datetime.combine(next_trading_day(local.date()), MORNING_OPEN, tzinfo=ASIA_SHANGHAI)
+        try:
+            boundary = datetime.combine(next_trading_day(local.date()), MORNING_OPEN, tzinfo=ASIA_SHANGHAI)
+        except ExchangeCalendarUnavailableError:
+            boundary = datetime.combine(local.date() + timedelta(days=1), time.min, tzinfo=ASIA_SHANGHAI)
     return max(1, int((boundary - local).total_seconds()))

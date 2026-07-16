@@ -34,7 +34,7 @@ from app.services.intraday_etf.service import (
 from app.services.short_research.service import (
     CONCLUSION_HIGH_WATCH,
     CONCLUSION_WATCH,
-    latest_signal_run,
+    current_etf_snapshot_selection,
 )
 from app.services.short_research.snapshot_selector import snapshot_metadata
 from app.services.workflows.tracking_filters import (
@@ -347,11 +347,12 @@ def _entry_filter_labels(
     return {label for label in labels if label}
 
 
-async def _build_research_watchlist(session: AsyncSession) -> WatchlistResult:
+async def _build_research_watchlist(session: AsyncSession, *, now: datetime | None = None) -> WatchlistResult:
     watchlist = await build_watchlist(session)
     watch_map = {item.etf_code: item for item in watchlist.items}
-    run = await latest_signal_run(session, asset_type=ASSET_TYPE_ETF)
-    signal_status = watchlist.signal_status
+    selection = await current_etf_snapshot_selection(session, now=now)
+    run = selection.run
+    signal_status = selection.state
     message = watchlist.message
     signal_run_id: int | None = None
     signal_as_of_date: date | None = None
@@ -404,7 +405,7 @@ async def live_rankings(
     if tracking_filters and user_id is None:
         raise ValueError("持仓筛选需要登录")
     state = intraday_quotes.current_market_state()
-    watchlist = await _build_research_watchlist(session)
+    watchlist = await _build_research_watchlist(session, now=state.now)
     source_snapshot = (
         await session.get(ShortResearchSignalRun, watchlist.signal_run_id)
         if watchlist.signal_run_id is not None
@@ -427,7 +428,9 @@ async def live_rankings(
             signal_status=watchlist.signal_status,
             latest_run=market_data.etf_watch_run_out(latest_run) if latest_run is not None else None,
             items=[],
-            snapshot=EtfRankingSnapshotMetadataOut.model_validate(snapshot_metadata(source_snapshot)),
+            snapshot=EtfRankingSnapshotMetadataOut.model_validate(
+                snapshot_metadata(source_snapshot, selection_state=watchlist.signal_status)
+            ),
         )
 
     names = await market_data.etf_quote_name_map(session, watch_codes)
@@ -461,10 +464,14 @@ async def live_rankings(
     for watch_item in watchlist.items:
         name = names.get(watch_item.etf_code)
         signal_item = signal_items_by_code.get(watch_item.etf_code)
-        reference_base_score = _float_or_none(signal_item.total_score) if signal_item is not None else None
+        reference_base_score = (
+            _float_or_none(signal_item.ranking_score)
+            if signal_item is not None and signal_item.score_eligible is True
+            else None
+        )
         signal_metrics = dict(signal_item.metrics_json or {}) if signal_item is not None else {}
         signal_breakdown = dict(signal_item.score_breakdown_json or {}) if signal_item is not None else {}
-        final_score_breakdown = signal_breakdown.get("final_score_v2")
+        final_score_breakdown = signal_breakdown.get("final_score_v3") or signal_breakdown.get("final_score_v2")
         item_score_version = (
             signal_metrics.get("score_version")
             or signal_breakdown.get("score_version")
@@ -664,7 +671,9 @@ async def live_rankings(
         signal_as_of_date=watchlist.signal_as_of_date,
         signal_status=watchlist.signal_status,
         latest_run=market_data.etf_watch_run_out(latest_run) if latest_run is not None else None,
-        snapshot=EtfRankingSnapshotMetadataOut.model_validate(snapshot_metadata(source_snapshot)),
+        snapshot=EtfRankingSnapshotMetadataOut.model_validate(
+            snapshot_metadata(source_snapshot, selection_state=watchlist.signal_status)
+        ),
         live_scope_hash=live_scope_hash,
         items=[
             EtfLiveRankingItemOut(

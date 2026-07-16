@@ -50,6 +50,38 @@ def test_etf_theme_classifier_keeps_unknown_auditable() -> None:
     assert "没有命中" in profile.classification_reason
 
 
+@pytest.mark.parametrize(
+    ("code", "name", "expected_group", "expected_theme"),
+    [
+        ("159611", "电力ETF", "energy", "电力"),
+        ("159865", "养殖ETF", "consumer", "养殖"),
+        ("159869", "游戏ETF", "technology", "游戏传媒"),
+        ("159870", "化工ETF", "materials", "基础材料"),
+        ("159871", "有色ETF", "materials", "基础材料"),
+        ("512200", "房地产ETF", "financial", "房地产"),
+        ("512400", "有色金属ETF", "materials", "基础材料"),
+        ("512980", "传媒ETF", "technology", "游戏传媒"),
+        ("515220", "煤炭ETF", "energy", "煤炭"),
+        ("515250", "智能汽车ETF", "industrial", "智能汽车"),
+        ("516010", "游戏ETF", "technology", "游戏传媒"),
+        ("516970", "基建50ETF", "industrial", "基建"),
+    ],
+)
+def test_etf_theme_classifier_covers_audited_sector_universe(
+    code: str,
+    name: str,
+    expected_group: str,
+    expected_theme: str,
+) -> None:
+    profile = classify_etf_theme(code=code, name=name, asset_class="sector")
+
+    assert profile.asset_bucket == "equity"
+    assert profile.theme_group == expected_group
+    assert profile.primary_theme == expected_theme
+    assert profile.classification_source == "fund_name"
+    assert profile.classification_confidence == "high"
+
+
 def test_dynamic_thresholds_adapt_to_asset_bucket_and_volatility() -> None:
     high_vol = dynamic_threshold_context(
         asset_bucket="equity",

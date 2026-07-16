@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
 import pytest
@@ -14,9 +14,14 @@ from app.models.entities import (
     ShortResearchSignalRun,
     TrackedPosition,
     TradableEtf,
+    authorize_snapshot_publication,
 )
 from app.services.short_research import service as short_research_service
+from app.services.short_research import universe as universe_module
+from app.services.short_research.ranking_contract import final_score_v3_contract
+from app.services.short_research.snapshot_selector import required_etf_snapshot_trade_date
 from app.services.short_research.universe import (
+    EtfUniverseDiscovery,
     EtfUniverseRecord,
     build_point_in_time_universe_snapshot,
     refresh_etf_universe,
@@ -24,6 +29,12 @@ from app.services.short_research.universe import (
 from app.services.workflows.short_research_data import (
     sync_short_research_data_with_tracking_priority,
 )
+
+
+def test_default_etf_sync_batch_size_is_bounded_for_small_servers(monkeypatch) -> None:
+    monkeypatch.delenv("SHORT_RESEARCH_ETF_SYNC_BATCH_SIZE", raising=False)
+
+    assert short_research_service._etf_sync_batch_size() == 20
 
 
 async def _seed_etf_history(
@@ -78,18 +89,56 @@ async def _seed_etf_history(
         await session.commit()
 
 
-async def _seed_cached_etf_signals(app: Any, count: int = 3) -> int:
+async def _seed_cached_etf_signals(
+    app: Any,
+    count: int = 3,
+    *,
+    item_overrides: dict[int, dict[str, Any]] | None = None,
+) -> int:
     async with app.state.db.session() as session:
+        contract = final_score_v3_contract()
+        selector = contract["selector"]
+        calculation = contract["calculation"]
+        trade_date = required_etf_snapshot_trade_date()
         run = ShortResearchSignalRun(
             status="success",
-            as_of_date=date(2026, 6, 12),
+            as_of_date=trade_date,
+            scope_kind=str(selector["required_scope"]),
+            scope_hash="cached-etf-full-scope",
+            universe_snapshot_hash="cached-etf-universe",
+            input_snapshot_hash="cached-etf-input",
+            score_version=str(selector["target_score_version"]),
+            rule_version=str(contract["rule_version"]),
+            ranking_contract_hash="cached-etf-contract",
+            score_field=str(selector["score_field"]),
+            data_cutoff=datetime.combine(trade_date, time(15, 0)),
+            as_of_trade_date=trade_date,
+            price_basis=str(calculation["price_basis"]),
+            expected_item_count=count,
+            decision_data_item_count=count,
+            decision_data_coverage_ratio=1.0,
+            eligible_item_count=count,
+            coverage_ratio=1.0,
+            publication_state="unpublished",
+            idempotency_key=f"cached-etf-{trade_date.isoformat()}-{count}",
             config_json={"asset_type": "etf"},
-            summary_json={"item_count": count, "fund_count": 0, "etf_count": count},
+            summary_json={
+                "item_count": count,
+                "fund_count": 0,
+                "etf_count": count,
+                "score_version": "final_score_v3",
+            },
         )
         session.add(run)
         await session.flush()
         for index in range(count):
             code = f"5620{index:02d}"
+            override = (item_overrides or {}).get(index, {})
+            entry_timing_label = override.get("entry_timing_label", "健康回踩")
+            entry_timing_reason = override.get(
+                "entry_timing_reason",
+                "测试缓存资产处于健康回踩，允许进入观察组合。",
+            )
             session.add(
                 TradableEtf(
                     code=code,
@@ -108,9 +157,17 @@ async def _seed_cached_etf_signals(app: Any, count: int = 3) -> int:
                     asset_type="etf",
                     asset_code=code,
                     rank=index + 1,
+                    global_rank=index + 1,
                     total_score=90 - index,
-                    conclusion="短线观察",
+                    ranking_score=90 - index,
+                    score_eligible=True,
+                    conclusion=override.get("conclusion", "短线观察"),
                     score_breakdown_json={
+                        "final_score_v3": {
+                            "score_version": "final_score_v3",
+                            "ranking_score": 90 - index,
+                            "score_eligible": True,
+                        },
                         "trend": {"score": 80 - index, "weight": 0.55},
                         "risk": {"score": 70, "weight": 0.30},
                         "liquidity": {"score": 90, "weight": 0.15},
@@ -130,11 +187,19 @@ async def _seed_cached_etf_signals(app: Any, count: int = 3) -> int:
                         "sample_level": "样本充足",
                         "source_note": "cached signal",
                         "default_display_eligible": True,
-                        "entry_timing_label": "健康回踩",
-                        "entry_timing_reason": "测试缓存资产处于健康回踩，允许进入观察组合。",
+                        "entry_timing_label": entry_timing_label,
+                        "entry_timing_reason": entry_timing_reason,
+                        "score_version": "final_score_v3",
+                        "ranking_score": 90 - index,
+                        "score_eligible": True,
                     },
                 )
             )
+        await session.flush()
+        with authorize_snapshot_publication(session.sync_session, run_id=run.id):
+            run.publication_state = "published"
+            run.published_at = datetime.combine(trade_date, time(15, 1))
+            await session.flush()
         await session.commit()
         return run.id
 
@@ -142,37 +207,75 @@ async def _seed_cached_etf_signals(app: Any, count: int = 3) -> int:
 
 async def _seed_observation_portfolio_signal_run(app: Any, *, items: list[dict[str, Any]]) -> None:
     async with app.state.db.session() as session:
+        contract = final_score_v3_contract()
+        selector = contract["selector"]
+        calculation = contract["calculation"]
+        trade_date = required_etf_snapshot_trade_date()
         run = ShortResearchSignalRun(
             status="success",
-            as_of_date=date(2026, 6, 15),
+            as_of_date=trade_date,
+            scope_kind=str(selector["required_scope"]),
+            scope_hash="observation-etf-full-scope",
+            universe_snapshot_hash="observation-etf-universe",
+            input_snapshot_hash="observation-etf-input",
+            score_version=str(selector["target_score_version"]),
+            rule_version=str(contract["rule_version"]),
+            ranking_contract_hash="observation-etf-contract",
+            score_field=str(selector["score_field"]),
+            data_cutoff=datetime.combine(trade_date, time(15, 0)),
+            as_of_trade_date=trade_date,
+            price_basis=str(calculation["price_basis"]),
+            expected_item_count=len(items),
+            decision_data_item_count=len(items),
+            decision_data_coverage_ratio=1.0,
+            eligible_item_count=len(items),
+            coverage_ratio=1.0,
+            publication_state="unpublished",
+            idempotency_key=f"observation-etf-{trade_date.isoformat()}-{len(items)}",
             config_json={"asset_type": "etf"},
-            summary_json={"item_count": len(items), "fund_count": 0, "etf_count": len(items)},
+            summary_json={
+                "item_count": len(items),
+                "fund_count": 0,
+                "etf_count": len(items),
+                "score_version": str(selector["target_score_version"]),
+            },
         )
         session.add(run)
         await session.flush()
         for index, item in enumerate(items):
             code = item["code"]
-            session.add(
-                TradableEtf(
-                    code=code,
-                    name=item.get("name", f"观察组合ETF{index}"),
-                    exchange="SH" if code.startswith("5") else "SZ",
-                    theme_tags_json=item.get("theme_tags", ["测试主题"]),
-                    trading_rule_label="证券账户 T+1 ETF",
-                    asset_class=item.get("asset_class", "sector"),
-                    is_short_term_eligible=True,
-                    is_watchlist=True,
+            existing = await session.scalar(select(TradableEtf).where(TradableEtf.code == code))
+            if existing is None:
+                session.add(
+                    TradableEtf(
+                        code=code,
+                        name=item.get("name", f"观察组合ETF{index}"),
+                        exchange="SH" if code.startswith("5") else "SZ",
+                        theme_tags_json=item.get("theme_tags", ["测试主题"]),
+                        trading_rule_label="证券账户 T+1 ETF",
+                        asset_class=item.get("asset_class", "sector"),
+                        is_short_term_eligible=True,
+                        is_watchlist=True,
+                    )
                 )
-            )
+            score = item.get("total_score", 80)
             session.add(
                 ShortResearchSignalItem(
                     run_id=run.id,
                     asset_type="etf",
                     asset_code=code,
                     rank=index + 1,
-                    total_score=item.get("total_score", 80),
+                    global_rank=index + 1,
+                    total_score=score,
+                    ranking_score=score,
+                    score_eligible=True,
                     conclusion=item.get("conclusion", "短线观察"),
                     score_breakdown_json={
+                        "final_score_v3": {
+                            "score_version": str(selector["target_score_version"]),
+                            "ranking_score": score,
+                            "score_eligible": True,
+                        },
                         "trend": {"score": item.get("trend_score", 80), "weight": 0.55},
                         "risk": {"score": 80, "weight": 0.30},
                         "liquidity": {"score": 90, "weight": 0.15},
@@ -186,7 +289,7 @@ async def _seed_observation_portfolio_signal_run(app: Any, *, items: list[dict[s
                         "max_drawdown_60d": -0.05,
                         "volatility_20d": 0.02,
                         "average_turnover_20d": 160_000_000,
-                        "latest_date": "2026-06-15",
+                        "latest_date": trade_date.isoformat(),
                         "latest_value": 1.2 + index / 10,
                         "usable_days": 100,
                         "sample_level": "样本充足",
@@ -194,9 +297,18 @@ async def _seed_observation_portfolio_signal_run(app: Any, *, items: list[dict[s
                         "default_display_eligible": True,
                         "entry_timing_label": item.get("entry_timing_label", "趋势延续"),
                         "entry_timing_reason": item.get("entry_timing_reason", "测试原因。"),
+                        "score_version": str(selector["target_score_version"]),
+                        "ranking_score": score,
+                        "score_eligible": True,
+                        **dict(item.get("metrics") or {}),
                     },
                 )
             )
+        await session.flush()
+        with authorize_snapshot_publication(session.sync_session, run_id=run.id):
+            run.publication_state = "published"
+            run.published_at = datetime.combine(trade_date, time(15, 1))
+            await session.flush()
         await session.commit()
 
 
@@ -332,6 +444,49 @@ async def test_universe_refresh_closes_missing_memberships_and_preserves_histori
 
 
 @pytest.mark.asyncio
+async def test_universe_refresh_preserves_frozen_membership_when_live_discovery_is_not_authoritative(
+    app,
+    monkeypatch,
+) -> None:
+    record = EtfUniverseRecord(
+        code="588001",
+        name="科创50ETF",
+        exchange="SH",
+        category="broad",
+        theme_tags=["科创"],
+        trading_rule_label="证券账户 T+1 ETF",
+        source="pytest",
+    )
+    async with app.state.db.session() as session:
+        await refresh_etf_universe(session, records=[record], as_of_date=date(2026, 1, 2))
+
+        async def failed_discovery() -> EtfUniverseDiscovery:
+            return EtfUniverseDiscovery(
+                records=(),
+                status="failure",
+                source="akshare.fund_etf_spot_em",
+                source_row_count=0,
+                normalized_row_count=0,
+                error_summary="proxy connection refused",
+            )
+
+        monkeypatch.setattr(universe_module, "discover_etf_universe", failed_discovery)
+        result = await refresh_etf_universe(session, as_of_date=date(2026, 1, 3))
+        membership = await session.scalar(
+            select(EtfUniverseMembership).where(EtfUniverseMembership.etf_code == record.code)
+        )
+        current = await build_point_in_time_universe_snapshot(session, as_of_date=date(2026, 1, 4))
+
+    assert result["authoritative"] is False
+    assert result["discovery_status"] == "failure"
+    assert result["stale_universe"] is True
+    assert result["deactivated"] == 0
+    assert membership is not None
+    assert membership.effective_to is None
+    assert [member["asset_code"] for member in current.members] == [record.code]
+
+
+@pytest.mark.asyncio
 async def test_universe_refresh_flushes_new_etf_before_membership_insert(app) -> None:
     record = EtfUniverseRecord(
         code="159605",
@@ -359,8 +514,29 @@ async def test_short_research_etf_status_universe_filter_and_dynamic_detail(clie
     await _seed_etf_history(app, code="560001", name="动态科技ETF", turnover=150_000_000)
     await _seed_etf_history(app, code="560002", name="低流动ETF", turnover=3_000_000)
 
-    async with app.state.db.session() as session:
-        await short_research_service.run_signal_generation(session, asset_type="etf")
+    await _seed_observation_portfolio_signal_run(
+        app,
+        items=[
+            {
+                "code": "560001",
+                "total_score": 90,
+                "metrics": {
+                    "default_display_eligible": True,
+                    "default_exclusion_reasons": [],
+                    "data_quality_score": 90,
+                },
+            },
+            {
+                "code": "560002",
+                "total_score": 70,
+                "metrics": {
+                    "default_display_eligible": False,
+                    "default_exclusion_reasons": ["20日平均成交额不足，流动性不满足默认展示门槛。"],
+                    "data_quality_score": 70,
+                },
+            },
+        ],
+    )
 
     status = await client.get("/api/short-research/status")
     assert status.status_code == 200
@@ -470,7 +646,7 @@ async def test_etf_observation_portfolio_fills_to_full_exposure_with_defensive_c
     assert any(item["code"] == "562104" for item in body["defensive_items"])
     assert all(item["target_weight"] <= 0.3 for item in [*body["items"], *body["defensive_items"]])
     assert body["data_as_of_time"] is not None
-    assert body["daily_signal_date"] == "2026-06-15"
+    assert body["daily_signal_date"] == required_etf_snapshot_trade_date().isoformat()
     assert body["portfolio_generated_at"] is not None
     assert any(item["weight_reason_json"].get("weight_fill_reason") for item in body["defensive_items"])
 
@@ -499,19 +675,17 @@ async def test_assets_endpoint_uses_cached_signal_items_and_paginates(client, ap
 
 @pytest.mark.asyncio
 async def test_assets_endpoint_filters_labels_before_pagination(client, app, monkeypatch) -> None:
-    await _seed_cached_etf_signals(app, count=4)
-    async with app.state.db.session() as session:
-        high_item = await session.scalar(
-            select(ShortResearchSignalItem).where(ShortResearchSignalItem.asset_code == "562003")
-        )
-        assert high_item is not None
-        high_item.conclusion = "高位观察"
-        high_item.metrics_json = {
-            **dict(high_item.metrics_json or {}),
-            "entry_timing_label": "冲高别追",
-            "entry_timing_reason": "测试高位冲高，不应混入健康回踩筛选。",
-        }
-        await session.commit()
+    await _seed_cached_etf_signals(
+        app,
+        count=4,
+        item_overrides={
+            3: {
+                "conclusion": "高位观察",
+                "entry_timing_label": "冲高别追",
+                "entry_timing_reason": "测试高位冲高，不应混入健康回踩筛选。",
+            }
+        },
+    )
 
     async def fail_full_recompute(*_args: Any, **_kwargs: Any) -> list[Any]:
         raise AssertionError("assets endpoint should filter cached signal items")
@@ -710,10 +884,32 @@ async def test_bounded_etf_sync_rotates_regular_codes_without_starvation(app, mo
         return codes
 
     async def fake_etf_sync(
-        _session: Any, _from_date: date, _to_date: date, batch_codes: list[str] | None = None
+        session: Any, _from_date: date, sync_to_date: date, batch_codes: list[str] | None = None
     ) -> dict[str, Any]:
         batch = list(batch_codes or [])
         calls.append(batch)
+        for code in batch:
+            existing = await session.scalar(
+                select(EtfPriceHistory.id).where(
+                    EtfPriceHistory.etf_code == code,
+                    EtfPriceHistory.trade_date == sync_to_date,
+                )
+            )
+            if existing is not None:
+                continue
+            session.add(
+                EtfPriceHistory(
+                    etf_code=code,
+                    trade_date=sync_to_date,
+                    open=1.0,
+                    high=1.0,
+                    low=1.0,
+                    close=1.0,
+                    volume=1.0,
+                    turnover=1.0,
+                    pct_change=0.0,
+                )
+            )
         return {"etfs": len(batch), "inserted": 0, "updated": 0, "failed": 0, "failures": []}
 
     monkeypatch.setenv("SHORT_RESEARCH_ETF_SYNC_BATCH_SIZE", "2")
@@ -820,3 +1016,100 @@ async def test_bounded_etf_sync_rotates_regular_codes_without_starvation(app, mo
         ["561100"],
         ["561103"],
     ]
+
+
+@pytest.mark.asyncio
+async def test_bounded_etf_sync_finishes_all_gaps_before_rotating_current_codes(app, monkeypatch) -> None:
+    to_date = date(2026, 6, 5)
+    priority_gaps = [f"5620{index:02d}" for index in range(20)]
+    priority_current = [f"5620{index:02d}" for index in range(90, 95)]
+    regular_gaps = [f"5630{index:02d}" for index in range(20)]
+    regular_current = [f"5630{index:02d}" for index in range(90, 95)]
+    codes = [*priority_gaps, *priority_current, *regular_gaps, *regular_current]
+    calls: list[list[str]] = []
+
+    async def fake_dynamic_etf_codes(_session: Any, _codes: list[str] | None = None) -> list[str]:
+        return codes
+
+    async def fake_etf_sync(
+        session: Any, _from_date: date, sync_to_date: date, batch_codes: list[str] | None = None
+    ) -> dict[str, Any]:
+        batch = list(batch_codes or [])
+        calls.append(batch)
+        for code in batch:
+            existing = await session.scalar(
+                select(EtfPriceHistory.id).where(
+                    EtfPriceHistory.etf_code == code,
+                    EtfPriceHistory.trade_date == sync_to_date,
+                )
+            )
+            if existing is not None:
+                continue
+            session.add(
+                EtfPriceHistory(
+                    etf_code=code,
+                    trade_date=sync_to_date,
+                    open=1.0,
+                    high=1.0,
+                    low=1.0,
+                    close=1.0,
+                    volume=1.0,
+                    turnover=1.0,
+                    pct_change=0.0,
+                )
+            )
+        return {"etfs": len(batch), "inserted": len(batch), "updated": 0, "failed": 0, "failures": []}
+
+    monkeypatch.setenv("SHORT_RESEARCH_ETF_SYNC_BATCH_SIZE", "20")
+    monkeypatch.setenv("SHORT_RESEARCH_ETF_SYNC_MAX_BATCHES", "1")
+    monkeypatch.setattr(short_research_service, "_dynamic_etf_codes", fake_dynamic_etf_codes)
+    monkeypatch.setattr(short_research_service, "sync_etf_price_history", fake_etf_sync)
+
+    async with app.state.db.session() as session:
+        session.add_all(
+            [
+                TradableEtf(
+                    code=code,
+                    name=f"批次ETF{code}",
+                    exchange="SH",
+                    theme_tags_json=["批量"],
+                    trading_rule_label="证券账户 T+1 ETF",
+                    asset_class="sector",
+                    is_short_term_eligible=True,
+                    is_watchlist=False,
+                )
+                for code in codes
+            ]
+        )
+        session.add_all(
+            [
+                EtfPriceHistory(
+                    etf_code=code,
+                    trade_date=to_date,
+                    open=1.0,
+                    high=1.0,
+                    low=1.0,
+                    close=1.0,
+                    volume=1.0,
+                    turnover=1.0,
+                    pct_change=0.0,
+                )
+                for code in [*priority_current, *regular_current]
+            ]
+        )
+        await session.commit()
+
+        for _ in range(2):
+            await short_research_service.sync_short_research_data(
+                session,
+                from_date=date(2026, 6, 1),
+                to_date=to_date,
+                asset_type="etf",
+                priority_etf_codes=[*priority_gaps, *priority_current],
+            )
+
+    selected = [code for batch in calls for code in batch]
+    assert len(calls) == 2
+    assert all(len(batch) == 20 for batch in calls)
+    assert set(selected) == set([*priority_gaps, *regular_gaps])
+    assert len(selected) == len(set(selected))

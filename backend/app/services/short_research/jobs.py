@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+import asyncio
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
@@ -8,9 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
 from app.defaults.short_research import ASSET_TYPE_ETF, ASSET_TYPE_FUND
-from app.models.entities import EtfPriceHistory
+from app.models.entities import EtfPriceHistory, JobRun
 from app.services.etf_exit_calibration import run_etf_exit_hyperopt
 from app.services.llm import LLMClient
+from app.services.market_data import ASIA_SHANGHAI, is_etf_exchange_trading_day
 from app.services.short_etf.data import sync_etf_price_history_from_intraday_snapshot
 from app.services.short_research.advisor import run_advisor_generation
 from app.services.short_research.backtest import (
@@ -27,15 +29,26 @@ from app.services.short_research.service import (
     run_etf_signal_validation,
     run_signal_generation,
 )
+from app.services.short_research.snapshot_publication import (
+    SnapshotPublicationError,
+    build_etf_coverage_barrier,
+)
+from app.services.short_research.snapshot_selector import resolve_current_canonical_etf_snapshot
 from app.services.short_research.theme_catalysts import refresh_theme_catalyst_snapshots
 from app.services.short_research.theme_taxonomy import refresh_etf_theme_profiles
 from app.services.short_research.universe import refresh_etf_universe
+from app.services.workflows.etf_daily_research import (
+    etf_source_availability_cutoff,
+    generate_and_publish_etf_snapshot,
+)
 from app.services.workflows.short_research_data import (
     sync_short_research_data_with_tracking_priority as sync_short_research_data,
 )
 
 SHORT_RESEARCH_DAILY_ASSET_TYPES = [ASSET_TYPE_FUND, ASSET_TYPE_ETF]
 ETF_HISTORY_BACKFILL_ALLOWED_DAYS = (365, 730, 1095)
+ETF_ADJUSTED_SYNC_SLICE_TIMEOUT_SECONDS = 50
+ETF_CANONICAL_MIN_COVERAGE = 0.95
 
 
 def _count(value: Any, key: str) -> int:
@@ -61,9 +74,10 @@ async def daily_short_research_data_job(session: AsyncSession) -> dict[str, Any]
     today = date.today()
     results: dict[str, dict[str, Any]] = {}
     for asset_type in SHORT_RESEARCH_DAILY_ASSET_TYPES:
+        from_date = today if asset_type == ASSET_TYPE_ETF else today - timedelta(days=120)
         results[asset_type] = await sync_short_research_data(
             session,
-            from_date=today - timedelta(days=120),
+            from_date=from_date,
             to_date=today,
             asset_type=asset_type,
         )
@@ -71,6 +85,7 @@ async def daily_short_research_data_job(session: AsyncSession) -> dict[str, Any]
     failed_count = sum(_count(item, "failed") for item in results.values())
     result: dict[str, Any] = {
         "from_date": (today - timedelta(days=120)).isoformat(),
+        "etf_from_date": today.isoformat(),
         "to_date": today.isoformat(),
         "asset_types": SHORT_RESEARCH_DAILY_ASSET_TYPES,
         "fund": results[ASSET_TYPE_FUND],
@@ -175,7 +190,16 @@ async def etf_history_backfill_job(session: AsyncSession, *, days: int = 730) ->
 async def daily_etf_universe_job(session: AsyncSession) -> dict[str, Any]:
     universe = await refresh_etf_universe(session)
     taxonomy = await refresh_etf_theme_profiles(session)
-    return {**universe, "universe": universe, "taxonomy": taxonomy}
+    result = {
+        **universe,
+        "as_of_date": date.today().isoformat(),
+        "universe": universe,
+        "taxonomy": taxonomy,
+    }
+    if universe.get("authoritative") is not True:
+        result["job_status"] = "failed"
+        result["job_message"] = "ETF universe discovery is not authoritative"
+    return result
 
 
 async def daily_etf_taxonomy_job(session: AsyncSession) -> dict[str, Any]:
@@ -187,9 +211,18 @@ async def daily_etf_theme_catalyst_job(session: AsyncSession) -> dict[str, Any]:
 
 
 async def daily_short_research_signals_job(session: AsyncSession) -> dict[str, Any]:
-    results: dict[str, dict[str, Any]] = {}
-    for asset_type in SHORT_RESEARCH_DAILY_ASSET_TYPES:
-        results[asset_type] = _signal_result(await run_signal_generation(session, asset_type=asset_type))
+    results: dict[str, dict[str, Any]] = {
+        ASSET_TYPE_FUND: _signal_result(
+            await run_signal_generation(session, asset_type=ASSET_TYPE_FUND)
+        ),
+        ASSET_TYPE_ETF: {
+            "asset_type": ASSET_TYPE_ETF,
+            "status": "delegated_to_canonical_v3",
+            "items": 0,
+            "funds": 0,
+            "etfs": 0,
+        },
+    }
     return {
         "asset_types": SHORT_RESEARCH_DAILY_ASSET_TYPES,
         "fund": results[ASSET_TYPE_FUND],
@@ -200,14 +233,240 @@ async def daily_short_research_signals_job(session: AsyncSession) -> dict[str, A
     }
 
 
-async def post_close_etf_signals_job(session: AsyncSession) -> dict[str, Any]:
-    run = await run_signal_generation(session, asset_type=ASSET_TYPE_ETF)
+def post_close_etf_decision_context(now: datetime | None = None) -> tuple[date, datetime] | None:
+    local_now = now or datetime.now(ASIA_SHANGHAI)
+    if local_now.tzinfo is not None:
+        local_now = local_now.astimezone(ASIA_SHANGHAI)
+    trade_date = local_now.date()
+    if not is_etf_exchange_trading_day(trade_date) or local_now.time() < time(15, 0):
+        return None
+    return trade_date, datetime.combine(trade_date, time(15, 0))
+
+
+async def _latest_authoritative_etf_universe_refresh(
+    session: AsyncSession,
+    *,
+    trade_date: date,
+) -> tuple[bool, str | None]:
+    run = await session.scalar(
+        select(JobRun)
+        .where(JobRun.job_name == "daily_etf_universe")
+        .order_by(JobRun.started_at.desc(), JobRun.id.desc())
+        .limit(1)
+    )
+    if run is None:
+        return False, "missing_daily_universe_refresh"
+    details = dict(run.details_json or {})
+    universe = details.get("universe")
+    universe_details = universe if isinstance(universe, dict) else details
+    observed_date = details.get("as_of_date") or universe_details.get("as_of_date")
+    if observed_date != trade_date.isoformat():
+        return False, "stale_daily_universe_refresh"
+    if run.status != "success" or universe_details.get("authoritative") is not True:
+        return False, str(universe_details.get("discovery_error") or "universe_not_authoritative")
+    return True, None
+
+
+def _waiting_etf_publication(
+    *,
+    trade_date: date,
+    reason: str,
+    coverage: dict[str, Any] | None = None,
+    sync: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "asset_type": ASSET_TYPE_ETF,
+        "as_of_date": trade_date.isoformat(),
+        "status": "waiting",
+        "publication_state": "not_run",
+        "reason": reason,
+        "job_status": "partial",
+        "job_message": reason,
+    }
+    if coverage is not None:
+        result["coverage"] = coverage
+    if sync is not None:
+        result["sync"] = sync
+    return result
+
+
+async def _publish_etf_snapshot_at_gate(
+    session: AsyncSession,
+    *,
+    trade_date: date,
+    decision_cutoff: datetime,
+    source_availability_cutoff: datetime,
+    coverage: dict[str, Any],
+    sync: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    try:
+        run = await generate_and_publish_etf_snapshot(
+            session,
+            trade_date=trade_date,
+            decision_cutoff=decision_cutoff,
+            source_availability_cutoff=source_availability_cutoff,
+        )
+    except SnapshotPublicationError as exc:
+        await session.rollback()
+        return _waiting_etf_publication(
+            trade_date=trade_date,
+            reason=f"score_coverage_or_publication_gate_failed: {exc}",
+            coverage=coverage,
+            sync=sync,
+        )
     result = _signal_result(run)
     return {
         "asset_type": ASSET_TYPE_ETF,
+        "publication_state": run.publication_state,
+        "coverage": coverage,
+        **({"sync": sync} if sync is not None else {}),
         "etf": result,
         **result,
     }
+
+
+async def post_close_etf_signals_job(session: AsyncSession) -> dict[str, Any]:
+    context = post_close_etf_decision_context()
+    if context is None:
+        return {
+            "asset_type": ASSET_TYPE_ETF,
+            "status": "skipped",
+            "publication_state": "not_run",
+            "reason": "no_completed_trading_session",
+        }
+    trade_date, decision_cutoff = context
+    authoritative, universe_error = await _latest_authoritative_etf_universe_refresh(
+        session,
+        trade_date=trade_date,
+    )
+    if not authoritative:
+        return _waiting_etf_publication(
+            trade_date=trade_date,
+            reason="universe_not_authoritative",
+            sync={"error": universe_error},
+        )
+    current = await resolve_current_canonical_etf_snapshot(
+        session,
+        required_trade_date=trade_date,
+    )
+    if current.run is not None:
+        result = _signal_result(current.run)
+        return {
+            "asset_type": ASSET_TYPE_ETF,
+            "publication_state": "published",
+            "already_published": True,
+            "etf": result,
+            **result,
+        }
+    source_cutoff = etf_source_availability_cutoff(trade_date)
+    coverage = await build_etf_coverage_barrier(
+        session,
+        as_of_trade_date=trade_date,
+        data_cutoff=source_cutoff,
+    )
+    coverage_payload = coverage.to_dict()
+    if not coverage.expected_codes or coverage.coverage_ratio < ETF_CANONICAL_MIN_COVERAGE:
+        return _waiting_etf_publication(
+            trade_date=trade_date,
+            reason="adjusted_price_coverage_below_publication_gate",
+            coverage=coverage_payload,
+        )
+    return await _publish_etf_snapshot_at_gate(
+        session,
+        trade_date=trade_date,
+        decision_cutoff=decision_cutoff,
+        source_availability_cutoff=source_cutoff,
+        coverage=coverage_payload,
+    )
+
+
+async def post_close_etf_adjusted_sync_job(session: AsyncSession) -> dict[str, Any]:
+    context = post_close_etf_decision_context()
+    if context is None:
+        return {
+            "asset_type": ASSET_TYPE_ETF,
+            "status": "skipped",
+            "publication_state": "not_run",
+            "reason": "no_completed_trading_session",
+        }
+    trade_date, decision_cutoff = context
+    authoritative, universe_error = await _latest_authoritative_etf_universe_refresh(
+        session,
+        trade_date=trade_date,
+    )
+    if not authoritative:
+        return _waiting_etf_publication(
+            trade_date=trade_date,
+            reason="universe_not_authoritative",
+            sync={"error": universe_error},
+        )
+    current = await resolve_current_canonical_etf_snapshot(
+        session,
+        required_trade_date=trade_date,
+    )
+    if current.run is not None:
+        result = _signal_result(current.run)
+        return {
+            "asset_type": ASSET_TYPE_ETF,
+            "publication_state": "published",
+            "already_published": True,
+            "etf": result,
+            **result,
+        }
+
+    source_cutoff = etf_source_availability_cutoff(trade_date)
+    coverage = await build_etf_coverage_barrier(
+        session,
+        as_of_trade_date=trade_date,
+        data_cutoff=source_cutoff,
+    )
+    sync_result: dict[str, Any] | None = None
+    if not coverage.expected_codes or coverage.coverage_ratio < ETF_CANONICAL_MIN_COVERAGE:
+        try:
+            async with asyncio.timeout(ETF_ADJUSTED_SYNC_SLICE_TIMEOUT_SECONDS):
+                sync_result = await sync_short_research_data(
+                    session,
+                    from_date=trade_date,
+                    to_date=trade_date,
+                    asset_type=ASSET_TYPE_ETF,
+                )
+        except TimeoutError:
+            await session.rollback()
+            source_cutoff = etf_source_availability_cutoff(trade_date)
+            coverage = await build_etf_coverage_barrier(
+                session,
+                as_of_trade_date=trade_date,
+                data_cutoff=source_cutoff,
+            )
+            return _waiting_etf_publication(
+                trade_date=trade_date,
+                reason="bounded_adjusted_price_sync_timed_out",
+                coverage=coverage.to_dict(),
+                sync={"timeout_seconds": ETF_ADJUSTED_SYNC_SLICE_TIMEOUT_SECONDS},
+            )
+        source_cutoff = etf_source_availability_cutoff(trade_date)
+        coverage = await build_etf_coverage_barrier(
+            session,
+            as_of_trade_date=trade_date,
+            data_cutoff=source_cutoff,
+        )
+
+    coverage_payload = coverage.to_dict()
+    if not coverage.expected_codes or coverage.coverage_ratio < ETF_CANONICAL_MIN_COVERAGE:
+        return _waiting_etf_publication(
+            trade_date=trade_date,
+            reason="adjusted_price_coverage_below_publication_gate",
+            coverage=coverage_payload,
+            sync=sync_result,
+        )
+    return await _publish_etf_snapshot_at_gate(
+        session,
+        trade_date=trade_date,
+        decision_cutoff=decision_cutoff,
+        source_availability_cutoff=source_cutoff,
+        coverage=coverage_payload,
+        sync=sync_result,
+    )
 
 
 async def daily_short_research_advisor_job(
@@ -218,12 +477,24 @@ async def daily_short_research_advisor_job(
     effective_settings = settings or get_settings()
     results: dict[str, dict[str, Any]] = {}
     for asset_type in SHORT_RESEARCH_DAILY_ASSET_TYPES:
-        results[asset_type] = await run_advisor_generation(
-            session,
-            effective_settings,
-            llm_client=llm_client,
-            asset_type=asset_type,
-        )
+        try:
+            results[asset_type] = await run_advisor_generation(
+                session,
+                effective_settings,
+                llm_client=llm_client,
+                asset_type=asset_type,
+            )
+        except ValueError as exc:
+            if asset_type != ASSET_TYPE_ETF or "canonical ETF 排名快照不可用" not in str(exc):
+                raise
+            results[asset_type] = {
+                "asset_type": ASSET_TYPE_ETF,
+                "status": "waiting",
+                "selected": 0,
+                "succeeded": 0,
+                "failed": 0,
+                "reason": "canonical_etf_snapshot_unavailable",
+            }
     return {
         "asset_types": SHORT_RESEARCH_DAILY_ASSET_TYPES,
         "fund": results[ASSET_TYPE_FUND],

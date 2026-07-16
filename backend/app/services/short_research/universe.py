@@ -10,7 +10,6 @@ import akshare as ak
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.defaults.short_research import DEFAULT_SHORT_RESEARCH_ETFS
 from app.models.entities import EtfUniverseMembership, TradableEtf
 from app.services.short_research.ranking_contract import canonical_hash
 
@@ -27,6 +26,7 @@ EXCLUDED_ETF_KEYWORDS = (
     "一年",
     "滚动",
 )
+LIVE_DISCOVERY_MIN_RETENTION_RATIO = 0.8
 
 
 @dataclass(frozen=True)
@@ -38,6 +38,20 @@ class EtfUniverseRecord:
     theme_tags: list[str]
     trading_rule_label: str
     source: str
+
+
+@dataclass(frozen=True)
+class EtfUniverseDiscovery:
+    records: tuple[EtfUniverseRecord, ...]
+    status: str
+    source: str
+    source_row_count: int
+    normalized_row_count: int
+    error_summary: str | None = None
+
+    @property
+    def authoritative(self) -> bool:
+        return self.status == "authoritative"
 
 
 @dataclass(frozen=True)
@@ -196,18 +210,6 @@ def classify_etf(name: str) -> tuple[str, list[str], str, str]:
     return category, deduped, direction, rule
 
 
-def _record_from_default(item: Any) -> EtfUniverseRecord:
-    return EtfUniverseRecord(
-        code=item.code,
-        name=item.name,
-        exchange=item.exchange or infer_exchange(item.code),
-        category=item.category,
-        theme_tags=list(item.theme_tags),
-        trading_rule_label=item.trading_rule_label,
-        source="default_seed",
-    )
-
-
 def _pick(record: Any, *keys: str) -> Any:
     for key in keys:
         if key in record and record[key] not in (None, ""):
@@ -232,22 +234,46 @@ def normalize_source_row(record: Any, *, source: str) -> EtfUniverseRecord | Non
     )
 
 
-async def discover_etf_universe() -> list[EtfUniverseRecord]:
+async def discover_etf_universe() -> EtfUniverseDiscovery:
+    source = "akshare.fund_etf_spot_em"
     records: list[EtfUniverseRecord] = []
     try:
-        frame = await asyncio.to_thread(ak.fund_etf_spot_em)
+        async with asyncio.timeout(20):
+            frame = await asyncio.to_thread(ak.fund_etf_spot_em)
+        source_row_count = int(len(frame.index))
         for _, row in frame.iterrows():
-            record = normalize_source_row(row, source="akshare.fund_etf_spot_em")
+            record = normalize_source_row(row, source=source)
             if record is not None:
                 records.append(record)
-    except Exception:  # noqa: BLE001
-        records = []
+    except Exception as exc:  # noqa: BLE001
+        return EtfUniverseDiscovery(
+            records=(),
+            status="failure",
+            source=source,
+            source_row_count=0,
+            normalized_row_count=0,
+            error_summary=f"{type(exc).__name__}: {exc}"[:500],
+        )
 
-    seeded = [_record_from_default(item) for item in DEFAULT_SHORT_RESEARCH_ETFS]
-    by_code = {item.code: item for item in seeded}
-    for item in records:
-        by_code[item.code] = item
-    return sorted(by_code.values(), key=lambda item: item.code)
+    by_code = {item.code: item for item in records}
+    normalized = tuple(sorted(by_code.values(), key=lambda item: item.code))
+    if not normalized:
+        status = "failure"
+        error_summary = "provider returned no usable ETF universe rows"
+    elif len(records) != source_row_count or len(normalized) != len(records):
+        status = "partial"
+        error_summary = "provider universe contained invalid or duplicate rows"
+    else:
+        status = "authoritative"
+        error_summary = None
+    return EtfUniverseDiscovery(
+        records=normalized,
+        status=status,
+        source=source,
+        source_row_count=source_row_count,
+        normalized_row_count=len(normalized),
+        error_summary=error_summary,
+    )
 
 
 async def refresh_etf_universe(
@@ -256,7 +282,19 @@ async def refresh_etf_universe(
     records: Iterable[EtfUniverseRecord] | None = None,
     as_of_date: date | None = None,
 ) -> dict[str, Any]:
-    discovered = list(records) if records is not None else await discover_etf_universe()
+    live_discovery = records is None
+    if records is None:
+        discovery = await discover_etf_universe()
+    else:
+        explicit_records = tuple(records)
+        discovery = EtfUniverseDiscovery(
+            records=explicit_records,
+            status="authoritative",
+            source="explicit",
+            source_row_count=len(explicit_records),
+            normalized_row_count=len(explicit_records),
+        )
+    discovered = list(discovery.records)
     effective_date = as_of_date or date.today()
     inserted = 0
     updated = 0
@@ -270,7 +308,52 @@ async def refresh_etf_universe(
             await session.scalars(select(EtfUniverseMembership).where(EtfUniverseMembership.effective_to.is_(None)))
         ).all()
     }
-    eligible_codes: set[str] = set()
+    eligible_codes = {
+        record.code
+        for record in discovered
+        if is_short_term_etf_eligible(record.name, code=record.code)
+    }
+    authoritative = discovery.authoritative
+    discovery_status = discovery.status
+    discovery_error = discovery.error_summary
+    if (
+        authoritative
+        and live_discovery
+        and active_memberships
+        and len(eligible_codes) / len(active_memberships) < LIVE_DISCOVERY_MIN_RETENTION_RATIO
+    ):
+        authoritative = False
+        discovery_status = "partial"
+        discovery_error = (
+            "live discovery retained fewer than "
+            f"{LIVE_DISCOVERY_MIN_RETENTION_RATIO:.0%} of active memberships"
+        )
+    if not authoritative:
+        default_display = await session.scalar(
+            select(func.count()).select_from(TradableEtf).where(
+                TradableEtf.is_short_term_eligible.is_(True),
+                TradableEtf.is_watchlist.is_(True),
+            )
+        )
+        return {
+            "as_of_date": effective_date.isoformat(),
+            "discovered": len(discovered),
+            "inserted": 0,
+            "updated": 0,
+            "activated": 0,
+            "deactivated": 0,
+            "excluded": 0,
+            "default_display": int(default_display or 0),
+            "failed": 0,
+            "failures": [],
+            "authoritative": False,
+            "discovery_status": discovery_status,
+            "discovery_source": discovery.source,
+            "discovery_error": discovery_error,
+            "source_row_count": discovery.source_row_count,
+            "normalized_row_count": discovery.normalized_row_count,
+            "stale_universe": True,
+        }
     memberships_to_activate: list[EtfUniverseRecord] = []
 
     for record in discovered:
@@ -278,8 +361,6 @@ async def refresh_etf_universe(
             eligible = is_short_term_etf_eligible(record.name, code=record.code)
             if not eligible:
                 excluded += 1
-            else:
-                eligible_codes.add(record.code)
             existing = await session.scalar(select(TradableEtf).where(TradableEtf.code == record.code))
             if existing is None:
                 session.add(
@@ -340,6 +421,7 @@ async def refresh_etf_universe(
         )
     )
     return {
+        "as_of_date": effective_date.isoformat(),
         "discovered": len(discovered),
         "inserted": inserted,
         "updated": updated,
@@ -349,4 +431,11 @@ async def refresh_etf_universe(
         "default_display": int(default_display or 0),
         "failed": len(failed),
         "failures": failed,
+        "authoritative": True,
+        "discovery_status": "authoritative",
+        "discovery_source": discovery.source,
+        "discovery_error": None,
+        "source_row_count": discovery.source_row_count,
+        "normalized_row_count": discovery.normalized_row_count,
+        "stale_universe": False,
     }

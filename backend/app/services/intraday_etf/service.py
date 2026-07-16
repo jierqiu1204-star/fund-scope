@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from math import isfinite
 from typing import Any, cast
 
@@ -43,6 +43,9 @@ AKSHARE_PROVIDER_TIMEOUT_SECONDS = 30.0
 EASTMONEY_PROVIDER_TIMEOUT_SECONDS = 8.0
 QUOTE_PRICE_DIFF_PCT_TOLERANCE = 0.003
 QUOTE_PRICE_DIFF_ABS_TOLERANCE = 0.003
+PREMIUM_DIFF_BPS_TOLERANCE = 30.0
+PREMIUM_CONSENSUS_MULTI_PROVIDER_SCORE = 100
+PREMIUM_CONSENSUS_SINGLE_PROVIDER_SCORE = 60
 EASTMONEY_PAGE_SIZE = 5000
 EASTMONEY_MAX_PAGES = 30
 EASTMONEY_RETRY_ATTEMPTS = 3
@@ -371,15 +374,67 @@ def _quote_field_completeness(quote: NormalizedQuote) -> int:
 
 
 def _normalized_quote_summary(quote: NormalizedQuote) -> dict[str, Any]:
+    premium_discount_bps = _quote_premium_discount_bps(quote)
     return {
         "provider": quote.source,
         "quote_time": quote.quote_time.isoformat(),
         "latest_price": quote.latest_price,
         "change_percent": quote.change_percent,
+        "volume": quote.volume,
         "turnover": quote.turnover,
+        "bid_price": quote.bid_price,
+        "ask_price": quote.ask_price,
+        "iopv": quote.iopv,
+        "premium_discount_pct": quote.premium_discount_pct,
+        "premium_discount_bps": premium_discount_bps,
         "quote_time_is_fallback": bool(quote.raw.get("quote_time_is_fallback")),
         "field_completeness": _quote_field_completeness(quote),
     }
+
+
+def _quote_premium_discount_bps(quote: NormalizedQuote) -> float | None:
+    if quote.iopv is None or not isfinite(quote.iopv) or quote.iopv <= 0:
+        return None
+    premium_bps = (quote.latest_price / quote.iopv - 1.0) * 10_000
+    return premium_bps if isfinite(premium_bps) else None
+
+
+def _premium_consensus(
+    fresh_quotes: list[NormalizedQuote],
+    *,
+    price_consensus_status: str,
+) -> tuple[str, int | None, int, float | None, str | None]:
+    premium_by_provider = {
+        quote.source: premium_bps
+        for quote in fresh_quotes
+        if (premium_bps := _quote_premium_discount_bps(quote)) is not None
+    }
+    provider_count = len(premium_by_provider)
+    if price_consensus_status == CONSENSUS_DIVERGED:
+        return CONSENSUS_DIVERGED, None, provider_count, None, "price_provider_diverged"
+    if not fresh_quotes:
+        return CONSENSUS_STALE, None, 0, None, "no_fresh_provider_quote"
+    if provider_count == 0:
+        return CONSENSUS_UNAVAILABLE, None, 0, None, "missing_provider_iopv"
+    if provider_count == 1:
+        return (
+            CONSENSUS_SINGLE_PROVIDER,
+            PREMIUM_CONSENSUS_SINGLE_PROVIDER_SCORE,
+            1,
+            None,
+            None,
+        )
+    values = list(premium_by_provider.values())
+    dispersion_bps = max(values) - min(values)
+    if dispersion_bps > PREMIUM_DIFF_BPS_TOLERANCE:
+        return CONSENSUS_DIVERGED, None, provider_count, dispersion_bps, "premium_provider_diverged"
+    return (
+        CONSENSUS_CONSISTENT,
+        PREMIUM_CONSENSUS_MULTI_PROVIDER_SCORE,
+        provider_count,
+        dispersion_bps,
+        None,
+    )
 
 
 def _provider_status_summary(result: ProviderQuoteResult) -> dict[str, Any]:
@@ -457,6 +512,13 @@ def select_consensus_quotes(
             if diverged:
                 reason = f"多行情源价格分歧：最大价差约 {price_diff_abs:.4f}，占 {price_diff_pct:.2f}%，仅网页参考。"
         counts[status] += 1
+        (
+            premium_consensus_status,
+            premium_provider_consensus,
+            premium_provider_count,
+            premium_dispersion_bps,
+            premium_consensus_reason,
+        ) = _premium_consensus(fresh_quotes, price_consensus_status=status)
         provider_quotes = [_normalized_quote_summary(quote) for quote in valid_quotes]
         raw = dict(chosen.raw)
         raw.update(
@@ -470,6 +532,13 @@ def select_consensus_quotes(
                 "consensus_status": status,
                 "price_diff_abs": round(price_diff_abs, 6) if price_diff_abs is not None else None,
                 "price_diff_pct": round(price_diff_pct, 4) if price_diff_pct is not None else None,
+                "premium_consensus_status": premium_consensus_status,
+                "premium_provider_consensus": premium_provider_consensus,
+                "premium_provider_count": premium_provider_count,
+                "premium_dispersion_bps": (
+                    round(premium_dispersion_bps, 6) if premium_dispersion_bps is not None else None
+                ),
+                "premium_consensus_reason": premium_consensus_reason,
                 "decision_eligible": decision_eligible,
                 "decision_ineligible_reason": reason,
             }
@@ -624,6 +693,10 @@ async def latest_intraday_quote(session: AsyncSession, etf_code: str) -> QuoteRo
 async def _latest_historical_quotes_by_code(
     session: AsyncSession,
     codes: list[str],
+    *,
+    trade_date: date | None = None,
+    decision_cutoff: datetime | None = None,
+    captured_cutoff: datetime | None = None,
 ) -> dict[str, EtfIntradayQuote]:
     unique_codes = list(dict.fromkeys(code for code in codes if code))
     if not unique_codes:
@@ -632,7 +705,17 @@ async def _latest_historical_quotes_by_code(
     bind = session.get_bind()
     if bind.dialect.name == "postgresql":
         values_sql = ", ".join(f"(:code_{index})" for index in range(len(unique_codes)))
-        params = {f"code_{index}": code for index, code in enumerate(unique_codes)}
+        params: dict[str, Any] = {f"code_{index}": code for index, code in enumerate(unique_codes)}
+        cutoff_filters = ""
+        if trade_date is not None:
+            cutoff_filters += " AND q.trade_date = :trade_date"
+            params["trade_date"] = trade_date
+        if decision_cutoff is not None:
+            cutoff_filters += " AND q.quote_time <= :decision_cutoff"
+            params["decision_cutoff"] = decision_cutoff
+        if captured_cutoff is not None:
+            cutoff_filters += " AND q.created_at <= :captured_cutoff"
+            params["captured_cutoff"] = captured_cutoff
         stmt = text(
             f"""
             WITH watch_codes(etf_code) AS (VALUES {values_sql})
@@ -642,6 +725,7 @@ async def _latest_historical_quotes_by_code(
                 SELECT *
                 FROM etf_intraday_quotes q
                 WHERE q.etf_code = w.etf_code
+                  {cutoff_filters}
                 ORDER BY q.quote_time DESC, q.id DESC
                 LIMIT 1
             ) q ON TRUE
@@ -650,6 +734,13 @@ async def _latest_historical_quotes_by_code(
         rows = (await session.scalars(select(EtfIntradayQuote).from_statement(stmt).params(**params))).all()
         return {row.etf_code: row for row in rows}
 
+    filters: list[Any] = [EtfIntradayQuote.etf_code.in_(unique_codes)]
+    if trade_date is not None:
+        filters.append(EtfIntradayQuote.trade_date == trade_date)
+    if decision_cutoff is not None:
+        filters.append(EtfIntradayQuote.quote_time <= decision_cutoff)
+    if captured_cutoff is not None:
+        filters.append(EtfIntradayQuote.created_at <= captured_cutoff)
     ranked = (
         select(
             EtfIntradayQuote.id.label("quote_id"),
@@ -660,7 +751,7 @@ async def _latest_historical_quotes_by_code(
             )
             .label("rank"),
         )
-        .where(EtfIntradayQuote.etf_code.in_(unique_codes))
+        .where(*filters)
         .subquery()
     )
     rows = (
@@ -671,6 +762,32 @@ async def _latest_historical_quotes_by_code(
         )
     ).all()
     return {row.etf_code: row for row in rows}
+
+
+async def quotes_at_or_before_cutoff(
+    session: AsyncSession,
+    codes: list[str],
+    *,
+    trade_date: date,
+    decision_cutoff: datetime,
+) -> dict[str, EtfIntradayQuote]:
+    market_cutoff = (
+        decision_cutoff.replace(tzinfo=None)
+        if decision_cutoff.tzinfo is None
+        else decision_cutoff.astimezone(ASIA_SHANGHAI).replace(tzinfo=None)
+    )
+    captured_cutoff = (
+        decision_cutoff.replace(tzinfo=ASIA_SHANGHAI)
+        if decision_cutoff.tzinfo is None
+        else decision_cutoff.astimezone(ASIA_SHANGHAI)
+    ).astimezone(UTC).replace(tzinfo=None)
+    return await _latest_historical_quotes_by_code(
+        session,
+        codes,
+        trade_date=trade_date,
+        decision_cutoff=market_cutoff,
+        captured_cutoff=captured_cutoff,
+    )
 
 
 async def latest_quotes_by_code(
@@ -844,15 +961,9 @@ async def _persist_quotes_postgresql(session: AsyncSession, records: list[dict[s
     latest_rows = [{**_postgres_quote_record(record), "created_at": now, "updated_at": now} for record in records]
 
     history_insert = pg_insert(EtfIntradayQuote).values(history_rows)
-    history_update = {
-        field_name: getattr(history_insert.excluded, field_name)
-        for field_name in _QUOTE_DB_FIELDS
-        if field_name not in {"etf_code", "quote_time"}
-    }
     await session.execute(
-        history_insert.on_conflict_do_update(
+        history_insert.on_conflict_do_nothing(
             index_elements=["etf_code", "quote_time"],
-            set_=history_update,
         )
     )
 
@@ -867,7 +978,7 @@ async def _persist_quotes_postgresql(session: AsyncSession, records: list[dict[s
         latest_insert.on_conflict_do_update(
             index_elements=["etf_code"],
             set_=latest_update,
-            where=latest_insert.excluded.quote_time >= EtfIntradayLatestQuote.quote_time,
+            where=latest_insert.excluded.quote_time > EtfIntradayLatestQuote.quote_time,
         )
     )
 
@@ -889,13 +1000,11 @@ async def _persist_quotes_row_by_row(session: AsyncSession, records: list[dict[s
         )
         if existing is None:
             session.add(EtfIntradayQuote(**record))
-        else:
-            _apply_quote_record(existing, record)
 
         latest = await session.get(EtfIntradayLatestQuote, record["etf_code"])
         if latest is None:
             session.add(EtfIntradayLatestQuote(**record))
-        elif record["quote_time"] >= latest.quote_time:
+        elif record["quote_time"] > latest.quote_time:
             _apply_quote_record(latest, record)
 
 

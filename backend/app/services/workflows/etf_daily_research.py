@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
-from sqlalchemy import update
+from sqlalchemy import or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.defaults.short_research import ASSET_TYPE_ETF
 from app.models.entities import EtfDailyWorkflowLock, ShortResearchSignalRun, utcnow
-from app.services.short_research.service import run_signal_generation
+from app.services.market_data import ASIA_SHANGHAI
+from app.services.short_research.snapshot_materialization import materialize_final_score_v3_snapshot
 from app.services.short_research.snapshot_publication import (
     SnapshotPublicationError,
     build_etf_coverage_barrier,
@@ -23,18 +24,65 @@ from app.services.workflows.short_research_data import (
 
 ETF_DAILY_WORKFLOW_RUNNING = "running"
 ETF_DAILY_WORKFLOW_MIN_COVERAGE = 0.95
+ETF_DAILY_WORKFLOW_LOCK_LEASE = timedelta(minutes=30)
 
 
-async def try_acquire_etf_daily_workflow_lock(session: AsyncSession, trade_date: date) -> bool:
+def etf_decision_cutoff(trade_date: date) -> datetime:
+    return datetime.combine(trade_date, time(15, 0))
+
+
+def etf_source_availability_cutoff(
+    trade_date: date,
+    *,
+    now: datetime | None = None,
+) -> datetime:
+    local_now = now or datetime.now(ASIA_SHANGHAI)
+    if local_now.tzinfo is not None:
+        local_now = local_now.astimezone(ASIA_SHANGHAI).replace(tzinfo=None)
+    if local_now.date() != trade_date:
+        return etf_decision_cutoff(trade_date)
+    return max(local_now, etf_decision_cutoff(trade_date))
+
+
+async def generate_and_publish_etf_snapshot(
+    session: AsyncSession,
+    *,
+    trade_date: date,
+    decision_cutoff: datetime,
+    source_availability_cutoff: datetime | None = None,
+) -> ShortResearchSignalRun:
+    source_cutoff = source_availability_cutoff or etf_source_availability_cutoff(trade_date)
+    generated = await materialize_final_score_v3_snapshot(
+        session,
+        trade_date=trade_date,
+        decision_cutoff=decision_cutoff,
+        source_availability_cutoff=source_cutoff,
+    )
+    await session.commit()
+    return await publish_full_snapshot(session, run_id=generated.id)
+
+
+async def try_acquire_etf_daily_workflow_lock(
+    session: AsyncSession,
+    trade_date: date,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    started_at = now or utcnow()
+    lease_cutoff = started_at - ETF_DAILY_WORKFLOW_LOCK_LEASE
     updated = await session.execute(
         update(EtfDailyWorkflowLock)
         .where(
             EtfDailyWorkflowLock.trade_date == trade_date,
-            EtfDailyWorkflowLock.status != ETF_DAILY_WORKFLOW_RUNNING,
+            or_(
+                EtfDailyWorkflowLock.status != ETF_DAILY_WORKFLOW_RUNNING,
+                EtfDailyWorkflowLock.started_at.is_(None),
+                EtfDailyWorkflowLock.started_at < lease_cutoff,
+            ),
         )
         .values(
             status=ETF_DAILY_WORKFLOW_RUNNING,
-            started_at=utcnow(),
+            started_at=started_at,
             finished_at=None,
             details_json={},
         )
@@ -43,7 +91,13 @@ async def try_acquire_etf_daily_workflow_lock(session: AsyncSession, trade_date:
         await session.commit()
         return True
 
-    session.add(EtfDailyWorkflowLock(trade_date=trade_date, status=ETF_DAILY_WORKFLOW_RUNNING))
+    session.add(
+        EtfDailyWorkflowLock(
+            trade_date=trade_date,
+            status=ETF_DAILY_WORKFLOW_RUNNING,
+            started_at=started_at,
+        )
+    )
     try:
         await session.commit()
         return True
@@ -83,13 +137,28 @@ async def run_daily_etf_research_workflow(
 
     try:
         universe = await refresh_etf_universe(session, as_of_date=trade_date)
+        if universe.get("authoritative") is not True:
+            result: dict[str, Any] = {
+                "trade_date": trade_date.isoformat(),
+                "universe": universe,
+                "workflow_status": "universe_failed",
+                "job_status": "failed",
+                "job_message": "ETF universe discovery is not authoritative; frozen membership was preserved",
+            }
+            await finish_etf_daily_workflow_lock(session, trade_date, "failed", result)
+            return result
         sync = await sync_short_research_data_with_tracking_priority(
             session,
             from_date=trade_date - timedelta(days=120),
             to_date=trade_date,
             asset_type=ASSET_TYPE_ETF,
         )
-        coverage = await build_etf_coverage_barrier(session, as_of_trade_date=trade_date)
+        source_cutoff = etf_source_availability_cutoff(trade_date)
+        coverage = await build_etf_coverage_barrier(
+            session,
+            as_of_trade_date=trade_date,
+            data_cutoff=source_cutoff,
+        )
         details: dict[str, Any] = {
             "trade_date": trade_date.isoformat(),
             "universe": universe,
@@ -106,10 +175,17 @@ async def run_daily_etf_research_workflow(
             await finish_etf_daily_workflow_lock(session, trade_date, "failed", result)
             return result
 
-        generated = await run_signal_generation(session, as_of_date=trade_date, asset_type=ASSET_TYPE_ETF)
+        generated = await materialize_final_score_v3_snapshot(
+            session,
+            trade_date=trade_date,
+            decision_cutoff=etf_decision_cutoff(trade_date),
+            source_availability_cutoff=source_cutoff,
+        )
+        await session.commit()
         try:
             published = await publish_full_snapshot(session, run_id=generated.id)
         except SnapshotPublicationError as exc:
+            await session.rollback()
             result = {
                 **details,
                 "signal_run_id": generated.id,
@@ -131,5 +207,6 @@ async def run_daily_etf_research_workflow(
         await finish_etf_daily_workflow_lock(session, trade_date, "success", result)
         return result
     except Exception:
+        await session.rollback()
         await finish_etf_daily_workflow_lock(session, trade_date, "failed", {"trade_date": trade_date.isoformat()})
         raise

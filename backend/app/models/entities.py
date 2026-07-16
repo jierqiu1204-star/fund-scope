@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Collection, Iterator
+from contextlib import contextmanager
 from datetime import date, datetime
 from typing import Any
 
@@ -34,6 +36,25 @@ def utcnow() -> datetime:
 
 class PublishedSnapshotImmutableError(ValueError):
     pass
+
+
+_SNAPSHOT_PUBLICATION_AUTHORIZATION_KEY = "snapshot_publication_authorized_run_ids"
+
+
+@contextmanager
+def authorize_snapshot_publication(session: Session, *, run_id: int) -> Iterator[None]:
+    authorized_run_ids = session.info.setdefault(_SNAPSHOT_PUBLICATION_AUTHORIZATION_KEY, set())
+    if not isinstance(authorized_run_ids, set):
+        raise RuntimeError("invalid snapshot publication authorization state")
+    was_authorized = run_id in authorized_run_ids
+    authorized_run_ids.add(run_id)
+    try:
+        yield
+    finally:
+        if not was_authorized:
+            authorized_run_ids.discard(run_id)
+        if not authorized_run_ids:
+            session.info.pop(_SNAPSHOT_PUBLICATION_AUTHORIZATION_KEY, None)
 
 
 class NotificationEnvelopeImmutableError(ValueError):
@@ -663,6 +684,8 @@ class ShortResearchSignalRun(Base):
     as_of_trade_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     price_basis: Mapped[str | None] = mapped_column(String(64), nullable=True)
     expected_item_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    decision_data_item_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    decision_data_coverage_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
     eligible_item_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     coverage_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
     publication_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -705,6 +728,27 @@ class EtfSignalValidationRun(Base):
             "source_score_field",
             "price_basis",
         ),
+        SaIndex(
+            "ix_etf_signal_validation_runs_ranking_source_kind",
+            "ranking_source_kind",
+        ),
+        SaIndex(
+            "ix_etf_signal_validation_runs_source_replay_run_key",
+            "source_replay_run_key",
+        ),
+        CheckConstraint(
+            "ranking_source_kind IS NULL OR "
+            "ranking_source_kind IN ('production_published', 'research_replay')",
+            name="ck_etf_validation_ranking_source_kind",
+        ),
+        CheckConstraint(
+            "status <> 'success' OR ranking_source_kind IS NULL OR "
+            "(ranking_source_kind = 'research_replay' AND "
+            "source_replay_run_key IS NOT NULL AND source_signal_run_id IS NULL) OR "
+            "(ranking_source_kind = 'production_published' AND "
+            "source_signal_run_id IS NOT NULL AND source_replay_run_key IS NULL)",
+            name="ck_etf_validation_ranking_source_identity",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -717,6 +761,8 @@ class EtfSignalValidationRun(Base):
     )
     asset_type: Mapped[str] = mapped_column(String(16), default="etf")
     validation_mode: Mapped[str] = mapped_column(String(32), default="forward_live")
+    ranking_source_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    source_replay_run_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     rule_version: Mapped[str] = mapped_column(String(64), default="label_validation_v1")
     config_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     summary_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -1789,6 +1835,8 @@ _SEALED_NOTIFICATION_ENVELOPE_FIELDS = frozenset(
 
 def _notification_was_sealed(instance: object, *, item: bool) -> bool:
     state = inspect(instance)
+    if state is None:
+        return False
     if item:
         status = state.attrs.status
         return "sealed" in status.history.deleted or (
@@ -2238,7 +2286,14 @@ class JobRun(Base):
     details_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
-_SNAPSHOT_IDENTITY_FIELDS = (
+_SNAPSHOT_RUN_FIELDS = (
+    "status",
+    "started_at",
+    "finished_at",
+    "as_of_date",
+    "config_json",
+    "summary_json",
+    "error_message",
     "scope_kind",
     "scope_hash",
     "universe_snapshot_hash",
@@ -2251,14 +2306,35 @@ _SNAPSHOT_IDENTITY_FIELDS = (
     "as_of_trade_date",
     "price_basis",
     "expected_item_count",
+    "decision_data_item_count",
+    "decision_data_coverage_ratio",
     "eligible_item_count",
     "coverage_ratio",
+    "published_at",
     "idempotency_key",
 )
-_SNAPSHOT_ITEM_FIELDS = ("run_id", "rank", "global_rank", "total_score", "ranking_score", "score_eligible")
+_SNAPSHOT_ITEM_FIELDS = (
+    "run_id",
+    "asset_type",
+    "asset_code",
+    "rank",
+    "total_score",
+    "conclusion",
+    "score_breakdown_json",
+    "risk_flags_json",
+    "rationale_json",
+    "metrics_json",
+    "created_at",
+    "ranking_score",
+    "score_eligible",
+    "global_rank",
+)
+_INITIAL_PUBLICATION_ALLOWED_RUN_FIELDS = frozenset(
+    {"summary_json", "publication_state", "published_at"}
+)
 
 
-def _changed_fields(instance: object, fields: tuple[str, ...]) -> bool:
+def _changed_fields(instance: object, fields: Collection[str]) -> bool:
     state = inspect(instance)
     if state is None:
         return False
@@ -2268,34 +2344,79 @@ def _changed_fields(instance: object, fields: tuple[str, ...]) -> bool:
 @event.listens_for(Session, "before_flush")
 def _prevent_published_snapshot_mutation(session: Session, _flush_context: object, _instances: object) -> None:
     published_run_ids: set[int] = set()
+    sealing_run_ids: set[int] = set()
     item_run_ids: set[int] = set()
-    changed_items: list[ShortResearchSignalItem] = []
+    authorized_run_ids = session.info.get(_SNAPSHOT_PUBLICATION_AUTHORIZATION_KEY)
+    if not isinstance(authorized_run_ids, set):
+        authorized_run_ids = set()
     for instance in session.dirty:
         if isinstance(instance, ShortResearchSignalRun):
             state = inspect(instance)
-            was_published = instance.publication_state == "published" or "published" in state.attrs.publication_state.history.deleted
-            if was_published and _changed_fields(instance, _SNAPSHOT_IDENTITY_FIELDS):
-                raise PublishedSnapshotImmutableError("published ranking snapshot identity is immutable")
-            if "published" in state.attrs.publication_state.history.deleted:
+            publication_history = state.attrs.publication_state.history
+            initial_publication = (
+                instance.publication_state == "published"
+                and publication_history.has_changes()
+                and "published" not in publication_history.deleted
+            )
+            if initial_publication:
+                if instance.id not in authorized_run_ids:
+                    raise PublishedSnapshotImmutableError(
+                        "initial publication requires the authorized snapshot publisher"
+                    )
+                changed_fields = {
+                    field
+                    for field in (*_SNAPSHOT_RUN_FIELDS, "publication_state")
+                    if state.attrs[field].history.has_changes()
+                }
+                disallowed_fields = changed_fields - _INITIAL_PUBLICATION_ALLOWED_RUN_FIELDS
+                if disallowed_fields:
+                    raise PublishedSnapshotImmutableError(
+                        "initial publication seal cannot include run content changes: "
+                        + ", ".join(sorted(disallowed_fields))
+                    )
+                sealing_run_ids.add(instance.id)
+            was_published = "published" in publication_history.deleted or (
+                instance.publication_state == "published" and not publication_history.has_changes()
+            )
+            if was_published and _changed_fields(instance, _SNAPSHOT_RUN_FIELDS):
+                raise PublishedSnapshotImmutableError("published ranking snapshot content is immutable")
+            if "published" in publication_history.deleted:
                 raise PublishedSnapshotImmutableError("published ranking snapshot is immutable")
         elif isinstance(instance, ShortResearchSignalItem) and _changed_fields(instance, _SNAPSHOT_ITEM_FIELDS):
-            changed_items.append(instance)
             item_run_ids.add(instance.run_id)
             item_run_ids.update(inspect(instance).attrs.run_id.history.deleted)
     for instance in session.new:
+        if isinstance(instance, ShortResearchSignalRun) and instance.publication_state == "published":
+            raise PublishedSnapshotImmutableError(
+                "ranking snapshot cannot be created as published"
+            )
         if isinstance(instance, ShortResearchSignalItem):
-            changed_items.append(instance)
+            item_run_ids.add(instance.run_id)
+    for instance in session.deleted:
+        if isinstance(instance, ShortResearchSignalRun) and instance.publication_state == "published":
+            raise PublishedSnapshotImmutableError("published ranking snapshot is immutable")
+        if isinstance(instance, ShortResearchSignalItem):
             item_run_ids.add(instance.run_id)
     if item_run_ids:
-        published_run_ids = set(
-            session.scalars(
-                select(ShortResearchSignalRun.id).where(
-                    ShortResearchSignalRun.id.in_(item_run_ids),
-                    ShortResearchSignalRun.publication_state == "published",
-                )
+        locked_runs = session.execute(
+            select(
+                ShortResearchSignalRun.id,
+                ShortResearchSignalRun.publication_state,
             )
+            .where(ShortResearchSignalRun.id.in_(item_run_ids))
+            .order_by(ShortResearchSignalRun.id.asc())
+            .with_for_update()
+        ).all()
+        published_run_ids = {
+            run_id
+            for run_id, publication_state in locked_runs
+            if publication_state == "published"
+        }
+    if sealing_run_ids & item_run_ids:
+        raise PublishedSnapshotImmutableError(
+            "initial publication seal cannot include item mutations"
         )
-    if any(item.run_id in published_run_ids for item in changed_items):
+    if published_run_ids & item_run_ids:
         raise PublishedSnapshotImmutableError("published ranking snapshot items are immutable")
 
 

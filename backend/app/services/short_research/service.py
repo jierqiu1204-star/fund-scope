@@ -4,12 +4,12 @@ import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from random import Random
 from statistics import mean, median, pstdev
 from typing import Any, cast
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.defaults.short_research import (
@@ -51,6 +51,12 @@ from app.services.etf_research_evidence import (
     build_evidence_summary,
 )
 from app.services.jobs import sync_fund_nav_history
+from app.services.market_data import (
+    ASIA_SHANGHAI,
+    etf_adjusted_price_provenance_issue,
+    etf_decision_adjusted_provider_versions,
+    etf_quotes_at_decision_cutoff,
+)
 from app.services.portfolio_allocation import (
     PORTFOLIO_CORRELATION_MIN_POINTS,
     PORTFOLIO_ENTRY_TIMING_FORBIDDEN,
@@ -101,11 +107,18 @@ from app.services.short_research.ranking import (
 )
 from app.services.short_research.ranking_contract import (
     RankingInput,
+    canonical_hash,
+    final_score_v3_contract,
     final_score_v3_manifest,
     scope_kind_for_filters,
 )
 from app.services.short_research.sector_trends import build_sector_trend_payloads
-from app.services.short_research.snapshot_selector import snapshot_metadata
+from app.services.short_research.snapshot_selector import (
+    CanonicalSnapshotSelection,
+    required_etf_snapshot_trade_date,
+    resolve_current_canonical_etf_snapshot,
+    snapshot_metadata,
+)
 from app.services.short_research.theme_catalysts import (
     build_asset_opportunity_payload,
     latest_theme_catalyst_snapshots_by_key,
@@ -137,9 +150,11 @@ ENTRY_TIMING_INSUFFICIENT = "数据不足"
 
 STALE_DATA_DAYS = 7
 MIN_AVERAGE_TURNOVER = 50_000_000
-DEFAULT_ETF_SYNC_BATCH_SIZE = 100
+DEFAULT_ETF_SYNC_BATCH_SIZE = 20
 DEFAULT_ETF_SYNC_MAX_BATCHES = 1
 ETF_DAILY_SYNC_CURSOR_SCOPE = "short_research_daily"
+ETF_SNAPSHOT_SCORE_HISTORY_ROWS = 180
+ETF_SNAPSHOT_HISTORY_DIGEST_SCHEMA_VERSION = "v3-adjusted-price-history-v1"
 ETF_JOB_FRESHNESS_WINDOWS = {
     "daily_etf_universe": timedelta(days=2),
     "daily_etf_theme_catalyst": timedelta(days=2),
@@ -204,6 +219,8 @@ class ComputedAsset:
     entry_timing_reason: str
     global_rank: int | None = None
     filtered_position: int | None = None
+    ranking_score: float | None = None
+    score_eligible: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -419,6 +436,9 @@ async def _latest_signal_run(
     theme: str | None = None,
     codes: list[str] | None = None,
 ) -> ShortResearchSignalRun | None:
+    if asset_type == ASSET_TYPE_ETF:
+        selection = await current_etf_snapshot_selection(session)
+        return selection.run
     rows = (
         await session.scalars(
             select(ShortResearchSignalRun)
@@ -431,7 +451,24 @@ async def _latest_signal_run(
         )
     ).all()
     if asset_type is None and theme is None and codes is None:
-        return cast(ShortResearchSignalRun | None, rows[0] if rows else None)
+        canonical_etf_run = (await current_etf_snapshot_selection(session)).run
+        candidates = [
+            row
+            for row in rows
+            if (row.config_json or {}).get("asset_type") == ASSET_TYPE_FUND
+        ]
+        if canonical_etf_run is not None:
+            candidates.append(canonical_etf_run)
+        if not candidates:
+            return None
+        return max(
+            candidates,
+            key=lambda row: (
+                row.as_of_trade_date or row.as_of_date,
+                row.finished_at or row.started_at,
+                row.id,
+            ),
+        )
     for run in rows:
         if _matches_signal_config(run, asset_type=asset_type, theme=theme, codes=codes):
             return run
@@ -507,6 +544,17 @@ def _int_metric(value: Any) -> int | None:
     return None
 
 
+async def current_etf_snapshot_selection(
+    session: AsyncSession,
+    *,
+    now: datetime | None = None,
+) -> CanonicalSnapshotSelection:
+    return await resolve_current_canonical_etf_snapshot(
+        session,
+        required_trade_date=required_etf_snapshot_trade_date(now),
+    )
+
+
 def has_unavailable_theme_catalyst(metrics: Mapping[str, Any]) -> bool:
     status = str(metrics.get("catalyst_status") or "").lower()
     if status == "unavailable":
@@ -552,6 +600,14 @@ def _final_decision_score_from_breakdown(
 
 
 def _final_decision_score(asset: ComputedAsset) -> float | None:
+    if asset.ranking_score is not None or asset.score_eligible is not None:
+        if (
+            asset.score_eligible is True
+            and asset.ranking_score is not None
+            and math.isfinite(asset.ranking_score)
+        ):
+            return float(asset.ranking_score)
+        return None
     return _final_decision_score_from_breakdown(asset.score_breakdown, asset.total_score)
 
 
@@ -589,6 +645,10 @@ def _cached_asset_from_signal_item(
     as_of_date: date | None,
 ) -> ComputedAsset:
     metrics = dict(item.metrics_json or {})
+    if item.ranking_score is not None:
+        metrics["ranking_score"] = float(item.ranking_score)
+    if item.score_eligible is not None:
+        metrics["score_eligible"] = item.score_eligible
     rationale = dict(item.rationale_json or {})
     entry_timing_label = str(
         metrics.get("entry_timing_label")
@@ -605,7 +665,7 @@ def _cached_asset_from_signal_item(
     rationale.setdefault("entry_timing_label", entry_timing_label)
     rationale.setdefault("entry_timing_reason", entry_timing_reason)
     score_breakdown = dict(item.score_breakdown_json or {})
-    final_score_breakdown = score_breakdown.get("final_score_v2")
+    final_score_breakdown = score_breakdown.get("final_score_v3") or score_breakdown.get("final_score_v2")
     score_version = (
         metrics.get("score_version")
         or score_breakdown.get("score_version")
@@ -634,10 +694,17 @@ def _cached_asset_from_signal_item(
         )
     )
     global_rank = item.global_rank if item.global_rank is not None else item.rank
+    ranking_score = float(item.ranking_score) if item.ranking_score is not None else None
+    score_eligible = item.score_eligible
+    canonical_score = (
+        ranking_score
+        if score_eligible is True and ranking_score is not None and math.isfinite(ranking_score)
+        else float(item.total_score)
+    )
     return ComputedAsset(
         metadata=metadata,
         rank=global_rank,
-        total_score=float(item.total_score),
+        total_score=canonical_score,
         conclusion=item.conclusion,
         latest_date=latest_date,
         latest_value=latest_value,
@@ -651,6 +718,8 @@ def _cached_asset_from_signal_item(
         entry_timing_label=entry_timing_label,
         entry_timing_reason=entry_timing_reason,
         global_rank=global_rank,
+        ranking_score=ranking_score,
+        score_eligible=score_eligible,
     )
 
 
@@ -748,8 +817,25 @@ async def _fund_series(session: AsyncSession, code: str, as_of_date: date | None
     ]
 
 
-def _research_adjusted_value(row: EtfPriceHistory) -> float | None:
+def _research_adjusted_value(
+    row: EtfPriceHistory,
+    *,
+    data_cutoff: datetime | None = None,
+) -> float | None:
     value = row.research_adjusted_value
+    if data_cutoff is not None:
+        if row.decision_eligible is not True:
+            return None
+        issue = etf_adjusted_price_provenance_issue(
+            adjusted_value=value,
+            price_basis=row.research_price_basis,
+            data_provider=row.data_provider,
+            provider_version=row.provider_version,
+            source_timestamp=row.source_timestamp,
+            adjustment_version=row.adjustment_version,
+            data_cutoff=data_cutoff,
+        )
+        return None if issue is not None or value is None else float(value)
     if (
         row.decision_eligible is not True
         or row.research_price_basis != "total_return_adjusted"
@@ -761,42 +847,197 @@ def _research_adjusted_value(row: EtfPriceHistory) -> float | None:
     return float(value)
 
 
-async def _etf_series(session: AsyncSession, code: str, as_of_date: date | None = None) -> list[PricePoint]:
+def _price_point_from_etf_history(row: EtfPriceHistory, research_value: float) -> PricePoint:
+    adjustment_factor = (
+        research_value / row.close if math.isfinite(row.close) and row.close > 0 else None
+    )
+    return PricePoint(
+        point_date=row.trade_date,
+        value=research_value,
+        close=row.close,
+        high=row.high * adjustment_factor
+        if adjustment_factor is not None and math.isfinite(row.high) and row.high > 0
+        else None,
+        low=row.low * adjustment_factor
+        if adjustment_factor is not None and math.isfinite(row.low) and row.low > 0
+        else None,
+        turnover=row.turnover,
+        pct_change=row.pct_change / 100,
+    )
+
+
+def _etf_history_digest_payload(
+    row: EtfPriceHistory,
+    point: PricePoint,
+) -> dict[str, Any]:
+    return {
+        "etf_code": row.etf_code,
+        "trade_date": point.point_date,
+        "research_adjusted_value": point.value,
+        "research_price_basis": row.research_price_basis,
+        "close": row.close,
+        "high": row.high,
+        "low": row.low,
+        "turnover": row.turnover,
+        "pct_change": row.pct_change,
+        "data_provider": row.data_provider,
+        "provider_version": row.provider_version,
+        "adjustment_version": row.adjustment_version,
+        "source_timestamp": row.source_timestamp,
+        "decision_eligible": row.decision_eligible,
+    }
+
+
+async def _etf_series(
+    session: AsyncSession,
+    code: str,
+    as_of_date: date | None = None,
+    *,
+    data_cutoff: datetime | None = None,
+) -> list[PricePoint]:
     query = select(EtfPriceHistory).where(EtfPriceHistory.etf_code == code)
     if as_of_date is not None:
         query = query.where(EtfPriceHistory.trade_date <= as_of_date)
     rows = await session.scalars(query.order_by(EtfPriceHistory.trade_date.asc()))
     series: list[PricePoint] = []
     for row in rows.all():
-        research_value = _research_adjusted_value(row)
+        research_value = _research_adjusted_value(row, data_cutoff=data_cutoff)
         if research_value is None:
             continue
-        adjustment_factor = research_value / row.close if math.isfinite(row.close) and row.close > 0 else None
-        series.append(
-            PricePoint(
-                point_date=row.trade_date,
-                value=research_value,
-                close=row.close,
-                high=row.high * adjustment_factor
-                if adjustment_factor is not None and math.isfinite(row.high) and row.high > 0
-                else None,
-                low=row.low * adjustment_factor
-                if adjustment_factor is not None and math.isfinite(row.low) and row.low > 0
-                else None,
-                turnover=row.turnover,
-                pct_change=row.pct_change / 100,
-            )
-        )
+        series.append(_price_point_from_etf_history(row, research_value))
     return series
+
+
+def _cutoff_utc_naive(data_cutoff: datetime) -> datetime:
+    local_cutoff = (
+        data_cutoff.replace(tzinfo=ASIA_SHANGHAI)
+        if data_cutoff.tzinfo is None
+        else data_cutoff.astimezone(ASIA_SHANGHAI)
+    )
+    return local_cutoff.astimezone(UTC).replace(tzinfo=None)
+
+
+async def _prefetch_etf_snapshot_series(
+    session: AsyncSession,
+    *,
+    codes: list[str],
+    as_of_date: date,
+    data_cutoff: datetime,
+) -> tuple[dict[str, list[PricePoint]], dict[str, int], dict[str, str]]:
+    unique_codes = sorted(set(codes))
+    series_by_code: dict[str, list[PricePoint]] = {code: [] for code in unique_codes}
+    usable_days_by_code = {code: 0 for code in unique_codes}
+    if not unique_codes:
+        return series_by_code, usable_days_by_code, {}
+
+    provider_filters = [
+        and_(
+            func.lower(func.trim(EtfPriceHistory.data_provider)) == provider,
+            EtfPriceHistory.provider_version == version,
+            EtfPriceHistory.adjustment_version == version,
+        )
+        for provider, version in etf_decision_adjusted_provider_versions()
+    ]
+    eligible_filters = (
+        EtfPriceHistory.etf_code.in_(unique_codes),
+        EtfPriceHistory.trade_date <= as_of_date,
+        EtfPriceHistory.decision_eligible.is_(True),
+        EtfPriceHistory.research_price_basis == "total_return_adjusted",
+        EtfPriceHistory.research_adjusted_value.is_not(None),
+        EtfPriceHistory.research_adjusted_value > 0,
+        EtfPriceHistory.research_adjusted_value < math.inf,
+        EtfPriceHistory.source_timestamp.is_not(None),
+        EtfPriceHistory.source_timestamp <= _cutoff_utc_naive(data_cutoff),
+        or_(*provider_filters),
+    )
+    ranked = (
+        select(
+            EtfPriceHistory.id.label("price_id"),
+            EtfPriceHistory.etf_code.label("etf_code"),
+            func.row_number()
+            .over(
+                partition_by=EtfPriceHistory.etf_code,
+                order_by=(EtfPriceHistory.trade_date.desc(), EtfPriceHistory.id.desc()),
+            )
+            .label("row_number"),
+            func.count(EtfPriceHistory.id)
+            .over(partition_by=EtfPriceHistory.etf_code)
+            .label("usable_days"),
+        )
+        .where(*eligible_filters)
+        .subquery()
+    )
+    statement = (
+        select(EtfPriceHistory, ranked.c.usable_days)
+        .join(ranked, ranked.c.price_id == EtfPriceHistory.id)
+        .where(ranked.c.row_number <= ETF_SNAPSHOT_SCORE_HISTORY_ROWS)
+        .order_by(
+            EtfPriceHistory.etf_code.asc(),
+            EtfPriceHistory.trade_date.asc(),
+            EtfPriceHistory.id.asc(),
+        )
+        .execution_options(yield_per=500)
+    )
+    rows = await session.stream(statement)
+    history_digest_by_code: dict[str, str] = {}
+    digest_code: str | None = None
+    digest_rows: list[dict[str, Any]] = []
+    async for row, usable_days in rows:
+        research_value = _research_adjusted_value(row, data_cutoff=data_cutoff)
+        if research_value is None:
+            continue
+        if digest_code != row.etf_code:
+            if digest_code is not None:
+                history_digest_by_code[digest_code] = canonical_hash(
+                    {
+                        "schema_version": ETF_SNAPSHOT_HISTORY_DIGEST_SCHEMA_VERSION,
+                        "rows": digest_rows,
+                    }
+                )
+            digest_code = row.etf_code
+            digest_rows = []
+        point = _price_point_from_etf_history(row, research_value)
+        series_by_code[row.etf_code].append(point)
+        usable_days_by_code[row.etf_code] = int(usable_days)
+        digest_rows.append(_etf_history_digest_payload(row, point))
+    if digest_code is not None:
+        history_digest_by_code[digest_code] = canonical_hash(
+            {
+                "schema_version": ETF_SNAPSHOT_HISTORY_DIGEST_SCHEMA_VERSION,
+                "rows": digest_rows,
+            }
+        )
+    empty_digest = canonical_hash(
+        {"schema_version": ETF_SNAPSHOT_HISTORY_DIGEST_SCHEMA_VERSION, "rows": []}
+    )
+    for code in unique_codes:
+        history_digest_by_code.setdefault(code, empty_digest)
+    return series_by_code, usable_days_by_code, history_digest_by_code
+
+
+async def _prefetch_etf_data_health(
+    session: AsyncSession,
+    *,
+    codes: list[str],
+) -> dict[str, EtfDataHealth]:
+    unique_codes = sorted(set(codes))
+    if not unique_codes:
+        return {}
+    rows = await session.scalars(
+        select(EtfDataHealth).where(EtfDataHealth.etf_code.in_(unique_codes))
+    )
+    return {row.etf_code: row for row in rows.all()}
 
 
 async def _series_for_asset(
     session: AsyncSession,
     metadata: ShortResearchAsset,
     as_of_date: date | None = None,
+    *,
+    data_cutoff: datetime | None = None,
 ) -> list[PricePoint]:
     if metadata.asset_type == ASSET_TYPE_ETF:
-        return await _etf_series(session, metadata.code, as_of_date)
+        return await _etf_series(session, metadata.code, as_of_date, data_cutoff=data_cutoff)
     return await _fund_series(session, metadata.code, as_of_date)
 
 
@@ -1052,8 +1293,14 @@ def _risk_text(flags: list[str]) -> str:
     return "；".join(f"{flag}：{explanations.get(flag, '需要额外谨慎。')}" for flag in flags)
 
 
-def _score_metrics(metadata: ShortResearchAsset, series: list[PricePoint], as_of_date: date) -> dict[str, Any]:
-    usable_days = len(series)
+def _score_metrics(
+    metadata: ShortResearchAsset,
+    series: list[PricePoint],
+    as_of_date: date,
+    *,
+    usable_days_override: int | None = None,
+) -> dict[str, Any]:
+    usable_days = len(series) if usable_days_override is None else usable_days_override
     latest_date = series[-1].point_date if series else None
     latest_value = series[-1].value if series else None
     volatility_points = series[-21:]
@@ -3322,10 +3569,10 @@ def _data_quality_from_reasons(reasons: list[str]) -> float:
     return round(max(0.0, score), 2)
 
 
-async def _quality_gate_reasons(
-    session: AsyncSession,
+def _quality_gate_reasons_from_health(
     asset: ComputedAsset,
     as_of_date: date,
+    health: EtfDataHealth | None,
 ) -> list[str]:
     if asset.metadata.asset_type != ASSET_TYPE_ETF:
         return []
@@ -3339,18 +3586,30 @@ async def _quality_gate_reasons(
     turnover = asset.metrics.get("average_turnover_20d")
     if turnover is None or float(turnover) < MIN_AVERAGE_TURNOVER:
         reasons.append("近 20 日平均成交额偏低，流动性不足")
-    health = await session.scalar(select(EtfDataHealth).where(EtfDataHealth.etf_code == asset.metadata.code))
     if health is not None and int(health.consecutive_failures or 0) >= 3:
         reasons.append("数据源连续同步失败")
     return reasons
 
 
-async def _with_quality_metrics(
+async def _quality_gate_reasons(
     session: AsyncSession,
     asset: ComputedAsset,
     as_of_date: date,
+) -> list[str]:
+    health = None
+    if asset.metadata.asset_type == ASSET_TYPE_ETF:
+        health = await session.scalar(
+            select(EtfDataHealth).where(EtfDataHealth.etf_code == asset.metadata.code)
+        )
+    return _quality_gate_reasons_from_health(asset, as_of_date, health)
+
+
+def _with_quality_metrics_from_health(
+    asset: ComputedAsset,
+    as_of_date: date,
+    health: EtfDataHealth | None,
 ) -> ComputedAsset:
-    reasons = await _quality_gate_reasons(session, asset, as_of_date)
+    reasons = _quality_gate_reasons_from_health(asset, as_of_date, health)
     data_quality_score = _data_quality_from_reasons(reasons)
     metrics = {
         **asset.metrics,
@@ -3369,6 +3628,19 @@ async def _with_quality_metrics(
         metrics=metrics,
         score_breakdown=score_breakdown,
     )
+
+
+async def _with_quality_metrics(
+    session: AsyncSession,
+    asset: ComputedAsset,
+    as_of_date: date,
+) -> ComputedAsset:
+    health = None
+    if asset.metadata.asset_type == ASSET_TYPE_ETF:
+        health = await session.scalar(
+            select(EtfDataHealth).where(EtfDataHealth.etf_code == asset.metadata.code)
+        )
+    return _with_quality_metrics_from_health(asset, as_of_date, health)
 
 
 def _with_final_score_v2(assets: list[ComputedAsset]) -> list[ComputedAsset]:
@@ -3517,11 +3789,81 @@ async def _with_opportunity_scores(
     return updated
 
 
-def _v3_premium_inputs(
-    quote: EtfIntradayLatestQuote | None,
+def _exchange_naive(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(ASIA_SHANGHAI).replace(tzinfo=None)
+
+
+def _v3_quote_window_status(
+    quote: Any,
     *,
     as_of_date: date,
-    now: datetime | None = None,
+    decision_cutoff: datetime,
+) -> str | None:
+    observed_at = getattr(quote, "quote_time", None)
+    if not isinstance(observed_at, datetime) or getattr(quote, "trade_date", None) != as_of_date:
+        return "stale"
+    observed_at = _exchange_naive(observed_at)
+    cutoff = _exchange_naive(decision_cutoff)
+    if observed_at > cutoff:
+        return "after_decision_cutoff"
+    if observed_at < cutoff - timedelta(minutes=15):
+        return "stale"
+    return None
+
+
+def _provider_premium_values(
+    raw: Mapping[str, Any],
+    *,
+    as_of_date: date,
+    decision_cutoff: datetime,
+) -> list[float]:
+    provider_quotes = raw.get("provider_quotes")
+    if not isinstance(provider_quotes, list):
+        return []
+    values_by_provider: dict[str, float] = {}
+    cutoff = _exchange_naive(decision_cutoff)
+    for evidence in provider_quotes:
+        if not isinstance(evidence, Mapping) or evidence.get("quote_time_is_fallback") is True:
+            continue
+        provider = str(evidence.get("provider") or "").strip()
+        observed_value = evidence.get("quote_time")
+        try:
+            observed_at = (
+                observed_value
+                if isinstance(observed_value, datetime)
+                else datetime.fromisoformat(str(observed_value))
+            )
+        except (TypeError, ValueError):
+            continue
+        observed_at = _exchange_naive(observed_at)
+        latest_price = evidence.get("latest_price")
+        iopv = evidence.get("iopv")
+        if (
+            not provider
+            or observed_at.date() != as_of_date
+            or observed_at > cutoff
+            or observed_at < cutoff - timedelta(minutes=15)
+            or isinstance(latest_price, bool)
+            or isinstance(iopv, bool)
+            or not isinstance(latest_price, int | float)
+            or not isinstance(iopv, int | float)
+            or not math.isfinite(float(latest_price))
+            or not math.isfinite(float(iopv))
+            or float(latest_price) <= 0
+            or float(iopv) <= 0
+        ):
+            continue
+        values_by_provider[provider] = (float(latest_price) / float(iopv) - 1.0) * 10_000
+    return list(values_by_provider.values())
+
+
+def _v3_premium_inputs(
+    quote: EtfIntradayLatestQuote | Any | None,
+    *,
+    as_of_date: date,
+    decision_cutoff: datetime,
 ) -> dict[str, Any]:
     base = {
         "premium_discount_bps": None,
@@ -3533,26 +3875,68 @@ def _v3_premium_inputs(
     }
     if quote is None:
         return base
-    observed_at = quote.quote_time
+    observed_at = getattr(quote, "quote_time", None)
+    if not isinstance(observed_at, datetime):
+        return base
     base["iopv_observed_at"] = observed_at.isoformat()
-    base["premium_source_date"] = quote.trade_date.isoformat()
-    cutoff = now or utcnow()
-    if quote.trade_date != as_of_date or observed_at < cutoff - timedelta(minutes=15):
-        return {**base, "premium_input_status": "stale", "premium_input_reliability": "stale"}
-    if quote.freshness_status != "fresh" or quote.premium_discount_pct is None:
+    source_date = getattr(quote, "trade_date", None)
+    base["premium_source_date"] = source_date.isoformat() if isinstance(source_date, date) else None
+    window_status = _v3_quote_window_status(
+        quote,
+        as_of_date=as_of_date,
+        decision_cutoff=decision_cutoff,
+    )
+    if window_status is not None:
+        reliability = "stale" if window_status == "stale" else "unavailable"
+        return {**base, "premium_input_status": window_status, "premium_input_reliability": reliability}
+    raw = quote.raw_json if isinstance(getattr(quote, "raw_json", None), Mapping) else {}
+    if (
+        getattr(quote, "freshness_status", None) != "fresh"
+        or raw.get("quote_time_is_fallback") is True
+        or raw.get("decision_eligible") is not True
+        or raw.get("consensus_status") not in {"consistent", "single_provider"}
+    ):
         return base
-    premium = float(quote.premium_discount_pct)
-    if not math.isfinite(premium):
+    latest_price = getattr(quote, "latest_price", None)
+    iopv = getattr(quote, "iopv", None)
+    if (
+        isinstance(latest_price, bool)
+        or isinstance(iopv, bool)
+        or not isinstance(latest_price, int | float)
+        or not isinstance(iopv, int | float)
+        or not math.isfinite(float(latest_price))
+        or not math.isfinite(float(iopv))
+        or float(latest_price) <= 0
+        or float(iopv) <= 0
+    ):
         return base
-    raw = quote.raw_json if isinstance(quote.raw_json, Mapping) else {}
-    consensus = raw.get("premium_provider_consensus")
-    consensus_value = float(consensus) if isinstance(consensus, int | float) and math.isfinite(float(consensus)) else None
+    provider_values = _provider_premium_values(
+        raw,
+        as_of_date=as_of_date,
+        decision_cutoff=decision_cutoff,
+    )
+    contract = final_score_v3_contract()
+    consensus_policy = contract["freshness"]["premium_discount"]["provider_consensus"]
+    minimum_providers = int(consensus_policy["minimum_independent_providers"])
+    maximum_dispersion_bps = float(consensus_policy["maximum_premium_dispersion_bps"])
+    if not provider_values:
+        return base
+    if len(provider_values) == 1:
+        consensus_value = float(consensus_policy["eligible_single_provider_score"])
+        reliability = "alternate_provider"
+    else:
+        dispersion_bps = max(provider_values) - min(provider_values)
+        if len(provider_values) < minimum_providers or dispersion_bps > maximum_dispersion_bps:
+            return base
+        consensus_value = float(consensus_policy["consistent_multi_provider_score"])
+        reliability = "verified"
+    premium_bps = (float(latest_price) / float(iopv) - 1.0) * 10_000
     return {
         **base,
-        "premium_discount_bps": round(premium * 100, 4),
+        "premium_discount_bps": round(premium_bps, 4),
         "premium_provider_consensus": consensus_value,
-        "premium_input_status": "verified",
-        "premium_input_reliability": "verified",
+        "premium_input_status": reliability,
+        "premium_input_reliability": reliability,
     }
 
 
@@ -3561,7 +3945,7 @@ def _v3_structure_inputs(
     *,
     metrics: Mapping[str, Any],
     as_of_date: date,
-    now: datetime | None = None,
+    decision_cutoff: datetime,
 ) -> dict[str, Any]:
     base = {
         "spread_bps": None,
@@ -3576,12 +3960,20 @@ def _v3_structure_inputs(
     if not isinstance(observed_at, datetime):
         return base
     base["structure_source_date"] = observed_at.isoformat()
-    cutoff = now or utcnow()
+    window_status = _v3_quote_window_status(
+        quote,
+        as_of_date=as_of_date,
+        decision_cutoff=decision_cutoff,
+    )
+    raw = quote.raw_json if isinstance(getattr(quote, "raw_json", None), Mapping) else {}
+    consensus_status = raw.get("consensus_status")
     if (
-        getattr(quote, "trade_date", None) != as_of_date
-        or observed_at < cutoff - timedelta(minutes=15)
+        window_status is not None
         or getattr(quote, "freshness_status", None) != "fresh"
         or metrics.get("default_display_eligible") is False
+        or raw.get("quote_time_is_fallback") is True
+        or raw.get("decision_eligible") is not True
+        or consensus_status not in {"consistent", "single_provider"}
     ):
         return base
     bid = getattr(quote, "bid_price", None)
@@ -3601,12 +3993,13 @@ def _v3_structure_inputs(
     midpoint = (float(bid) + float(ask)) / 2
     if midpoint <= 0:
         return base
+    reliability = "verified" if consensus_status == "consistent" else "alternate_provider"
     return {
         **base,
         "spread_bps": round((float(ask) - float(bid)) / midpoint * 10_000, 4),
         "structure_quality": round(max(0.0, min(100.0, float(quality))), 4),
-        "structure_input_status": "verified",
-        "structure_input_reliability": "verified",
+        "structure_input_status": reliability,
+        "structure_input_reliability": reliability,
     }
 
 
@@ -3668,6 +4061,8 @@ async def _with_final_score_v3_shadow(
     session: AsyncSession,
     assets: list[ComputedAsset],
     as_of_date: date,
+    *,
+    decision_cutoff: datetime,
 ) -> list[ComputedAsset]:
     etf_assets = [asset for asset in assets if asset.metadata.asset_type == ASSET_TYPE_ETF]
     if not etf_assets:
@@ -3690,19 +4085,26 @@ async def _with_final_score_v3_shadow(
     underlying_by_code: dict[str, str | None] = {}
     for row in membership_rows:
         underlying_by_code.setdefault(row.etf_code, row.tracked_underlying_id)
-    quote_rows = (
-        await session.scalars(select(EtfIntradayLatestQuote).where(EtfIntradayLatestQuote.etf_code.in_(codes)))
-    ).all()
+    quote_by_code = await etf_quotes_at_decision_cutoff(
+        session,
+        codes,
+        trade_date=as_of_date,
+        decision_cutoff=decision_cutoff,
+    )
     premium_by_code = {
-        quote.etf_code: _v3_premium_inputs(quote, as_of_date=as_of_date)
-        for quote in quote_rows
+        quote.etf_code: _v3_premium_inputs(
+            quote,
+            as_of_date=as_of_date,
+            decision_cutoff=decision_cutoff,
+        )
+        for quote in quote_by_code.values()
     }
-    quote_by_code = {quote.etf_code: quote for quote in quote_rows}
     structure_by_code = {
         asset.metadata.code: _v3_structure_inputs(
             quote_by_code.get(asset.metadata.code),
             metrics=asset.metrics,
             as_of_date=as_of_date,
+            decision_cutoff=decision_cutoff,
         )
         for asset in etf_assets
     }
@@ -3731,7 +4133,7 @@ async def _with_final_score_v3_shadow(
         code: _v3_theme_catalyst_inputs(
             [event for key in keys for event in events_by_key.get(key, [])],
             as_of_date=as_of_date,
-            cutoff=datetime.combine(as_of_date, datetime.max.time()),
+            cutoff=decision_cutoff,
         )
         for code, keys in theme_keys_by_code.items()
     }
@@ -3743,14 +4145,26 @@ async def _with_final_score_v3_shadow(
             profile_version=str(asset.metrics.get("ranking_profile_version") or "unknown"),
             values={
                 **asset.metrics,
-                **premium_by_code.get(asset.metadata.code, _v3_premium_inputs(None, as_of_date=as_of_date)),
+                **premium_by_code.get(
+                    asset.metadata.code,
+                    _v3_premium_inputs(
+                        None,
+                        as_of_date=as_of_date,
+                        decision_cutoff=decision_cutoff,
+                    ),
+                ),
                 **structure_by_code.get(
                     asset.metadata.code,
-                    _v3_structure_inputs(None, metrics=asset.metrics, as_of_date=as_of_date),
+                    _v3_structure_inputs(
+                        None,
+                        metrics=asset.metrics,
+                        as_of_date=as_of_date,
+                        decision_cutoff=decision_cutoff,
+                    ),
                 ),
                 **theme_by_code.get(
                     asset.metadata.code,
-                    _v3_theme_catalyst_inputs([], as_of_date=as_of_date, cutoff=datetime.combine(as_of_date, datetime.max.time())),
+                    _v3_theme_catalyst_inputs([], as_of_date=as_of_date, cutoff=decision_cutoff),
                 ),
                 "tracked_underlying_id": underlying_by_code.get(asset.metadata.code),
                 "quality_gate_rejected": asset.metrics.get("default_display_eligible") is False,
@@ -3794,21 +4208,51 @@ async def _with_final_score_v3_shadow(
         )
         for ranking_input in base_inputs
     ]
-    results = score_final_score_v3(inputs, manifest=final_score_v3_manifest())
+    manifest = final_score_v3_manifest()
+    results = score_final_score_v3(inputs, manifest=manifest)
+    input_by_code = {ranking_input.asset_code: ranking_input for ranking_input in inputs}
+    contract_input_keys = {
+        key
+        for component in manifest.components.values()
+        for key in component.required_inputs
+    }
+    contract_input_keys.update(
+        {
+            "component_reliability",
+            "component_source_dates",
+            "distance_to_ma20",
+            "quality_gate_rejected",
+            "risk_flags",
+            "theme_group",
+            "tracked_underlying_id",
+        }
+    )
     updated: list[ComputedAsset] = []
     for asset in assets:
         result = results.get(asset.metadata.code)
         if result is None:
             updated.append(asset)
             continue
-        premium_inputs = premium_by_code.get(asset.metadata.code, _v3_premium_inputs(None, as_of_date=as_of_date))
+        premium_inputs = premium_by_code.get(
+            asset.metadata.code,
+            _v3_premium_inputs(
+                None,
+                as_of_date=as_of_date,
+                decision_cutoff=decision_cutoff,
+            ),
+        )
         structure_inputs = structure_by_code.get(
             asset.metadata.code,
-            _v3_structure_inputs(None, metrics=asset.metrics, as_of_date=as_of_date),
+            _v3_structure_inputs(
+                None,
+                metrics=asset.metrics,
+                as_of_date=as_of_date,
+                decision_cutoff=decision_cutoff,
+            ),
         )
         theme_inputs = theme_by_code.get(
             asset.metadata.code,
-            _v3_theme_catalyst_inputs([], as_of_date=as_of_date, cutoff=datetime.combine(as_of_date, datetime.max.time())),
+            _v3_theme_catalyst_inputs([], as_of_date=as_of_date, cutoff=decision_cutoff),
         )
         component_source_dates = dict(asset.metrics.get("component_source_dates") or {})
         component_source_dates["premium_discount"] = premium_inputs["premium_source_date"]
@@ -3847,6 +4291,10 @@ async def _with_final_score_v3_shadow(
             "v3_observation_explanation": v3_observation_explanation,
             "v3_metric_peer_counts": dict(result.metric_peer_counts),
             "v3_missing_by_component": dict(result.missing_by_component),
+            "v3_input_values": {
+                key: input_by_code[asset.metadata.code].values.get(key)
+                for key in sorted(contract_input_keys)
+            },
             "tracked_underlying_id": underlying_by_code.get(asset.metadata.code),
         }
         updated.append(
@@ -3876,10 +4324,25 @@ async def compute_asset(
     *,
     as_of_date: date | None = None,
     rank: int | None = None,
+    data_cutoff: datetime | None = None,
+    prefetched_series: list[PricePoint] | None = None,
+    usable_days_override: int | None = None,
+    prefetched_health: EtfDataHealth | None = None,
+    health_prefetched: bool = False,
+    adjusted_price_history_digest: str | None = None,
 ) -> ComputedAsset:
     effective_date = as_of_date or await latest_data_date(session) or date.today()
-    series = await _series_for_asset(session, metadata, effective_date)
-    metrics = _score_metrics(metadata, series, effective_date)
+    series = (
+        prefetched_series
+        if prefetched_series is not None
+        else await _series_for_asset(session, metadata, effective_date, data_cutoff=data_cutoff)
+    )
+    metrics = _score_metrics(
+        metadata,
+        series,
+        effective_date,
+        usable_days_override=usable_days_override,
+    )
     conclusion = _conclusion(metrics)
     source_note = "公开 ETF 日线数据" if metadata.asset_type == ASSET_TYPE_ETF else "公开基金净值数据"
     score_breakdown = {
@@ -3942,49 +4405,56 @@ async def compute_asset(
         usable_days=int(metrics["usable_days"]),
         sample_level=_sample_level(int(metrics["usable_days"])),
         metrics={
-            key: metrics[key]
-            for key in (
-                "return_5d",
-                "return_10d",
-                "return_20d",
-                "return_60d",
-                "volatility_20d",
-                "realized_volatility_20d",
-                "downside_volatility_20d",
-                "max_drawdown_20d",
-                "max_drawdown_60d",
-                "average_turnover_20d",
-                "average_turnover_60d",
-                "today_return_pct",
-                "ma5",
-                "ma10",
-                "ma20",
-                "distance_to_ma5_pct",
-                "distance_to_ma10_pct",
-                "distance_to_ma20_pct",
-                "trend_consistency",
-                "overextension_atr",
-                "overextension_atr_status",
-                "spread_bps",
-                "structure_quality",
-                "premium_discount_bps",
-                "premium_provider_consensus",
-                "premium_input_status",
-                "source_trade_date",
-                "market_data_reliability",
-                "component_source_dates",
-                "component_reliability",
-                "effective_windows",
-                "pullback_from_5d_high_pct",
-                "pullback_from_20d_high_pct",
-                "volume_ratio_20d",
-                "entry_timing_label",
-                "entry_timing_reason",
-                "theme_profile",
-                "ranking_asset_bucket",
-                "ranking_profile_version",
-                "dynamic_threshold_context",
-            )
+            **(
+                {"v3_adjusted_price_history_digest": adjusted_price_history_digest}
+                if adjusted_price_history_digest is not None
+                else {}
+            ),
+            **{
+                key: metrics[key]
+                for key in (
+                    "return_5d",
+                    "return_10d",
+                    "return_20d",
+                    "return_60d",
+                    "volatility_20d",
+                    "realized_volatility_20d",
+                    "downside_volatility_20d",
+                    "max_drawdown_20d",
+                    "max_drawdown_60d",
+                    "average_turnover_20d",
+                    "average_turnover_60d",
+                    "today_return_pct",
+                    "ma5",
+                    "ma10",
+                    "ma20",
+                    "distance_to_ma5_pct",
+                    "distance_to_ma10_pct",
+                    "distance_to_ma20_pct",
+                    "trend_consistency",
+                    "overextension_atr",
+                    "overextension_atr_status",
+                    "spread_bps",
+                    "structure_quality",
+                    "premium_discount_bps",
+                    "premium_provider_consensus",
+                    "premium_input_status",
+                    "source_trade_date",
+                    "market_data_reliability",
+                    "component_source_dates",
+                    "component_reliability",
+                    "effective_windows",
+                    "pullback_from_5d_high_pct",
+                    "pullback_from_20d_high_pct",
+                    "volume_ratio_20d",
+                    "entry_timing_label",
+                    "entry_timing_reason",
+                    "theme_profile",
+                    "ranking_asset_bucket",
+                    "ranking_profile_version",
+                    "dynamic_threshold_context",
+                )
+            },
         },
         score_breakdown=score_breakdown,
         risk_flags=list(metrics["risk_flags"]),
@@ -3993,6 +4463,8 @@ async def compute_asset(
         entry_timing_label=str(metrics["entry_timing_label"]),
         entry_timing_reason=str(metrics["entry_timing_reason"]),
     )
+    if health_prefetched:
+        return _with_quality_metrics_from_health(computed, effective_date, prefetched_health)
     return await _with_quality_metrics(session, computed, effective_date)
 
 
@@ -4174,6 +4646,52 @@ def _dedupe_etf_candidates(assets: list[ComputedAsset]) -> list[ComputedAsset]:
     return list(best_by_key.values())
 
 
+async def compute_etf_snapshot_assets(
+    session: AsyncSession,
+    *,
+    codes: list[str],
+    as_of_date: date,
+    decision_cutoff: datetime,
+    data_cutoff: datetime | None = None,
+) -> list[ComputedAsset]:
+    candidates = await _available_assets(session, asset_type=ASSET_TYPE_ETF, codes=codes)
+    candidate_codes = [candidate.code for candidate in candidates]
+    effective_data_cutoff = data_cutoff or decision_cutoff
+    series_by_code, usable_days_by_code, history_digest_by_code = (
+        await _prefetch_etf_snapshot_series(
+            session,
+            codes=candidate_codes,
+            as_of_date=as_of_date,
+            data_cutoff=effective_data_cutoff,
+        )
+    )
+    health_by_code = await _prefetch_etf_data_health(session, codes=candidate_codes)
+    computed: list[ComputedAsset] = []
+    for item in candidates:
+        computed.append(
+            await compute_asset(
+                session,
+                item,
+                as_of_date=as_of_date,
+                data_cutoff=effective_data_cutoff,
+                prefetched_series=series_by_code[item.code],
+                usable_days_override=usable_days_by_code[item.code],
+                prefetched_health=health_by_code.get(item.code),
+                health_prefetched=True,
+                adjusted_price_history_digest=history_digest_by_code[item.code],
+            )
+        )
+    computed = _with_final_score_v2(computed)
+    computed = _with_sector_trend_scores(computed)
+    computed = await _with_opportunity_scores(session, computed, as_of_date)
+    return await _with_final_score_v3_shadow(
+        session,
+        computed,
+        as_of_date,
+        decision_cutoff=decision_cutoff,
+    )
+
+
 async def list_computed_assets(
     session: AsyncSession,
     *,
@@ -4183,16 +4701,31 @@ async def list_computed_assets(
     codes: list[str] | None = None,
     sort: str = "score",
     universe: str = UNIVERSE_DEFAULT,
+    decision_cutoff: datetime | None = None,
 ) -> list[ComputedAsset]:
     await ensure_short_research_universe(session)
     effective_date = as_of_date or await latest_data_date(session) or date.today()
     candidates = await _available_assets(session, asset_type=asset_type)
-    computed = [await compute_asset(session, item, as_of_date=effective_date) for item in candidates]
+    computed = [
+        await compute_asset(
+            session,
+            item,
+            as_of_date=effective_date,
+            data_cutoff=decision_cutoff,
+        )
+        for item in candidates
+    ]
     if asset_type == ASSET_TYPE_ETF or any(item.metadata.asset_type == ASSET_TYPE_ETF for item in computed):
         computed = _with_final_score_v2(computed)
         computed = _with_sector_trend_scores(computed)
         computed = await _with_opportunity_scores(session, computed, effective_date)
-        computed = await _with_final_score_v3_shadow(session, computed, effective_date)
+        effective_cutoff = decision_cutoff or datetime.now(ASIA_SHANGHAI).replace(tzinfo=None)
+        computed = await _with_final_score_v3_shadow(
+            session,
+            computed,
+            effective_date,
+            decision_cutoff=effective_cutoff,
+        )
     if asset_type == ASSET_TYPE_ETF and universe not in {UNIVERSE_DEFAULT, UNIVERSE_ALL, UNIVERSE_ILLIQUID}:
         raise ValueError("ETF universe 只支持 default、all、illiquid")
     computed.sort(key=lambda item: _sort_key(item, sort))
@@ -4218,6 +4751,7 @@ async def get_asset_detail(
     source_run: ShortResearchSignalRun | None = None,
 ) -> tuple[ComputedAsset, list[dict[str, Any]], dict[str, str]]:
     await ensure_short_research_universe(session)
+    detail_data_cutoff: datetime | None = None
     if asset_type == ASSET_TYPE_ETF:
         if SHORT_RESEARCH_ASSET_BY_KEY.get((asset_type, code)) is None:
             etf = await session.scalar(select(TradableEtf).where(TradableEtf.code == code))
@@ -4238,6 +4772,7 @@ async def get_asset_detail(
         if not cached_assets:
             raise ValueError("等待 ETF 信号生成后再查看当前评分")
         computed = cached_assets[0]
+        detail_data_cutoff = run.data_cutoff
     else:
         metadata = SHORT_RESEARCH_ASSET_BY_KEY.get((asset_type, code))
         if metadata is None:
@@ -4250,7 +4785,12 @@ async def get_asset_detail(
                 raise ValueError("资产类型只支持 fund 或 etf")
         computed = await compute_asset(session, metadata, as_of_date=as_of_date)
     detail_date = as_of_date or computed.latest_date or await latest_data_date(session)
-    series = await _series_for_asset(session, computed.metadata, detail_date)
+    series = await _series_for_asset(
+        session,
+        computed.metadata,
+        detail_date,
+        data_cutoff=detail_data_cutoff,
+    )
     recent = series[-240:]
     drawdowns = _drawdown_series(recent)
     chart = [
@@ -4779,11 +5319,13 @@ async def _select_bounded_etf_sync_codes(
             return 0
         return 1 if latest_date < to_date else 2
 
+    gaps = {code for code in code_set if freshness(code) < 2}
+    selection_pool = gaps or code_set
     priority = sorted(
-        priority_set | default_display_codes,
+        (priority_set | default_display_codes) & selection_pool,
         key=lambda code: (freshness(code), 0 if code in priority_set else 1, code),
     )
-    regular = sorted(code_set - set(priority), key=lambda code: (freshness(code), code))
+    regular = sorted(selection_pool - set(priority), key=lambda code: (freshness(code), code))
     cursor = await session.get(EtfSyncCursor, ETF_DAILY_SYNC_CURSOR_SCOPE)
     priority_codes_rotated = _rotate_sync_codes(priority, cursor.last_priority_code if cursor else None)
     regular_codes_rotated = _rotate_sync_codes(regular, cursor.last_regular_code if cursor else None)
@@ -5304,10 +5846,17 @@ async def _portfolio_return_maps(
     session: AsyncSession,
     assets: list[ComputedAsset],
     as_of_date: date | None,
+    *,
+    data_cutoff: datetime | None,
 ) -> dict[str, dict[date, float]]:
     result: dict[str, dict[date, float]] = {}
     for asset in assets:
-        series = await _etf_series(session, asset.metadata.code, as_of_date)
+        series = await _etf_series(
+            session,
+            asset.metadata.code,
+            as_of_date,
+            data_cutoff=data_cutoff,
+        )
         returns = _series_return_by_date(series)
         if len(returns) >= _PORTFOLIO_CORRELATION_MIN_POINTS:
             result[asset.metadata.code] = returns
@@ -5607,7 +6156,18 @@ async def run_etf_observation_portfolio_optimization(
 
 async def _attach_optimized_allocation(session: AsyncSession, portfolio: dict[str, Any]) -> dict[str, Any]:
     snapshot = await latest_optimized_allocation_snapshot(session)
-    portfolio["optimized_allocation"] = await optimized_allocation_payload(session, snapshot)
+    source_metadata = portfolio.get("source_ranking_snapshot")
+    source_signal_run_id = source_metadata.get("snapshot_id") if isinstance(source_metadata, dict) else None
+    if (
+        snapshot is not None
+        and (source_signal_run_id is None or snapshot.source_signal_run_id != source_signal_run_id)
+    ):
+        snapshot = None
+    portfolio["optimized_allocation"] = await optimized_allocation_payload(
+        session,
+        snapshot,
+        expected_source_signal_run_id=source_signal_run_id,
+    )
     return portfolio
 
 
@@ -5621,12 +6181,17 @@ async def etf_observation_portfolio(
     include_optimized: bool = True,
     source_run: ShortResearchSignalRun | None = None,
 ) -> dict[str, Any]:
+    run = source_run or await latest_signal_run(session, asset_type=ASSET_TYPE_ETF)
     if use_snapshot and source_run is None and universe == UNIVERSE_DEFAULT:
         snapshot = await latest_observation_portfolio_snapshot(session)
-        if snapshot is not None and _observation_snapshot_is_usable(snapshot):
+        if (
+            run is not None
+            and snapshot is not None
+            and snapshot.source_signal_run_id == run.id
+            and _observation_snapshot_is_usable(snapshot)
+        ):
             portfolio = await observation_portfolio_from_snapshot(session, snapshot)
             return await _attach_optimized_allocation(session, portfolio) if include_optimized else portfolio
-    run = source_run or await latest_signal_run(session, asset_type=ASSET_TYPE_ETF)
     if run is None:
         portfolio = {
             "as_of_date": as_of_date or await latest_data_date(session) or date.today(),
@@ -5715,6 +6280,7 @@ async def etf_observation_portfolio(
             *[asset for asset, _reason in watch_only_candidates],
         ],
         run.as_of_date,
+        data_cutoff=run.data_cutoff,
     )
     selected_assets: list[ComputedAsset] = []
     selected_return_maps: dict[str, dict[date, float]] = {}

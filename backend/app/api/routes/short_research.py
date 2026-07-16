@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import date, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from sqlalchemy import select
@@ -86,6 +86,7 @@ from app.services.short_research.service import (
     VALIDATION_MODE_SCORE_BUCKET_REPLAY,
     ComputedAsset,
     cached_signal_assets,
+    current_etf_snapshot_selection,
     etf_observation_portfolio,
     get_asset_detail,
     has_available_opportunity_score,
@@ -199,6 +200,8 @@ def _asset_out(
         code=asset.metadata.code,
         name=asset.metadata.name,
         rank=asset.rank,
+        ranking_score=round(asset.ranking_score, 4) if asset.ranking_score is not None else None,
+        score_eligible=asset.score_eligible,
         global_rank=asset.global_rank if asset.global_rank is not None else asset.rank,
         filtered_position=asset.filtered_position,
         total_score=round(asset.total_score, 2),
@@ -375,12 +378,35 @@ async def _validation_run_out(session: AsyncSession, run: EtfSignalValidationRun
             )
         )
     ).all()
+    ranking_source_kind: Literal["production_published", "research_replay"] | None
+    if run.ranking_source_kind == "production_published":
+        ranking_source_kind = "production_published"
+    elif run.ranking_source_kind == "research_replay":
+        ranking_source_kind = "research_replay"
+    else:
+        ranking_source_kind = None
+    if run.status == "success" and ranking_source_kind == "research_replay" and (
+        not run.source_replay_run_key or run.source_signal_run_id is not None
+    ):
+        ranking_source_kind = None
+    if run.status == "success" and ranking_source_kind == "production_published" and (
+        source_snapshot is None
+        or source_snapshot.publication_state != "published"
+        or run.source_replay_run_key is not None
+    ):
+        ranking_source_kind = None
     return EtfSignalValidationRunOut(
         id=run.id,
         status=run.status,
         as_of_date=run.as_of_date,
         source_signal_run_id=run.source_signal_run_id,
         validation_mode=run.validation_mode or VALIDATION_MODE_FORWARD_LIVE,
+        ranking_source_kind=ranking_source_kind,
+        source_replay_run_key=(
+            run.source_replay_run_key
+            if ranking_source_kind == "research_replay"
+            else None
+        ),
         rule_version=run.rule_version,
         source_ranking_contract_hash=run.source_ranking_contract_hash,
         source_scope_kind=run.source_scope_kind,
@@ -463,6 +489,8 @@ async def _signal_run_out(
         as_of_trade_date=run.as_of_trade_date,
         price_basis=run.price_basis,
         expected_item_count=run.expected_item_count,
+        decision_data_item_count=run.decision_data_item_count,
+        decision_data_coverage_ratio=run.decision_data_coverage_ratio,
         eligible_item_count=run.eligible_item_count,
         coverage_ratio=run.coverage_ratio,
         publication_state=run.publication_state,
@@ -509,14 +537,24 @@ async def list_short_research_assets(
             raise HTTPException(status_code=401, detail="持仓筛选需要登录")
         if tracking_filters and asset_type == "fund":
             raise ValueError("持仓筛选仅支持 ETF")
-        run = await latest_signal_run(session, asset_type=asset_type, theme=theme)
-        if run is None and theme is not None:
+        selection = await current_etf_snapshot_selection(session) if asset_type == "etf" else None
+        run = selection.run if selection is not None else await latest_signal_run(
+            session,
+            asset_type=asset_type,
+            theme=theme,
+        )
+        if run is None and theme is not None and asset_type != "etf":
             run = await latest_signal_run(session, asset_type=asset_type)
         if run is None:
             return ShortResearchAssetListOut(
                 items=[],
                 total=0,
-                snapshot=EtfRankingSnapshotMetadataOut.model_validate(snapshot_metadata(None)),
+                snapshot=EtfRankingSnapshotMetadataOut.model_validate(
+                    snapshot_metadata(
+                        None,
+                        selection_state=selection.state if selection is not None else None,
+                    )
+                ),
             )
         assets, total = await cached_signal_assets(
             session,
@@ -625,7 +663,11 @@ async def run_etf_optimized_allocation_endpoint(
     _user: User = Depends(require_approved_user),
 ) -> dict[str, Any]:
     snapshot = await run_etf_optimized_allocation(session)
-    result = await optimized_allocation_payload(session, snapshot)
+    result = await optimized_allocation_payload(
+        session,
+        snapshot,
+        expected_source_signal_run_id=snapshot.source_signal_run_id,
+    )
     if result is None:
         raise HTTPException(status_code=500, detail="ETF 优化配置结果不可用")
     return result
@@ -639,7 +681,11 @@ async def get_latest_etf_optimized_allocation(
     snapshot = await latest_optimized_allocation_snapshot(session)
     if snapshot is None:
         return None
-    return await optimized_allocation_payload(session, snapshot)
+    return await optimized_allocation_payload(
+        session,
+        snapshot,
+        expected_source_signal_run_id=snapshot.source_signal_run_id,
+    )
 
 
 @router.post("/etf-backtests", response_model=EtfPortfolioBacktestDetailOut)
@@ -883,7 +929,18 @@ async def get_short_research_asset_detail(
     code: str,
     session: AsyncSession = Depends(get_db_session),
 ) -> ShortResearchAssetDetailOut:
-    run = await latest_signal_run(session, asset_type=asset_type) if asset_type == "etf" else None
+    run = None
+    if asset_type == "etf":
+        selection = await current_etf_snapshot_selection(session)
+        if selection.run is None:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "message": "当前 ETF 综合排名快照不可用",
+                    "snapshot_state": selection.state,
+                },
+            )
+        run = selection.run
     try:
         asset, chart, sections = await get_asset_detail(session, asset_type, code, source_run=run)
     except ValueError as exc:
@@ -948,6 +1005,11 @@ async def run_short_research_signals(
     payload: ShortResearchSignalRunRequest,
     session: AsyncSession = Depends(get_db_session),
 ) -> ShortResearchSignalRunOut:
+    if payload.asset_type != "fund":
+        raise HTTPException(
+            status_code=409,
+            detail="ETF 综合排名仅由 canonical v3 工作流发布；当前接口只允许生成基金研究信号。",
+        )
     run = await run_signal_generation(
         session,
         as_of_date=payload.as_of_date,

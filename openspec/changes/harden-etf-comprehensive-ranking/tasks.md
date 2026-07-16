@@ -134,9 +134,9 @@
 ## 11. Migrate, Shadow, Publish, And Recompute
 
 - [x] 11.1 Deploy additive nullable schema before new writers and confirm old readers continue working against the migrated database.
-- [x] 11.2 Run full universe and adjusted-price synchronization until the publication coverage gate passes, recording unresolved source and basis exclusions.
-- [x] 11.3 Generate v3 snapshots in shadow and require non-null identity, no non-finite score inputs, hard-cap invariants, expected coverage, and reviewed top-rank differences before promotion.
-- [x] 11.4 Switch canonical readers with one configured score-version selector while retaining a rollback path that never labels v2/legacy evidence as current.
+- [ ] 11.2 Run full universe and adjusted-price synchronization until the publication coverage gate passes, recording unresolved source and basis exclusions.
+- [ ] 11.3 Generate v3 snapshots in shadow and require non-null identity, no non-finite score inputs, hard-cap invariants, expected coverage, and reviewed top-rank differences before promotion.
+- [ ] 11.4 Switch canonical readers with one configured score-version selector while retaining a rollback path that never labels v2/legacy evidence as current.
 - [x] 11.5 Migrate the workbench, detail, live ranking, portfolio, and evidence consumers to explicit snapshot/rank fields before deprecating legacy aliases.
 - [x] 11.6 Recompute historical rankings only from reconstructable point-in-time adjusted data and leave unreconstructable dates explicitly legacy rather than filling them.
 - [x] 11.7 Re-run Top-N and label validation under the exact v3 contract; keep evidence `等待验证` or `样本不足` until independent-date gates pass.
@@ -154,3 +154,16 @@
 - [x] 12.7 Verify every audited accuracy path: clone handling, asset buckets, premium and factor availability, point-in-time universe, non-overlapping date-level validation, costs, uncertainty, same-time activity, and exchange calendar.
 - [x] 12.8 Verify every audited workbench path: tracking filters, live status source, boundary refresh, stale/error/empty states, pagination recovery, health detail, count scope, auth cache, task concurrency, and Shanghai dates.
 - [x] 12.9 Run any verification expected to exceed three minutes with a bounded timeout and process monitoring, using the project server Docker environment when local static builds are known to hang.
+
+## 13. Repair The Missing Production V3 Materializer
+
+- [x] 13.1 Add failing production-path tests proving a full ETF generation currently lacks canonical typed identity, v3 `ranking_score`, `score_eligible`, continuous global rank, both coverage dimensions, and a contract-builder call.
+- [x] 13.2 Add nullable `decision_data_item_count` and `decision_data_coverage_ratio` fields with migration, ORM, schema, API compatibility, upgrade/downgrade, legacy-null, index, and single-head tests; define existing eligible count/coverage as score coverage.
+- [x] 13.3 Implement a full-ETF v3 materializer that freezes the point-in-time universe, price barrier, declared cutoff, input cohort, raw v3 component manifest, reliability policy, and canonical contract before persistence.
+- [x] 13.4 Persist only finite score-eligible v3 items in deterministic order with continuous global ranks, complete typed run/item identity, score/component exclusions, idempotency, and unpublished state; never copy v2 `total_score` or mutate old runs.
+- [x] 13.5 Change atomic publication to validate decision-data coverage and score coverage independently, require both at least 95 percent, require score codes to be a subset of price-eligible codes, and preserve exact exclusions.
+- [x] 13.6 Add cutoff-bound immutable quote-history selection and tests for 14:50→15:00 freshness, 15:50 job execution, future/latest contamination, historical trade dates, and missing real timestamps.
+- [x] 13.7 Derive the versioned premium provider-consensus value from persisted consistent/single-provider evidence, keep diverged/stale/missing evidence unavailable, and add producer-consumer integration tests.
+- [x] 13.8 Add workflow integration tests proving full generation→unpublished persistence→atomic publish is idempotent, partial runs remain non-canonical, legacy run ids remain unchanged, and insufficient component coverage stays honestly unpublished.
+- [x] 13.9 Run bounded targeted tests, migration tests, backend domain boundaries, Ruff, type checks, strict OpenSpec validation, and a real-data shadow attempt; record dual coverage and component exclusions before resuming task 11.9.
+- [x] 13.10 Route the post-close job through a bounded coverage→materialize→publish workflow without repeating history sync, and switch default ETF list/detail/live/portfolio readers to the exact canonical selector while preserving explicit waiting/rollback states.

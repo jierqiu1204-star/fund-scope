@@ -157,6 +157,9 @@ async def run_job_by_name(
 ) -> dict[str, object]:
     llm_client = LLMClient(request.app.state.settings)
     effective_max_assets = max_assets or 300
+    # End the authentication read transaction before jobs open their own writer
+    # session. This is required for SQLite and harmless for production databases.
+    await session.rollback()
     if job_name == "daily_fund_nav":
         return await run_job(request.app.state.db.session, job_name, daily_fund_nav_job)
     if job_name == "daily_valuation":

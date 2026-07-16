@@ -32,6 +32,7 @@ from app.services.short_research.jobs import (
     daily_short_research_signals_job,
     etf_exit_hyperopt_job,
     etf_exit_signal_credibility_job,
+    post_close_etf_adjusted_sync_job,
     post_close_etf_data_job,
     post_close_etf_label_outcome_review_job,
     post_close_etf_observation_portfolio_job,
@@ -227,6 +228,16 @@ def register_default_jobs(
         hour=15,
         minute=20,
         id="intraday_etf_cleanup",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_tracked_job,
+        "cron",
+        args=[db, "post_close_etf_adjusted_sync", post_close_etf_adjusted_sync_job],
+        day_of_week="mon-fri",
+        hour="21-22",
+        minute="5,15,35,45,55",
+        id="post_close_etf_adjusted_sync",
         replace_existing=True,
     )
     scheduler.add_job(

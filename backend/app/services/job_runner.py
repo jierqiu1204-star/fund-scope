@@ -48,16 +48,20 @@ async def run_job(
         job_run = JobRun(job_name=job_name, status="running")
         session.add(job_run)
         await session.commit()
+        job_run_id = int(job_run.id)
         try:
             result = await job(session)
             await _finish_job_run(job_run, result)
             await session.commit()
             return result
         except Exception as exc:  # noqa: BLE001
-            job_run.status = "failed"
-            job_run.error_message = str(exc)
-            job_run.finished_at = utcnow()
-            await session.commit()
+            await session.rollback()
+            persisted_job_run = await session.get(JobRun, job_run_id)
+            if persisted_job_run is not None:
+                persisted_job_run.status = "failed"
+                persisted_job_run.error_message = str(exc)
+                persisted_job_run.finished_at = utcnow()
+                await session.commit()
             raise
 
 

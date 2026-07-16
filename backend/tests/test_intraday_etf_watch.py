@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 import httpx
 import pandas as pd
@@ -20,9 +20,15 @@ from app.models.entities import (
     TrackedPositionAlert,
     TradableEtf,
     User,
+    authorize_snapshot_publication,
     utcnow,
 )
 from app.services.intraday_etf import service as intraday_service
+from app.services.intraday_etf.exchange_calendar import (
+    is_trading_day,
+    market_session,
+    next_trading_day,
+)
 from app.services.intraday_etf.jobs import intraday_etf_watch_job
 from app.services.intraday_etf.service import (
     ASIA_SHANGHAI,
@@ -48,6 +54,7 @@ from app.services.intraday_etf.service import (
 )
 from app.services.short_research import service as short_research_service
 from app.services.short_research.service import CONCLUSION_HIGH_WATCH, CONCLUSION_WATCH
+from app.services.short_research.snapshot_selector import CanonicalSnapshotSelection
 from app.services.tracked_positions.service import (
     create_alert_if_needed,
     create_position,
@@ -92,12 +99,22 @@ async def _seed_signal_run(
             config_json={"asset_type": "etf", "theme": None, "codes": [], "language": "research_only"},
             summary_json={"item_count": count, "etf_count": count},
             scope_kind="full" if canonical else None,
+            scope_hash="test-full-scope" if canonical else None,
+            universe_snapshot_hash="test-universe" if canonical else None,
+            input_snapshot_hash="test-input" if canonical else None,
             score_version="final_score_v3" if canonical else None,
+            rule_version="final_score_v3_rule_v2" if canonical else None,
             ranking_contract_hash="test-ranking-contract" if canonical else None,
             score_field="ranking_score" if canonical else None,
+            data_cutoff=datetime.combine(signal_date, time(15, 0)) if canonical else None,
             as_of_trade_date=signal_date if canonical else None,
             price_basis="total_return_adjusted" if canonical else None,
+            expected_item_count=count if canonical else None,
+            decision_data_item_count=count if canonical else None,
+            decision_data_coverage_ratio=1.0 if canonical else None,
+            eligible_item_count=count if canonical else None,
             coverage_ratio=1.0 if canonical else None,
+            idempotency_key=f"live-test-{signal_date}-{count}-{utcnow().isoformat()}" if canonical else None,
             publication_state=None,
             published_at=None,
         )
@@ -141,8 +158,10 @@ async def _seed_signal_run(
         )
         await session.commit()
         if canonical:
-            run.publication_state = "published"
-            run.published_at = utcnow()
+            with authorize_snapshot_publication(session.sync_session, run_id=run.id):
+                run.publication_state = "published"
+                run.published_at = utcnow()
+                await session.flush()
             await session.commit()
         return run.id
 
@@ -232,6 +251,26 @@ def test_exchange_calendar_handles_holidays_boundaries_and_lunch_freshness() -> 
         datetime(2026, 6, 17, 11, 29, tzinfo=ASIA_SHANGHAI),
         datetime(2026, 6, 17, 13, 5, tzinfo=ASIA_SHANGHAI),
     ) is True
+
+
+def test_exchange_calendar_fails_closed_for_unknown_year() -> None:
+    unknown_weekday = date(2027, 7, 15)
+
+    assert is_trading_day(unknown_weekday) is False
+    assert market_session(datetime(2027, 7, 15, 10, 0, tzinfo=ASIA_SHANGHAI)) == ("closed", None)
+
+
+def test_unknown_calendar_year_rechecks_at_midnight_without_searching_forever() -> None:
+    state = current_market_state(datetime(2027, 7, 15, 10, 0, tzinfo=ASIA_SHANGHAI))
+
+    assert state.status == "closed"
+    assert state.session is None
+    assert state.next_poll_seconds == 14 * 60 * 60
+
+
+def test_next_trading_day_rejects_crossing_into_unknown_calendar_year() -> None:
+    with pytest.raises(ValueError, match="exchange calendar is unavailable for 2027"):
+        next_trading_day(date(2026, 12, 31))
 
 
 def test_intraday_adjustments_are_volatility_and_same_time_normalized() -> None:
@@ -462,7 +501,7 @@ async def test_live_rankings_order_and_rank_change(client, app, monkeypatch) -> 
     assert body["watched_count"] == 3
     assert body["next_poll_seconds"] == 30
     assert body["snapshot"]["snapshot_id"] == run_id
-    assert body["snapshot"]["freshness_status"] in {"legacy", "unpublished", "unverified"}
+    assert body["snapshot"]["freshness_status"] == "ready"
     assert body["live_scope_hash"]
     items = body["items"]
     assert [item["etf_code"] for item in items] == ["510002", "510001"]
@@ -552,9 +591,9 @@ async def test_live_rankings_pins_the_signal_run_selected_for_its_watchlist(clie
             raise AssertionError("live ranking must not resolve a second signal run")
         run = await session.get(ShortResearchSignalRun, run_id)
         assert run is not None
-        return run
+        return CanonicalSnapshotSelection(state="ready", run=run)
 
-    monkeypatch.setattr(live_ranking_workflow, "latest_signal_run", one_source_run)
+    monkeypatch.setattr(live_ranking_workflow, "current_etf_snapshot_selection", one_source_run)
 
     response = await client.get("/api/etf-quotes/live-rankings?limit=10")
 
@@ -565,12 +604,20 @@ async def test_live_rankings_pins_the_signal_run_selected_for_its_watchlist(clie
 
 @pytest.mark.asyncio
 async def test_detail_and_portfolio_reuse_the_provided_signal_run(app, monkeypatch) -> None:
-    run_id = await _seed_signal_run(app, count=1)
+    run_id = await _seed_signal_run(app, count=1, canonical=True)
+    series_cutoffs: list[datetime | None] = []
 
     async def unexpected_latest_signal_run(*_args, **_kwargs):
         raise AssertionError("a pinned signal run must not be resolved again")
 
+    async def cutoff_pinned_etf_series(
+        _session, _code, _as_of_date=None, *, data_cutoff: datetime | None = None
+    ):
+        series_cutoffs.append(data_cutoff)
+        return []
+
     monkeypatch.setattr(short_research_service, "latest_signal_run", unexpected_latest_signal_run)
+    monkeypatch.setattr(short_research_service, "_etf_series", cutoff_pinned_etf_series)
 
     async with app.state.db.session() as session:
         run = await session.get(ShortResearchSignalRun, run_id)
@@ -590,6 +637,8 @@ async def test_detail_and_portfolio_reuse_the_provided_signal_run(app, monkeypat
 
     assert asset.metadata.code == "510000"
     assert portfolio["daily_signal_date"] == run.as_of_date
+    assert series_cutoffs
+    assert set(series_cutoffs) == {run.data_cutoff}
 
 
 @pytest.mark.asyncio
@@ -1892,19 +1941,30 @@ async def test_persist_quotes_writes_latest_snapshot_and_dedupes_history(app) ->
         )
         first = _normalized_provider_quote("510001", 1.0, "akshare", datetime(2026, 6, 18, 9, 31))
         second = _normalized_provider_quote("510001", 1.2, "akshare", datetime(2026, 6, 18, 9, 32))
+        conflicting_second = _normalized_provider_quote(
+            "510001", 9.9, "eastmoney", datetime(2026, 6, 18, 9, 32)
+        )
 
         assert await persist_quotes(session, watchlist, {"510001": first}) == 1
         assert await persist_quotes(session, watchlist, {"510001": second}) == 1
-        assert await persist_quotes(session, watchlist, {"510001": second}) == 1
+        assert await persist_quotes(session, watchlist, {"510001": conflicting_second}) == 1
 
         latest_count = await session.scalar(select(func.count()).select_from(EtfIntradayLatestQuote))
         history_count = await session.scalar(select(func.count()).select_from(EtfIntradayQuote))
         latest = await session.get(EtfIntradayLatestQuote, "510001")
+        frozen_history = await session.scalar(
+            select(EtfIntradayQuote).where(
+                EtfIntradayQuote.etf_code == "510001",
+                EtfIntradayQuote.quote_time == datetime(2026, 6, 18, 9, 32),
+            )
+        )
 
     assert latest_count == 1
     assert history_count == 2
     assert latest is not None
+    assert frozen_history is not None
     assert latest.latest_price == 1.2
+    assert frozen_history.latest_price == 1.2
     assert latest.quote_time == datetime(2026, 6, 18, 9, 32)
 
 
@@ -2013,6 +2073,75 @@ async def test_latest_quotes_by_code_returns_one_latest_quote_per_etf(app) -> No
 
 
 @pytest.mark.asyncio
+async def test_quotes_at_cutoff_selects_latest_history_row_and_ignores_later_quote(app) -> None:
+    trade_date = date(2026, 6, 18)
+    cutoff = datetime(2026, 6, 18, 15, 0)
+    async with app.state.db.session() as session:
+        session.add_all([_etf("510011"), _etf("510012"), _etf("510013")])
+        await session.flush()
+        session.add_all(
+            [
+                EtfIntradayQuote(
+                    etf_code="510011",
+                    quote_time=datetime(2026, 6, 18, 14, 45),
+                    trade_date=trade_date,
+                    latest_price=1.0,
+                    created_at=datetime(2026, 6, 18, 6, 45),
+                ),
+                EtfIntradayQuote(
+                    etf_code="510011",
+                    quote_time=datetime(2026, 6, 18, 14, 55),
+                    trade_date=trade_date,
+                    latest_price=1.1,
+                    created_at=datetime(2026, 6, 18, 6, 55),
+                ),
+                EtfIntradayQuote(
+                    etf_code="510011",
+                    quote_time=datetime(2026, 6, 18, 15, 1),
+                    trade_date=trade_date,
+                    latest_price=9.9,
+                    created_at=datetime(2026, 6, 18, 7, 1),
+                ),
+                EtfIntradayQuote(
+                    etf_code="510012",
+                    quote_time=datetime(2026, 6, 18, 14, 50),
+                    trade_date=trade_date,
+                    latest_price=2.0,
+                    created_at=datetime(2026, 6, 18, 6, 50),
+                ),
+                EtfIntradayQuote(
+                    etf_code="510012",
+                    quote_time=datetime(2026, 6, 17, 14, 59),
+                    trade_date=date(2026, 6, 17),
+                    latest_price=8.8,
+                    created_at=datetime(2026, 6, 17, 6, 59),
+                ),
+                EtfIntradayQuote(
+                    etf_code="510013",
+                    quote_time=datetime(2026, 6, 18, 14, 50),
+                    trade_date=trade_date,
+                    latest_price=3.0,
+                    # captured at 15:05 Asia/Shanghai, after the 15:00 decision cutoff
+                    created_at=datetime(2026, 6, 18, 7, 5),
+                ),
+            ]
+        )
+        await session.commit()
+
+        quotes = await intraday_service.quotes_at_or_before_cutoff(
+            session,
+            ["510011", "510012", "510013", "510011", "599999"],
+            trade_date=trade_date,
+            decision_cutoff=cutoff,
+        )
+
+    assert set(quotes) == {"510011", "510012"}
+    assert quotes["510011"].quote_time == datetime(2026, 6, 18, 14, 55)
+    assert quotes["510011"].latest_price == 1.1
+    assert quotes["510012"].latest_price == 2.0
+
+
+@pytest.mark.asyncio
 async def test_intraday_cleanup_summarizes_and_deletes_old_raw_quotes(app) -> None:
     async with app.state.db.session() as session:
         session.add(_etf("510003"))
@@ -2069,6 +2198,29 @@ def _normalized_provider_quote(code: str, price: float, source: str, quote_time:
     return quote
 
 
+def _normalized_provider_premium_quote(
+    code: str,
+    price: float,
+    iopv: float,
+    source: str,
+    quote_time: datetime,
+) -> object:
+    quote = normalize_spot_record(
+        {
+            "code": code,
+            "latest_price": price,
+            "iopv": iopv,
+            "bid_price": price - 0.0001,
+            "ask_price": price + 0.0001,
+            "quote_time": quote_time.strftime("%Y-%m-%d %H:%M:%S"),
+        },
+        fallback_time=quote_time.replace(tzinfo=ASIA_SHANGHAI),
+        source=source,
+    )
+    assert quote is not None
+    return quote
+
+
 def test_select_consensus_quotes_marks_consistent_and_single_provider() -> None:
     now = datetime(2026, 6, 24, 10, 0, 0)
     ak_quote = _normalized_provider_quote("510000", 1.0000, "akshare", now)
@@ -2099,6 +2251,73 @@ def test_select_consensus_quotes_marks_consistent_and_single_provider() -> None:
     assert single.quotes["510001"].raw["consensus_status"] == CONSENSUS_SINGLE_PROVIDER
     assert single.quotes["510001"].raw["decision_eligible"] is True
     assert single.consensus_counts[CONSENSUS_SINGLE_PROVIDER] == 1
+
+
+def test_select_consensus_quotes_persists_premium_consensus_and_provider_provenance() -> None:
+    now = datetime(2026, 6, 24, 10, 0, 0)
+    ak_quote = _normalized_provider_premium_quote("510020", 1.0010, 1.0, "akshare", now)
+    eastmoney_quote = _normalized_provider_premium_quote("510020", 1.0015, 1.0, "eastmoney", now)
+
+    result = select_consensus_quotes(
+        [
+            ProviderQuoteResult("akshare", {"510020": ak_quote}),
+            ProviderQuoteResult("eastmoney", {"510020": eastmoney_quote}),
+        ],
+        now=now,
+    )
+
+    raw = result.quotes["510020"].raw
+    assert raw["premium_consensus_status"] == CONSENSUS_CONSISTENT
+    assert raw["premium_provider_consensus"] == 100
+    assert raw["premium_provider_count"] == 2
+    assert raw["premium_dispersion_bps"] == pytest.approx(5.0)
+    ak_provenance, eastmoney_provenance = raw["provider_quotes"]
+    assert ak_provenance["provider"] == "akshare"
+    assert ak_provenance["latest_price"] == 1.001
+    assert ak_provenance["iopv"] == 1.0
+    assert ak_provenance["premium_discount_bps"] == pytest.approx(10.0)
+    assert ak_provenance["bid_price"] == pytest.approx(1.0009)
+    assert ak_provenance["ask_price"] == pytest.approx(1.0011)
+    assert ak_provenance["quote_time"] == now.isoformat()
+    assert eastmoney_provenance["provider"] == "eastmoney"
+    assert eastmoney_provenance["latest_price"] == 1.0015
+    assert eastmoney_provenance["iopv"] == 1.0
+    assert eastmoney_provenance["premium_discount_bps"] == pytest.approx(15.0)
+    assert eastmoney_provenance["bid_price"] == pytest.approx(1.0014)
+    assert eastmoney_provenance["ask_price"] == pytest.approx(1.0016)
+    assert eastmoney_provenance["quote_time"] == now.isoformat()
+
+
+def test_select_consensus_quotes_uses_contract_single_provider_score() -> None:
+    now = datetime(2026, 6, 24, 10, 0, 0)
+    quote = _normalized_provider_premium_quote("510021", 1.0010, 1.0, "akshare", now)
+
+    result = select_consensus_quotes([ProviderQuoteResult("akshare", {"510021": quote})], now=now)
+
+    raw = result.quotes["510021"].raw
+    assert raw["premium_consensus_status"] == CONSENSUS_SINGLE_PROVIDER
+    assert raw["premium_provider_consensus"] == 60
+    assert raw["premium_provider_count"] == 1
+
+
+def test_premium_divergence_is_independent_of_latest_price_agreement() -> None:
+    now = datetime(2026, 6, 24, 10, 0, 0)
+    ak_quote = _normalized_provider_premium_quote("510022", 1.001, 1.0, "akshare", now)
+    eastmoney_quote = _normalized_provider_premium_quote("510022", 1.001, 0.99, "eastmoney", now)
+
+    result = select_consensus_quotes(
+        [
+            ProviderQuoteResult("akshare", {"510022": ak_quote}),
+            ProviderQuoteResult("eastmoney", {"510022": eastmoney_quote}),
+        ],
+        now=now,
+    )
+
+    raw = result.quotes["510022"].raw
+    assert raw["consensus_status"] == CONSENSUS_CONSISTENT
+    assert raw["premium_consensus_status"] == CONSENSUS_DIVERGED
+    assert raw["premium_provider_consensus"] is None
+    assert raw["premium_dispersion_bps"] > 30
 
 
 def test_select_consensus_quotes_blocks_diverged_and_missing_time_quotes() -> None:

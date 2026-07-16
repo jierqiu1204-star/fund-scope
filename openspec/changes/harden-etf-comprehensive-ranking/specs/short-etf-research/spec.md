@@ -13,11 +13,15 @@ The system SHALL synchronize traceable raw and total-return-aware ETF daily mark
 
 #### Scenario: Large universe sync is batched
 - **WHEN** the system synchronizes a large ETF universe
-- **THEN** the task processes ETFs in bounded batches and records expected, attempted, succeeded, updated, failed, skipped, deferred, and decision-eligible counts
+- **THEN** the task processes at most 20 ETFs per bounded slice on the small-server profile, commits completed per-code progress, and records expected, attempted, succeeded, updated, failed, skipped, deferred, and decision-eligible counts
 
 #### Scenario: Higher priority ETFs update first
 - **WHEN** the daily ETF sync task runs
 - **THEN** tracked, missing, stale, default-display, and high-turnover ETFs are prioritized while a persisted cursor guarantees that lower-priority ETFs are eventually attempted
+
+#### Scenario: Same-date coverage is accumulated across slices
+- **WHEN** several post-close slices target the same trade date
+- **THEN** missing same-date adjusted rows are attempted first, no second slice overlaps the active one, and the combined database coverage is evaluated before materialization rather than requiring one unbounded full-universe request
 
 #### Scenario: Research-adjusted data is unavailable
 - **WHEN** a traceable total-return-aware value cannot be obtained for an ETF/date
@@ -76,6 +80,10 @@ The system SHALL provide a web-runnable job that refreshes tradable ETF metadata
 - **WHEN** a source no longer lists an ETF or marks it ineligible
 - **THEN** the system closes its current membership interval with an effective date and reason while retaining it in historical snapshots and validation denominators
 
+#### Scenario: Discovery fails or suspiciously shrinks
+- **WHEN** the configured live provider fails or returns a materially smaller universe than the frozen active membership
+- **THEN** the refresh is non-authoritative, preserves all current membership intervals, performs no seed fallback or mass deactivation, and blocks canonical publication
+
 ## ADDED Requirements
 
 ### Requirement: ETF Cross-Sectional Ranking Uses Homogeneous Point-In-Time Cohorts
@@ -111,9 +119,32 @@ The system SHALL record factor profile version, available groups, missing groups
 - **WHEN** stale data, low liquidity, or another quality gate makes a theme/catalyst component unavailable
 - **THEN** a later factor/profile assignment cannot restore that component to decision-eligible status
 
+#### Scenario: Theme catalyst coverage is sparse under rule v2
+- **WHEN** current theme/catalyst evidence is unavailable for part or all of the universe
+- **THEN** it remains explanatory-only with zero weight and cannot improve or block the five-component comprehensive score
+
 ### Requirement: Theme And Catalyst Evidence Has A Maximum Age
 The system SHALL version and expire theme/catalyst snapshots and SHALL expose unavailable evidence when the latest snapshot exceeds its configured maximum age.
 
 #### Scenario: Theme snapshot is old
 - **WHEN** the most recent theme/catalyst snapshot is older than the allowed freshness window
 - **THEN** it remains visible only as stale context and cannot improve a current comprehensive score
+
+### Requirement: Full ETF Signal Generation Materializes The Declared Final Score
+The full-universe ETF signal generator SHALL build the canonical ranking contract and persist only finite score-eligible `final_score_v3` items with continuous global ranks and complete typed snapshot identity before publication is attempted.
+
+#### Scenario: Full ETF generation succeeds
+- **WHEN** the full ETF generator has a complete authoritative universe, input cohort, and eligible v3 results
+- **THEN** it persists `ranking_score`, `score_eligible=true`, continuous `global_rank`, score/rule versions, hashes, cutoff, price basis, both coverage dimensions, and an idempotency key while leaving publication state unpublished
+
+#### Scenario: Required v3 input is unavailable
+- **WHEN** an ETF lacks any required finite score-bearing input
+- **THEN** the ETF is recorded in score exclusions and is not persisted by copying legacy `total_score` into the canonical score field
+
+#### Scenario: Legacy signal run already exists
+- **WHEN** an older run lacks canonical v3 item or identity fields
+- **THEN** the generator leaves that run legacy/unpublished and MUST NOT infer missing identity from current configuration
+
+#### Scenario: Full-universe metrics are computed on a small server
+- **WHEN** the materializer scores the complete eligible ETF cohort
+- **THEN** adjusted history and health are prefetched in bounded constant-count queries without concurrent use of one async session, and the produced scores remain identical to the sequential calculation

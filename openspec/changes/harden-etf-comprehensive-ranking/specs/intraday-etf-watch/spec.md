@@ -109,3 +109,22 @@ The workbench and API SHALL refresh session state at Asia/Shanghai open, lunch, 
 #### Scenario: Session is open
 - **WHEN** an eligible open-session response is received
 - **THEN** subsequent polling uses the server-provided interval until the next boundary or response-state change
+
+### Requirement: Ranking Quote Inputs Use The Declared Decision Cutoff
+The system SHALL select ranking quote evidence from immutable intraday history by ETF, exchange trade date, and `quote_time <= decision_cutoff`, SHALL measure freshness relative to that cutoff, and SHALL derive provider consensus only from persisted real provider evidence.
+
+#### Scenario: Ranking runs after the decision cutoff
+- **WHEN** a 14:50 quote is evaluated by a 15:50 job for a declared 15:00 decision cutoff
+- **THEN** freshness is measured from 14:50 to 15:00 and the quote is not rejected merely because the job wall clock is 15:50
+
+#### Scenario: Newer quote exists after the cutoff
+- **WHEN** immutable history contains both an eligible quote before the cutoff and a later quote after the cutoff
+- **THEN** ranking uses the latest eligible quote at or before the cutoff and the later quote cannot contaminate the input snapshot
+
+#### Scenario: Provider evidence is consistent or single-source
+- **WHEN** persisted provider evidence is fresh and either consistent across providers or explicitly eligible from one provider
+- **THEN** the system produces the versioned consensus value and reliability from that evidence, with single-provider evidence degraded rather than represented as multi-provider consensus
+
+#### Scenario: Provider evidence is diverged or absent
+- **WHEN** persisted provider evidence is diverged, stale, estimated, missing, or lacks a real quote time
+- **THEN** provider consensus and dependent premium score inputs remain unavailable and are not filled from the latest table or a default value

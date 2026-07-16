@@ -42,7 +42,7 @@ def _valid_report(action_label: str = ACTION_FOCUS) -> str:
     )
 
 
-async def _seed_signal_run(app) -> int:
+async def _seed_signal_run(app, *, include_etf: bool = True) -> int:
     async with app.state.db.session() as session:
         run = ShortResearchSignalRun(
             status="success",
@@ -50,7 +50,11 @@ async def _seed_signal_run(app) -> int:
             finished_at=utcnow(),
             as_of_date=date(2026, 6, 5),
             config_json={},
-            summary_json={"item_count": 2},
+            summary_json={
+                "item_count": 2,
+                "fund_count": 1 if include_etf else 2,
+                "etf_count": 1 if include_etf else 0,
+            },
         )
         session.add(run)
         await session.commit()
@@ -71,7 +75,7 @@ async def _seed_signal_run(app) -> int:
                 ),
                 ShortResearchSignalItem(
                     run_id=run.id,
-                    asset_type="etf",
+                    asset_type="etf" if include_etf else "fund",
                     asset_code="515000",
                     rank=2,
                     total_score=84.7,
@@ -237,7 +241,7 @@ def test_validate_advisor_payload_uses_fallback_for_missing_fields() -> None:
 
 @pytest.mark.asyncio
 async def test_advisor_generation_is_idempotent_and_does_not_change_signal_items(app, settings) -> None:
-    run_id = await _seed_signal_run(app)
+    run_id = await _seed_signal_run(app, include_etf=False)
     calls = 0
 
     class FakeClient:
@@ -293,7 +297,7 @@ async def test_advisor_generation_is_idempotent_and_does_not_change_signal_items
 
 @pytest.mark.asyncio
 async def test_advisor_generation_marks_partial_rule_completion(app, settings) -> None:
-    run_id = await _seed_signal_run(app)
+    run_id = await _seed_signal_run(app, include_etf=False)
 
     class PartialClient:
         model_name = "fake-model"
@@ -323,7 +327,7 @@ async def test_advisor_generation_marks_partial_rule_completion(app, settings) -
 
 @pytest.mark.asyncio
 async def test_advisor_api_returns_reports_with_latest_short_research_items(client, app) -> None:
-    await _seed_signal_run(app)
+    await _seed_signal_run(app, include_etf=False)
 
     advisor = await client.post("/api/short-research/advisor/run")
     assert advisor.status_code == 200
@@ -332,10 +336,9 @@ async def test_advisor_api_returns_reports_with_latest_short_research_items(clie
     latest = await client.get("/api/short-research/signals/latest?asset_type=fund")
     assert latest.status_code == 200
     body = latest.json()
-    first = body["items"][0]
-    assert first["code"] == "270042"
-    assert first["advisor_report"]["action_label"] == ACTION_CAUTION
-    assert first["advisor_report"]["source"] == "fallback"
+    fund = next(item for item in body["items"] if item["code"] == "270042")
+    assert fund["advisor_report"]["action_label"] == ACTION_CAUTION
+    assert fund["advisor_report"]["source"] == "fallback"
 
     admin_run = await client.post("/api/admin/jobs/daily_short_research_advisor/run")
     assert admin_run.status_code == 200
@@ -367,8 +370,7 @@ async def test_advisor_api_can_limit_to_fund_signal_run(client, app) -> None:
 
 @pytest.mark.asyncio
 async def test_advisor_api_uses_the_explicit_completed_source_snapshot(client, app) -> None:
-    source_run_id = await _seed_signal_run(app)
-    await _seed_fund_signal_run(app)
+    source_run_id = await _seed_fund_signal_run(app)
 
     advisor = await client.post("/api/short-research/advisor/run", json={"source_signal_run_id": source_run_id})
 
@@ -377,3 +379,39 @@ async def test_advisor_api_uses_the_explicit_completed_source_snapshot(client, a
 
     unavailable = await client.post("/api/short-research/advisor/run", json={"source_signal_run_id": 999_999})
     assert unavailable.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_etf_advisor_rejects_explicit_legacy_source_snapshot(client, app) -> None:
+    legacy_run_id = await _seed_signal_run(app)
+
+    response = await client.post(
+        "/api/short-research/advisor/run",
+        json={"asset_type": "etf", "source_signal_run_id": legacy_run_id},
+    )
+
+    assert response.status_code == 409
+    assert "canonical" in str(response.json()["detail"]).lower()
+
+
+@pytest.mark.asyncio
+async def test_advisor_infers_etf_from_explicit_source_when_asset_type_is_omitted(client, app) -> None:
+    legacy_etf_source_id = await _seed_signal_run(app)
+
+    response = await client.post(
+        "/api/short-research/advisor/run",
+        json={"source_signal_run_id": legacy_etf_source_id},
+    )
+
+    assert response.status_code == 409
+    assert "canonical" in str(response.json()["detail"]).lower()
+
+
+@pytest.mark.asyncio
+async def test_default_advisor_rejects_latest_legacy_run_that_contains_etf(client, app) -> None:
+    await _seed_signal_run(app)
+
+    response = await client.post("/api/short-research/advisor/run")
+
+    assert response.status_code == 409
+    assert "canonical" in str(response.json()["detail"]).lower()

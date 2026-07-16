@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
+from enum import StrEnum
 from typing import Any
 
 EVIDENCE_SCHEMA_VERSION = "etf_research_evidence_v1"
@@ -18,12 +20,69 @@ EXIT_V2_EVIDENCE_CONTRACT_VERSION = "etf_exit_v2_evidence_contract_v1"
 EXECUTION_MODEL_DAILY_CLOSE = "daily_close_v1"
 EXECUTION_MODEL_INTRADAY_ALERT = "intraday_alert_v1"
 FEE_MODEL_SIMPLE_RATE = "simple_fee_rate_v1"
+REPLAY_PROVENANCE_SCHEMA_VERSION = "etf_replay_provenance_v1"
 
 EVIDENCE_STATUS_SAME_CONTRACT = "同源已验证"
 EVIDENCE_STATUS_WAITING = "等待验证"
 EVIDENCE_STATUS_INSUFFICIENT = "样本不足"
 EVIDENCE_STATUS_VERSION_MISMATCH = "版本不一致"
 EVIDENCE_STATUS_LEGACY = "旧口径结果"
+
+
+class RankingSourceKind(StrEnum):
+    PRODUCTION_PUBLISHED = "production_published"
+    RESEARCH_REPLAY = "research_replay"
+
+
+class SignalContractCompatibility(StrEnum):
+    SAME_PRODUCTION_CONTRACT = "same_production_contract"
+    SAME_REPLAY_CONTRACT = "same_replay_contract"
+    MISMATCH = "mismatch"
+    LEGACY = "legacy"
+
+
+class ActionPolicyContractCompatibility(StrEnum):
+    SAME_CONTRACT = "same_contract"
+    MISMATCH = "mismatch"
+    LEGACY = "legacy"
+
+
+class PolicyMode(StrEnum):
+    PRODUCTION_LIVE = "production_live"
+    POLICY_SHADOW = "policy_shadow"
+
+
+class NotificationProvenance(StrEnum):
+    NOT_ATTEMPTED = "not_attempted"
+    SHADOW_ELIGIBLE = "shadow_eligible"
+    SMTP_FAILED_LIVE = "smtp_failed_live"
+    SMTP_UNKNOWN_LIVE = "smtp_unknown_live"
+    SMTP_ACCEPTED_LIVE = "smtp_accepted_live"
+    PROVIDER_DELIVERED_LIVE = "provider_delivered_live"
+
+
+class ReplayExecutionProvenance(StrEnum):
+    NONE = "none"
+    SIMULATED_EXECUTION = "simulated_execution"
+    USER_CONFIRMED = "user_confirmed"
+
+
+def require_single_validation_ranking_source(
+    evidence_summaries: Sequence[dict[str, Any]],
+) -> RankingSourceKind:
+    if not evidence_summaries:
+        raise ValueError("validation evidence requires a ranking source")
+    try:
+        sources = {
+            RankingSourceKind(summary["ranking_source_kind"])
+            for summary in evidence_summaries
+        }
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("validation evidence requires a registered ranking source") from exc
+    if len(sources) != 1:
+        raise ValueError("validation evidence from different ranking sources cannot be merged")
+    return next(iter(sources))
+
 
 _CONTRACT_HASH_FIELDS = (
     "ranking_contract_hash",
@@ -62,6 +121,83 @@ def _with_hash(payload: dict[str, Any]) -> dict[str, Any]:
     result = dict(payload)
     result["contract_hash"] = stable_contract_hash(result)
     return result
+
+
+@dataclass(frozen=True)
+class ReplayEvidenceProvenanceContract:
+    ranking_source_kind: RankingSourceKind
+    signal_contract_compatibility: SignalContractCompatibility
+    action_policy_contract_compatibility: ActionPolicyContractCompatibility
+    policy_mode: PolicyMode
+    notification_provenance: NotificationProvenance
+    execution_provenance: ReplayExecutionProvenance
+    provider_receipt_id: str | None = None
+    provider_receipt_timestamp: datetime | None = None
+    schema_version: str = REPLAY_PROVENANCE_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        dimensions = (
+            (self.ranking_source_kind, RankingSourceKind),
+            (self.signal_contract_compatibility, SignalContractCompatibility),
+            (
+                self.action_policy_contract_compatibility,
+                ActionPolicyContractCompatibility,
+            ),
+            (self.policy_mode, PolicyMode),
+            (self.notification_provenance, NotificationProvenance),
+            (self.execution_provenance, ReplayExecutionProvenance),
+        )
+        if not all(isinstance(value, enum_type) for value, enum_type in dimensions):
+            raise ValueError("registered provenance enum values are required")
+        if (
+            self.ranking_source_kind is RankingSourceKind.RESEARCH_REPLAY
+            and self.signal_contract_compatibility
+            is SignalContractCompatibility.SAME_PRODUCTION_CONTRACT
+        ) or (
+            self.ranking_source_kind is RankingSourceKind.PRODUCTION_PUBLISHED
+            and self.signal_contract_compatibility
+            is SignalContractCompatibility.SAME_REPLAY_CONTRACT
+        ):
+            raise ValueError("ranking source and signal contract compatibility conflict")
+        if self.notification_provenance is NotificationProvenance.PROVIDER_DELIVERED_LIVE:
+            if (
+                not isinstance(self.provider_receipt_id, str)
+                or not self.provider_receipt_id.strip()
+                or not isinstance(self.provider_receipt_timestamp, datetime)
+            ):
+                raise ValueError(
+                    "provider receipt id and timestamp are required for provider delivery"
+                )
+
+    def _payload(self) -> dict[str, Any]:
+        return {
+            "action_policy_contract_compatibility": (
+                self.action_policy_contract_compatibility.value
+            ),
+            "execution_provenance": self.execution_provenance.value,
+            "notification_provenance": self.notification_provenance.value,
+            "policy_mode": self.policy_mode.value,
+            "provider_receipt_id": self.provider_receipt_id,
+            "provider_receipt_timestamp": (
+                self.provider_receipt_timestamp.isoformat()
+                if self.provider_receipt_timestamp is not None
+                else None
+            ),
+            "ranking_source_kind": self.ranking_source_kind.value,
+            "schema_version": self.schema_version,
+            "signal_contract_compatibility": self.signal_contract_compatibility.value,
+        }
+
+    def canonical_json(self) -> str:
+        return json.dumps(
+            self._payload(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _with_hash(self._payload())
 
 
 @dataclass(frozen=True)

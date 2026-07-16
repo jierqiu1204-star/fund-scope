@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ShortResearchDataHealthOut(BaseModel):
@@ -60,6 +60,11 @@ class EtfRankingSnapshotMetadataOut(BaseModel):
     scope_kind: str | None = None
     as_of_trade_date: date | None = None
     generated_at: datetime | None = None
+    expected_item_count: int | None = None
+    decision_data_item_count: int | None = None
+    decision_data_coverage_ratio: float | None = None
+    score_eligible_item_count: int | None = None
+    score_coverage_ratio: float | None = None
     coverage_ratio: float | None = None
     freshness_status: str = "waiting"
     limitations: list[str] = Field(default_factory=list)
@@ -85,6 +90,8 @@ class EtfSignalValidationRunOut(BaseModel):
     as_of_date: date
     source_signal_run_id: int | None = None
     validation_mode: str = "forward_live"
+    ranking_source_kind: Literal["production_published", "research_replay"] | None = None
+    source_replay_run_key: str | None = None
     rule_version: str
     source_ranking_contract_hash: str | None = None
     source_scope_kind: str | None = None
@@ -101,6 +108,20 @@ class EtfSignalValidationRunOut(BaseModel):
     summary: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     items: list[EtfSignalValidationItemOut] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_ranking_source_identity(self) -> EtfSignalValidationRunOut:
+        if self.status != "success" or self.ranking_source_kind is None:
+            return self
+        if self.ranking_source_kind == "research_replay" and (
+            not self.source_replay_run_key or self.source_signal_run_id is not None
+        ):
+            raise ValueError("successful research replay requires only a replay run key")
+        if self.ranking_source_kind == "production_published" and (
+            self.source_signal_run_id is None or self.source_replay_run_key is not None
+        ):
+            raise ValueError("successful production evidence requires only a published source run")
+        return self
 
 
 class ShortResearchDataSyncRequest(BaseModel):
@@ -253,6 +274,8 @@ class ShortResearchSignalRunOut(BaseModel):
     as_of_trade_date: date | None = None
     price_basis: str | None = None
     expected_item_count: int | None = None
+    decision_data_item_count: int | None = None
+    decision_data_coverage_ratio: float | None = None
     eligible_item_count: int | None = None
     coverage_ratio: float | None = None
     publication_state: str | None = None

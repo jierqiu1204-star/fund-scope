@@ -587,7 +587,7 @@ export type ShortResearchAsset = {
   ranking_score?: number | null;
   score_eligible?: boolean | null;
   global_rank?: number | null;
-  total_score: number;
+  total_score: number | null;
   technical_score?: number | null;
   opportunity_score?: number | null;
   opportunity_label?: string | null;
@@ -653,8 +653,11 @@ export type ShortResearchScoreComponent = {
 export type ShortResearchFinalScoreBreakdown = {
   score_version?: string;
   final_score?: number;
+  ranking_score?: number;
+  score_eligible?: boolean;
   confidence?: string;
   components?: Record<string, ShortResearchScoreComponent>;
+  component_scores?: Record<string, number>;
   limitation_reasons?: string[];
   weights?: Record<string, number>;
   [key: string]: unknown;
@@ -662,6 +665,7 @@ export type ShortResearchFinalScoreBreakdown = {
 
 export type ShortResearchScoreBreakdown = Record<string, unknown> & {
   score_version?: string;
+  final_score_v3?: ShortResearchFinalScoreBreakdown;
   final_score_v2?: ShortResearchFinalScoreBreakdown;
 };
 
@@ -726,6 +730,8 @@ export type ShortResearchSignalRun = {
   as_of_trade_date?: string | null;
   price_basis?: string | null;
   expected_item_count?: number | null;
+  decision_data_item_count?: number | null;
+  decision_data_coverage_ratio?: number | null;
   eligible_item_count?: number | null;
   coverage_ratio?: number | null;
   publication_state?: string | null;
@@ -1532,6 +1538,11 @@ export type EtfRankingSnapshotMetadata = {
   scope_kind?: string | null;
   as_of_trade_date?: string | null;
   generated_at?: string | null;
+  expected_item_count?: number | null;
+  decision_data_item_count?: number | null;
+  decision_data_coverage_ratio?: number | null;
+  score_eligible_item_count?: number | null;
+  score_coverage_ratio?: number | null;
   coverage_ratio?: number | null;
   freshness_status?: string | null;
   limitations?: string[];

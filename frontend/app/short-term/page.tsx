@@ -304,6 +304,20 @@ function scoreBucketSampleText(group: ScoreBucketValidationGroup) {
   return `${sampleCount}`;
 }
 
+function scoreBucketUnavailableText(summary: Record<string, unknown>) {
+  const reason = typeof summary.unavailable_reason === "string" ? summary.unavailable_reason : "";
+  switch (reason) {
+    case "waiting_signal_generation":
+      return "尚无通过发布门槛的 final_score_v3 历史快照；需先完成复权价、盘中报价及综合分覆盖，且不使用旧分数或原始价格补算。";
+    case "no_available_final_decision_score":
+      return "已有历史运行，但其中没有可决策的 final_score_v3 排名分；不使用旧分数或原始价格补算。";
+    default:
+      return Object.keys(summary).length
+        ? "本次严格验证尚未形成完整样本；等待 T+1 入场与对应持有窗口走完，不使用旧分数或原始价格补算。"
+        : "尚未形成可验证的 final_score_v3 历史样本；生产前瞻与 PIT 研究回放会分开累计。";
+  }
+}
+
 function scoreBucketPrimaryEndpointText(group: ScoreBucketValidationGroup | undefined) {
   const window = group?.windows?.["5"];
   if (!window) {
@@ -604,6 +618,29 @@ function formatOptionalScore(value: number | null | undefined) {
   return value === null || value === undefined ? "暂无" : value.toFixed(1);
 }
 
+function canonicalAssetScore(asset: ShortResearchAsset | null | undefined) {
+  if (!asset) {
+    return null;
+  }
+  const score =
+    asset.asset_type === "etf"
+      ? asset.score_eligible === true
+        ? asset.ranking_score
+        : null
+      : asset.total_score;
+  return typeof score === "number" && Number.isFinite(score) ? score : null;
+}
+
+function assetScoreText(asset: ShortResearchAsset | null | undefined) {
+  const score = canonicalAssetScore(asset);
+  return score === null ? "暂无分数" : `${score.toFixed(1)} 分`;
+}
+
+function assetScoreSummaryText(asset: ShortResearchAsset | null | undefined) {
+  const score = canonicalAssetScore(asset);
+  return `综合分 ${score === null ? "暂无" : score.toFixed(1)}`;
+}
+
 function opportunityScoreText(asset: ShortResearchAsset | null | undefined) {
   if (!asset?.opportunity_score && asset?.opportunity_score !== 0) {
     return "暂无主题辅助";
@@ -694,7 +731,16 @@ function catalystSummaryText(asset: ShortResearchAsset | null | undefined) {
   return asset?.catalyst_summary || "暂无主题催化数据，先按技术结构观察。";
 }
 
-const scoreDimensionLabels: Array<{ key: string; label: string }> = [
+const v3ScoreDimensionLabels: Array<{ key: string; label: string }> = [
+  { key: "technical_momentum_cross_section", label: "技术动量" },
+  { key: "risk_quality_cross_section", label: "风险质量" },
+  { key: "structure_liquidity", label: "结构/流动性" },
+  { key: "sector_trend", label: "板块趋势" },
+  { key: "theme_catalyst", label: "主题催化" },
+  { key: "premium_discount", label: "折溢价" }
+];
+
+const legacyScoreDimensionLabels: Array<{ key: string; label: string }> = [
   { key: "cross_sectional_percentile", label: "横截面分位" },
   { key: "dynamic_threshold", label: "动态阈值" },
   { key: "label_evidence", label: "历史有效性" },
@@ -703,23 +749,55 @@ const scoreDimensionLabels: Array<{ key: string; label: string }> = [
 ];
 
 function finalScoreBreakdown(asset: ShortResearchAsset | null | undefined) {
-  const final = asset?.score_breakdown?.final_score_v2;
-  return final && typeof final === "object" ? final : null;
+  const v3 = asset?.score_breakdown?.final_score_v3;
+  if (v3 && typeof v3 === "object") {
+    return v3;
+  }
+  const v2 = asset?.score_breakdown?.final_score_v2;
+  return v2 && typeof v2 === "object" ? v2 : null;
+}
+
+function finalScoreVersion(asset: ShortResearchAsset | null | undefined) {
+  if (
+    asset?.score_breakdown?.final_score_v3 &&
+    typeof asset.score_breakdown.final_score_v3 === "object"
+  ) {
+    return "final_score_v3";
+  }
+  if (
+    asset?.score_breakdown?.final_score_v2 &&
+    typeof asset.score_breakdown.final_score_v2 === "object"
+  ) {
+    return "final_score_v2";
+  }
+  return null;
 }
 
 function scoreVersionText(asset: ShortResearchAsset | null | undefined) {
   const final = finalScoreBreakdown(asset);
-  const version = final?.score_version ?? asset?.metrics?.score_version ?? asset?.score_breakdown?.score_version;
-  if (!version || version === "legacy") {
-    return "旧口径结果";
+  const version =
+    finalScoreVersion(asset) ??
+    final?.score_version ??
+    asset?.metrics?.score_version ??
+    asset?.score_breakdown?.score_version;
+  if (version === "final_score_v3") {
+    return "当前评分口径";
   }
-  return version === "final_score_v2" ? "新评分口径" : String(version);
+  return "旧口径结果";
+}
+
+function scoreDimensionLabels(asset: ShortResearchAsset | null | undefined) {
+  return finalScoreVersion(asset) === "final_score_v3"
+    ? v3ScoreDimensionLabels
+    : legacyScoreDimensionLabels;
 }
 
 function scoreDimensionValue(asset: ShortResearchAsset | null | undefined, key: string) {
-  const component = finalScoreBreakdown(asset)?.components?.[key];
-  const score = component?.score;
-  return typeof score === "number" ? score.toFixed(1) : "暂无";
+  const final = finalScoreBreakdown(asset);
+  const score = final?.component_scores?.[key] ?? final?.components?.[key]?.score;
+  return typeof score === "number" && Number.isFinite(score)
+    ? score.toFixed(1)
+    : "暂无";
 }
 
 function hasFreshIntradayChange(
@@ -878,13 +956,21 @@ function previewAssetFromRankedItem(item: RankedAssetItem, marketStatus?: string
   if (quote?.turnover !== null && quote?.turnover !== undefined) {
     metrics.average_turnover_20d = quote.turnover;
   }
+  const rankingScore =
+    item.score_version === "final_score_v3" &&
+    item.base_score !== null &&
+    Number.isFinite(item.base_score)
+      ? item.base_score
+      : null;
 
   return {
     asset_type: "etf",
     code: item.etf_code,
     name: item.etf_name ?? item.etf_code,
     rank: item.live_rank ?? item.base_rank,
-    total_score: item.live_total_score ?? item.base_score ?? 0,
+    ranking_score: rankingScore,
+    score_eligible: rankingScore !== null,
+    total_score: item.live_total_score ?? item.base_score ?? null,
     conclusion,
     entry_timing_label: entryTiming.label,
     entry_timing_reason: entryTiming.reason,
@@ -1577,7 +1663,7 @@ function ShortTermClient() {
   const trackingSectionRef = useRef<HTMLDivElement | null>(null);
   const [assetType, setAssetType] = useState<AssetType>("etf");
   const [theme, setTheme] = useState("all");
-  const [sort, setSort] = useState<SortKey>("opportunity");
+  const [sort, setSort] = useState<SortKey>("score");
   const [keyword, setKeyword] = useState("");
   const [labelFilters, setLabelFilters] = useState<LabelFilterState>(emptyLabelFilters);
   const [labelFilterExpanded, setLabelFilterExpanded] = useState(false);
@@ -1854,23 +1940,33 @@ function ShortTermClient() {
   });
 
   const runSignals = useMutation({
-    mutationFn: async () =>
-      (
+    mutationFn: async () => {
+      if (assetType === "etf") {
+        return { kind: "canonical_refresh" as const };
+      }
+      const run = (
         await api.post<ShortResearchSignalRun>("/api/short-research/signals/run", {
           asset_type: assetType,
           theme: theme === "all" ? null : theme
         })
-      ).data,
+      ).data;
+      return { kind: "fund_signal" as const, run };
+    },
     onSuccess: async (result) => {
-      if (assetType === "etf") {
-        setSort("opportunity");
+      if (result.kind === "canonical_refresh") {
+        setSort("score");
         setAssetOffset(0);
+        setLastResult({
+          status: "refreshed",
+          message: "已刷新 canonical v3 综合排名状态；未触发 legacy ETF 信号。"
+        });
+      } else {
+        setLastResult({
+          as_of_date: result.run.as_of_date,
+          item_count: result.run.summary.item_count,
+          conclusion_counts: result.run.summary.conclusion_counts
+        });
       }
-      setLastResult({
-        as_of_date: result.as_of_date,
-        item_count: result.summary.item_count,
-        conclusion_counts: result.summary.conclusion_counts
-      });
       await queryClient.invalidateQueries({ queryKey: ["short-research"] });
     }
   });
@@ -1888,7 +1984,9 @@ function ShortTermClient() {
 
   const optimizedAllocationData = observationPortfolio.data?.optimized_allocation ?? etfOptimizedAllocation.data ?? null;
   const advisorSourceRunId =
-    etfLiveData?.snapshot?.snapshot_id ?? shortAssetData?.snapshot?.snapshot_id ?? latestCompletedSignal.data?.id ?? null;
+    assetType === "etf"
+      ? (etfLiveData?.snapshot?.snapshot_id ?? shortAssetData?.snapshot?.snapshot_id ?? null)
+      : (latestCompletedSignal.data?.id ?? null);
 
   const runAdvisor = useMutation({
     mutationFn: async () => {
@@ -2847,8 +2945,8 @@ function ShortTermClient() {
             const timingDisplay = itemEntryTimingDisplay(item, etfLiveData?.market_status);
             const liveChange = intradayChangeDisplay(quote, etfLiveData?.market_status);
             const itemScoreVersion = isLiveItem
-              ? item.score_version === "final_score_v2"
-                ? "新评分口径"
+              ? item.score_version === "final_score_v3"
+                ? "当前评分口径"
                 : item.score_version
                 ? "旧口径结果"
                 : "暂无口径"
@@ -2882,7 +2980,7 @@ function ShortTermClient() {
                     <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white text-ink" : "bg-ink text-white"}`}>
                       {isLiveItem
                         ? liveScoreText(item)
-                        : `${item.total_score.toFixed(1)} 分`}
+                        : assetScoreText(item)}
                     </span>
                     {!isLiveItem && item.asset_type === "etf" && item.opportunity_score !== null && item.opportunity_score !== undefined ? (
                       <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : "bg-accent text-white"}`}>
@@ -3043,7 +3141,7 @@ function ShortTermClient() {
             <div className="rounded-[8px] bg-paper px-4 py-3">
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">当前结论</p>
               <p className="mt-2 text-lg font-semibold text-ink">
-                {selectedAsset.conclusion} · 综合分 {selectedAsset.total_score.toFixed(1)}
+                {selectedAsset.conclusion} · {assetScoreSummaryText(selectedAsset)}
               </p>
               <p className="mt-2 text-sm leading-6 text-ink/65">
                 {rationaleText(selectedAsset, "key_reason", "暂无")}
@@ -4087,7 +4185,9 @@ function ShortTermClient() {
               {syncData.isPending ? "准备数据中" : mode.dataButton}
             </TaskButton>
             <TaskButton variant="primary" disabled={isResearchTaskPending} onClick={() => runSignals.mutate()}>
-              {runSignals.isPending ? "排序生成中" : "生成短线排序"}
+              {runSignals.isPending
+                ? (assetType === "etf" ? "刷新中" : "排序生成中")
+                : (assetType === "etf" ? "刷新综合排名" : "生成短线排序")}
             </TaskButton>
             <TaskButton disabled={isResearchTaskPending || advisorSourceRunId === null} onClick={() => runAdvisor.mutate()}>
               {runAdvisor.isPending ? "报告生成中" : "AI 研究说明"}
@@ -4106,7 +4206,7 @@ function ShortTermClient() {
                 }`}
                 onClick={() => {
                   setAssetType(item);
-                  setSort(item === "etf" ? "opportunity" : "score");
+                  setSort("score");
                   setTheme("all");
                   setSelected(null);
                   setAssetOffset(0);
@@ -4286,7 +4386,7 @@ function ShortTermClient() {
             </div>
           ) : (
             <div className="mt-4 rounded-[8px] border border-dashed border-ink/20 bg-paper px-4 py-5 text-sm text-ink/55">
-              暂无综合关注分层验证。
+              {scoreBucketUnavailableText(scoreBucketValidation)}
             </div>
           )}
         </Panel>
@@ -4430,7 +4530,7 @@ function ShortTermClient() {
                       <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white text-ink" : "bg-ink text-white"}`}>
                         {isLiveItem
                           ? liveScoreText(item)
-                          : `${item.total_score.toFixed(1)} 分`}
+                          : assetScoreText(item)}
                       </span>
                       <span className={`rounded-full px-3 py-1 text-xs font-semibold ${
                         isSelected ? "bg-white/15 text-white" : conclusionTone(itemConclusion(item))
@@ -4551,7 +4651,7 @@ function ShortTermClient() {
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <span className="rounded-full bg-ink px-4 py-2 text-sm font-semibold text-white">
-                      综合分 {selectedAsset.total_score.toFixed(1)}
+                      {assetScoreSummaryText(selectedAsset)}
                     </span>
                     {selectedAsset.asset_type === "etf" && selectedAsset.opportunity_score !== null && selectedAsset.opportunity_score !== undefined ? (
                       <span className="rounded-full bg-accent px-4 py-2 text-sm font-semibold text-white">
@@ -4587,7 +4687,7 @@ function ShortTermClient() {
                     <div className="rounded-[10px] bg-paper p-4">
                       <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">当前结论</p>
                       <p className="mt-2 text-lg font-semibold text-ink">
-                        {selectedAsset.conclusion} · 综合分 {selectedAsset.total_score.toFixed(1)}
+                        {selectedAsset.conclusion} · {assetScoreSummaryText(selectedAsset)}
                       </p>
                       <p className="mt-2 text-sm leading-7 text-ink/65">
                         {rationaleText(selectedAsset, "key_reason", "按近期趋势、回撤、波动、成交额和数据质量综合生成。")}
@@ -4648,7 +4748,7 @@ function ShortTermClient() {
                       <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">评分拆解</p>
                     </div>
                     <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
-                      {scoreDimensionLabels.map((item) => (
+                      {scoreDimensionLabels(selectedAsset).map((item) => (
                         <div key={item.key} className="rounded-[8px] border border-ink/10 bg-paper px-3 py-2">
                           <p className="text-xs text-ink/45">{item.label}</p>
                           <p className="mt-1 text-base font-semibold text-ink">{scoreDimensionValue(selectedAsset, item.key)}</p>

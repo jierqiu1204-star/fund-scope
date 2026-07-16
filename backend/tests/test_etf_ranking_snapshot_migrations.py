@@ -17,6 +17,7 @@ MIGRATION_NAMES = (
     "20260712_000034_etf_price_research_provenance.py",
     "20260712_000035_etf_universe_memberships.py",
     "20260712_000036_etf_validation_source_identity.py",
+    "20260715_000045_etf_ranking_dual_coverage.py",
 )
 
 
@@ -58,7 +59,15 @@ def test_snapshot_schema_migrations_upgrade_and_downgrade_without_legacy_fabrica
         run_columns = {column["name"]: column for column in inspector.get_columns("short_research_signal_runs")}
         assert run_columns["scope_kind"]["nullable"] is True
         assert run_columns["ranking_contract_hash"]["nullable"] is True
-        assert connection.execute(sa.text("SELECT scope_kind, ranking_contract_hash FROM short_research_signal_runs WHERE id = 1")).one() == (None, None)
+        assert run_columns["decision_data_item_count"]["nullable"] is True
+        assert run_columns["decision_data_coverage_ratio"]["nullable"] is True
+        assert connection.execute(
+            sa.text(
+                "SELECT scope_kind, ranking_contract_hash, "
+                "decision_data_item_count, decision_data_coverage_ratio "
+                "FROM short_research_signal_runs WHERE id = 1"
+            )
+        ).one() == (None, None, None, None)
 
         run_table = sa.Table("short_research_signal_runs", sa.MetaData(), autoload_with=connection)
         connection.execute(run_table.insert().values(id=2, idempotency_key="same-input"))

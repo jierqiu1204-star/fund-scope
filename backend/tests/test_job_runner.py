@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.models.entities import JobRun
 from app.services.job_runner import run_job, start_background_job
@@ -35,6 +36,46 @@ async def test_run_job_persists_business_result_status(app, result, expected_sta
     assert job_run.status == expected_status
     assert job_run.error_message == expected_error
     assert job_run.details_json == result
+
+
+@pytest.mark.asyncio
+async def test_run_job_rolls_back_partial_business_writes_before_recording_failure(app) -> None:
+    async def job(session):
+        session.add(JobRun(job_name="uncommitted_business_write", status="running"))
+        await session.flush()
+        raise RuntimeError("business write failed")
+
+    with pytest.raises(RuntimeError, match="business write failed"):
+        await run_job(app.state.db.session, "rollback_probe", job)
+
+    async with app.state.db.session() as session:
+        partial = await session.scalar(select(JobRun).where(JobRun.job_name == "uncommitted_business_write"))
+        recorded = await session.scalar(select(JobRun).where(JobRun.job_name == "rollback_probe"))
+
+    assert partial is None
+    assert recorded is not None
+    assert recorded.status == "failed"
+    assert recorded.error_message == "business write failed"
+
+
+@pytest.mark.asyncio
+async def test_run_job_recovers_failed_flush_before_recording_failure(app) -> None:
+    async def job(session):
+        current = await session.scalar(select(JobRun).where(JobRun.job_name == "failed_flush_probe"))
+        assert current is not None
+        session.add(JobRun(id=current.id, job_name="duplicate_primary_key", status="running"))
+        await session.flush()
+        return {}
+
+    with pytest.raises(IntegrityError):
+        await run_job(app.state.db.session, "failed_flush_probe", job)
+
+    async with app.state.db.session() as session:
+        recorded = await session.scalar(select(JobRun).where(JobRun.job_name == "failed_flush_probe"))
+
+    assert recorded is not None
+    assert recorded.status == "failed"
+    assert recorded.error_message
 
 
 @pytest.mark.asyncio

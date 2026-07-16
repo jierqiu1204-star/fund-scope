@@ -120,9 +120,9 @@ def _cluster_distributions(
     inputs: Sequence[RankingInput],
     manifest: RankingManifest,
 ) -> dict[str, dict[str, list[float]]]:
-    primitive_ids = {
-        primitive.primitive_id
-        for component in manifest.components.values()
+    primitive_components = {
+        primitive.primitive_id: component_id
+        for component_id, component in manifest.components.items()
         for primitive in component.primitive_inputs
         if component.score_bearing
     }
@@ -133,10 +133,17 @@ def _cluster_distributions(
     distributions: dict[str, dict[str, list[float]]] = {}
     for bucket, clone_groups in clusters.items():
         bucket_distributions: dict[str, list[float]] = {}
-        for primitive_id in primitive_ids:
+        for primitive_id, component_id in primitive_components.items():
             values: list[float] = []
             for clone_inputs in clone_groups.values():
-                clone_values = [_numeric(item.values.get(primitive_id)) for item in clone_inputs]
+                clone_values = [
+                    _numeric(item.values.get(primitive_id))
+                    for item in clone_inputs
+                    if item.values.get("quality_gate_rejected") is not True
+                    and isinstance(item.values.get("component_reliability"), Mapping)
+                    and str(item.values["component_reliability"].get(component_id) or "unavailable")
+                    in _DECISION_RELIABILITIES
+                ]
                 usable = [item for item in clone_values if item is not None]
                 if usable:
                     values.append(mean(usable))
@@ -182,11 +189,19 @@ def build_final_score_v3_sector_inputs(inputs: Sequence[RankingInput]) -> dict[s
         source_dates: set[str] = set()
         reliabilities: set[str] = set()
         for clones in clone_groups.values():
-            returns = [_numeric(member.values.get("return_20d")) for member in clones]
-            turnovers_20 = [_numeric(member.values.get("average_turnover_20d")) for member in clones]
-            turnovers_60 = [_numeric(member.values.get("average_turnover_60d")) for member in clones]
-            sources = {str(member.values.get("source_trade_date") or "") for member in clones}
-            clone_reliabilities = {str(member.values.get("market_data_reliability") or "unavailable") for member in clones}
+            eligible_clones = [
+                member
+                for member in clones
+                if member.values.get("quality_gate_rejected") is not True
+            ]
+            returns = [_numeric(member.values.get("return_20d")) for member in eligible_clones]
+            turnovers_20 = [_numeric(member.values.get("average_turnover_20d")) for member in eligible_clones]
+            turnovers_60 = [_numeric(member.values.get("average_turnover_60d")) for member in eligible_clones]
+            sources = {str(member.values.get("source_trade_date") or "") for member in eligible_clones}
+            clone_reliabilities = {
+                str(member.values.get("market_data_reliability") or "unavailable")
+                for member in eligible_clones
+            }
             if (
                 not sources
                 or "" in sources
@@ -255,7 +270,8 @@ def score_final_score_v3(
                     sum(primitive.weight * score for primitive, score in primitive_scores),
                     4,
                 )
-        score_eligible = not missing_by_component and len(component_scores) == len(manifest.components)
+        score_bearing_count = sum(component.score_bearing for component in manifest.components.values())
+        score_eligible = not missing_by_component and len(component_scores) == score_bearing_count
         ranking_score = (
             round(
                 sum(manifest.components[component_id].weight * score for component_id, score in component_scores.items()),
