@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, time, timedelta
+from types import SimpleNamespace
 from typing import Any
 
+import pandas as pd
 import pytest
-from sqlalchemy import func, select, text
+from sqlalchemy import event, func, select, text
 
 from app.models.entities import (
     EtfPriceHistory,
@@ -24,6 +26,7 @@ from app.services.short_research.universe import (
     EtfUniverseDiscovery,
     EtfUniverseRecord,
     build_point_in_time_universe_snapshot,
+    discover_etf_universe,
     refresh_etf_universe,
 )
 from app.services.workflows.short_research_data import (
@@ -35,6 +38,175 @@ def test_default_etf_sync_batch_size_is_bounded_for_small_servers(monkeypatch) -
     monkeypatch.delenv("SHORT_RESEARCH_ETF_SYNC_BATCH_SIZE", raising=False)
 
     assert short_research_service._etf_sync_batch_size() == 20
+
+
+@pytest.mark.asyncio
+async def test_universe_discovery_uses_complete_eastmoney_snapshot_before_akshare(monkeypatch) -> None:
+    calls = {"eastmoney": 0, "akshare": 0}
+
+    async def fetch_eastmoney_rows() -> SimpleNamespace:
+        calls["eastmoney"] += 1
+        return SimpleNamespace(
+            rows=(
+                {"f12": "510300", "f14": "沪深300ETF"},
+                {"f12": "159915", "f14": "创业板ETF"},
+            ),
+            expected_total=2,
+            complete=True,
+            error=None,
+            elapsed_ms=5,
+        )
+
+    def fetch_akshare_rows() -> pd.DataFrame:
+        calls["akshare"] += 1
+        raise AssertionError("complete Eastmoney discovery must not call AKShare")
+
+    monkeypatch.setattr(
+        universe_module,
+        "fetch_eastmoney_etf_spot_rows",
+        fetch_eastmoney_rows,
+        raising=False,
+    )
+    monkeypatch.setattr(universe_module.ak, "fund_etf_spot_em", fetch_akshare_rows)
+
+    result = await discover_etf_universe()
+
+    assert result.authoritative is True
+    assert result.source == "eastmoney.push2.clist"
+    assert result.source_row_count == 2
+    assert result.normalized_row_count == 2
+    assert [record.code for record in result.records] == ["159915", "510300"]
+    assert calls == {"eastmoney": 1, "akshare": 0}
+
+
+@pytest.mark.asyncio
+async def test_universe_discovery_falls_back_to_complete_akshare_snapshot(monkeypatch) -> None:
+    eastmoney_calls = 0
+
+    async def fetch_eastmoney_rows() -> SimpleNamespace:
+        nonlocal eastmoney_calls
+        eastmoney_calls += 1
+        return SimpleNamespace(
+            rows=(),
+            expected_total=None,
+            complete=False,
+            error="eastmoney disconnected",
+            elapsed_ms=5,
+        )
+
+    monkeypatch.setattr(
+        universe_module,
+        "fetch_eastmoney_etf_spot_rows",
+        fetch_eastmoney_rows,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        universe_module.ak,
+        "fund_etf_spot_em",
+        lambda: pd.DataFrame([{"代码": "588000", "名称": "科创50ETF"}]),
+    )
+
+    result = await discover_etf_universe()
+
+    assert result.authoritative is True
+    assert result.source == "akshare.fund_etf_spot_em"
+    assert [record.code for record in result.records] == ["588000"]
+    assert eastmoney_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_universe_discovery_reports_both_provider_failures(monkeypatch) -> None:
+    async def fetch_eastmoney_rows() -> SimpleNamespace:
+        return SimpleNamespace(
+            rows=(),
+            expected_total=None,
+            complete=False,
+            error="eastmoney disconnected",
+            elapsed_ms=5,
+        )
+
+    def fetch_akshare_rows() -> pd.DataFrame:
+        raise ConnectionError("akshare proxy refused")
+
+    monkeypatch.setattr(
+        universe_module,
+        "fetch_eastmoney_etf_spot_rows",
+        fetch_eastmoney_rows,
+        raising=False,
+    )
+    monkeypatch.setattr(universe_module.ak, "fund_etf_spot_em", fetch_akshare_rows)
+
+    result = await discover_etf_universe()
+
+    assert result.status == "failure"
+    assert result.error_summary is not None
+    assert "eastmoney disconnected" in result.error_summary
+    assert "akshare proxy refused" in result.error_summary
+
+
+@pytest.mark.asyncio
+async def test_universe_discovery_rejects_duplicate_primary_snapshot(monkeypatch) -> None:
+    async def fetch_eastmoney_rows() -> SimpleNamespace:
+        return SimpleNamespace(
+            rows=(
+                {"f12": "510300", "f14": "沪深300ETF"},
+                {"f12": "510300", "f14": "沪深300ETF"},
+            ),
+            expected_total=2,
+            complete=True,
+            error=None,
+            elapsed_ms=5,
+        )
+
+    def fetch_akshare_rows() -> pd.DataFrame:
+        raise ConnectionError("akshare unavailable")
+
+    monkeypatch.setattr(
+        universe_module,
+        "fetch_eastmoney_etf_spot_rows",
+        fetch_eastmoney_rows,
+        raising=False,
+    )
+    monkeypatch.setattr(universe_module.ak, "fund_etf_spot_em", fetch_akshare_rows)
+
+    result = await discover_etf_universe()
+
+    assert result.status == "partial"
+    assert result.source_row_count == 2
+    assert result.normalized_row_count == 1
+    assert result.error_summary is not None
+    assert "duplicate" in result.error_summary.lower()
+
+
+@pytest.mark.asyncio
+async def test_universe_discovery_rejects_incomplete_primary_snapshot(monkeypatch) -> None:
+    async def fetch_eastmoney_rows() -> SimpleNamespace:
+        return SimpleNamespace(
+            rows=({"f12": "510300", "f14": "沪深300ETF"},),
+            expected_total=2,
+            complete=False,
+            error=None,
+            elapsed_ms=5,
+        )
+
+    def fetch_akshare_rows() -> pd.DataFrame:
+        raise ConnectionError("akshare unavailable")
+
+    monkeypatch.setattr(
+        universe_module,
+        "fetch_eastmoney_etf_spot_rows",
+        fetch_eastmoney_rows,
+        raising=False,
+    )
+    monkeypatch.setattr(universe_module.ak, "fund_etf_spot_em", fetch_akshare_rows)
+
+    result = await discover_etf_universe()
+
+    assert result.status == "partial"
+    assert result.source_row_count == 1
+    assert result.normalized_row_count == 1
+    assert result.error_summary is not None
+    assert "expected 2 rows" in result.error_summary
 
 
 async def _seed_etf_history(
@@ -431,6 +603,7 @@ async def test_universe_refresh_closes_missing_memberships_and_preserves_histori
         membership = await session.scalar(
             select(EtfUniverseMembership).where(EtfUniverseMembership.etf_code == "588001")
         )
+        etf = await session.get(TradableEtf, "588001")
         historical = await build_point_in_time_universe_snapshot(session, as_of_date=date(2026, 1, 2))
         current = await build_point_in_time_universe_snapshot(session, as_of_date=date(2026, 1, 4))
 
@@ -439,6 +612,9 @@ async def test_universe_refresh_closes_missing_memberships_and_preserves_histori
     assert membership is not None
     assert membership.effective_to == date(2026, 1, 3)
     assert membership.exclusion_reason == "missing_from_refresh"
+    assert etf is not None
+    assert etf.is_short_term_eligible is False
+    assert etf.is_watchlist is False
     assert [member["asset_code"] for member in historical.members] == ["588001"]
     assert current.members == []
 
@@ -487,6 +663,69 @@ async def test_universe_refresh_preserves_frozen_membership_when_live_discovery_
 
 
 @pytest.mark.asyncio
+async def test_universe_refresh_rejects_equal_sized_disjoint_live_replacement(app, monkeypatch) -> None:
+    old_records = [
+        EtfUniverseRecord(
+            code=f"56000{index}",
+            name=f"旧池{index}ETF",
+            exchange="SH",
+            category="sector",
+            theme_tags=["旧池"],
+            trading_rule_label="证券账户 T+1 ETF",
+            source="pytest.seed",
+        )
+        for index in range(1, 4)
+    ]
+    replacement_records = tuple(
+        EtfUniverseRecord(
+            code=f"56100{index}",
+            name=f"替换池{index}ETF",
+            exchange="SH",
+            category="sector",
+            theme_tags=["替换池"],
+            trading_rule_label="证券账户 T+1 ETF",
+            source="eastmoney.push2.clist",
+        )
+        for index in range(1, 4)
+    )
+
+    async with app.state.db.session() as session:
+        await refresh_etf_universe(session, records=old_records, as_of_date=date(2026, 7, 15))
+
+        async def disjoint_discovery() -> EtfUniverseDiscovery:
+            return EtfUniverseDiscovery(
+                records=replacement_records,
+                status="authoritative",
+                source="eastmoney.push2.clist",
+                source_row_count=3,
+                normalized_row_count=3,
+            )
+
+        monkeypatch.setattr(universe_module, "discover_etf_universe", disjoint_discovery)
+        result = await refresh_etf_universe(session, as_of_date=date(2026, 7, 16))
+        active_old = await session.scalar(
+            select(func.count())
+            .select_from(EtfUniverseMembership)
+            .where(
+                EtfUniverseMembership.etf_code.in_([record.code for record in old_records]),
+                EtfUniverseMembership.effective_to.is_(None),
+            )
+        )
+        replacement_count = await session.scalar(
+            select(func.count())
+            .select_from(TradableEtf)
+            .where(TradableEtf.code.in_([record.code for record in replacement_records]))
+        )
+
+    assert result["authoritative"] is False
+    assert result["discovery_status"] == "partial"
+    assert result["inserted"] == 0
+    assert result["deactivated"] == 0
+    assert active_old == 3
+    assert replacement_count == 0
+
+
+@pytest.mark.asyncio
 async def test_universe_refresh_flushes_new_etf_before_membership_insert(app) -> None:
     record = EtfUniverseRecord(
         code="159605",
@@ -507,6 +746,42 @@ async def test_universe_refresh_flushes_new_etf_before_membership_insert(app) ->
     assert result["inserted"] == 1
     assert result["activated"] == 1
     assert membership is not None
+
+
+@pytest.mark.asyncio
+async def test_universe_refresh_bulk_loads_seed_expansion_without_syncing_history(app) -> None:
+    records = [
+        EtfUniverseRecord(
+            code=f"560{index:03d}",
+            name=f"扩容样本{index}ETF",
+            exchange="SH",
+            category="sector",
+            theme_tags=["测试"],
+            trading_rule_label="证券账户 T+1 ETF",
+            source="pytest.full_universe",
+        )
+        for index in range(1, 41)
+    ]
+    tradable_selects: list[str] = []
+
+    def capture_select(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+        normalized = str(statement).strip().upper()
+        if normalized.startswith("SELECT") and "FROM TRADABLE_ETFS" in normalized:
+            tradable_selects.append(normalized)
+
+    event.listen(app.state.db.engine.sync_engine, "before_cursor_execute", capture_select)
+    try:
+        async with app.state.db.session() as session:
+            result = await refresh_etf_universe(session, records=records, as_of_date=date(2026, 7, 16))
+            history_count = await session.scalar(select(func.count()).select_from(EtfPriceHistory))
+    finally:
+        event.remove(app.state.db.engine.sync_engine, "before_cursor_execute", capture_select)
+
+    assert result["inserted"] == 40
+    assert result["activated"] == 40
+    assert result["default_display"] == 40
+    assert history_count == 0
+    assert len(tradable_selects) <= 2
 
 
 @pytest.mark.asyncio

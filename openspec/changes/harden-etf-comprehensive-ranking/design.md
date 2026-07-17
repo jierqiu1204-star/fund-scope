@@ -210,6 +210,8 @@ The taxonomy does not solve missing classifications with a blanket `sector -> eq
 
 Legacy ETF generation endpoints are not an alternative producer. ETF refresh resolves only the canonical v3 state, while the legacy generator remains fund-only; generic latest/status readers exclude legacy and unpublished ETF runs.
 
+Universe discovery uses the bounded Eastmoney ETF spot-list endpoint as the primary metadata source and AKShare as a fallback. A provider result is authoritative only when its declared total, received row count, normalized row count, and unique code count agree; a partial page, malformed row, duplicate code, or provider failure cannot update membership. Metadata refresh bulk-loads existing ETFs before applying the authoritative snapshot so expanding from a seed cohort to the full public universe does not issue one database lookup per ETF. This metadata operation never starts adjusted-price history synchronization; the existing at-most-20-ETF slices remain the only path that advances research history on the small-server profile.
+
 ## Risks / Trade-offs
 
 - [Strict selection initially leaves the workbench in `等待数据`] → Deploy schema and producer changes first, generate a shadow v3 full snapshot, and promote only after coverage and comparison gates pass.

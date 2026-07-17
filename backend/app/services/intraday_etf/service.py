@@ -41,6 +41,7 @@ QUOTE_FRESH_SECONDS = 180
 QUOTE_PROVIDER_TIMEOUT_SECONDS = 4.0
 AKSHARE_PROVIDER_TIMEOUT_SECONDS = 30.0
 EASTMONEY_PROVIDER_TIMEOUT_SECONDS = 8.0
+EASTMONEY_PROVIDER_TOTAL_TIMEOUT_SECONDS = 20.0
 QUOTE_PRICE_DIFF_PCT_TOLERANCE = 0.003
 QUOTE_PRICE_DIFF_ABS_TOLERANCE = 0.003
 PREMIUM_DIFF_BPS_TOLERANCE = 30.0
@@ -139,6 +140,23 @@ class ProviderQuoteResult:
     quotes: dict[str, NormalizedQuote]
     error: str | None = None
     elapsed_ms: int | None = None
+
+
+@dataclass(frozen=True)
+class EastmoneyEtfSpotRows:
+    rows: tuple[dict[str, Any], ...]
+    expected_total: int | None
+    error: str | None
+    elapsed_ms: int
+
+    @property
+    def complete(self) -> bool:
+        return bool(
+            self.error is None
+            and self.expected_total is not None
+            and self.expected_total > 0
+            and len(self.rows) == self.expected_total
+        )
 
 
 @dataclass(frozen=True)
@@ -593,7 +611,7 @@ def _eastmoney_quote_time(value: Any) -> datetime | None:
     return datetime.fromtimestamp(int(raw), tz=ASIA_SHANGHAI).replace(tzinfo=None)
 
 
-async def _fetch_eastmoney_provider() -> ProviderQuoteResult:
+async def fetch_eastmoney_etf_spot_rows() -> EastmoneyEtfSpotRows:
     started = datetime.now(ASIA_SHANGHAI)
     url = "https://push2.eastmoney.com/api/qt/clist/get"
     base_params = {
@@ -605,12 +623,14 @@ async def _fetch_eastmoney_provider() -> ProviderQuoteResult:
         "fltt": "2",
         "invt": "2",
         "fid": "f3",
-        "fs": "b:MK0021,b:MK0022,b:MK0023,b:MK0024",
-        "fields": "f12,f14,f2,f3,f5,f6,f124",
+        "fs": "b:MK0021,b:MK0022,b:MK0023,b:MK0024,b:MK0827",
+        "fields": "f12,f13,f14,f2,f3,f5,f6,f124",
     }
     rows: list[dict[str, Any]] = []
-    total: int | None = None
-    try:
+    expected_total: int | None = None
+
+    async def fetch_all_pages() -> None:
+        nonlocal expected_total
         timeout = httpx.Timeout(EASTMONEY_PROVIDER_TIMEOUT_SECONDS, connect=QUOTE_PROVIDER_TIMEOUT_SECONDS)
         async with httpx.AsyncClient(
             timeout=timeout,
@@ -637,16 +657,44 @@ async def _fetch_eastmoney_provider() -> ProviderQuoteResult:
                 if not isinstance(page_rows, list) or not page_rows:
                     break
                 rows.extend(row for row in page_rows if isinstance(row, dict))
-                if total is None:
+                if expected_total is None:
                     total_raw = _float_or_none(data.get("total"))
-                    total = int(total_raw) if total_raw is not None and total_raw > 0 else None
-                if total is None or len(rows) >= total:
+                    expected_total = int(total_raw) if total_raw is not None and total_raw > 0 else None
+                if expected_total is None or len(rows) >= expected_total:
                     break
+
+    try:
+        async with asyncio.timeout(EASTMONEY_PROVIDER_TOTAL_TIMEOUT_SECONDS):
+            await fetch_all_pages()
+    except TimeoutError:
+        return EastmoneyEtfSpotRows(
+            rows=tuple(rows),
+            expected_total=expected_total,
+            error=f"Eastmoney ETF spot request timeout after {EASTMONEY_PROVIDER_TOTAL_TIMEOUT_SECONDS:g}s",
+            elapsed_ms=_elapsed_ms(started),
+        )
     except Exception as exc:  # noqa: BLE001
-        return ProviderQuoteResult(QUOTE_SOURCE_EASTMONEY, {}, f"东方财富 ETF 行情源请求失败：{exc}", _elapsed_ms(started))
+        return EastmoneyEtfSpotRows(
+            rows=tuple(rows),
+            expected_total=expected_total,
+            error=f"东方财富 ETF 行情源请求失败：{exc}",
+            elapsed_ms=_elapsed_ms(started),
+        )
+    return EastmoneyEtfSpotRows(
+        rows=tuple(rows),
+        expected_total=expected_total,
+        error=None,
+        elapsed_ms=_elapsed_ms(started),
+    )
+
+
+async def _fetch_eastmoney_provider() -> ProviderQuoteResult:
+    result = await fetch_eastmoney_etf_spot_rows()
+    if result.error is not None and not result.rows:
+        return ProviderQuoteResult(QUOTE_SOURCE_EASTMONEY, {}, result.error, result.elapsed_ms)
     quotes: dict[str, NormalizedQuote] = {}
     now = datetime.now(ASIA_SHANGHAI)
-    for row in rows:
+    for row in result.rows:
         quote_time = _eastmoney_quote_time(row.get("f124"))
         record = {
             "code": row.get("f12"),
@@ -662,7 +710,13 @@ async def _fetch_eastmoney_provider() -> ProviderQuoteResult:
         quote = normalize_spot_record(record, fallback_time=now, source=QUOTE_SOURCE_EASTMONEY)
         if quote is not None:
             quotes[quote.etf_code] = quote
-    return ProviderQuoteResult(QUOTE_SOURCE_EASTMONEY, quotes, elapsed_ms=_elapsed_ms(started))
+    error = result.error
+    if error is None and not result.complete:
+        error = (
+            "东方财富 ETF 行情源返回不完整："
+            f"expected={result.expected_total}, received={len(result.rows)}"
+        )
+    return ProviderQuoteResult(QUOTE_SOURCE_EASTMONEY, quotes, error, result.elapsed_ms)
 
 async def fetch_spot_quotes_with_metadata(fetcher: Any | None = None) -> SpotQuoteFetchResult:
     if fetcher is not None:

@@ -167,3 +167,11 @@
 - [x] 13.8 Add workflow integration tests proving full generation→unpublished persistence→atomic publish is idempotent, partial runs remain non-canonical, legacy run ids remain unchanged, and insufficient component coverage stays honestly unpublished.
 - [x] 13.9 Run bounded targeted tests, migration tests, backend domain boundaries, Ruff, type checks, strict OpenSpec validation, and a real-data shadow attempt; record dual coverage and component exclusions before resuming task 11.9.
 - [x] 13.10 Route the post-close job through a bounded coverage→materialize→publish workflow without repeating history sync, and switch default ETF list/detail/live/portfolio readers to the exact canonical selector while preserving explicit waiting/rollback states.
+
+## 14. Restore The Full Public ETF Universe
+
+- [x] 14.1 Add failing tests for authoritative Eastmoney universe discovery, AKShare fallback, dual-provider failure, partial/duplicate provider rejection, and seed-cohort expansion without history synchronization.
+- [x] 14.2 Expose one bounded Eastmoney spot-row fetch result and keep the existing intraday quote provider behavior and pagination/retry tests passing through that shared fetch.
+- [x] 14.3 Make ETF universe discovery try complete Eastmoney facts first and complete AKShare facts second, preserving non-authoritative status and combined diagnostics when neither source is safe.
+- [x] 14.4 Bulk-load existing ETF metadata before applying an authoritative universe snapshot so a 1,400-plus-member refresh avoids per-code lookup queries while retaining idempotent effective-dated membership.
+- [x] 14.5 Run bounded universe, intraday-provider, workflow, domain-boundary, Ruff, and strict OpenSpec validation; then perform one metadata-only real refresh and record the resulting total, eligible, source, and exclusion counts without starting history sync or publication.

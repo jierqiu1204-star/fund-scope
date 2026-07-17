@@ -1,0 +1,94 @@
+# Review package: 077c5e9..d58ff27
+
+## Commits
+d58ff27 docs: 记录 ETF 评分变更重叠矩阵
+
+## Files changed
+ .../overlap-matrix.md                              | 58 ++++++++++++++++++++++
+ .../harden-etf-comprehensive-ranking/tasks.md      |  2 +-
+ 2 files changed, 59 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/openspec/changes/harden-etf-comprehensive-ranking/overlap-matrix.md b/openspec/changes/harden-etf-comprehensive-ranking/overlap-matrix.md
+new file mode 100644
+index 0000000..e0166ad
+--- /dev/null
++++ b/openspec/changes/harden-etf-comprehensive-ranking/overlap-matrix.md
+@@ -0,0 +1,58 @@
++# Active-change overlap matrix
++
++## Authority and status meanings
++
++This matrix is the Task 1.1 governance record for `harden-etf-comprehensive-ranking`. The authoritative current ranking contract is the immutable `final_score_v3` full-scope snapshot. `final_score_v2`, `total_score`, `opportunity_score`, and hashless historical results remain old-contract or explanatory evidence and cannot be reinterpreted as v3.
++
++- `retained`: compatible producer, presentation, or test work that v3 should reuse behind its typed manifest and snapshot selector.
++- `superseded`: a requirement conflicts with the single-pass v3 score, immutable snapshot identity, homogeneous cohorts, fixed manifest, or one-way evidence boundary.
++- `blocked`: the task must not deploy, generate a production ranking, recompute allocation, validate Top-N/labels, promote evidence, or feed decision consumers until a compatible published v3 snapshot exists.
++
++This classification does not edit the five source changes. Tasks 1.2 and 1.3 will perform any required source-artifact supersession or pause marking.
++
++All source paths below are relative to `openspec/changes/`.
++
++## Requirement and task overlap
++
++| Area | Active change and source | Status | Required v3 treatment |
++| --- | --- | --- | --- |
++| Score version and ordering | `make-opportunity-final-decision-ranking/specs/short-term-research/spec.md`, requirement **Comprehensive Focus Ranking Uses Final Decision Score**; `design.md` decisions 1-2 | `retained` | Keep comprehensive order based on the declared final decision score and keep theme/sector heat explanatory. Bind the compatibility sort alias only to `final_score_v3`. |
++| Score version and ordering | `make-opportunity-final-decision-ranking/design.md` decisions 1 and 3 | `superseded` | Do not treat the existing `final_score_breakdown.final_score` as current without v3 identity, and do not fall back to `total_score`. Historical values remain old-contract evidence. |
++| Score version and ordering | `improve-etf-cross-sectional-ranking/proposal.md`; `design.md` decisions 1-2; `specs/short-term-research/spec.md`, requirements **ETF final ranking uses versioned cross-sectional score** and **Short-Term Scores Are Deterministic And Explainable** | `superseded` | `final_score_v2`, its `total_score` alias as a score source, and market-wide fallback for an insufficient/incompatible peer bucket cannot define current order. Reuse only eligible percentile producers inside the frozen v3 DAG and homogeneous asset buckets. |
++| Score version and ordering | `add-etf-sector-trend-scoring/design.md` decision 4; `specs/etf-sector-trend-scoring/spec.md`, requirement **Opportunity Score Uses Available Evidence Weights**; `specs/short-etf-research/spec.md`, requirement **Short ETF Opportunity Sorting Uses Real Comprehensive Scores** | `superseded` | The 60/20/15/5 and degraded opportunity formulas do not define the comprehensive rank. Sector output may enter v3 only through its declared fixed component path; no availability-based weight transfer is allowed. |
++| Score version and ordering | `expand-etf-factor-library/specs/etf-factor-library/spec.md`, requirements **ETF Factor Profiles Are Versioned** and **ETF Factor Usage Separates Scores, Penalties, Gates, And Display Context** | `retained` | Reuse versioned taxonomy, usage, lineage, availability, and risk-gate concepts in the v3 component manifest. |
++| Score version and ordering | `expand-etf-factor-library/design.md` decision 4; `tasks.md` 5.1 and 5.3; `specs/etf-factor-library/spec.md`, scenario **Factor profile is degraded** | `superseded` | Do not select a degraded profile that recomputes weights across available groups. Missing required v3 inputs make the score unavailable; incompatible profiles are not directly comparable. |
++| Score version and ordering | `add-etf-theme-catalyst-scoring/specs/short-term-research/spec.md`, requirement **Short-Term Research Separates Technical Score From Opportunity Score** | `retained` | Keep catalyst/opportunity values visible as auxiliary research context, separate from the comprehensive final score and entry/risk labels. |
++| Score version and ordering | `add-etf-theme-catalyst-scoring/design.md` decisions 3 and 5; `specs/etf-theme-catalyst-scoring/spec.md`, requirement **Opportunity Score Combines Technical And Catalyst Inputs** | `superseded` | The 70/20/10 formula, neutral missing-catalyst fallback, and opportunity ordering cannot define v3 or fill a missing v3 component. |
++| Validation-to-score feedback | `improve-etf-cross-sectional-ranking/design.md` decision 4; `tasks.md` 4.1-4.5; `specs/etf-signal-validation/spec.md`, all requirements and scenarios that allow evidence boosts or penalties | `superseded` | Validation, replay, and backtest results are read-only evidence. Positive, weak, negative, fresh, or sufficient evidence must never change current score, label, rank, allocation, tracking, alerts, or notifications. |
++| Validation-to-score feedback | `make-opportunity-final-decision-ranking/proposal.md` and `specs/short-term-research/spec.md` references to label-history participation in the final score | `superseded` | Preserve label evidence for display and research validation only; remove it from the v3 score DAG. |
++| Sector inputs | `add-etf-sector-trend-scoring/tasks.md` 1.1, 2.1-2.4, 4.1, and 4.3; `specs/etf-sector-trend-scoring/spec.md`, requirements **ETF Sector Trend Scores Are Computed From Theme Peers** and **Missing Sector Trend Data Is Not Faked** | `retained` | Reuse peer grouping, coverage, null/unavailable states, reasons, and cached breakdown. The v3 producer contract must supply finite source dates, MA-distance and turnover references, eligible peer counts, reliability, clone handling, and homogeneous bucket identity before scoring. |
++| Sector inputs | `add-etf-sector-trend-scoring/design.md` decision 3 fallback from primary theme to broad theme group | `superseded` | Do not mix an incompatible broad group into a v3 percentile/breadth cohort. Any fallback cohort must be explicitly declared by the frozen manifest and pass homogeneous-bucket and minimum-peer gates. |
++| Factor producers and degraded profiles | `expand-etf-factor-library/tasks.md` 1.1-1.4, 2.1-2.4, 3.1-3.5, 4.1-4.6, and 6.5; `specs/etf-factor-library/spec.md`, requirements on taxonomy, result metadata, external-source eligibility, and risk gates | `retained` | Reuse typed factor results, stable ids, availability/reliability/source metadata, display-only separation, and domain boundaries. Fund flow, fundamentals, valuation, macro, sentiment, or other groups without point-in-time production data remain explanatory/unavailable. |
++| Factor producers and degraded profiles | `expand-etf-factor-library/tasks.md` 5.1 and 6.4; `design.md` decisions 4 and 6 | `superseded` | Optional-group failure may remain visible, but it cannot silently create a different comparable score profile or transfer weight. A required v3 producer failure makes `final_score_v3` unavailable. |
++| Theme/catalyst freshness | `add-etf-theme-catalyst-scoring/tasks.md` 1.1-1.5, 2.1-2.2, 2.4-2.5, and 5.1-5.3; `specs/etf-theme-catalyst-scoring/spec.md`, requirements **ETF Theme Catalysts Are Structured And Auditable**, **Theme Catalyst Snapshots Are Generated Per Theme**, **Catalyst Inputs Cannot Override Risk Or Data Gates**, and **AI May Extract Candidates But Cannot Directly Score** | `retained` | Reuse structured source/date/effective-window/confidence metadata, expiry, pending/unverified exclusion, limitations, and risk guards. v3 additionally requires an explicit snapshot maximum age and decision-eligible freshness at the ranking cutoff. |
++| Theme/catalyst freshness | `add-etf-theme-catalyst-scoring/design.md` decision 6 seed coverage and decision 5 neutral fallback | `superseded` | Seed/manual/proxy context may be displayed with limitations but cannot become score-bearing unless the v3 manifest declares an eligible point-in-time producer. Missing or stale catalyst data stays unavailable, never neutral. |
++
++## Pending operational tasks
++
++| Active change and pending task | Status | Gate |
++| --- | --- | --- |
++| `make-opportunity-final-decision-ranking/tasks.md` 4.1 commit and push | `retained` | Version-control housekeeping is compatible, but it does not authorize deployment, recomputation, or promotion of the old contract. |
++| `make-opportunity-final-decision-ranking/tasks.md` 4.2 deploy, 4.3 production score recompute | `blocked` | Wait for a compatible published `final_score_v3` snapshot and canonical selector. |
++| `make-opportunity-final-decision-ranking/tasks.md` 4.4 allocation recompute | `blocked` | Allocation may consume only the pinned compatible v3 snapshot and must preserve its identity. |
++| `make-opportunity-final-decision-ranking/tasks.md` 4.5 Top 5/10/20/50 validation and 4.6 result reporting | `blocked` | Validate only exact-contract v3 full snapshots; no v2/legacy score fallback or evidence promotion. |
++| `improve-etf-cross-sectional-ranking/tasks.md` 9.1 deploy, 9.3 v2 signal generation, 9.4 allocation generation, and 9.5 production verification | `blocked` | Do not publish or feed `final_score_v2` to current downstream consumers. |
++| `improve-etf-cross-sectional-ranking/tasks.md` 9.2 data refresh | `retained` | It may prepare traceable inputs only when run through the v3 price-basis, trade-date, universe, and coverage contract; it must not publish or refresh a v2 canonical ranking. |
++| `add-etf-sector-trend-scoring/tasks.md` 6.5 manual ranking/detail validation and 6.6 deploy/recompute verification | `blocked` | Validate the sector producer through a published v3 production-path snapshot, not the old opportunity profile. |
++| `expand-etf-factor-library/tasks.md` 8.5 manual ranking/detail validation and 8.6 deploy/recompute verification | `blocked` | Validate only one compatible v3 manifest/profile and keep unavailable producers unavailable. |
++| `add-etf-theme-catalyst-scoring/tasks.md` 6.5 catalyst refresh plus signal generation/verification | `blocked` | Supporting refresh may be scheduled later, but the bundled task must not generate or validate a production ranking before a compatible v3 snapshot exists. |
++
++## Downstream and evidence promotion gate
++
++- Daily list, detail, live ranking, observation allocation, tracking, alerts, and notifications may consume only a pinned, published, full-scope, fresh v3 snapshot with an exact score version, contract hash, universe/input identity, price basis, and cutoff.
++- Validation/backtest workflows may write evidence records only. They never call ranking/allocation/tracking/alert/notification writers and never trigger signal generation.
++- All `final_score_v2`, `total_score`, `opportunity_score`, partial-scope, hashless, or mismatched historical results remain `旧口径结果` or `版本不一致`. Evidence becomes current only after exact-contract v3 validation satisfies the independent-date and coverage gates.
++
++## Coverage check
++
++All five active changes are represented above. The matrix explicitly covers score version/ordering, validation-to-score feedback, sector inputs, factor producers/degraded profiles, theme/catalyst freshness, deployment/recompute/Top-N validation, and downstream allocation/evidence promotion.
+diff --git a/openspec/changes/harden-etf-comprehensive-ranking/tasks.md b/openspec/changes/harden-etf-comprehensive-ranking/tasks.md
+index 6ea89a9..da73be7 100644
+--- a/openspec/changes/harden-etf-comprehensive-ranking/tasks.md
++++ b/openspec/changes/harden-etf-comprehensive-ranking/tasks.md
+@@ -1,13 +1,13 @@
+ ## 1. Reconcile Contracts And Lock Regression Baselines
+
+-- [ ] 1.1 Compare this change with `make-opportunity-final-decision-ranking`, `improve-etf-cross-sectional-ranking`, `add-etf-sector-trend-scoring`, `expand-etf-factor-library`, and `add-etf-theme-catalyst-scoring`, and record each overlapping task as retained, superseded, or blocked.
++- [x] 1.1 Compare this change with `make-opportunity-final-decision-ranking`, `improve-etf-cross-sectional-ranking`, `add-etf-sector-trend-scoring`, `expand-etf-factor-library`, and `add-etf-theme-catalyst-scoring`, and record each overlapping task as retained, superseded, or blocked.
+ - [ ] 1.2 Remove or supersede every active-change requirement that lets label or validation evidence contribute to a current score, label, rank, allocation, tracked position, alert, or notification.
+ - [ ] 1.3 Pause pending deployment, production recompute, Top-N validation, allocation recompute, and evidence-promotion tasks from overlapping active changes until the v3 publication contract is ready.
+ - [ ] 1.4 Freeze the `final_score_v3` component DAG/manifest, compatibility aliases, stale/unavailable caps, homogeneous asset buckets, anti-double-count lineage, and current score-version selector in one reviewed configuration contract.
+ - [ ] 1.5 Convert the failing opportunity-order test into `test_comprehensive_sort_uses_final_decision_score_not_theme_heat`, preserving theme/catalyst evidence assertions.
+ - [ ] 1.6 Convert the failing score-bucket test into `test_score_bucket_validation_requires_current_full_ranking_contract`, covering legacy score, later partial run, contract mismatch, missing score, and non-finite score.
+ - [ ] 1.7 Add failing regression tests for partial-run canonical pollution, stale canonical cache, one-code detail rank, filtered live rank change, missing-hash classification, post-enrichment caps, negative evidence, and validation side effects before changing production behavior.
+
+## 2. Add Snapshot, Price-Basis, And Universe Schema
+
+- [ ] 2.1 Add nullable typed and indexed snapshot identity fields to `ShortResearchSignalRun` for scope kind/hash, universe and input-snapshot hashes, score/rule versions, ranking contract hash, score field, cutoff, trade date, price basis, coverage counts, publication state/time, and a unique idempotency key.

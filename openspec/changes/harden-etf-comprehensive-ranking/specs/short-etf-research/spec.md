@@ -84,6 +84,18 @@ The system SHALL provide a web-runnable job that refreshes tradable ETF metadata
 - **WHEN** the configured live provider fails or returns a materially smaller universe than the frozen active membership
 - **THEN** the refresh is non-authoritative, preserves all current membership intervals, performs no seed fallback or mass deactivation, and blocks canonical publication
 
+#### Scenario: Provider returns an equal-sized disjoint replacement
+- **WHEN** a provider returns as many eligible rows as the frozen membership but retains fewer than 80 percent of the previously active codes
+- **THEN** the refresh is non-authoritative and performs no inserts, updates, activations, or deactivations
+
+#### Scenario: Primary universe provider fails but fallback is complete
+- **WHEN** the bounded Eastmoney universe request fails or is incomplete and AKShare returns a complete unique ETF list
+- **THEN** the refresh uses the AKShare facts as the authoritative snapshot and records the actual membership source
+
+#### Scenario: Public universe expands beyond the seed cohort
+- **WHEN** an authoritative provider returns the complete public ETF list while the database contains only a frozen seed cohort
+- **THEN** the refresh bulk-loads existing metadata, activates every eligible newly discovered ETF idempotently, and does not trigger adjusted-price history synchronization in the same operation
+
 ## ADDED Requirements
 
 ### Requirement: ETF Cross-Sectional Ranking Uses Homogeneous Point-In-Time Cohorts

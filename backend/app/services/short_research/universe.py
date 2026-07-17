@@ -11,6 +11,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.entities import EtfUniverseMembership, TradableEtf
+from app.services.intraday_etf.service import fetch_eastmoney_etf_spot_rows
 from app.services.short_research.ranking_contract import canonical_hash
 
 EXCLUDED_ETF_KEYWORDS = (
@@ -27,6 +28,8 @@ EXCLUDED_ETF_KEYWORDS = (
     "滚动",
 )
 LIVE_DISCOVERY_MIN_RETENTION_RATIO = 0.8
+EASTMONEY_UNIVERSE_SOURCE = "eastmoney.push2.clist"
+AKSHARE_UNIVERSE_SOURCE = "akshare.fund_etf_spot_em"
 
 
 @dataclass(frozen=True)
@@ -234,8 +237,78 @@ def normalize_source_row(record: Any, *, source: str) -> EtfUniverseRecord | Non
     )
 
 
-async def discover_etf_universe() -> EtfUniverseDiscovery:
-    source = "akshare.fund_etf_spot_em"
+def _finalize_discovery(
+    records: list[EtfUniverseRecord],
+    *,
+    source: str,
+    source_row_count: int,
+    expected_total: int | None,
+    provider_complete: bool,
+    provider_error: str | None = None,
+) -> EtfUniverseDiscovery:
+    by_code = {item.code: item for item in records}
+    normalized = tuple(sorted(by_code.values(), key=lambda item: item.code))
+    reasons: list[str] = []
+    if provider_error:
+        reasons.append(provider_error)
+    if expected_total is None or expected_total <= 0:
+        reasons.append("provider did not report a positive expected total")
+    elif source_row_count != expected_total:
+        reasons.append(f"expected {expected_total} rows, received {source_row_count}")
+    elif not provider_complete:
+        reasons.append("provider marked the universe snapshot incomplete")
+    if len(records) != source_row_count:
+        reasons.append(f"{source_row_count - len(records)} provider rows were invalid")
+    if len(normalized) != len(records):
+        reasons.append(f"{len(records) - len(normalized)} duplicate ETF codes were returned")
+
+    if not normalized:
+        status = "failure"
+        if not reasons:
+            reasons.append("provider returned no usable ETF universe rows")
+    elif reasons:
+        status = "partial"
+    else:
+        status = "authoritative"
+    return EtfUniverseDiscovery(
+        records=normalized,
+        status=status,
+        source=source,
+        source_row_count=source_row_count,
+        normalized_row_count=len(normalized),
+        error_summary="; ".join(reasons) or None,
+    )
+
+
+async def _discover_eastmoney_universe() -> EtfUniverseDiscovery:
+    source = EASTMONEY_UNIVERSE_SOURCE
+    result = await fetch_eastmoney_etf_spot_rows()
+    records: list[EtfUniverseRecord] = []
+    for row in result.rows:
+        market = str(row.get("f13") or "")
+        exchange = "SH" if market == "1" else ("SZ" if market == "0" else "")
+        record = normalize_source_row(
+            {
+                "code": row.get("f12"),
+                "name": row.get("f14"),
+                "exchange": exchange,
+            },
+            source=source,
+        )
+        if record is not None:
+            records.append(record)
+    return _finalize_discovery(
+        records,
+        source=source,
+        source_row_count=len(result.rows),
+        expected_total=result.expected_total,
+        provider_complete=result.complete,
+        provider_error=result.error,
+    )
+
+
+async def _discover_akshare_universe() -> EtfUniverseDiscovery:
+    source = AKSHARE_UNIVERSE_SOURCE
     records: list[EtfUniverseRecord] = []
     try:
         async with asyncio.timeout(20):
@@ -254,25 +327,39 @@ async def discover_etf_universe() -> EtfUniverseDiscovery:
             normalized_row_count=0,
             error_summary=f"{type(exc).__name__}: {exc}"[:500],
         )
-
-    by_code = {item.code: item for item in records}
-    normalized = tuple(sorted(by_code.values(), key=lambda item: item.code))
-    if not normalized:
-        status = "failure"
-        error_summary = "provider returned no usable ETF universe rows"
-    elif len(records) != source_row_count or len(normalized) != len(records):
-        status = "partial"
-        error_summary = "provider universe contained invalid or duplicate rows"
-    else:
-        status = "authoritative"
-        error_summary = None
-    return EtfUniverseDiscovery(
-        records=normalized,
-        status=status,
+    return _finalize_discovery(
+        records,
         source=source,
         source_row_count=source_row_count,
-        normalized_row_count=len(normalized),
-        error_summary=error_summary,
+        expected_total=source_row_count,
+        provider_complete=True,
+    )
+
+
+async def discover_etf_universe() -> EtfUniverseDiscovery:
+    primary = await _discover_eastmoney_universe()
+    if primary.authoritative:
+        return primary
+    fallback = await _discover_akshare_universe()
+    if fallback.authoritative:
+        return fallback
+
+    candidates = (primary, fallback)
+    best = max(
+        candidates,
+        key=lambda item: (item.status == "partial", item.normalized_row_count, item.source_row_count),
+    )
+    errors = [
+        f"{item.source}: {item.error_summary or item.status}"
+        for item in candidates
+    ]
+    return EtfUniverseDiscovery(
+        records=best.records,
+        status="partial" if best.records else "failure",
+        source=",".join(item.source for item in candidates),
+        source_row_count=best.source_row_count,
+        normalized_row_count=best.normalized_row_count,
+        error_summary="; ".join(errors)[:1000],
     )
 
 
@@ -316,11 +403,12 @@ async def refresh_etf_universe(
     authoritative = discovery.authoritative
     discovery_status = discovery.status
     discovery_error = discovery.error_summary
+    active_codes = set(active_memberships)
     if (
         authoritative
         and live_discovery
         and active_memberships
-        and len(eligible_codes) / len(active_memberships) < LIVE_DISCOVERY_MIN_RETENTION_RATIO
+        and len(eligible_codes & active_codes) / len(active_codes) < LIVE_DISCOVERY_MIN_RETENTION_RATIO
     ):
         authoritative = False
         discovery_status = "partial"
@@ -355,26 +443,30 @@ async def refresh_etf_universe(
             "stale_universe": True,
         }
     memberships_to_activate: list[EtfUniverseRecord] = []
+    existing_etfs = {
+        etf.code: etf
+        for etf in (await session.scalars(select(TradableEtf))).all()
+    }
 
     for record in discovered:
         try:
             eligible = is_short_term_etf_eligible(record.name, code=record.code)
             if not eligible:
                 excluded += 1
-            existing = await session.scalar(select(TradableEtf).where(TradableEtf.code == record.code))
+            existing = existing_etfs.get(record.code)
             if existing is None:
-                session.add(
-                    TradableEtf(
-                        code=record.code,
-                        name=record.name,
-                        exchange=record.exchange,
-                        theme_tags_json=list(record.theme_tags),
-                        trading_rule_label=record.trading_rule_label,
-                        asset_class=record.category,
-                        is_short_term_eligible=eligible,
-                        is_watchlist=eligible,
-                    )
+                existing = TradableEtf(
+                    code=record.code,
+                    name=record.name,
+                    exchange=record.exchange,
+                    theme_tags_json=list(record.theme_tags),
+                    trading_rule_label=record.trading_rule_label,
+                    asset_class=record.category,
+                    is_short_term_eligible=eligible,
+                    is_watchlist=eligible,
                 )
+                session.add(existing)
+                existing_etfs[record.code] = existing
                 inserted += 1
             else:
                 existing.name = record.name
@@ -395,6 +487,11 @@ async def refresh_etf_universe(
                 deactivated += 1
         except Exception as exc:  # noqa: BLE001
             failed.append({"code": record.code, "error": str(exc)})
+
+    for code, existing in existing_etfs.items():
+        if code not in eligible_codes:
+            existing.is_short_term_eligible = False
+            existing.is_watchlist = False
 
     for code, membership in active_memberships.items():
         if code in eligible_codes or membership.effective_to is not None:

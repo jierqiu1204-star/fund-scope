@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import date, datetime, time, timedelta
 
@@ -1152,6 +1153,70 @@ def test_quote_normalization_parses_timezone_update_time() -> None:
     assert quote.quote_time == datetime(2026, 6, 22, 12, 47, 26)
     assert quote.trade_date == date(2026, 6, 22)
     assert quote.raw["quote_time_is_fallback"] is False
+
+
+@pytest.mark.asyncio
+async def test_eastmoney_spot_row_fetch_preserves_complete_universe_rows(monkeypatch) -> None:
+    rows = [
+        {"f12": "510300", "f14": "沪深300ETF", "f2": 4.1},
+        {"f12": "511010", "f14": "国债ETF", "f2": None},
+    ]
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"data": {"total": len(rows), "diff": rows}}
+
+    class FakeAsyncClient:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeAsyncClient:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def get(self, _url: str, *, params: dict[str, str]) -> FakeResponse:
+            assert params["pn"] == "1"
+            assert "b:MK0827" in params["fs"]
+            return FakeResponse()
+
+    monkeypatch.setattr("app.services.intraday_etf.service.httpx.AsyncClient", FakeAsyncClient)
+
+    result = await intraday_service.fetch_eastmoney_etf_spot_rows()
+
+    assert result.error is None
+    assert result.expected_total == 2
+    assert result.complete is True
+    assert list(result.rows) == rows
+
+
+@pytest.mark.asyncio
+async def test_eastmoney_spot_row_fetch_has_total_wall_clock_timeout(monkeypatch) -> None:
+    class FakeAsyncClient:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeAsyncClient:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def get(self, _url: str, *, params: dict[str, str]) -> None:
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr("app.services.intraday_etf.service.httpx.AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(intraday_service, "EASTMONEY_PROVIDER_TOTAL_TIMEOUT_SECONDS", 0.01, raising=False)
+
+    result = await intraday_service.fetch_eastmoney_etf_spot_rows()
+
+    assert result.complete is False
+    assert result.error is not None
+    assert "timeout" in result.error.lower()
 
 
 @pytest.mark.asyncio
