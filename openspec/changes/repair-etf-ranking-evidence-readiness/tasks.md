@@ -86,7 +86,7 @@
 - [x] 9.1 Run focused migration, manifest, planner, sync, readiness, replay-integration, intraday, and endpoint test batches with a hard timeout of at most 60 seconds per command.
 - [x] 9.2 Run `uv run pytest tests/test_backend_domain_boundaries.py`, targeted regression suites, and `uv run ruff check .`, splitting any suite that cannot finish inside 60 seconds.
 - [x] 9.3 Run strict OpenSpec validation for this change and both owner/dependency changes, reconciling every completed checkbox with test, migration, benchmark, or real-environment evidence.
-- [ ] 9.4 Deploy migrations and code through the existing workflow only after backup and single-head checks pass; verify application/database health and retain a tested rollback point.
+- [x] 9.4 Deploy migrations and code through the existing workflow only after backup and single-head checks pass; verify application/database health and retain a tested rollback point.
 - [ ] 9.5 Run signed production readiness before any sync, then execute only single-worker bounded continuations while the applicable adjusted-history lane is below threshold.
 - [ ] 9.6 Generate and validate a production shadow only when real current-day, 61-session, decision-data, and score-coverage publication gates pass; otherwise record blockers and stop without fallback publication.
 - [ ] 9.7 Accumulate three distinct qualified signed production trade-date sessions for `harden-etf-comprehensive-ranking` 11.2/11.9, never substituting simulation, stale evidence, or repeated same-day runs.
