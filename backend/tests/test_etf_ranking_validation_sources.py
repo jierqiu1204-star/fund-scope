@@ -11,6 +11,7 @@ from app.services.strategy_lab.etf_ranking_validation import (
     RankingValidationContractError,
     RankingValidationSourceEvent,
     freeze_ranking_validation_source_cohort,
+    freeze_ranking_validation_source_event,
     validate_score_bucket_observations,
 )
 from app.services.tracked_positions.lifecycle import stable_contract_hash
@@ -41,10 +42,16 @@ def _event(
         ranking_contract_hash=_hash(
             "daily-reconstructable" if research else "final-score-v3"
         ),
+        scope_hash=_hash(f"scope:{source_kind.value}:{signal_date}"),
         universe_snapshot_hash=_hash(f"universe:{source_kind.value}:{signal_date}"),
         input_snapshot_hash=_hash(f"input:{source_kind.value}:{signal_date}"),
         score_version="daily_reconstructable_v1" if research else "final_score_v3",
         score_field="research_score" if research else "ranking_score",
+        rule_version=(
+            "daily_reconstructable_v1_rule_v1"
+            if research
+            else "final_score_v3_rule_v2"
+        ),
         price_basis="total_return_adjusted",
         publication_state=None if research else "published",
         scope_kind="research_replay" if research else "full",
@@ -57,6 +64,17 @@ def _event(
             tzinfo=UTC,
         ),
         immutable_hash="pending",
+        source_status=None if research else "success",
+        idempotency_key=None if research else f"published:{signal_date}",
+        expected_asset_count=None if research else 100,
+        decision_data_covered_count=None if research else 96,
+        eligible_asset_count=None if research else 95,
+        item_count=None if research else 95,
+        decision_data_coverage_ratio=None if research else 0.96,
+        score_coverage_ratio=None if research else 0.95,
+        etf_item_count=None if research else 95,
+        finite_eligible_score_count=None if research else 95,
+        contiguous_global_rank=None if research else True,
     )
     return replace(
         draft,
@@ -121,6 +139,36 @@ def test_exact_production_and_research_sources_are_frozen_separately() -> None:
         )
 
 
+def test_source_manifest_order_and_hash_cover_every_event_identity() -> None:
+    first = _event(RankingSourceKind.PRODUCTION_PUBLISHED, date(2026, 4, 1))
+    second = _event(RankingSourceKind.PRODUCTION_PUBLISHED, date(2026, 4, 2))
+    chronological = freeze_ranking_validation_source_cohort(
+        ranking_source_kind=RankingSourceKind.PRODUCTION_PUBLISHED,
+        events=(first, second),
+    )
+    reversed_input = freeze_ranking_validation_source_cohort(
+        ranking_source_kind=RankingSourceKind.PRODUCTION_PUBLISHED,
+        events=(second, first),
+    )
+    changed_second = freeze_ranking_validation_source_event(
+        replace(second, source_event_hash=_hash("changed-second"), immutable_hash="pending")
+    )
+    changed = freeze_ranking_validation_source_cohort(
+        ranking_source_kind=RankingSourceKind.PRODUCTION_PUBLISHED,
+        events=(first, changed_second),
+    )
+    representative_only = freeze_ranking_validation_source_cohort(
+        ranking_source_kind=RankingSourceKind.PRODUCTION_PUBLISHED,
+        events=(second,),
+    )
+
+    assert chronological.events == reversed_input.events == (first, second)
+    assert chronological.cohort_hash == reversed_input.cohort_hash
+    assert changed.cohort_hash != chronological.cohort_hash
+    assert representative_only.cohort_hash != chronological.cohort_hash
+    assert representative_only.independent_dates != chronological.independent_dates
+
+
 def test_research_source_requires_complete_replay_identity() -> None:
     event = _event(RankingSourceKind.RESEARCH_REPLAY, date(2026, 4, 1))
 
@@ -133,6 +181,8 @@ def test_research_source_requires_complete_replay_identity() -> None:
             ranking_source_kind=RankingSourceKind.RESEARCH_REPLAY,
             events=(replace(event, input_snapshot_hash=_hash("tampered")),),
         )
+    with pytest.raises(RankingValidationContractError, match="publication metadata"):
+        replace(event, source_status="success")
 
 
 def test_production_source_requires_exact_published_full_scope_v3() -> None:
@@ -140,10 +190,20 @@ def test_production_source_requires_exact_published_full_scope_v3() -> None:
 
     for changes, message in (
         ({"source_signal_run_id": None}, "source run id"),
+        ({"source_status": "failed"}, "successful"),
         ({"publication_state": "shadow"}, "published"),
         ({"scope_kind": "partial"}, "full scope"),
         ({"score_version": "legacy_v2"}, "final_score_v3"),
         ({"score_field": "total_score"}, "ranking_score"),
+        ({"rule_version": "legacy_rule"}, "rule version"),
+        ({"idempotency_key": None}, "idempotency"),
+        ({"expected_asset_count": 0}, "expected asset"),
+        ({"decision_data_covered_count": 94}, "decision-data coverage"),
+        ({"eligible_asset_count": 94}, "score coverage"),
+        ({"item_count": 94}, "item count"),
+        ({"etf_item_count": 94}, "ETF-only"),
+        ({"finite_eligible_score_count": 94}, "finite eligible"),
+        ({"contiguous_global_rank": False}, "contiguous"),
     ):
         with pytest.raises(RankingValidationContractError, match=message):
             replace(event, **changes)

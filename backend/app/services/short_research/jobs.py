@@ -13,6 +13,10 @@ from app.models.entities import EtfPriceHistory, JobRun
 from app.services.etf_exit_calibration import run_etf_exit_hyperopt
 from app.services.llm import LLMClient
 from app.services.market_data import ASIA_SHANGHAI, is_etf_exchange_trading_day
+from app.services.short_etf.bounded_history_sync import (
+    BoundedHistorySyncRequest,
+    run_bounded_history_sync_slice,
+)
 from app.services.short_etf.data import sync_etf_price_history_from_intraday_snapshot
 from app.services.short_research.advisor import run_advisor_generation
 from app.services.short_research.backtest import (
@@ -21,11 +25,16 @@ from app.services.short_research.backtest import (
 )
 from app.services.short_research.etf_exit_credibility import run_etf_exit_credibility
 from app.services.short_research.healthcheck import run_etf_strategy_healthcheck
+from app.services.short_research.history_readiness import (
+    SCORE_WARMUP_SCOPE,
+    SCORE_WARMUP_SESSIONS,
+    derived_replay_depth_sessions,
+    history_depth_scope,
+)
 from app.services.short_research.optimized_allocation import run_etf_optimized_allocation
 from app.services.short_research.service import (
     run_etf_label_historical_replay,
     run_etf_observation_portfolio_optimization,
-    run_etf_score_bucket_validation,
     run_etf_signal_validation,
     run_signal_generation,
 )
@@ -37,9 +46,17 @@ from app.services.short_research.snapshot_selector import resolve_current_canoni
 from app.services.short_research.theme_catalysts import refresh_theme_catalyst_snapshots
 from app.services.short_research.theme_taxonomy import refresh_etf_theme_profiles
 from app.services.short_research.universe import refresh_etf_universe
+from app.services.strategy_lab.etf_score_bucket_validation import (
+    run_registered_etf_score_bucket_validation as run_etf_score_bucket_validation,
+)
 from app.services.workflows.etf_daily_research import (
     etf_source_availability_cutoff,
     generate_and_publish_etf_snapshot,
+)
+from app.services.workflows.etf_history_readiness import (
+    PUBLICATION_COVERAGE_THRESHOLD,
+    current_etf_history_contract_hash,
+    read_etf_history_readiness,
 )
 from app.services.workflows.short_research_data import (
     sync_short_research_data_with_tracking_priority as sync_short_research_data,
@@ -165,25 +182,121 @@ async def _etf_price_history_coverage(session: AsyncSession) -> dict[str, Any]:
 
 async def etf_history_backfill_job(session: AsyncSession, *, days: int = 730) -> dict[str, Any]:
     backfill_days = days if days in ETF_HISTORY_BACKFILL_ALLOWED_DAYS else 730
-    today = date.today()
+    today = datetime.now(ASIA_SHANGHAI).date()
     from_date = today - timedelta(days=backfill_days)
-    result = await sync_short_research_data(
+    horizons = (1, 3, 5, 10)
+    contract_hash = current_etf_history_contract_hash(horizons=horizons)
+    readiness = await read_etf_history_readiness(
         session,
-        from_date=from_date,
-        to_date=today,
-        asset_type=ASSET_TYPE_ETF,
-        sync_all_etfs=True,
+        target_date=today,
+        horizons=horizons,
+    )
+    universe = readiness.get("universe") or {}
+    eligible_codes = tuple(str(code) for code in (universe.get("codes") or ()))
+    universe_hash = str(universe.get("snapshot_hash") or "")
+    daily_ratio = float(readiness["daily_freshness"]["coverage_ratio"])
+    warmup_ratio = float(readiness["history_depth_61"]["coverage_ratio"])
+    if not eligible_codes or len(universe_hash) != 64:
+        return {
+            "from_date": from_date.isoformat(),
+            "to_date": today.isoformat(),
+            "days": backfill_days,
+            "asset_type": ASSET_TYPE_ETF,
+            "asset_count": 0,
+            "failed": 0,
+            "etf": {
+                "status": "skipped",
+                "stop_reason": "point_in_time_universe_unavailable",
+                "attempted_codes": [],
+                "completed_codes": [],
+                "exclusions": [],
+            },
+            "coverage": await _etf_price_history_coverage(session),
+            "source": "history_provider_bounded_continuation",
+            "lane_scope": SCORE_WARMUP_SCOPE,
+            "required_sessions": SCORE_WARMUP_SESSIONS,
+            "readiness_before": {
+                "daily_freshness_coverage_ratio": daily_ratio,
+                "history_depth_61_coverage_ratio": warmup_ratio,
+            },
+        }
+    if eligible_codes and daily_ratio < PUBLICATION_COVERAGE_THRESHOLD:
+        return {
+            "from_date": from_date.isoformat(),
+            "to_date": today.isoformat(),
+            "days": backfill_days,
+            "asset_type": ASSET_TYPE_ETF,
+            "asset_count": len(eligible_codes),
+            "failed": 0,
+            "etf": {
+                "status": "skipped",
+                "stop_reason": "daily_freshness_below_publication_priority",
+                "attempted_codes": [],
+                "completed_codes": [],
+                "exclusions": [],
+            },
+            "coverage": await _etf_price_history_coverage(session),
+            "source": "history_provider_bounded_continuation",
+            "lane_scope": SCORE_WARMUP_SCOPE,
+            "required_sessions": SCORE_WARMUP_SESSIONS,
+            "readiness_before": {
+                "daily_freshness_coverage_ratio": daily_ratio,
+                "history_depth_61_coverage_ratio": warmup_ratio,
+            },
+        }
+    if warmup_ratio < PUBLICATION_COVERAGE_THRESHOLD:
+        lane_scope = SCORE_WARMUP_SCOPE
+        required_sessions = SCORE_WARMUP_SESSIONS
+    else:
+        lane_scope = history_depth_scope(contract_hash)
+        required_sessions = derived_replay_depth_sessions(horizons=horizons)
+    result = await run_bounded_history_sync_slice(
+        session,
+        request=BoundedHistorySyncRequest(
+            scope=lane_scope,
+            contract_hash=contract_hash,
+            universe_hash=universe_hash,
+            eligible_codes=eligible_codes,
+            from_date=from_date,
+            to_date=today,
+            required_sessions=required_sessions,
+        ),
     )
     return {
         "from_date": from_date.isoformat(),
         "to_date": today.isoformat(),
         "days": backfill_days,
         "asset_type": ASSET_TYPE_ETF,
-        "etf": result,
-        "asset_count": _count(result, "asset_count"),
-        "failed": _count(result, "failed"),
+        "etf": {
+            "status": result.status,
+            "stop_reason": result.stop_reason,
+            "attempted_codes": list(result.attempted_codes),
+            "completed_codes": list(result.completed_codes),
+            "exclusions": [list(item) for item in result.exclusions],
+            "fetched_rows": result.fetched_rows,
+            "persisted_rows": result.persisted_rows,
+            "inserted_rows": result.inserted_rows,
+            "updated_rows": result.updated_rows,
+            "unchanged_rows": result.unchanged_rows,
+            "excluded_rows": result.excluded_rows,
+            "max_page_rows": result.max_page_rows,
+            "elapsed_seconds": result.elapsed_seconds,
+            "peak_rss_bytes": result.peak_rss_bytes,
+            "sql_statements": result.sql_statements,
+            "max_page_sql_statements": result.max_page_sql_statements,
+            "retries": result.retries,
+            "last_durable_checkpoint": result.last_durable_checkpoint,
+        },
+        "asset_count": len(eligible_codes),
+        "failed": len(result.exclusions),
         "coverage": await _etf_price_history_coverage(session),
-        "source": "history_provider_long_backfill",
+        "source": "history_provider_bounded_continuation",
+        "lane_scope": lane_scope,
+        "required_sessions": required_sessions,
+        "readiness_before": {
+            "daily_freshness_coverage_ratio": daily_ratio,
+            "history_depth_61_coverage_ratio": warmup_ratio,
+        },
     }
 
 

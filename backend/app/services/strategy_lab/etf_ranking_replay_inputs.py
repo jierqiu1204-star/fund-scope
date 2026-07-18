@@ -34,6 +34,9 @@ MAX_CODES_PER_REPLAY_INPUT_PAGE = 16
 
 class ReplayInputExclusionReason(StrEnum):
     INSUFFICIENT_POINT_IN_TIME_UNIVERSE = "insufficient_point_in_time_universe"
+    MEMBERSHIP_OBSERVED_AFTER_CUTOFF = "membership_observed_after_cutoff"
+    MEMBERSHIP_FACT_CONFLICT = "membership_fact_conflict"
+    MEMBERSHIP_EXCLUDED = "membership_excluded"
     UNPROVEN_ADJUSTMENT_POINT_IN_TIME = "unproven_adjustment_point_in_time"
     RAW_OR_FALLBACK_PROVIDER_DATA = "raw_or_fallback_provider_data"
     STALE_OR_INELIGIBLE_ADJUSTED_INPUT = "stale_or_ineligible_adjusted_input"
@@ -44,9 +47,15 @@ class ReplayInputExclusionReason(StrEnum):
 class PointInTimeEtfMetadata:
     asset_code: str
     membership_source: str
+    membership_external_source_id: str
+    membership_provider_version: str
+    membership_evidence_hash: str
+    membership_raw_payload_hash: str
+    membership_fact_hash: str
     tracked_underlying_id: str | None
     membership_known_at: datetime
     membership_last_modified_at: datetime
+    membership_ingested_at: datetime
     eligible_from: date
     eligible_at: date
 
@@ -106,9 +115,15 @@ def _metadata_payload(item: PointInTimeEtfMetadata) -> dict[str, Any]:
     return {
         "asset_code": item.asset_code,
         "membership_source": item.membership_source,
+        "membership_external_source_id": item.membership_external_source_id,
+        "membership_provider_version": item.membership_provider_version,
+        "membership_evidence_hash": item.membership_evidence_hash,
+        "membership_raw_payload_hash": item.membership_raw_payload_hash,
+        "membership_fact_hash": item.membership_fact_hash,
         "tracked_underlying_id": item.tracked_underlying_id,
         "membership_known_at": item.membership_known_at.isoformat(),
         "membership_last_modified_at": item.membership_last_modified_at.isoformat(),
+        "membership_ingested_at": item.membership_ingested_at.isoformat(),
         "eligible_from": item.eligible_from.isoformat(),
         "eligible_at": item.eligible_at.isoformat(),
     }
@@ -313,12 +328,12 @@ async def load_point_in_time_ranking_inputs(
     facts_by_code: dict[str, list[market_data.EtfPointInTimeMembershipFact]] = defaultdict(list)
     exclusions: list[ReplayInputExclusion] = []
     for fact in facts:
-        fact_known_at = max(_utc(fact.created_at), _utc(fact.updated_at))
+        fact_known_at = _utc(fact.observed_at)
         if fact_known_at > cutoff:
             exclusions.append(
                 ReplayInputExclusion(
                     fact.etf_code,
-                    ReplayInputExclusionReason.FUTURE_KNOWN_INPUT,
+                    ReplayInputExclusionReason.MEMBERSHIP_OBSERVED_AFTER_CUTOFF,
                     "membership fact was not known by the decision cutoff",
                 )
             )
@@ -327,25 +342,48 @@ async def load_point_in_time_ranking_inputs(
 
     universe: list[PointInTimeEtfMetadata] = []
     for code in sorted(facts_by_code):
-        rows = facts_by_code[code]
-        if len(rows) != 1 or not rows[0].source.strip():
+        rows = sorted(
+            facts_by_code[code],
+            key=lambda item: (
+                _utc(item.observed_at),
+                item.external_source_id,
+                item.fact_hash,
+            ),
+        )
+        states = {item.membership_state for item in rows}
+        if len(states) != 1:
             exclusions.append(
                 ReplayInputExclusion(
                     code,
-                    ReplayInputExclusionReason.INSUFFICIENT_POINT_IN_TIME_UNIVERSE,
-                    "membership is missing or ambiguous at replay_date",
+                    ReplayInputExclusionReason.MEMBERSHIP_FACT_CONFLICT,
+                    "overlapping factual membership receipts disagree at replay_date",
                 )
             )
             continue
         fact = rows[0]
-        fact_known_at = max(_utc(fact.created_at), _utc(fact.updated_at))
+        if fact.membership_state != "included":
+            exclusions.append(
+                ReplayInputExclusion(
+                    code,
+                    ReplayInputExclusionReason.MEMBERSHIP_EXCLUDED,
+                    "factual membership receipt excludes the ETF at replay_date",
+                )
+            )
+            continue
+        fact_known_at = _utc(fact.observed_at)
         universe.append(
             PointInTimeEtfMetadata(
                 asset_code=code,
-                membership_source=fact.source,
-                tracked_underlying_id=fact.tracked_underlying_id,
+                membership_source=fact.provider,
+                membership_external_source_id=fact.external_source_id,
+                membership_provider_version=fact.provider_version,
+                membership_evidence_hash=fact.evidence_hash,
+                membership_raw_payload_hash=fact.raw_payload_hash,
+                membership_fact_hash=fact.fact_hash,
+                tracked_underlying_id=None,
                 membership_known_at=fact_known_at,
-                membership_last_modified_at=_utc(fact.updated_at),
+                membership_last_modified_at=fact_known_at,
+                membership_ingested_at=_utc(fact.created_at),
                 eligible_from=fact.effective_from,
                 eligible_at=replay_date,
             )

@@ -13,6 +13,7 @@ from app.core.db import get_db_session
 from app.models.entities import (
     EtfSignalValidationItem,
     EtfSignalValidationRun,
+    EtfSignalValidationSourceEvent,
     ShortResearchSignalRun,
     User,
 )
@@ -28,6 +29,7 @@ from app.schemas.short_research import (
     EtfRankingSnapshotMetadataOut,
     EtfSignalValidationItemOut,
     EtfSignalValidationRunOut,
+    EtfSignalValidationSourceEventOut,
     EtfStrategyComparisonOut,
     EtfStrategyComparisonRequest,
     EtfStrategyHealthcheckOut,
@@ -95,13 +97,21 @@ from app.services.short_research.service import (
     latest_signal_validation_run,
     latest_validation_evidence_by_label,
     run_etf_label_historical_replay,
-    run_etf_score_bucket_validation,
     run_etf_signal_validation,
     run_signal_generation,
     status_summary,
     sync_short_research_data,
 )
 from app.services.short_research.snapshot_selector import snapshot_metadata
+from app.services.strategy_lab.etf_ranking_validation import (
+    RankingValidationContractError,
+)
+from app.services.strategy_lab.etf_score_bucket_validation import (
+    run_registered_etf_score_bucket_validation as run_etf_score_bucket_validation,
+)
+from app.services.strategy_lab.etf_validation_manifest import (
+    validate_attached_validation_source_manifest,
+)
 from app.services.workflows.tracking_filters import (
     tracking_states_by_code,
     validate_tracking_states,
@@ -385,16 +395,24 @@ async def _validation_run_out(session: AsyncSession, run: EtfSignalValidationRun
         ranking_source_kind = "research_replay"
     else:
         ranking_source_kind = None
-    if run.status == "success" and ranking_source_kind == "research_replay" and (
-        not run.source_replay_run_key or run.source_signal_run_id is not None
-    ):
-        ranking_source_kind = None
-    if run.status == "success" and ranking_source_kind == "production_published" and (
-        source_snapshot is None
-        or source_snapshot.publication_state != "published"
-        or run.source_replay_run_key is not None
-    ):
-        ranking_source_kind = None
+    source_events: list[EtfSignalValidationSourceEvent] = []
+    if run.status == "success" and ranking_source_kind is not None:
+        try:
+            await validate_attached_validation_source_manifest(session, run)
+        except RankingValidationContractError:
+            ranking_source_kind = None
+        else:
+            source_events = list(
+                (
+                    await session.scalars(
+                        select(EtfSignalValidationSourceEvent)
+                        .where(
+                            EtfSignalValidationSourceEvent.validation_run_id == run.id
+                        )
+                        .order_by(EtfSignalValidationSourceEvent.event_order)
+                    )
+                ).all()
+            )
     return EtfSignalValidationRunOut(
         id=run.id,
         status=run.status,
@@ -407,6 +425,30 @@ async def _validation_run_out(session: AsyncSession, run: EtfSignalValidationRun
             if ranking_source_kind == "research_replay"
             else None
         ),
+        source_manifest_hash=(
+            run.source_manifest_hash if ranking_source_kind is not None else None
+        ),
+        source_event_count=(
+            run.source_event_count if ranking_source_kind is not None else None
+        ),
+        source_events=[
+            EtfSignalValidationSourceEventOut(
+                event_order=event.event_order,
+                source_date=event.source_date,
+                ranking_source_kind=ranking_source_kind,
+                source_signal_run_id=event.source_signal_run_id,
+                source_replay_run_key=event.source_replay_run_key,
+                source_replay_contract_hash=event.source_replay_contract_hash,
+                source_event_hash=event.source_event_hash,
+                ranking_contract_hash=event.ranking_contract_hash,
+                scope_hash=event.scope_hash,
+                universe_snapshot_hash=event.universe_snapshot_hash,
+                input_snapshot_hash=event.input_snapshot_hash,
+                availability_cutoff=event.availability_cutoff,
+                immutable_hash=event.immutable_hash,
+            )
+            for event in source_events
+        ],
         rule_version=run.rule_version,
         source_ranking_contract_hash=run.source_ranking_contract_hash,
         source_scope_kind=run.source_scope_kind,

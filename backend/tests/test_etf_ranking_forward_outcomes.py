@@ -146,6 +146,11 @@ def test_missing_entry_or_exit_is_excluded_without_signal_close_substitution() -
     assert by_code["510002"].missing_leg == "exit"
     assert by_code["510002"].exit_adjusted_close is None
     assert all(item.net_return is None for item in bundle.outcomes)
+    assert bundle.requested_outcome_count == 2
+    assert bundle.completed_outcome_count == 0
+    assert bundle.pending_outcome_count == 0
+    assert bundle.excluded_outcome_count == 2
+    assert bundle.status_counts_by_horizon[0].excluded_count == 2
 
 
 def test_incomplete_future_window_is_pending_not_fabricated() -> None:
@@ -164,6 +169,9 @@ def test_incomplete_future_window_is_pending_not_fabricated() -> None:
     assert outcome.exclusion_reason == "future_window_pending"
     assert outcome.exit_session is None
     assert outcome.net_return is None
+    assert bundle.requested_outcome_count == 1
+    assert bundle.pending_outcome_count == 1
+    assert bundle.excluded_outcome_count == 0
 
 
 def test_forward_inputs_reject_duplicates_raw_prices_and_dynamic_horizons() -> None:

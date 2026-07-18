@@ -44,7 +44,7 @@ jobs:
 
       - name: Deploy on VPS
         run: |
-          set -eu
+          set -euo pipefail
 
           case "$COMPOSE_FILE" in
             docker-compose.yml|docker-compose.ip.yml) ;;
@@ -64,22 +64,142 @@ jobs:
           esac
 
           mkdir -p "$deploy_dir"
+          candidate_image="fundscope-backend-candidate:$GITHUB_SHA"
+          sudo docker build --tag "$candidate_image" "$GITHUB_WORKSPACE/backend"
+          candidate_heads=$(
+            sudo docker run --rm --entrypoint alembic "$candidate_image" heads
+          )
+          candidate_head_count=$(
+            printf '%s\n' "$candidate_heads" | awk '/\(head\)/ { count += 1 } END { print count + 0 }'
+          )
+          test "$candidate_head_count" -eq 1
+          candidate_schema_head=$(
+            printf '%s\n' "$candidate_heads" | awk '/\(head\)/ { print $1; exit }'
+          )
+          test -n "$candidate_schema_head"
+
+          backup_dir=/var/backups/fundscope
+          sudo mkdir -p "$backup_dir"
+          rollback_metadata="$backup_dir/rollback-metadata-$(date +%Y%m%d_%H%M%S).txt"
+          test -f "$deploy_dir/deploy/$COMPOSE_FILE"
+          previous_deploy_sha=$(
+            if [ -f "$deploy_dir/.deploy-version" ]; then
+              cat "$deploy_dir/.deploy-version"
+            else
+              printf '%s' unrecorded
+            fi
+          )
+
+          cd "$deploy_dir/deploy"
+          sudo docker compose -f "$COMPOSE_FILE" up -d postgres
+          postgres_ready=false
+          for attempt in $(seq 1 20); do
+            if sudo docker compose -f "$COMPOSE_FILE" exec -T postgres \
+              pg_isready -U fundscope -d fundscope; then
+              postgres_ready=true
+              break
+            fi
+            sleep 2
+          done
+          test "$postgres_ready" = true
+          previous_revision_count=$(
+            sudo docker compose -f "$COMPOSE_FILE" exec -T postgres \
+              psql -U fundscope -d fundscope -Atqc \
+              "SELECT count(*) FROM alembic_version"
+          )
+          test "$previous_revision_count" -eq 1
+          previous_schema_head=$(
+            sudo docker compose -f "$COMPOSE_FILE" exec -T postgres \
+              psql -U fundscope -d fundscope -Atqc \
+              "SELECT version_num FROM alembic_version"
+          )
+          test -n "$previous_schema_head"
+          backup_path=$(
+            sudo env \
+              BACKUP_DIR="$backup_dir" \
+              COMPOSE_FILE="$COMPOSE_FILE" \
+              sh "$GITHUB_WORKSPACE/deploy/backup-compose.sh"
+          )
+          sudo test -s "$backup_path"
+          sudo sha256sum -c "$backup_path.sha256"
+
+          printf '%s\n' \
+            "previous_deploy_sha=$previous_deploy_sha" \
+            "previous_schema_head=$previous_schema_head" \
+            "database_backup=$backup_path" \
+            "candidate_schema_head=$candidate_schema_head" \
+            "candidate_deploy_sha=$GITHUB_SHA" \
+            | sudo tee "$rollback_metadata" > /dev/null
+
+          cd "$GITHUB_WORKSPACE"
           rsync -a --delete \
             --exclude '.git/' \
             --exclude '.env' \
+            --exclude '.deploy-version' \
             --exclude 'deploy/.env' \
             --exclude 'deploy/.htpasswd' \
             "$GITHUB_WORKSPACE"/ "$deploy_dir"/
-          echo "$GITHUB_SHA" > "$deploy_dir/.deploy-version"
 
           cd "$deploy_dir/deploy"
+          sudo docker compose -f "$COMPOSE_FILE" build backend frontend-static-builder
+
           sudo docker compose -f "$COMPOSE_FILE" down --remove-orphans
           sudo docker compose -f "$COMPOSE_FILE" rm -f -s frontend-static-builder 2>/dev/null || true
           sudo docker rm -f deploy-frontend-static-builder-1 2>/dev/null || true
-          sudo docker compose -f "$COMPOSE_FILE" build backend frontend-static-builder
           sudo docker compose -f "$COMPOSE_FILE" run --rm frontend-static-builder
-          sudo docker compose -f "$COMPOSE_FILE" up -d postgres backend
+          sudo docker compose -f "$COMPOSE_FILE" up -d postgres
+          postgres_ready=false
+          for attempt in $(seq 1 20); do
+            if sudo docker compose -f "$COMPOSE_FILE" exec -T postgres \
+              pg_isready -U fundscope -d fundscope; then
+              postgres_ready=true
+              break
+            fi
+            sleep 2
+          done
+          test "$postgres_ready" = true
+          sudo docker compose -f "$COMPOSE_FILE" run --rm --no-deps backend alembic upgrade head
+          deployed_revision_count=$(
+            sudo docker compose -f "$COMPOSE_FILE" exec -T postgres \
+              psql -U fundscope -d fundscope -Atqc \
+              "SELECT count(*) FROM alembic_version"
+          )
+          test "$deployed_revision_count" -eq 1
+          deployed_schema_head=$(
+            sudo docker compose -f "$COMPOSE_FILE" exec -T postgres \
+              psql -U fundscope -d fundscope -Atqc \
+              "SELECT version_num FROM alembic_version"
+          )
+          test "$deployed_schema_head" = "$candidate_schema_head"
+          sudo docker compose -f "$COMPOSE_FILE" up -d backend
           sudo docker compose -f "$COMPOSE_FILE" up -d --no-deps nginx
-          sudo docker compose -f "$COMPOSE_FILE" exec -T backend alembic upgrade head
+          health_payload=$(
+            timeout 60 sh -c '
+              for attempt in $(seq 1 10); do
+                if payload=$(curl --fail --silent --show-error \
+                  --connect-timeout 3 --max-time 5 \
+                  http://127.0.0.1/api/health); then
+                  printf "%s" "$payload"
+                  exit 0
+                fi
+                sleep 4
+              done
+              exit 1
+            '
+          )
+          printf '%s\n' "$health_payload" | grep -Eq '"app"[[:space:]]*:[[:space:]]*"ok"'
+          printf '%s\n' "$health_payload" | grep -Eq '"db"[[:space:]]*:[[:space:]]*"ok"'
+          echo "$GITHUB_SHA" > "$deploy_dir/.deploy-version"
+          printf '%s\n' \
+            "deployed_schema_head=$deployed_schema_head" \
+            "health=ok" \
+            | sudo tee -a "$rollback_metadata" > /dev/null
+          {
+            echo "Database backup: $backup_path"
+            echo "Rollback metadata: $rollback_metadata"
+            echo "Previous deploy: $previous_deploy_sha ($previous_schema_head)"
+            echo "Deployed: $GITHUB_SHA ($deployed_schema_head)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          sudo docker image rm "$candidate_image" 2>/dev/null || true
           sudo docker image prune -f
           sudo docker compose -f "$COMPOSE_FILE" ps

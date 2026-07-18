@@ -84,6 +84,22 @@ class EtfSignalValidationItemOut(BaseModel):
     metrics: dict[str, Any] = Field(default_factory=dict)
 
 
+class EtfSignalValidationSourceEventOut(BaseModel):
+    event_order: int
+    source_date: date
+    ranking_source_kind: Literal["production_published", "research_replay"]
+    source_signal_run_id: int | None = None
+    source_replay_run_key: str | None = None
+    source_replay_contract_hash: str | None = None
+    source_event_hash: str
+    ranking_contract_hash: str
+    scope_hash: str
+    universe_snapshot_hash: str
+    input_snapshot_hash: str
+    availability_cutoff: datetime
+    immutable_hash: str
+
+
 class EtfSignalValidationRunOut(BaseModel):
     id: int
     status: str
@@ -92,6 +108,9 @@ class EtfSignalValidationRunOut(BaseModel):
     validation_mode: str = "forward_live"
     ranking_source_kind: Literal["production_published", "research_replay"] | None = None
     source_replay_run_key: str | None = None
+    source_manifest_hash: str | None = None
+    source_event_count: int | None = None
+    source_events: list[EtfSignalValidationSourceEventOut] = Field(default_factory=list)
     rule_version: str
     source_ranking_contract_hash: str | None = None
     source_scope_kind: str | None = None
@@ -113,14 +132,43 @@ class EtfSignalValidationRunOut(BaseModel):
     def validate_ranking_source_identity(self) -> EtfSignalValidationRunOut:
         if self.status != "success" or self.ranking_source_kind is None:
             return self
+        if (
+            not self.source_manifest_hash
+            or self.source_event_count is None
+            or self.source_event_count <= 0
+            or self.source_event_count != len(self.source_events)
+            or [event.event_order for event in self.source_events]
+            != list(range(self.source_event_count))
+            or len({event.source_date for event in self.source_events})
+            != self.source_event_count
+            or any(
+                event.ranking_source_kind != self.ranking_source_kind
+                for event in self.source_events
+            )
+        ):
+            raise ValueError("successful registered evidence requires a complete source manifest")
         if self.ranking_source_kind == "research_replay" and (
-            not self.source_replay_run_key or self.source_signal_run_id is not None
+            not self.source_replay_run_key
+            or self.source_signal_run_id is not None
+            or any(
+                event.source_signal_run_id is not None
+                or event.source_replay_run_key != self.source_replay_run_key
+                or event.source_replay_contract_hash is None
+                for event in self.source_events
+            )
         ):
             raise ValueError("successful research replay requires only a replay run key")
         if self.ranking_source_kind == "production_published" and (
-            self.source_signal_run_id is None or self.source_replay_run_key is not None
+            self.source_signal_run_id is not None
+            or self.source_replay_run_key is not None
+            or any(
+                event.source_signal_run_id is None
+                or event.source_replay_run_key is not None
+                or event.source_replay_contract_hash is not None
+                for event in self.source_events
+            )
         ):
-            raise ValueError("successful production evidence requires only a published source run")
+            raise ValueError("successful production evidence requires published manifest events")
         return self
 
 

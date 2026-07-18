@@ -305,12 +305,32 @@ async def test_post_close_etf_data_job_defers_history_when_snapshot_unavailable(
 
 
 @pytest.mark.asyncio
-async def test_etf_history_backfill_job_syncs_all_etfs(monkeypatch) -> None:
-    calls: list[dict[str, Any]] = []
+async def test_etf_history_backfill_job_uses_bounded_continuation(monkeypatch) -> None:
+    calls: list[Any] = []
+    eligible_codes = tuple(f"5100{index:02d}" for index in range(8))
 
-    async def fake_sync_short_research_data(_session: object, **kwargs: Any) -> dict[str, Any]:
-        calls.append(kwargs)
-        return {"asset_count": 8, "failed": 0, "asset_type": kwargs["asset_type"]}
+    async def fake_run(_session: object, *, request: Any) -> SimpleNamespace:
+        calls.append(request)
+        return SimpleNamespace(
+            status="partial",
+            stop_reason="continuation_required",
+            attempted_codes=("510000", "510001"),
+            completed_codes=("510000",),
+            exclusions=(("510001", "provider_timeout"),),
+            fetched_rows=500,
+            persisted_rows=480,
+            inserted_rows=400,
+            updated_rows=80,
+            unchanged_rows=20,
+            excluded_rows=0,
+            max_page_rows=500,
+            elapsed_seconds=44.0,
+            peak_rss_bytes=128 * 1024 * 1024,
+            sql_statements=8,
+            max_page_sql_statements=3,
+            retries=0,
+            last_durable_checkpoint={"active_code": "510001"},
+        )
 
     async def fake_coverage(_session: object) -> dict[str, Any]:
         return {
@@ -320,18 +340,124 @@ async def test_etf_history_backfill_job_syncs_all_etfs(monkeypatch) -> None:
             "latest_trade_date": "2026-06-26",
         }
 
-    monkeypatch.setattr(jobs_module, "sync_short_research_data", fake_sync_short_research_data)
+    async def fake_readiness(_session: object, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "universe": {
+                "codes": list(eligible_codes),
+                "snapshot_hash": "d" * 64,
+            },
+            "daily_freshness": {"coverage_ratio": 1.0},
+            "history_depth_61": {"coverage_ratio": 1.0},
+        }
+
+    monkeypatch.setattr(jobs_module, "run_bounded_history_sync_slice", fake_run)
     monkeypatch.setattr(jobs_module, "_etf_price_history_coverage", fake_coverage)
+    monkeypatch.setattr(jobs_module, "read_etf_history_readiness", fake_readiness)
 
     result = await jobs_module.etf_history_backfill_job(object(), days=730)  # type: ignore[arg-type]
 
     assert len(calls) == 1
-    assert calls[0]["asset_type"] == ASSET_TYPE_ETF
-    assert calls[0]["sync_all_etfs"] is True
+    assert calls[0].max_codes == 10
+    assert calls[0].page_size == 500
+    assert calls[0].max_rows == 5_000
+    assert calls[0].required_sessions == 300
+    assert calls[0].process_deadline_seconds == 60
+    assert calls[0].eligible_codes == eligible_codes
+    assert calls[0].universe_hash == "d" * 64
     assert result["days"] == 730
     assert result["asset_count"] == 8
     assert result["coverage"]["etfs"] == 8
-    assert result["source"] == "history_provider_long_backfill"
+    assert result["etf"]["status"] == "partial"
+    assert result["source"] == "history_provider_bounded_continuation"
+    assert result["lane_scope"].startswith("history_depth_required:")
+
+
+@pytest.mark.asyncio
+async def test_etf_history_backfill_prioritizes_61_session_warmup(monkeypatch) -> None:
+    calls: list[Any] = []
+    eligible_codes = ("510001", "510002")
+
+    async def fake_readiness(_session: object, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "universe": {
+                "codes": list(eligible_codes),
+                "snapshot_hash": "e" * 64,
+            },
+            "daily_freshness": {"coverage_ratio": 1.0},
+            "history_depth_61": {"coverage_ratio": 0.5},
+        }
+
+    async def fake_run(_session: object, *, request: Any) -> SimpleNamespace:
+        calls.append(request)
+        return SimpleNamespace(
+            status="partial",
+            stop_reason="continuation_required",
+            attempted_codes=("510001",),
+            completed_codes=("510001",),
+            exclusions=(),
+            fetched_rows=61,
+            persisted_rows=61,
+            inserted_rows=61,
+            updated_rows=0,
+            unchanged_rows=0,
+            excluded_rows=0,
+            max_page_rows=61,
+            elapsed_seconds=1.0,
+            peak_rss_bytes=64 * 1024 * 1024,
+            sql_statements=6,
+            max_page_sql_statements=3,
+            retries=0,
+            last_durable_checkpoint={"active_code": "510001"},
+        )
+
+    async def fake_coverage(_session: object) -> dict[str, Any]:
+        return {"rows": 61, "etfs": 1}
+
+    monkeypatch.setattr(jobs_module, "read_etf_history_readiness", fake_readiness)
+    monkeypatch.setattr(jobs_module, "run_bounded_history_sync_slice", fake_run)
+    monkeypatch.setattr(jobs_module, "_etf_price_history_coverage", fake_coverage)
+
+    result = await jobs_module.etf_history_backfill_job(object(), days=730)  # type: ignore[arg-type]
+
+    assert calls[0].scope == "history_depth_61"
+    assert calls[0].required_sessions == 61
+    assert calls[0].eligible_codes == eligible_codes
+    assert calls[0].universe_hash == "e" * 64
+    assert result["lane_scope"] == "history_depth_61"
+
+
+@pytest.mark.asyncio
+async def test_etf_history_backfill_yields_to_daily_freshness(monkeypatch) -> None:
+    called = False
+    eligible_codes = ("510001", "510002")
+
+    async def fake_readiness(_session: object, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "universe": {
+                "codes": list(eligible_codes),
+                "snapshot_hash": "f" * 64,
+            },
+            "daily_freshness": {"coverage_ratio": 0.5},
+            "history_depth_61": {"coverage_ratio": 0.0},
+        }
+
+    async def fake_run(_session: object, *, request: Any) -> SimpleNamespace:
+        nonlocal called
+        called = True
+        raise AssertionError(f"history provider should not run: {request}")
+
+    async def fake_coverage(_session: object) -> dict[str, Any]:
+        return {"rows": 1, "etfs": 1}
+
+    monkeypatch.setattr(jobs_module, "read_etf_history_readiness", fake_readiness)
+    monkeypatch.setattr(jobs_module, "run_bounded_history_sync_slice", fake_run)
+    monkeypatch.setattr(jobs_module, "_etf_price_history_coverage", fake_coverage)
+
+    result = await jobs_module.etf_history_backfill_job(object(), days=730)  # type: ignore[arg-type]
+
+    assert called is False
+    assert result["etf"]["status"] == "skipped"
+    assert result["etf"]["stop_reason"] == "daily_freshness_below_publication_priority"
 
 
 @pytest.mark.asyncio

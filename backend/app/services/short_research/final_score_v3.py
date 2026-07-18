@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from statistics import mean
 from typing import Any
 
@@ -35,6 +35,24 @@ class FinalScoreV3Result:
     missing_by_component: Mapping[str, tuple[str, ...]]
     metric_peer_counts: Mapping[str, int]
     limitation_reasons: tuple[str, ...]
+
+
+def enforce_history_warmup(
+    result: FinalScoreV3Result,
+    *,
+    usable_sessions: int,
+    required_sessions: int = 61,
+) -> FinalScoreV3Result:
+    if usable_sessions >= required_sessions:
+        return result
+    reason = "insufficient_decision_eligible_adjusted_sessions"
+    return replace(
+        result,
+        ranking_score=None,
+        score_eligible=False,
+        missing_by_component={"history_depth_61": (reason,)},
+        limitation_reasons=(f"history_depth_61:{reason}",),
+    )
 
 
 def final_score_v3_bucket(theme_bucket: Any) -> str | None:

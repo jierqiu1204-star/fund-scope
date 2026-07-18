@@ -13,8 +13,18 @@ from app.core.config import get_settings
 from app.core.db import DatabaseManager
 from app.models.entities import Index, IndexValuationHistory
 from app.services.index_data import fetch_index_valuation
+from app.services.strategy_lab.etf_validation_continuation import (
+    continue_registered_production_validation,
+)
+from app.services.strategy_lab.etf_validation_manifest_repair import (
+    repair_legacy_validation_manifests,
+)
 from app.services.tracked_positions.lifecycle_backfill import backfill_position_lifecycle_batch
 from app.services.valuation import compute_percentile
+from app.services.workflows.etf_readiness_attestation import (
+    build_bounded_attested_etf_readiness_report,
+    provision_database_instance_identity,
+)
 
 
 async def backfill_valuation(index_code: str, years: int) -> None:
@@ -74,6 +84,84 @@ async def backfill_etf_alert_lifecycle(
     print(json.dumps(asdict(result), ensure_ascii=False, sort_keys=True))
 
 
+async def repair_etf_validation_manifests(*, apply: bool, limit: int) -> None:
+    settings = get_settings()
+    db = DatabaseManager(settings.database_url)
+    async with db.session() as session:
+        result = await repair_legacy_validation_manifests(
+            session,
+            apply=apply,
+            limit=limit,
+        )
+        if apply:
+            await session.commit()
+        else:
+            await session.rollback()
+    await db.engine.dispose()
+    print(json.dumps(asdict(result), ensure_ascii=False, sort_keys=True))
+
+
+async def read_etf_readiness(target_date: date | None) -> None:
+    settings = get_settings()
+    db = DatabaseManager(settings.database_url)
+    try:
+        async with db.session() as session:
+            report = await build_bounded_attested_etf_readiness_report(
+                session,
+                settings=settings,
+                target_date=target_date,
+            )
+            await session.rollback()
+    finally:
+        await db.engine.dispose()
+    print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+
+
+async def provision_readiness_database_identity(
+    *,
+    environment: str,
+    deploy_artifact: str,
+    attestation_key_id: str,
+    instance_uuid: str | None,
+) -> None:
+    settings = get_settings()
+    db = DatabaseManager(settings.database_url)
+    try:
+        async with db.session() as session:
+            identity = await provision_database_instance_identity(
+                session,
+                declared_environment=environment,
+                deploy_artifact=deploy_artifact,
+                attestation_key_id=attestation_key_id,
+                instance_uuid=instance_uuid,
+                creation_metadata={"provisioner": "fundscope-cli"},
+            )
+            await session.commit()
+            payload = {
+                "database_instance_uuid": identity.instance_uuid,
+                "declared_environment": identity.declared_environment,
+                "provisioned_by_deploy": identity.provisioned_by_deploy,
+                "attestation_key_id": identity.attestation_key_id,
+            }
+    finally:
+        await db.engine.dispose()
+    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+
+async def continue_etf_validation(validation_run_id: int) -> None:
+    settings = get_settings()
+    db = DatabaseManager(settings.database_url)
+    try:
+        async with db.session() as session:
+            result = await continue_registered_production_validation(
+                session,
+                validation_run_id=validation_run_id,
+            )
+    finally:
+        await db.engine.dispose()
+    print(json.dumps(asdict(result), ensure_ascii=False, sort_keys=True, default=str))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="FundScope CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -86,6 +174,18 @@ def build_parser() -> argparse.ArgumentParser:
     lifecycle.add_argument("--position-id", dest="position_ids", action="append", type=int, required=True)
     lifecycle.add_argument("--cutoff", type=date.fromisoformat, required=True)
     lifecycle.add_argument("--max-items", type=int, default=100)
+    manifest_repair = subparsers.add_parser("repair-etf-validation-manifests")
+    manifest_repair.add_argument("--apply", action="store_true")
+    manifest_repair.add_argument("--limit", type=int, default=100)
+    readiness = subparsers.add_parser("etf-readiness")
+    readiness.add_argument("--target-date", type=date.fromisoformat)
+    provision_identity = subparsers.add_parser("provision-database-identity")
+    provision_identity.add_argument("--environment", required=True)
+    provision_identity.add_argument("--deploy-artifact", required=True)
+    provision_identity.add_argument("--attestation-key-id", required=True)
+    provision_identity.add_argument("--instance-uuid")
+    validation_continuation = subparsers.add_parser("continue-etf-validation")
+    validation_continuation.add_argument("--run-id", type=int, required=True)
     return parser
 
 
@@ -97,6 +197,26 @@ def main() -> None:
         asyncio.run(backfill_valuation(args.index, args.years))
     elif args.command == "backfill-etf-alert-lifecycle":
         asyncio.run(backfill_etf_alert_lifecycle(args.position_ids, args.cutoff, args.max_items))
+    elif args.command == "repair-etf-validation-manifests":
+        asyncio.run(
+            repair_etf_validation_manifests(
+                apply=args.apply,
+                limit=args.limit,
+            )
+        )
+    elif args.command == "etf-readiness":
+        asyncio.run(read_etf_readiness(args.target_date))
+    elif args.command == "provision-database-identity":
+        asyncio.run(
+            provision_readiness_database_identity(
+                environment=args.environment,
+                deploy_artifact=args.deploy_artifact,
+                attestation_key_id=args.attestation_key_id,
+                instance_uuid=args.instance_uuid,
+            )
+        )
+    elif args.command == "continue-etf-validation":
+        asyncio.run(continue_etf_validation(args.run_id))
 
 
 if __name__ == "__main__":

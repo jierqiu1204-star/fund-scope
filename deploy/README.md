@@ -126,8 +126,11 @@ After deployment, verify these items before calling the release ready:
 - nginx proxying: log in through the browser, then confirm business pages load their `/api/` data.
 - Static frontend: open `/portfolio`, `/valuation`, `/news`, `/short-term`, and `/recommendations`.
 - Scheduler: temporarily set one job to run in the next few minutes, then check `docker compose logs -f backend` and `/api/admin/jobs`.
-- Backups: run `./backup.sh`, confirm a new dump exists under `/var/backups/fundscope/`, and confirm old dumps rotate.
-- Recovery note: document the latest successful commit SHA and database backup path.
+- Backups: every `deploy.yml` run creates an atomic custom-format dump before
+  source replacement, validates it with `pg_restore --list`, writes a SHA-256
+  sidecar, and retains it under `/var/backups/fundscope/` for seven days.
+- Recovery note: use the matching `rollback-metadata-*.txt` to recover the
+  previous commit SHA, schema head, and validated database backup path.
 
 ## Runtime Operations
 
@@ -139,4 +142,6 @@ After deployment, verify these items before calling the release ready:
   normal deploy workflow.
 - Manual rebuild only when intentionally bypassing the GitHub runner:
   `docker compose up -d --build`
-- Rollback: check out the previous commit, rebuild, and restore the latest known-good database dump if needed.
+- Rollback: use the previous commit and validated dump recorded in the matching
+  rollback metadata. Database restoration remains an explicit incident-response
+  action; do not overwrite production automatically after a failed health check.

@@ -94,6 +94,15 @@ class RankingForwardOutcome:
 
 
 @dataclass(frozen=True)
+class RankingForwardOutcomeStatusCount:
+    horizon_sessions: int
+    requested_count: int
+    completed_count: int
+    pending_count: int
+    excluded_count: int
+
+
+@dataclass(frozen=True)
 class RankingForwardOutcomeBundle:
     replay_run_key: str
     replay_date: date
@@ -107,6 +116,11 @@ class RankingForwardOutcomeBundle:
     slippage_bps_per_side: int
     round_trip_cost_bps: int
     cost_contract_hash: str
+    requested_outcome_count: int
+    completed_outcome_count: int
+    pending_outcome_count: int
+    excluded_outcome_count: int
+    status_counts_by_horizon: tuple[RankingForwardOutcomeStatusCount, ...]
     outcomes: tuple[RankingForwardOutcome, ...]
     input_hash: str
     bundle_hash: str
@@ -347,6 +361,27 @@ def calculate_ranking_forward_outcomes(
         for asset_code in selection.selected_asset_codes
         for horizon in frozen_horizons
     )
+    status_counts_by_horizon = tuple(
+        RankingForwardOutcomeStatusCount(
+            horizon_sessions=horizon,
+            requested_count=sum(
+                outcome.horizon_sessions == horizon for outcome in outcomes
+            ),
+            completed_count=sum(
+                outcome.horizon_sessions == horizon and outcome.status == "completed"
+                for outcome in outcomes
+            ),
+            pending_count=sum(
+                outcome.horizon_sessions == horizon and outcome.status == "pending"
+                for outcome in outcomes
+            ),
+            excluded_count=sum(
+                outcome.horizon_sessions == horizon and outcome.status == "excluded"
+                for outcome in outcomes
+            ),
+        )
+        for horizon in frozen_horizons
+    )
     draft = RankingForwardOutcomeBundle(
         replay_run_key=selection.replay_run_key,
         replay_date=selection.replay_date,
@@ -361,6 +396,17 @@ def calculate_ranking_forward_outcomes(
         round_trip_cost_bps=2
         * (RANKING_FEE_BPS_PER_SIDE + RANKING_SLIPPAGE_BPS_PER_SIDE),
         cost_contract_hash=RANKING_COST_CONTRACT_HASH,
+        requested_outcome_count=len(outcomes),
+        completed_outcome_count=sum(
+            outcome.status == "completed" for outcome in outcomes
+        ),
+        pending_outcome_count=sum(
+            outcome.status == "pending" for outcome in outcomes
+        ),
+        excluded_outcome_count=sum(
+            outcome.status == "excluded" for outcome in outcomes
+        ),
+        status_counts_by_horizon=status_counts_by_horizon,
         outcomes=outcomes,
         input_hash=input_hash,
         bundle_hash="pending",

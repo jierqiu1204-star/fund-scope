@@ -69,6 +69,7 @@ from app.services.short_etf.signals import (
     list_signal_items,
     run_signal_generation,
 )
+from app.services.workflows.etf_history_readiness import read_etf_history_readiness
 
 router = APIRouter(prefix="/api/short-etf", tags=["short-etf"])
 
@@ -280,8 +281,10 @@ async def sync_short_etf_data(
 @router.get("/data-status", response_model=EtfDataStatusOut)
 async def get_short_etf_data_status(session: AsyncSession = Depends(get_db_session)) -> EtfDataStatusOut:
     rows = await list_etf_data_health(session)
+    summary = await data_status_summary(session)
+    summary["history_readiness"] = await read_etf_history_readiness(session)
     return EtfDataStatusOut(
-        summary=await data_status_summary(session),
+        summary=summary,
         items=[_data_health_out(etf, health, stale) for etf, health, stale in rows],
     )
 

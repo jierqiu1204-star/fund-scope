@@ -65,9 +65,21 @@ def _series(code: str, replay_date: date) -> PointInTimeAdjustedSeries:
     metadata = PointInTimeEtfMetadata(
         asset_code=code,
         membership_source="exchange_fact",
+        membership_external_source_id=f"exchange-notice:{code}:{replay_date.isoformat()}",
+        membership_provider_version="exchange-notice-v1",
+        membership_evidence_hash=_hash(
+            f"membership-evidence:{code}:{replay_date.isoformat()}"
+        ),
+        membership_raw_payload_hash=_hash(
+            f"membership-raw:{code}:{replay_date.isoformat()}"
+        ),
+        membership_fact_hash=_hash(
+            f"membership-fact:{code}:{replay_date.isoformat()}"
+        ),
         tracked_underlying_id=None,
         membership_known_at=cutoff - timedelta(days=90),
         membership_last_modified_at=cutoff - timedelta(days=90),
+        membership_ingested_at=cutoff - timedelta(days=89),
         eligible_from=replay_date - timedelta(days=90),
         eligible_at=replay_date,
     )

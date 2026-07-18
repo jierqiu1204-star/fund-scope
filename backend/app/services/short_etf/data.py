@@ -622,17 +622,28 @@ def _risk_score(flags: list[str]) -> float:
     return round(max(0.0, score), 2)
 
 
-async def compute_etf_metric(session: AsyncSession, code: str, as_of_date: date) -> EtfMetric | None:
+async def compute_etf_metric(
+    session: AsyncSession,
+    code: str,
+    as_of_date: date,
+    *,
+    commit: bool = True,
+) -> EtfMetric | None:
     prices = (
         await session.scalars(
             select(EtfPriceHistory)
-            .where(EtfPriceHistory.etf_code == code, EtfPriceHistory.trade_date <= as_of_date)
-            .order_by(EtfPriceHistory.trade_date.asc())
+            .where(
+                EtfPriceHistory.etf_code == code,
+                EtfPriceHistory.trade_date <= as_of_date,
+                EtfPriceHistory.decision_eligible.is_(True),
+            )
+            .order_by(EtfPriceHistory.trade_date.desc())
+            .limit(61)
         )
     ).all()
     if len(prices) < 6:
         return None
-    price_list = list(prices)
+    price_list = list(reversed(prices))
     return_5d = _return(price_list, 5)
     return_20d = _return(price_list, 20)
     return_60d = _return(price_list, 60)
@@ -673,7 +684,10 @@ async def compute_etf_metric(session: AsyncSession, code: str, as_of_date: date)
     metric.liquidity_score = _liquidity_score(average_turnover_20d)
     metric.risk_score = _risk_score(risk_flags)
     metric.risk_flags_json = risk_flags
-    await session.commit()
+    if commit:
+        await session.commit()
+    else:
+        await session.flush()
     await session.refresh(metric)
     return metric
 

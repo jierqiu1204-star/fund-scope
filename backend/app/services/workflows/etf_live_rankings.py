@@ -36,7 +36,10 @@ from app.services.short_research.service import (
     CONCLUSION_WATCH,
     current_etf_snapshot_selection,
 )
-from app.services.short_research.snapshot_selector import snapshot_metadata
+from app.services.short_research.snapshot_selector import (
+    required_etf_snapshot_trade_date,
+    snapshot_metadata,
+)
 from app.services.workflows.tracking_filters import (
     tracking_states_by_code,
     validate_tracking_states,
@@ -110,7 +113,7 @@ def _is_finite_score(value: Any) -> bool:
 def _eligible_intraday_base(
     snapshot: ShortResearchSignalRun | None,
     item: ShortResearchSignalItem | None,
-    quote_trade_date: date | None,
+    required_base_trade_date: date,
 ) -> tuple[float | None, str | None]:
     if snapshot is None:
         return None, "缺少日线综合排序基座。"
@@ -126,8 +129,8 @@ def _eligible_intraday_base(
         return None, "日线基座未声明当前最终分字段。"
     if snapshot.coverage_ratio is None or snapshot.coverage_ratio < _INTRADAY_BASE_MIN_COVERAGE:
         return None, "日线基座覆盖率不足。"
-    if snapshot.as_of_trade_date is None or snapshot.as_of_trade_date != quote_trade_date:
-        return None, "日线基座不是当前交易日，盘中综合分不可用。"
+    if snapshot.as_of_trade_date is None or snapshot.as_of_trade_date != required_base_trade_date:
+        return None, "日线基座不是最近已收盘交易日，盘中综合分不可用。"
     score = item.ranking_score if item is not None else None
     if item is None or item.score_eligible is not True or score is None or not _is_finite_score(score):
         return None, "日线基座缺少可用最终分。"
@@ -292,7 +295,25 @@ async def _same_time_turnover_history(
     ).all()
     by_code_and_date: dict[tuple[str, date], float] = {}
     for row in rows:
-        if _exchange_minute(row.quote_time) != target_minute or not _is_finite_score(row.turnover):
+        raw = row.raw_json or {}
+        if isinstance(raw, str):
+            try:
+                loaded = json.loads(raw)
+            except json.JSONDecodeError:
+                loaded = {}
+            raw = loaded if isinstance(loaded, dict) else {}
+        if (
+            not isinstance(raw, dict)
+            or raw.get("decision_eligible") is not True
+            or row.freshness_status != "fresh"
+            or not row.source
+            or intraday_quotes.quote_consensus_status(row) in intraday_quotes.DISPLAY_ONLY_CONSENSUS
+            or intraday_quotes.is_quote_time_fallback(row)
+            or row.quote_time.date() != row.trade_date
+            or not market_data.is_etf_exchange_trading_day(row.trade_date)
+            or _exchange_minute(row.quote_time) != target_minute
+            or not _is_finite_score(row.turnover)
+        ):
             continue
         turnover = row.turnover
         if turnover is None:
@@ -487,7 +508,7 @@ async def live_rankings(
         intraday_base_score, base_limitation = _eligible_intraday_base(
             source_snapshot,
             signal_item,
-            quote.trade_date if quote is not None else None,
+            required_etf_snapshot_trade_date(now),
         )
         daily_entry_timing_label, daily_entry_timing_reason = _daily_entry_timing(signal_item)
 

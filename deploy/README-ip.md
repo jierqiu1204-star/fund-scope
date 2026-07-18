@@ -330,6 +330,12 @@ sudo ./backup-compose.sh
 sudo ls -lh /var/backups/fundscope/
 ```
 
+该脚本原子生成 PostgreSQL custom-format `.dump`，先执行
+`pg_restore --list` 校验，再写入 `.sha256` 校验文件。正常 GitHub Actions
+部署会在覆盖源码和执行迁移之前自动运行该脚本，并在同一目录记录
+`rollback-metadata-*.txt`（旧提交、旧 schema head、备份路径和候选 head）。
+恢复数据库属于显式事故处理操作，不由健康检查失败自动触发。
+
 ## 11. 重要限制
 
 - IP 阶段是临时方案，不是最终生产安全方案。

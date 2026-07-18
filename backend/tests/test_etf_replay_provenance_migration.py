@@ -50,6 +50,24 @@ def test_validation_run_model_and_schema_expose_nullable_replay_provenance() -> 
         rule_version="label_validation_v1",
         ranking_source_kind="research_replay",
         source_replay_run_key="replay-run-1",
+        source_manifest_hash="a" * 64,
+        source_event_count=1,
+        source_events=[
+            {
+                "event_order": 0,
+                "source_date": "2026-07-15",
+                "ranking_source_kind": "research_replay",
+                "source_replay_run_key": "replay-run-1",
+                "source_replay_contract_hash": "b" * 64,
+                "source_event_hash": "c" * 64,
+                "ranking_contract_hash": "d" * 64,
+                "scope_hash": "e" * 64,
+                "universe_snapshot_hash": "f" * 64,
+                "input_snapshot_hash": "1" * 64,
+                "availability_cutoff": "2026-07-15T15:30:00",
+                "immutable_hash": "2" * 64,
+            }
+        ],
         created_at="2026-07-15T09:30:00",
     )
 
@@ -153,7 +171,8 @@ def test_alembic_has_one_head_after_replay_provenance_revision() -> None:
     config.set_main_option("script_location", str(VERSIONS_DIR.parent))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["20260715_000047"]
+    assert len(script.get_heads()) == 1
+    assert script.get_revision("20260715_000047") is not None
 
 
 @pytest.mark.parametrize(

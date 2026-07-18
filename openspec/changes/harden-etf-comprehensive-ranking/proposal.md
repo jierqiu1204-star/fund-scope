@@ -41,3 +41,9 @@ The ETF comprehensive ranking can currently mix partial and full-universe runs, 
 - `/short-term` query construction, authentication-scoped caching, status transitions, pagination, error/empty states, and ranking explanations.
 - Historical ranking and validation evidence must be recomputed under the new contract before it can be shown as current same-contract evidence.
 - Relevant backend boundary, ranking, API, validation, intraday, scheduler, migration, and frontend behavior tests require regression coverage.
+
+## Coordination
+
+- This change exclusively owns live `final_score_v3` materialization/publication and real-environment rollout tasks 11.2/11.9.
+- `repair-etf-ranking-evidence-readiness` owns the shared multi-date validation source manifest, horizon/source-date planner, bounded production adjusted-history continuation, and signed readiness projection that task 11.2/11.9 consume.
+- `enable-etf-point-in-time-ranking-replay` owns research-only PIT membership, replay scoring, paired evaluation, walk-forward, purge/embargo, and holdout behavior. Replay sessions and results never replace production rollout sessions or formal production snapshot evidence.

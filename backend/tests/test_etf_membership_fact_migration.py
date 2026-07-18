@@ -38,12 +38,15 @@ def test_model_exposes_complete_receipt_without_operational_foreign_key() -> Non
         table.c.observed_at,
         table.c.effective_from,
         table.c.effective_to,
+        table.c.membership_state,
         table.c.evidence_hash,
         table.c.raw_payload_hash,
+        table.c.fact_hash,
         table.c.created_at,
     }
     assert not table.c.etf_code.foreign_keys
     assert table.c.evidence_hash.unique is True
+    assert table.c.fact_hash.unique is True
     assert {index.name for index in table.indexes} == {
         "ix_etf_pit_membership_facts_effective_lookup",
         "ix_etf_pit_membership_facts_observed_cursor",
@@ -98,8 +101,10 @@ def test_migration_is_additive_empty_and_reversible() -> None:
             "observed_at": datetime(2020, 1, 1, 1),
             "effective_from": date(2020, 1, 2),
             "effective_to": None,
+            "membership_state": "included",
             "evidence_hash": "a" * 64,
             "raw_payload_hash": "b" * 64,
+            "fact_hash": "c" * 64,
             "created_at": datetime(2026, 7, 15, 1),
         }
         connection.execute(table.insert().values(**values))
@@ -110,7 +115,8 @@ def test_migration_is_additive_empty_and_reversible() -> None:
                 table.insert().values(
                     **{
                         **values,
-                        "evidence_hash": "c" * 64,
+                        "evidence_hash": "d" * 64,
+                        "fact_hash": "e" * 64,
                         "effective_from": date(2020, 1, 3),
                         "effective_to": date(2020, 1, 2),
                     }
@@ -131,4 +137,5 @@ def test_alembic_has_one_head_at_membership_fact_revision() -> None:
     config.set_main_option("script_location", str(VERSIONS_DIR.parent))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["20260715_000047"]
+    assert len(script.get_heads()) == 1
+    assert script.get_revision("20260715_000047") is not None

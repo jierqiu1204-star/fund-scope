@@ -12,8 +12,10 @@ from app.models.entities import (
     EtfIntradayLatestQuote,
     EtfIntradayQuote,
     EtfPriceHistory,
-    EtfUniverseMembership,
     IntradayEtfWatchRun,
+)
+from app.models.entities import (
+    EtfPointInTimeMembershipFact as EtfPointInTimeMembershipFactRow,
 )
 from app.schemas.etf_quotes import EtfIntradayQuoteOut, IntradayEtfWatchRunOut
 from app.services.intraday_etf import service as intraday_quotes
@@ -89,10 +91,15 @@ class EtfPointInTimeMembershipFact:
     etf_code: str
     effective_from: date
     effective_to: date | None
-    source: str
-    tracked_underlying_id: str | None
+    membership_state: str
+    external_source_id: str
+    provider: str
+    provider_version: str
+    observed_at: datetime
+    evidence_hash: str
+    raw_payload_hash: str
+    fact_hash: str
     created_at: datetime
-    updated_at: datetime
 
 
 @dataclass(frozen=True)
@@ -135,18 +142,19 @@ async def etf_membership_facts_covering(
 
     rows = (
         await session.scalars(
-            select(EtfUniverseMembership)
+            select(EtfPointInTimeMembershipFactRow)
             .where(
-                EtfUniverseMembership.effective_from <= replay_date,
+                EtfPointInTimeMembershipFactRow.effective_from <= replay_date,
                 or_(
-                    EtfUniverseMembership.effective_to.is_(None),
-                    EtfUniverseMembership.effective_to >= replay_date,
+                    EtfPointInTimeMembershipFactRow.effective_to.is_(None),
+                    EtfPointInTimeMembershipFactRow.effective_to >= replay_date,
                 ),
             )
             .order_by(
-                EtfUniverseMembership.etf_code.asc(),
-                EtfUniverseMembership.effective_from.asc(),
-                EtfUniverseMembership.id.asc(),
+                EtfPointInTimeMembershipFactRow.etf_code.asc(),
+                EtfPointInTimeMembershipFactRow.effective_from.asc(),
+                EtfPointInTimeMembershipFactRow.observed_at.asc(),
+                EtfPointInTimeMembershipFactRow.id.asc(),
             )
         )
     ).all()
@@ -155,10 +163,15 @@ async def etf_membership_facts_covering(
             etf_code=row.etf_code,
             effective_from=row.effective_from,
             effective_to=row.effective_to,
-            source=row.source,
-            tracked_underlying_id=row.tracked_underlying_id,
+            membership_state=row.membership_state,
+            external_source_id=row.external_source_id,
+            provider=row.provider,
+            provider_version=row.provider_version,
+            observed_at=row.observed_at,
+            evidence_hash=row.evidence_hash,
+            raw_payload_hash=row.raw_payload_hash,
+            fact_hash=row.fact_hash,
             created_at=row.created_at,
-            updated_at=row.updated_at,
         )
         for row in rows
     )

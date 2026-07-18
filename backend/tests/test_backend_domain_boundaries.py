@@ -41,6 +41,7 @@ def test_market_data_and_portfolio_allocation_stay_upstream() -> None:
         ROOT / "market_data.py",
         (
             "app.services.short_research",
+            "app.services.strategy_lab",
             "app.services.tracked_positions",
             "app.services.notifier",
         ),
@@ -81,3 +82,43 @@ def test_workflows_are_allowed_to_orchestrate_multiple_domains() -> None:
 
     assert "app.services.short_research" in workflow_text
     assert "app.services.tracked_positions" in workflow_text
+
+
+def test_etf_strategy_lab_ranking_modules_cannot_mutate_daily_decision_domains() -> None:
+    forbidden = (
+        "app.services.portfolio_allocation",
+        "app.services.tracked_positions.service",
+        "app.services.risk_alerts",
+        "app.services.notifier",
+        "app.services.workflows",
+    )
+    for path in (ROOT / "strategy_lab").glob("etf_*.py"):
+        _assert_no_forbidden_imports(path, forbidden)
+
+
+def test_notification_remains_downstream_of_research_and_strategy_lab() -> None:
+    _assert_no_forbidden_imports(
+        ROOT / "notifier.py",
+        (
+            "app.services.market_data",
+            "app.services.short_research",
+            "app.services.strategy_lab",
+            "app.services.tracked_positions",
+        ),
+    )
+
+
+def test_etf_research_evidence_contract_has_no_database_or_business_service_dependency() -> None:
+    _assert_no_forbidden_imports(
+        ROOT / "etf_research_evidence.py",
+        (
+            "sqlalchemy",
+            "app.models",
+            "app.services.market_data",
+            "app.services.short_research",
+            "app.services.strategy_lab",
+            "app.services.tracked_positions",
+            "app.services.risk_alerts",
+            "app.services.notifier",
+        ),
+    )

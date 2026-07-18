@@ -34,3 +34,9 @@ Current ETF ranking and email-performance reports return `N/A` because the datab
 - Validation APIs and workbench evidence output gain additive provenance and limitation fields. Existing production endpoint paths and live notification behavior do not change.
 - Historical dates without reconstructable universe, adjusted-price provenance, or required daily inputs remain excluded. Raw Sina/efinance prices, estimated IOPV/premium, and current-universe backfills cannot become decision evidence.
 - Tests cover no-look-ahead cutoffs, survivor handling, evidence-kind isolation, frozen candidate/holdout guards, cost-aware outcomes, bounded resume, deterministic batching, and no decision-domain side effects.
+
+## Coordination
+
+- This change exclusively owns point-in-time membership persistence, replay scoring/materialization, the research source adapter, paired ranking endpoint, walk-forward, purge/embargo, and holdout behavior.
+- `repair-etf-ranking-evidence-readiness` owns the shared multi-date validation source manifest, validation/source-date planner, production adjusted-history continuation, and signed readiness projection; replay code consumes those contracts without duplicating them.
+- `harden-etf-comprehensive-ranking` owns live `final_score_v3` publication and real-environment rollout tasks 11.2/11.9. Research replay never satisfies those production publication or rollout gates.

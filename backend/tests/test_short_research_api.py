@@ -787,17 +787,19 @@ async def _seed_score_bucket_signal_runs(app) -> dict[str, Any]:
             status="success",
             as_of_date=signal_date,
             scope_kind="full",
-            scope_hash="full-scope",
-            universe_snapshot_hash="universe-current",
-            input_snapshot_hash="input-current",
+            scope_hash="b" * 64,
+            universe_snapshot_hash="c" * 64,
+            input_snapshot_hash="d" * 64,
             score_version="final_score_v3",
-            rule_version="short_research_rule_v3",
-            ranking_contract_hash="current-contract",
+            rule_version="final_score_v3_rule_v2",
+            ranking_contract_hash="a" * 64,
             score_field="ranking_score",
-            data_cutoff=utcnow(),
+            data_cutoff=datetime(2026, 7, 3, 15, 0),
             as_of_trade_date=signal_date,
             price_basis="total_return_adjusted",
-            expected_item_count=len(available_codes) + 3,
+            expected_item_count=len(available_codes),
+            decision_data_item_count=len(available_codes),
+            decision_data_coverage_ratio=1.0,
             eligible_item_count=len(available_codes),
             coverage_ratio=1.0,
             idempotency_key="score-bucket-current",
@@ -806,11 +808,11 @@ async def _seed_score_bucket_signal_runs(app) -> dict[str, Any]:
                 "language": "research_only",
                 "scope_kind": "full",
                 "score_version": "final_score_v3",
-                "ranking_contract_hash": "current-contract",
+                "ranking_contract_hash": "a" * 64,
                 "score_field": "ranking_score",
                 "price_basis": "total_return_adjusted",
             },
-            summary_json={"item_count": len(available_codes) + 3, "score_version": "final_score_v3"},
+            summary_json={"item_count": len(available_codes), "score_version": "final_score_v3"},
         )
         partial_run = ShortResearchSignalRun(
             status="success",
@@ -901,56 +903,6 @@ async def _seed_score_bucket_signal_runs(app) -> dict[str, Any]:
             )
         session.add_all(
             [
-                ShortResearchSignalItem(
-                    run_id=latest_run.id,
-                    asset_type="etf",
-                    asset_code=unavailable_code,
-                    rank=20,
-                    total_score=99,
-                    conclusion="高位观察",
-                    score_breakdown_json={"final_score_v3": {"score_version": "final_score_v3"}},
-                    risk_flags_json=[],
-                    rationale_json={},
-                    metrics_json={
-                        "opportunity_score": 999,
-                        "catalyst_score": 50,
-                        "sentiment_heat_score": 50,
-                        "catalyst_summary": "暂无可用于评分的主题催化事件。",
-                        "catalyst_limitations": ["主题催化数据不可用。"],
-                    },
-                ),
-                ShortResearchSignalItem(
-                    run_id=latest_run.id,
-                    asset_type="etf",
-                    asset_code=missing_score_code,
-                    rank=21,
-                    total_score=80,
-                    conclusion="短线观察",
-                    score_breakdown_json={},
-                    risk_flags_json=[],
-                    rationale_json={},
-                    metrics_json={"catalyst_summary": "缺少综合关注分。"},
-                ),
-                ShortResearchSignalItem(
-                    run_id=latest_run.id,
-                    asset_type="etf",
-                    asset_code=non_finite_score_code,
-                    rank=22,
-                    total_score=79,
-                    ranking_score=float("nan"),
-                    score_eligible=True,
-                    conclusion="短线观察",
-                    score_breakdown_json={
-                        "final_score_v3": {
-                            "score_version": "final_score_v3",
-                            "ranking_score": float("nan"),
-                            "score_eligible": True,
-                        }
-                    },
-                    risk_flags_json=[],
-                    rationale_json={},
-                    metrics_json={"catalyst_summary": "非有限综合关注分。"},
-                ),
                 ShortResearchSignalItem(
                     run_id=partial_run.id,
                     asset_type="etf",
@@ -1935,6 +1887,12 @@ async def test_score_bucket_validation_requires_current_full_ranking_contract(cl
     assert response.status_code == 200
     body = response.json()
     summary = body["summary"]
+    assert body["ranking_source_kind"] == "production_published"
+    assert body["source_signal_run_id"] is None
+    assert len(body["source_manifest_hash"]) == 64
+    assert body["source_event_count"] == 1
+    assert body["source_events"][0]["source_signal_run_id"] == seeded["latest_run_id"]
+    assert body["source_events"][0]["source_date"] == "2026-07-03"
     assert body["validation_mode"] == "score_bucket_replay"
     assert body["rule_version"] == "score_bucket_replay_v2"
     assert summary["score_field"] == "ranking_score"
@@ -1944,6 +1902,22 @@ async def test_score_bucket_validation_requires_current_full_ranking_contract(cl
     assert summary["round_trip_cost"] > 0
     assert summary["primary_endpoint"] == "Top 10 / cumulative / 5d paired net excess return vs all_scored"
     assert summary["source_signal_run_ids"] == [seeded["latest_run_id"]]
+    assert summary["source_date_plan"] == {
+        "status": "insufficient",
+        "reason": "sparse_compatible_sources_at_retention_cap",
+        "theoretical_session_span": 240,
+        "searched_session_span": 12,
+        "retention_cap_sessions": 12,
+        "compatible_count": 1,
+        "completed_count": 1,
+        "pending_count": 0,
+        "overlapping_count": 0,
+        "non_overlapping_count": 1,
+        "excluded_count": 0,
+        "source_date_shortfall": 19,
+        "query_count": 1,
+        "selected_source_date_count": 1,
+    }
     assert seeded["old_run_id"] not in summary["source_signal_run_ids"]
     assert seeded["partial_run_id"] not in summary["source_signal_run_ids"]
     assert seeded["mismatched_contract_run_id"] not in summary["source_signal_run_ids"]
@@ -1954,14 +1928,8 @@ async def test_score_bucket_validation_requires_current_full_ranking_contract(cl
     assert excluded_snapshots[seeded["old_run_id"]] == "partial_or_legacy_scope"
     assert excluded_snapshots[seeded["partial_run_id"]] == "partial_or_legacy_scope"
     assert excluded_snapshots[seeded["mismatched_contract_run_id"]] == "incompatible_score_field"
-    assert summary["excluded_unavailable_score_count"] == 3
-    assert seeded["unavailable_code"] in summary["excluded_codes"]["missing_ranking_score"]
-    assert seeded["missing_score_code"] in summary["excluded_codes"]["missing_ranking_score"]
-    assert seeded["non_finite_score_code"] in summary["excluded_codes"]["non_finite_ranking_score"]
-    assert summary["excluded_items"]["missing_ranking_score"] == [
-        {"asset_code": seeded["unavailable_code"], "key": "missing_ranking_score", "signal_date": "2026-07-03"},
-        {"asset_code": seeded["missing_score_code"], "key": "missing_ranking_score", "signal_date": "2026-07-03"},
-    ]
+    assert summary["excluded_unavailable_score_count"] == 0
+    assert summary["excluded_items"] == {}
 
     groups = {(item["label"], item["entry_timing_label"]): item for item in summary["groups"]}
     available_codes = seeded["available_codes"]
@@ -1989,24 +1957,31 @@ async def test_score_bucket_validation_requires_current_full_ranking_contract(cl
     assert primary["endpoint_type"] == "primary"
     assert primary["paired_sample_count"] == 1
     assert primary["sample_sufficiency"] == "insufficient"
+    assert primary["calculation_status"] == "success"
+    assert primary["required_signal_date_count"] == 20
+    assert primary["compatible_signal_date_count"] == 1
+    assert primary["completed_signal_date_count"] == 1
+    assert primary["non_overlapping_signal_date_count"] == 1
+    assert "insufficient_independent_dates" in primary["sufficiency_reasons"]
+    assert "insufficient_paired_dates" in primary["sufficiency_reasons"]
     assert primary["effect_direction"] == "insufficient"
     assert summary["source_snapshot_identities"] == [
         {
             "source_signal_run_id": seeded["latest_run_id"],
             "source_date": "2026-07-03",
-            "ranking_contract_hash": "current-contract",
+            "ranking_contract_hash": "a" * 64,
             "scope_kind": "full",
-            "scope_hash": "full-scope",
-            "universe_snapshot_hash": "universe-current",
-            "input_snapshot_hash": "input-current",
+            "scope_hash": "b" * 64,
+            "universe_snapshot_hash": "c" * 64,
+            "input_snapshot_hash": "d" * 64,
             "score_field": "ranking_score",
             "score_version": "final_score_v3",
-            "rule_version": "short_research_rule_v3",
+            "rule_version": "final_score_v3_rule_v2",
             "price_basis": "total_return_adjusted",
             "reliability_policy": "decision_eligible_total_return_adjusted",
         }
     ]
-    assert summary["source_evidence_contract_groups"][0]["identity"]["ranking_contract_hash"] == "current-contract"
+    assert summary["source_evidence_contract_groups"][0]["identity"]["ranking_contract_hash"] == "a" * 64
     assert summary["source_evidence_contract_groups"][0]["source_snapshots"] == summary["source_snapshot_identities"]
 
     latest = await client.get("/api/short-research/validation/score-buckets/latest")
@@ -2018,6 +1993,30 @@ async def test_score_bucket_validation_requires_current_full_ranking_contract(cl
     status_body = status.json()
     assert status_body["score_bucket_validation"]["validation_mode"] == "score_bucket_replay"
     assert status_body["score_bucket_validation_generated_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_score_bucket_zero_sources_is_unavailable_and_unregistered(
+    client,
+) -> None:
+    response = await client.post(
+        "/api/short-research/validation/score-buckets/run?days=180"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "failed"
+    assert body["ranking_source_kind"] is None
+    assert body["source_manifest_hash"] is None
+    assert body["source_event_count"] is None
+    assert body["source_events"] == []
+    assert body["summary"]["unavailable_reason"] == "waiting_signal_generation"
+    assert body["summary"]["source_date_plan"] == {
+        "status": "unavailable",
+        "reason": "missing_adjusted_trading_sessions",
+        "theoretical_session_span": 240,
+        "retention_cap_sessions": 240,
+    }
 
 
 @pytest.mark.asyncio

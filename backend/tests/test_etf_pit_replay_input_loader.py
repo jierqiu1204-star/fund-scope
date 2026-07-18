@@ -1,15 +1,38 @@
 from __future__ import annotations
 
+import hashlib
+import smtplib
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
+from sqlalchemy import event
 
-from app.models.entities import EtfPriceHistory, EtfUniverseMembership, TradableEtf
-from app.services.short_research.daily_reconstructable import score_daily_reconstructable
+from app.models.entities import (
+    EtfPointInTimeMembershipFact,
+    EtfPriceHistory,
+    TradableEtf,
+)
+from app.services.short_research.daily_reconstructable import (
+    daily_reconstructable_manifest,
+    score_daily_reconstructable,
+)
+from app.services.strategy_lab.etf_action_replay.artifact_store import ReplayArtifactStore
 from app.services.strategy_lab.etf_ranking_replay_inputs import (
     ReplayInputExclusionReason,
     load_point_in_time_ranking_inputs,
+)
+from app.services.strategy_lab.etf_ranking_stage_a import (
+    STAGE_A_SCHEMA_VERSION,
+    StageABatchRequest,
+    StageAReplayContract,
+    run_stage_a_loader_job,
+)
+from app.services.strategy_lab.etf_ranking_stage_b import (
+    StageBBatchRequest,
+    read_stage_b_source_date_page_from_stage_a,
+    run_stage_b_continuation,
+    stage_b_contract_from_stage_a,
 )
 
 T = date(2022, 6, 30)
@@ -38,15 +61,27 @@ def _membership(
     effective_to: date | None = None,
     known_at: datetime = datetime(2021, 1, 1),
     updated_at: datetime | None = None,
-) -> EtfUniverseMembership:
-    return EtfUniverseMembership(
+    membership_state: str = "included",
+    receipt_suffix: str = "primary",
+) -> EtfPointInTimeMembershipFact:
+    receipt = f"{code}:{receipt_suffix}:{membership_state}"
+
+    def digest(label: str) -> str:
+        return hashlib.sha256(f"{receipt}:{label}".encode()).hexdigest()
+
+    return EtfPointInTimeMembershipFact(
         etf_code=code,
+        external_source_id=f"exchange-notice:{receipt}",
+        provider="fixture-exchange",
+        provider_version="notice-v1",
+        observed_at=updated_at or known_at,
         effective_from=effective_from,
         effective_to=effective_to,
-        source="factual-membership-fixture",
-        tracked_underlying_id=f"UNDERLYING-{code}",
-        created_at=known_at,
-        updated_at=updated_at or known_at,
+        membership_state=membership_state,
+        evidence_hash=digest("evidence"),
+        raw_payload_hash=digest("raw"),
+        fact_hash=digest("fact"),
+        created_at=datetime(2026, 7, 15),
     )
 
 
@@ -135,13 +170,127 @@ async def test_loader_uses_effective_membership_and_keeps_later_delisted_member(
         "510003",
     ]
     assert [item.asset_code for item in first.eligible_inputs] == ["510001", "510003"]
-    assert first.authoritative_universe[0].membership_source == "factual-membership-fixture"
-    assert first.authoritative_universe[0].tracked_underlying_id == "UNDERLYING-510001"
+    assert first.authoritative_universe[0].membership_source == "fixture-exchange"
+    assert first.authoritative_universe[0].tracked_underlying_id is None
     assert first.eligible_inputs[0].bars[-1].session_date == T
     assert first.eligible_inputs[0].bars[-1].adjusted_close == pytest.approx(2.6)
     assert first == second
     assert len(first.universe_hash) == 64
     assert len(first.input_hash) == 64
+
+
+@pytest.mark.asyncio
+async def test_research_replay_cannot_write_production_decision_or_notification_state(
+    app,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    forbidden_tables = (
+        "short_research_signal_runs",
+        "short_research_signal_items",
+        "etf_observation_portfolio_snapshots",
+        "etf_observation_portfolio_items",
+        "etf_optimized_allocation_snapshots",
+        "etf_optimized_allocation_items",
+        "tracked_positions",
+        "tracked_position_alerts",
+        "tracked_position_alert_audits",
+        "tracked_position_action_decisions",
+        "tracked_position_action_executions",
+        "tracked_position_action_transition_receipts",
+        "tracked_position_lifecycle_shadow_evidence",
+        "tracked_position_notification_envelopes",
+        "tracked_position_notification_items",
+        "notification_log",
+    )
+    writes: list[str] = []
+    smtp_calls: list[str] = []
+
+    def capture_statement(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+        normalized = " ".join(str(statement).lower().split())
+        if normalized.startswith(("insert ", "update ", "delete ")) and any(
+            table in normalized for table in forbidden_tables
+        ):
+            writes.append(normalized)
+
+    def reject_smtp(*_args, **_kwargs):
+        smtp_calls.append("called")
+        raise AssertionError("research replay must not open SMTP connections")
+
+    monkeypatch.setattr(smtplib, "SMTP", reject_smtp)
+    monkeypatch.setattr(smtplib, "SMTP_SSL", reject_smtp)
+
+    async with app.state.db.session() as session:
+        session.add(_etf("510900"))
+        session.add(_membership("510900"))
+        session.add_all(_adjusted_history("510900"))
+        await session.commit()
+
+        sync_engine = session.sync_session.bind
+        assert sync_engine is not None
+        event.listen(sync_engine, "before_cursor_execute", capture_statement)
+        try:
+            def digest(label: str) -> str:
+                return hashlib.sha256(label.encode()).hexdigest()
+
+            stage_a_contract = StageAReplayContract(
+                replay_run_key="no-production-side-effects",
+                score_manifest_hash=daily_reconstructable_manifest().manifest_hash,
+                source_snapshot_hash=digest("source-registry"),
+                universe_manifest_hash=digest("universe-registry"),
+                decision_cutoff_semantics="asia_shanghai_post_close_v1",
+                schema_version=STAGE_A_SCHEMA_VERSION,
+                candidate_registry_hash=digest("candidate-registry"),
+            )
+            store = ReplayArtifactStore(tmp_path / "replay-artifacts.sqlite3")
+            stage_a = await run_stage_a_loader_job(
+                session=session,
+                store=store,
+                contract=stage_a_contract,
+                request=StageABatchRequest(
+                    max_source_rows=61,
+                    max_items=1,
+                    max_pages=1,
+                    max_seconds=10.0,
+                    worker_count=1,
+                    peak_rss_limit_bytes=256 * 1024**2,
+                ),
+                replay_dates=(T,),
+                decision_cutoffs=((T, CUTOFF),),
+                max_codes_per_page=1,
+                peak_rss_reader=lambda: 1024,
+            )
+            assert stage_a.complete is True
+
+            stage_b_contract = stage_b_contract_from_stage_a(stage_a_contract)
+            source_page = read_stage_b_source_date_page_from_stage_a(
+                store=store,
+                stage_a_contract=stage_a_contract,
+                stage_b_contract=stage_b_contract,
+                after_cursor=None,
+                max_dates=1,
+                max_feature_rows=2,
+                stage_a_page_rows=1,
+                max_seconds=10.0,
+            )
+            stage_b = run_stage_b_continuation(
+                store=store,
+                contract=stage_b_contract,
+                request=StageBBatchRequest(
+                    max_dates=1,
+                    max_feature_rows=2,
+                    max_seconds=10.0,
+                    worker_count=1,
+                ),
+                source_dates=source_page.source_dates,
+                source_has_more=source_page.has_more,
+            )
+            assert stage_b.complete is True
+        finally:
+            event.remove(sync_engine, "before_cursor_execute", capture_statement)
+
+    assert writes == []
+    assert smtp_calls == []
 
 
 @pytest.mark.asyncio
@@ -184,8 +333,48 @@ async def test_loader_rejects_current_survivor_and_future_known_membership(app) 
         (item.asset_code, item.reason)
         for item in snapshot.exclusions
     } == {
-        ("510011", ReplayInputExclusionReason.FUTURE_KNOWN_INPUT),
-        ("510012", ReplayInputExclusionReason.FUTURE_KNOWN_INPUT),
+        (
+            "510011",
+            ReplayInputExclusionReason.MEMBERSHIP_OBSERVED_AFTER_CUTOFF,
+        ),
+        (
+            "510012",
+            ReplayInputExclusionReason.MEMBERSHIP_OBSERVED_AFTER_CUTOFF,
+        ),
+        (None, ReplayInputExclusionReason.INSUFFICIENT_POINT_IN_TIME_UNIVERSE),
+    }
+
+
+@pytest.mark.asyncio
+async def test_loader_rejects_conflicting_membership_receipts(app) -> None:
+    async with app.state.db.session() as session:
+        session.add(_etf("510013"))
+        session.add_all(
+            [
+                _membership("510013", receipt_suffix="included"),
+                _membership(
+                    "510013",
+                    membership_state="excluded",
+                    receipt_suffix="excluded",
+                ),
+            ]
+        )
+        session.add_all(_adjusted_history("510013"))
+        await session.commit()
+
+        snapshot = await load_point_in_time_ranking_inputs(
+            session,
+            replay_date=T,
+            decision_cutoff=CUTOFF,
+            max_source_rows=1_000,
+        )
+
+    assert snapshot.authoritative_universe == ()
+    assert {
+        (item.asset_code, item.reason)
+        for item in snapshot.exclusions
+    } == {
+        ("510013", ReplayInputExclusionReason.MEMBERSHIP_FACT_CONFLICT),
         (None, ReplayInputExclusionReason.INSUFFICIENT_POINT_IN_TIME_UNIVERSE),
     }
 

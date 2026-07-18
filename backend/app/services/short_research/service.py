@@ -92,6 +92,7 @@ from app.services.short_research.factors import (
 from app.services.short_research.final_score_v3 import (
     build_final_score_v3_sector_inputs,
     build_v3_shadow_comparison,
+    enforce_history_warmup,
     final_score_v3_bucket,
     score_final_score_v3,
 )
@@ -2149,6 +2150,12 @@ class _ScoreBucketStats:
     def summary(self) -> dict[str, Any]:
         if not self.returns:
             return {
+                "calculation_status": "success",
+                "statistical_sufficiency": "insufficient",
+                "required_signal_date_count": _SCORE_BUCKET_MIN_INDEPENDENT_DATES,
+                "compatible_signal_date_count": self.total_count + self.overlapping_count,
+                "completed_signal_date_count": 0,
+                "non_overlapping_signal_date_count": self.total_count,
                 "sample_count": 0,
                 "unique_signal_date_count": 0,
                 "asset_count": self.asset_count,
@@ -2190,6 +2197,12 @@ class _ScoreBucketStats:
             else "insufficient"
         )
         return {
+            "calculation_status": "success",
+            "statistical_sufficiency": confidence,
+            "required_signal_date_count": _SCORE_BUCKET_MIN_INDEPENDENT_DATES,
+            "compatible_signal_date_count": self.total_count + self.overlapping_count,
+            "completed_signal_date_count": len(self.returns),
+            "non_overlapping_signal_date_count": self.total_count,
             "sample_count": len(self.returns),
             "unique_signal_date_count": len(self.returns),
             "effective_sample_count": len(self.returns),
@@ -2256,6 +2269,7 @@ def _paired_score_bucket_metrics(
     else:
         effect_direction = "inconclusive"
     return {
+        "paired_required_count": _SCORE_BUCKET_MIN_INDEPENDENT_DATES,
         "paired_sample_count": len(shared_dates),
         "paired_signal_dates": [signal_date.isoformat() for signal_date in shared_dates],
         "paired_coverage": round(coverage, 4),
@@ -2265,6 +2279,38 @@ def _paired_score_bucket_metrics(
         "effect_direction": effect_direction,
         "sample_sufficiency": "sufficient" if sufficient else "insufficient",
     }
+
+
+def _score_bucket_sufficiency_reasons(metrics: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    if int(metrics.get("sample_count") or 0) < _SCORE_BUCKET_MIN_INDEPENDENT_DATES:
+        reasons.append("insufficient_independent_dates")
+    if float(metrics.get("coverage") or 0.0) < _SCORE_BUCKET_MIN_COVERAGE:
+        reasons.append("low_date_coverage")
+    if float(metrics.get("asset_coverage") or 0.0) < _SCORE_BUCKET_MIN_COVERAGE:
+        reasons.append("low_asset_coverage")
+    if int(metrics.get("pending_count") or 0) > 0:
+        reasons.append("future_windows_pending")
+    exclusion_reasons = metrics.get("exclusion_reasons")
+    if isinstance(exclusion_reasons, dict) and any(
+        key in exclusion_reasons
+        for key in (
+            "missing_t_plus_one_entry_price",
+            "missing_horizon_exit_price",
+            "missing_research_price_provenance",
+            "invalid_window_price",
+        )
+    ):
+        reasons.append("missing_adjusted_entry_or_exit_legs")
+    if "paired_sample_count" in metrics and int(
+        metrics.get("paired_sample_count") or 0
+    ) < _SCORE_BUCKET_MIN_INDEPENDENT_DATES:
+        reasons.append("insufficient_paired_dates")
+    if "paired_coverage" in metrics and float(
+        metrics.get("paired_coverage") or 0.0
+    ) < _SCORE_BUCKET_MIN_COVERAGE:
+        reasons.append("low_paired_coverage")
+    return reasons
 
 
 def _source_evidence_contract_groups(source_snapshots: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2814,12 +2860,14 @@ def _score_bucket_group_specs(top_n: list[int]) -> list[dict[str, Any]]:
     return specs
 
 
-async def run_etf_score_bucket_validation(
+async def _calculate_etf_score_bucket_validation(
     session: AsyncSession,
     *,
     days: int = _SCORE_BUCKET_DEFAULT_DAYS,
     score_basis: str = _SCORE_BUCKET_SCORE_BASIS,
     top_n: list[int] | None = None,
+    planned_source_runs: list[ShortResearchSignalRun] | None = None,
+    source_plan: dict[str, Any] | None = None,
 ) -> EtfSignalValidationRun:
     started_at = utcnow()
     horizons = list(_LABEL_VALIDATION_WINDOWS)
@@ -2844,6 +2892,7 @@ async def run_etf_score_bucket_validation(
         "minimum_coverage": _SCORE_BUCKET_MIN_COVERAGE,
         "primary_endpoint": "Top 10 / cumulative / 5d paired net excess return vs all_scored",
         "research_only": True,
+        "source_date_plan": source_plan,
     }
     run = EtfSignalValidationRun(
         status=RUN_STATUS_RUNNING,
@@ -2863,17 +2912,29 @@ async def run_etf_score_bucket_validation(
         run.finished_at = utcnow()
         run.error_message = "score_basis 只支持 opportunity（综合关注最终决策分）。"
         run.summary_json = {**config, "status": RUN_STATUS_FAILED, "groups": []}
-        await session.commit()
+        await session.flush()
         await session.refresh(run)
         return run
 
-    source_runs = await _latest_etf_signal_runs_by_date(
-        session,
-        from_date=date.today() - timedelta(days=days),
+    source_runs = (
+        planned_source_runs
+        if planned_source_runs is not None
+        else await _latest_etf_signal_runs_by_date(
+            session,
+            from_date=date.today() - timedelta(days=days),
+        )
+    )
+    source_from_date = (
+        min(
+            source_run.as_of_trade_date or source_run.as_of_date
+            for source_run in source_runs
+        )
+        if source_runs
+        else date.today() - timedelta(days=days)
     )
     source_snapshot_exclusions = await _score_bucket_source_snapshot_exclusions(
         session,
-        from_date=date.today() - timedelta(days=days),
+        from_date=source_from_date,
         accepted_run_ids={source_run.id for source_run in source_runs},
     )
     if not source_runs:
@@ -2888,7 +2949,7 @@ async def run_etf_score_bucket_validation(
             "excluded_source_snapshots": source_snapshot_exclusions,
             "groups": [],
         }
-        await session.commit()
+        await session.flush()
         await session.refresh(run)
         return run
 
@@ -3051,7 +3112,7 @@ async def run_etf_score_bucket_validation(
             "excluded_source_snapshots": source_snapshot_exclusions,
             "groups": [],
         }
-        await session.commit()
+        await session.flush()
         await session.refresh(run)
         return run
 
@@ -3075,6 +3136,9 @@ async def run_etf_score_bucket_validation(
                 "primary"
                 if label == "Top 10" and entry_label == "cumulative" and window == 5
                 else "exploratory"
+            )
+            metrics["sufficiency_reasons"] = _score_bucket_sufficiency_reasons(
+                metrics
             )
             windows[str(window)] = metrics
         groups.append(
@@ -3169,7 +3233,7 @@ async def run_etf_score_bucket_validation(
                 metrics_json=item["metrics"],
             )
         )
-    await session.commit()
+    await session.flush()
     await session.refresh(run)
     return run
 
@@ -4210,6 +4274,16 @@ async def _with_final_score_v3_shadow(
     ]
     manifest = final_score_v3_manifest()
     results = score_final_score_v3(inputs, manifest=manifest)
+    usable_sessions_by_code = {
+        asset.metadata.code: asset.usable_days for asset in etf_assets
+    }
+    results = {
+        code: enforce_history_warmup(
+            result,
+            usable_sessions=usable_sessions_by_code.get(code, 0),
+        )
+        for code, result in results.items()
+    }
     input_by_code = {ranking_input.asset_code: ranking_input for ranking_input in inputs}
     contract_input_keys = {
         key

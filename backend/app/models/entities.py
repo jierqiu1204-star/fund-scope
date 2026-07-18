@@ -13,6 +13,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Integer,
     String,
     Text,
@@ -35,6 +36,14 @@ def utcnow() -> datetime:
 
 
 class PublishedSnapshotImmutableError(ValueError):
+    pass
+
+
+class DatabaseInstanceIdentityImmutableError(ValueError):
+    pass
+
+
+class ValidationEvidenceImmutableError(ValueError):
     pass
 
 
@@ -299,6 +308,45 @@ class EtfUniverseMembership(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
+class EtfPointInTimeMembershipFact(Base):
+    __tablename__ = "etf_point_in_time_membership_facts"
+    __table_args__ = (
+        SaIndex(
+            "ix_etf_pit_membership_facts_effective_lookup",
+            "etf_code",
+            "effective_from",
+            "effective_to",
+        ),
+        SaIndex(
+            "ix_etf_pit_membership_facts_observed_cursor",
+            "observed_at",
+            "etf_code",
+        ),
+        CheckConstraint(
+            "effective_to IS NULL OR effective_to >= effective_from",
+            name="ck_etf_pit_membership_facts_effective_interval",
+        ),
+        CheckConstraint(
+            "membership_state IN ('included', 'excluded')",
+            name="ck_etf_pit_membership_facts_state",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    etf_code: Mapped[str] = mapped_column(String(32))
+    external_source_id: Mapped[str] = mapped_column(String(255))
+    provider: Mapped[str] = mapped_column(String(64))
+    provider_version: Mapped[str] = mapped_column(String(128))
+    observed_at: Mapped[datetime] = mapped_column(DateTime)
+    effective_from: Mapped[date] = mapped_column(Date)
+    effective_to: Mapped[date | None] = mapped_column(Date, nullable=True)
+    membership_state: Mapped[str] = mapped_column(String(16), default="included")
+    evidence_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    raw_payload_hash: Mapped[str] = mapped_column(String(64))
+    fact_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class EtfPriceHistory(Base):
     __tablename__ = "etf_price_history"
     __table_args__ = (
@@ -397,11 +445,30 @@ class EtfDataHealth(Base):
 class EtfSyncCursor(Base):
     __tablename__ = "etf_sync_cursors"
 
-    scope: Mapped[str] = mapped_column(String(64), primary_key=True)
+    scope: Mapped[str] = mapped_column(String(128), primary_key=True)
     last_priority_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
     last_regular_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
     last_lane: Mapped[str | None] = mapped_column(String(16), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class DatabaseInstanceIdentity(Base):
+    __tablename__ = "database_instance_identity"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_database_instance_identity_singleton"),
+        CheckConstraint(
+            "declared_environment IN ('local', 'test', 'acceptance', 'production')",
+            name="ck_database_instance_identity_environment",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    instance_uuid: Mapped[str] = mapped_column(String(36), unique=True)
+    declared_environment: Mapped[str] = mapped_column(String(32))
+    provisioned_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    provisioned_by_deploy: Mapped[str] = mapped_column(String(128))
+    attestation_key_id: Mapped[str] = mapped_column(String(128))
+    creation_metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
 class EtfDailyWorkflowLock(Base):
@@ -736,6 +803,15 @@ class EtfSignalValidationRun(Base):
             "ix_etf_signal_validation_runs_source_replay_run_key",
             "source_replay_run_key",
         ),
+        SaIndex(
+            "ix_etf_signal_validation_runs_source_manifest_hash",
+            "source_manifest_hash",
+        ),
+        UniqueConstraint(
+            "id",
+            "ranking_source_kind",
+            name="uq_etf_validation_run_manifest_kind",
+        ),
         CheckConstraint(
             "ranking_source_kind IS NULL OR "
             "ranking_source_kind IN ('production_published', 'research_replay')",
@@ -743,10 +819,11 @@ class EtfSignalValidationRun(Base):
         ),
         CheckConstraint(
             "status <> 'success' OR ranking_source_kind IS NULL OR "
-            "(ranking_source_kind = 'research_replay' AND "
+            "(source_manifest_hash IS NOT NULL AND source_event_count > 0 AND "
+            "((ranking_source_kind = 'research_replay' AND "
             "source_replay_run_key IS NOT NULL AND source_signal_run_id IS NULL) OR "
             "(ranking_source_kind = 'production_published' AND "
-            "source_signal_run_id IS NOT NULL AND source_replay_run_key IS NULL)",
+            "source_replay_run_key IS NULL)))",
             name="ck_etf_validation_ranking_source_identity",
         ),
     )
@@ -763,6 +840,8 @@ class EtfSignalValidationRun(Base):
     validation_mode: Mapped[str] = mapped_column(String(32), default="forward_live")
     ranking_source_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
     source_replay_run_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_manifest_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_event_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     rule_version: Mapped[str] = mapped_column(String(64), default="label_validation_v1")
     config_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     summary_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -779,6 +858,214 @@ class EtfSignalValidationRun(Base):
     price_basis: Mapped[str | None] = mapped_column(String(64), nullable=True)
     execution_model: Mapped[str | None] = mapped_column(String(64), nullable=True)
     data_cutoff: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class EtfSignalValidationSourceEvent(Base):
+    __tablename__ = "etf_signal_validation_source_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "validation_run_id",
+            "event_order",
+            name="uq_etf_validation_source_event_order",
+        ),
+        UniqueConstraint(
+            "validation_run_id",
+            "source_date",
+            name="uq_etf_validation_source_event_date",
+        ),
+        UniqueConstraint(
+            "validation_run_id",
+            "immutable_hash",
+            name="uq_etf_validation_source_event_hash",
+        ),
+        ForeignKeyConstraint(
+            ["validation_run_id", "ranking_source_kind"],
+            [
+                "etf_signal_validation_runs.id",
+                "etf_signal_validation_runs.ranking_source_kind",
+            ],
+            name="fk_etf_validation_source_event_manifest_kind",
+            ondelete="CASCADE",
+        ),
+        SaIndex(
+            "ix_etf_validation_source_events_source_date",
+            "ranking_source_kind",
+            "source_date",
+        ),
+        SaIndex(
+            "ix_etf_validation_source_events_signal_run",
+            "source_signal_run_id",
+        ),
+        SaIndex(
+            "ix_etf_validation_source_events_replay_key",
+            "source_replay_run_key",
+        ),
+        CheckConstraint(
+            "ranking_source_kind IN ('production_published', 'research_replay')",
+            name="ck_etf_validation_source_event_kind",
+        ),
+        CheckConstraint(
+            "(ranking_source_kind = 'production_published' AND "
+            "source_signal_run_id IS NOT NULL AND source_replay_run_key IS NULL AND "
+            "source_replay_contract_hash IS NULL) OR "
+            "(ranking_source_kind = 'research_replay' AND "
+            "source_signal_run_id IS NULL AND source_replay_run_key IS NOT NULL AND "
+            "source_replay_contract_hash IS NOT NULL)",
+            name="ck_etf_validation_source_event_identity",
+        ),
+        CheckConstraint(
+            "event_order >= 0",
+            name="ck_etf_validation_source_event_order",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    validation_run_id: Mapped[int] = mapped_column(
+        Integer
+    )
+    event_order: Mapped[int] = mapped_column(Integer)
+    source_date: Mapped[date] = mapped_column(Date)
+    ranking_source_kind: Mapped[str] = mapped_column(String(32))
+    source_signal_run_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_replay_run_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_replay_contract_hash: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )
+    source_event_hash: Mapped[str] = mapped_column(String(128))
+    ranking_contract_hash: Mapped[str] = mapped_column(String(128))
+    scope_hash: Mapped[str] = mapped_column(String(128))
+    universe_snapshot_hash: Mapped[str] = mapped_column(String(128))
+    input_snapshot_hash: Mapped[str] = mapped_column(String(128))
+    availability_cutoff: Mapped[datetime] = mapped_column(DateTime)
+    score_version: Mapped[str] = mapped_column(String(64))
+    score_field: Mapped[str] = mapped_column(String(64))
+    rule_version: Mapped[str] = mapped_column(String(64))
+    price_basis: Mapped[str] = mapped_column(String(64))
+    publication_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    scope_kind: Mapped[str] = mapped_column(String(32))
+    source_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    expected_asset_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    decision_data_covered_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    eligible_asset_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    item_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    decision_data_coverage_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    score_coverage_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    etf_item_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    finite_eligible_score_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    contiguous_global_rank: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    immutable_hash: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class EtfValidationContinuation(Base):
+    __tablename__ = "etf_validation_continuations"
+    __table_args__ = (
+        UniqueConstraint(
+            "validation_run_id",
+            name="uq_etf_validation_continuation_run",
+        ),
+        UniqueConstraint(
+            "identity_hash",
+            name="uq_etf_validation_continuation_identity",
+        ),
+        SaIndex(
+            "ix_etf_validation_continuation_status",
+            "status",
+            "updated_at",
+        ),
+        CheckConstraint(
+            "status IN ('running', 'partial', 'complete', 'failed')",
+            name="ck_etf_validation_continuation_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    validation_run_id: Mapped[int] = mapped_column(
+        ForeignKey("etf_signal_validation_runs.id", ondelete="CASCADE")
+    )
+    identity_hash: Mapped[str] = mapped_column(String(128))
+    manifest_hash: Mapped[str] = mapped_column(String(128))
+    execution_contract_hash: Mapped[str] = mapped_column(String(128))
+    candidate_registry_hash: Mapped[str] = mapped_column(String(128))
+    horizon_set_hash: Mapped[str] = mapped_column(String(128))
+    schema_hash: Mapped[str] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(16), default="running")
+    checkpoint_source_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    checkpoint_horizon: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    checkpoint_asset_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    processed_sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    page_count: Mapped[int] = mapped_column(Integer, default=0)
+    rolling_aggregate_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    final_aggregate_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    details_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class EtfValidationMaterializedSample(Base):
+    __tablename__ = "etf_validation_materialized_samples"
+    __table_args__ = (
+        UniqueConstraint(
+            "continuation_id",
+            "source_date",
+            "horizon_sessions",
+            "asset_key",
+            name="uq_etf_validation_materialized_sample_key",
+        ),
+        SaIndex(
+            "ix_etf_validation_materialized_sample_source",
+            "validation_run_id",
+            "source_date",
+            "horizon_sessions",
+        ),
+        SaIndex(
+            "ix_etf_validation_materialized_sample_status",
+            "validation_run_id",
+            "status",
+        ),
+        CheckConstraint(
+            "status IN ('completed', 'pending', 'overlapping', 'excluded')",
+            name="ck_etf_validation_materialized_sample_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    continuation_id: Mapped[int] = mapped_column(
+        ForeignKey("etf_validation_continuations.id", ondelete="CASCADE")
+    )
+    validation_run_id: Mapped[int] = mapped_column(
+        ForeignKey("etf_signal_validation_runs.id", ondelete="CASCADE")
+    )
+    source_event_id: Mapped[int] = mapped_column(
+        ForeignKey("etf_signal_validation_source_events.id", ondelete="RESTRICT")
+    )
+    source_event_hash: Mapped[str] = mapped_column(String(128))
+    manifest_hash: Mapped[str] = mapped_column(String(128))
+    price_basis: Mapped[str] = mapped_column(String(64))
+    source_date: Mapped[date] = mapped_column(Date)
+    horizon_sessions: Mapped[int] = mapped_column(Integer)
+    asset_key: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16))
+    entry_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    exit_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    adjusted_entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    adjusted_exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    gross_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    net_return: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fee_rate: Mapped[float] = mapped_column(Float, default=0.0)
+    slippage_rate: Mapped[float] = mapped_column(Float, default=0.0)
+    total_cost_rate: Mapped[float] = mapped_column(Float, default=0.0)
+    adverse_drawdown: Mapped[float | None] = mapped_column(Float, nullable=True)
+    interval_start: Mapped[date | None] = mapped_column(Date, nullable=True)
+    interval_end: Mapped[date | None] = mapped_column(Date, nullable=True)
+    exclusion_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sample_hash: Mapped[str] = mapped_column(String(128))
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class EtfSignalValidationItem(Base):
@@ -2350,6 +2637,31 @@ def _prevent_published_snapshot_mutation(session: Session, _flush_context: objec
     if not isinstance(authorized_run_ids, set):
         authorized_run_ids = set()
     for instance in session.dirty:
+        if isinstance(instance, DatabaseInstanceIdentity):
+            raise DatabaseInstanceIdentityImmutableError(
+                "database instance identity is immutable after provisioning"
+            )
+        if isinstance(instance, EtfValidationMaterializedSample):
+            raise ValidationEvidenceImmutableError(
+                "validation materialized samples are immutable"
+            )
+        if isinstance(instance, EtfSignalValidationSourceEvent):
+            validation_run = session.get(
+                EtfSignalValidationRun,
+                instance.validation_run_id,
+            )
+            if validation_run is not None and validation_run.status == "success":
+                raise ValidationEvidenceImmutableError(
+                    "registered validation source events are immutable"
+                )
+        if (
+            isinstance(instance, EtfValidationContinuation)
+            and instance.status == "complete"
+            and inspect(instance).attrs.status.history.has_changes() is False
+        ):
+            raise ValidationEvidenceImmutableError(
+                "completed validation continuation is immutable"
+            )
         if isinstance(instance, ShortResearchSignalRun):
             state = inspect(instance)
             publication_history = state.attrs.publication_state.history
@@ -2393,6 +2705,21 @@ def _prevent_published_snapshot_mutation(session: Session, _flush_context: objec
         if isinstance(instance, ShortResearchSignalItem):
             item_run_ids.add(instance.run_id)
     for instance in session.deleted:
+        if isinstance(instance, DatabaseInstanceIdentity):
+            raise DatabaseInstanceIdentityImmutableError(
+                "database instance identity cannot be deleted"
+            )
+        if isinstance(
+            instance,
+            (
+                EtfSignalValidationSourceEvent,
+                EtfValidationMaterializedSample,
+                EtfValidationContinuation,
+            ),
+        ):
+            raise ValidationEvidenceImmutableError(
+                "validation evidence cannot be deleted"
+            )
         if isinstance(instance, ShortResearchSignalRun) and instance.publication_state == "published":
             raise PublishedSnapshotImmutableError("published ranking snapshot is immutable")
         if isinstance(instance, ShortResearchSignalItem):

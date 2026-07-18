@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -53,6 +55,10 @@ from app.services.short_research.jobs import (
 )
 from app.services.strategy_lab.jobs import daily_strategy_paper_job
 from app.services.tracked_positions.jobs import daily_tracked_position_alerts_job
+from app.services.workflows.etf_readiness_attestation import (
+    ReadinessQueryLimitError,
+    build_bounded_attested_etf_readiness_report,
+)
 from app.services.workflows.intraday_etf import intraday_etf_watch_with_alerts_job
 
 router = APIRouter(prefix="/api/admin/jobs", tags=["admin"])
@@ -144,6 +150,30 @@ async def list_job_runs(session: AsyncSession = Depends(get_db_session)) -> list
         }
         for row in rows
     ]
+
+
+@router.get("/etf-readiness")
+async def read_etf_readiness(
+    request: Request,
+    target_date: date | None = Query(default=None),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, object]:
+    try:
+        report = await build_bounded_attested_etf_readiness_report(
+            session,
+            settings=request.app.state.settings,
+            target_date=target_date,
+        )
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=504,
+            detail="etf readiness deadline exceeded",
+        ) from exc
+    except ReadinessQueryLimitError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    finally:
+        await session.rollback()
+    return report
 
 
 @router.post("/{job_name}/run")

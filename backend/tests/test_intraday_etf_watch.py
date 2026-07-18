@@ -302,7 +302,7 @@ def test_intraday_adjustments_are_volatility_and_same_time_normalized() -> None:
 @pytest.mark.asyncio
 async def test_live_rankings_compare_turnover_with_same_exchange_minute_history(client, app, monkeypatch) -> None:
     now = datetime(2026, 6, 17, 10, 0, 0)
-    await _seed_signal_run(app, count=1, canonical=True, as_of_date=now.date())
+    await _seed_signal_run(app, count=1, canonical=True, as_of_date=date(2026, 6, 16))
     monkeypatch.setattr(
         "app.services.intraday_etf.service.current_market_state",
         lambda: MarketState("open", "morning", now.replace(tzinfo=ASIA_SHANGHAI)),
@@ -312,12 +312,24 @@ async def test_live_rankings_compare_turnover_with_same_exchange_minute_history(
             [
                 EtfIntradayQuote(
                     etf_code="510000",
-                    quote_time=datetime(2026, 6, 17 - offset, 10, 0, 0),
-                    trade_date=date(2026, 6, 17 - offset),
+                    quote_time=datetime.combine(trade_date, time(10, 0)),
+                    trade_date=trade_date,
                     latest_price=1.0,
                     turnover=100.0,
+                    source="test",
+                    freshness_status="fresh",
+                    raw_json={
+                        "decision_eligible": True,
+                        "consensus_status": CONSENSUS_CONSISTENT,
+                    },
                 )
-                for offset in range(1, 6)
+                for trade_date in (
+                    date(2026, 6, 16),
+                    date(2026, 6, 15),
+                    date(2026, 6, 12),
+                    date(2026, 6, 11),
+                    date(2026, 6, 10),
+                )
             ]
         )
         session.add(
@@ -345,9 +357,77 @@ async def test_live_rankings_compare_turnover_with_same_exchange_minute_history(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("history_kind", ["stale", "mismatched", "incomplete"])
+async def test_live_rankings_reject_unreliable_same_minute_history(
+    client,
+    app,
+    monkeypatch,
+    history_kind: str,
+) -> None:
+    now = datetime(2026, 6, 17, 10, 0, 0)
+    await _seed_signal_run(app, count=1, canonical=True, as_of_date=date(2026, 6, 16))
+    monkeypatch.setattr(
+        "app.services.intraday_etf.service.current_market_state",
+        lambda: MarketState("open", "morning", now.replace(tzinfo=ASIA_SHANGHAI)),
+    )
+    trade_dates = [
+        date(2026, 6, 16),
+        date(2026, 6, 15),
+        date(2026, 6, 12),
+        date(2026, 6, 11),
+        date(2026, 6, 10),
+    ]
+    if history_kind == "incomplete":
+        trade_dates.pop()
+    async with app.state.db.session() as session:
+        for trade_date in trade_dates:
+            quote_minute = 1 if history_kind == "mismatched" else 0
+            session.add(
+                EtfIntradayQuote(
+                    etf_code="510000",
+                    quote_time=datetime.combine(trade_date, time(10, quote_minute)),
+                    trade_date=trade_date,
+                    latest_price=1.0,
+                    turnover=100.0,
+                    source="test",
+                    freshness_status="stale" if history_kind == "stale" else "fresh",
+                    raw_json={
+                        "decision_eligible": history_kind != "stale",
+                        "consensus_status": (
+                            CONSENSUS_STALE if history_kind == "stale" else CONSENSUS_CONSISTENT
+                        ),
+                    },
+                )
+            )
+        session.add(
+            EtfIntradayQuote(
+                etf_code="510000",
+                quote_time=now,
+                trade_date=now.date(),
+                latest_price=1.01,
+                change_percent=0.5,
+                turnover=150.0,
+                source="test",
+                freshness_status="fresh",
+                raw_json={"decision_eligible": True},
+            )
+        )
+        await session.commit()
+
+    response = await client.get("/api/etf-quotes/live-rankings")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["score_source"] == "intraday"
+    assert item["intraday_component_status"]["activity"]["status"] == "unavailable"
+    assert item["intraday_adjustment_score"] == 1.0
+    assert not any("同刻历史中位数" in reason for reason in item["score_contribution_reasons"])
+
+
+@pytest.mark.asyncio
 async def test_live_rankings_reports_unavailable_structure_components_without_weight_transfer(client, app, monkeypatch) -> None:
     now = datetime(2026, 6, 17, 10, 0, 0)
-    await _seed_signal_run(app, count=1, canonical=True, as_of_date=now.date())
+    await _seed_signal_run(app, count=1, canonical=True, as_of_date=date(2026, 6, 16))
     monkeypatch.setattr(
         "app.services.intraday_etf.service.current_market_state",
         lambda: MarketState("open", "morning", now.replace(tzinfo=ASIA_SHANGHAI)),
@@ -528,8 +608,14 @@ async def test_live_rankings_order_and_rank_change(client, app, monkeypatch) -> 
 
 @pytest.mark.asyncio
 async def test_live_rankings_exposes_fresh_quote_without_score_from_stale_daily_base(client, app, monkeypatch) -> None:
-    await _seed_signal_run(app, count=1, total_scores=[80.0])
-    now = datetime.now().replace(microsecond=0)
+    await _seed_signal_run(
+        app,
+        count=1,
+        total_scores=[80.0],
+        canonical=True,
+        as_of_date=date(2026, 6, 12),
+    )
+    now = datetime(2026, 6, 17, 10, 0, 0)
     monkeypatch.setattr(
         "app.services.intraday_etf.service.current_market_state",
         lambda: MarketState("open", "morning", now.replace(tzinfo=ASIA_SHANGHAI)),
@@ -554,11 +640,11 @@ async def test_live_rankings_exposes_fresh_quote_without_score_from_stale_daily_
     assert response.status_code == 200
     item = response.json()["items"][0]
     assert item["quote"]["decision_eligible"] is True
-    assert item["base_score"] == 80.0
+    assert item["base_score"] is None
     assert item["score_source"] == "unavailable"
     assert item["live_total_score"] is None
     assert item["live_scope_rank"] is None
-    assert any("日线基座" in reason for reason in item["score_contribution_reasons"])
+    assert any("基座" in reason for reason in item["score_contribution_reasons"])
 
 
 @pytest.mark.asyncio
@@ -1019,8 +1105,13 @@ def test_quote_raw_accepts_json_text_from_postgresql_bulk_insert() -> None:
 
 
 @pytest.mark.asyncio
-async def test_live_rankings_marks_data_insufficient_without_faking_quote(client, app) -> None:
-    await _seed_signal_run(app, count=1)
+async def test_live_rankings_marks_data_insufficient_without_faking_quote(client, app, monkeypatch) -> None:
+    now = datetime(2026, 6, 17, 10, 0, 0)
+    await _seed_signal_run(app, count=1, canonical=True, as_of_date=date(2026, 6, 16))
+    monkeypatch.setattr(
+        "app.services.intraday_etf.service.current_market_state",
+        lambda: MarketState("open", "morning", now.replace(tzinfo=ASIA_SHANGHAI)),
+    )
     response = await client.get("/api/etf-quotes/live-rankings")
 
     assert response.status_code == 200
@@ -1389,6 +1480,10 @@ async def test_intraday_watch_reports_watch_codes_missing_from_provider(app) -> 
     assert result["details"]["missing_watch_count"] == 1
     assert result["details"]["missing_watch_codes"] == ["510001"]
     assert result["details"]["quote_audit"]["510000"]["decision_eligible"] is True
+    assert (
+        result["details"]["quote_audit"]["510000"]["quote_time_is_fallback"]
+        is False
+    )
     assert result["details"]["quote_audit"]["510001"]["decision_eligible"] is False
     assert result["details"]["quote_audit"]["510001"]["quote_freshness"] == "unavailable"
 
@@ -2418,9 +2513,15 @@ def test_select_consensus_quotes_blocks_diverged_and_missing_time_quotes() -> No
 
 @pytest.mark.asyncio
 async def test_diverged_quote_does_not_drive_live_ranking_or_tracked_email(client, app, settings, monkeypatch) -> None:
-    await _seed_signal_run(app, count=1, total_scores=[80.0], canonical=True, as_of_date=date.today())
+    now = datetime(2026, 6, 17, 10, 0, 0)
+    await _seed_signal_run(
+        app,
+        count=1,
+        total_scores=[80.0],
+        canonical=True,
+        as_of_date=date(2026, 6, 16),
+    )
     await _seed_price_history(app, "510000")
-    now = datetime.now().replace(microsecond=0)
     sent: list[dict] = []
 
     async def fake_send_template(self, session, *, recipient: str, template_name: str, payload: dict) -> str:

@@ -25,6 +25,8 @@ PRODUCTION_SCORE_VERSION = "final_score_v3"
 PRODUCTION_SCORE_FIELD = "ranking_score"
 RESEARCH_SCORE_VERSION = "daily_reconstructable_v1"
 RESEARCH_SCORE_FIELD = "research_score"
+PRODUCTION_RULE_VERSION = "final_score_v3_rule_v2"
+RESEARCH_RULE_VERSION = "daily_reconstructable_v1_rule_v1"
 TOTAL_RETURN_ADJUSTED = "total_return_adjusted"
 
 
@@ -53,15 +55,28 @@ class RankingValidationSourceEvent:
     source_replay_contract_hash: str | None
     source_event_hash: str
     ranking_contract_hash: str
+    scope_hash: str
     universe_snapshot_hash: str
     input_snapshot_hash: str
     score_version: str
     score_field: str
+    rule_version: str
     price_basis: str
     publication_state: str | None
     scope_kind: str
     availability_cutoff: datetime
     immutable_hash: str
+    source_status: str | None = None
+    idempotency_key: str | None = None
+    expected_asset_count: int | None = None
+    decision_data_covered_count: int | None = None
+    eligible_asset_count: int | None = None
+    item_count: int | None = None
+    decision_data_coverage_ratio: float | None = None
+    score_coverage_ratio: float | None = None
+    etf_item_count: int | None = None
+    finite_eligible_score_count: int | None = None
+    contiguous_global_rank: bool | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.ranking_source_kind, RankingSourceKind):
@@ -75,6 +90,7 @@ class RankingValidationSourceEvent:
         for name, value in (
             ("source event hash", self.source_event_hash),
             ("ranking contract hash", self.ranking_contract_hash),
+            ("scope hash", self.scope_hash),
             ("universe snapshot hash", self.universe_snapshot_hash),
             ("input snapshot hash", self.input_snapshot_hash),
         ):
@@ -104,9 +120,32 @@ class RankingValidationSourceEvent:
                 raise RankingValidationContractError(
                     "research source requires research_score"
                 )
+            if self.rule_version != RESEARCH_RULE_VERSION:
+                raise RankingValidationContractError(
+                    "research source requires the registered rule version"
+                )
             if self.publication_state is not None or self.scope_kind != "research_replay":
                 raise RankingValidationContractError(
                     "research replay cannot be represented as a production publication"
+                )
+            if any(
+                value is not None
+                for value in (
+                    self.source_status,
+                    self.idempotency_key,
+                    self.expected_asset_count,
+                    self.decision_data_covered_count,
+                    self.eligible_asset_count,
+                    self.item_count,
+                    self.decision_data_coverage_ratio,
+                    self.score_coverage_ratio,
+                    self.etf_item_count,
+                    self.finite_eligible_score_count,
+                    self.contiguous_global_rank,
+                )
+            ):
+                raise RankingValidationContractError(
+                    "research source cannot carry production publication metadata"
                 )
         else:
             if self.source_signal_run_id is None or self.source_signal_run_id <= 0:
@@ -137,6 +176,94 @@ class RankingValidationSourceEvent:
                 raise RankingValidationContractError(
                     "production source requires ranking_score"
                 )
+            if self.rule_version != PRODUCTION_RULE_VERSION:
+                raise RankingValidationContractError(
+                    "production source requires the registered rule version"
+                )
+            if self.source_status != "success":
+                raise RankingValidationContractError(
+                    "production source must be a successful run"
+                )
+            if not self.idempotency_key or not self.idempotency_key.strip():
+                raise RankingValidationContractError(
+                    "production source idempotency key is required"
+                )
+            counts = (
+                self.expected_asset_count,
+                self.decision_data_covered_count,
+                self.eligible_asset_count,
+                self.item_count,
+                self.etf_item_count,
+                self.finite_eligible_score_count,
+            )
+            if any(
+                isinstance(value, bool) or not isinstance(value, int)
+                for value in counts
+            ):
+                raise RankingValidationContractError(
+                    "production source publication counts are required"
+                )
+            expected = int(self.expected_asset_count or 0)
+            decision_covered = int(self.decision_data_covered_count or 0)
+            eligible = int(self.eligible_asset_count or 0)
+            item_count = int(self.item_count or 0)
+            etf_item_count = int(self.etf_item_count or 0)
+            finite_count = int(self.finite_eligible_score_count or 0)
+            if expected <= 0:
+                raise RankingValidationContractError(
+                    "production source expected asset count must be positive"
+                )
+            decision_ratio = self.decision_data_coverage_ratio
+            score_ratio = self.score_coverage_ratio
+            if not (
+                0 <= eligible <= decision_covered <= expected
+                and isinstance(decision_ratio, int | float)
+                and not isinstance(decision_ratio, bool)
+                and math.isfinite(float(decision_ratio))
+                and math.isclose(
+                    float(decision_ratio),
+                    decision_covered / expected,
+                    abs_tol=1e-12,
+                )
+                and float(decision_ratio) >= 0.95
+            ):
+                raise RankingValidationContractError(
+                    "production source decision-data coverage is incompatible"
+                )
+            if not (
+                isinstance(score_ratio, int | float)
+                and not isinstance(score_ratio, bool)
+                and math.isfinite(float(score_ratio))
+                and math.isclose(
+                    float(score_ratio),
+                    eligible / expected,
+                    abs_tol=1e-12,
+                )
+                and float(score_ratio) >= 0.95
+            ):
+                raise RankingValidationContractError(
+                    "production source score coverage is incompatible"
+                )
+            if item_count != eligible:
+                raise RankingValidationContractError(
+                    "production source item count must equal eligible count"
+                )
+            if etf_item_count != item_count:
+                raise RankingValidationContractError(
+                    "production source must contain ETF-only items"
+                )
+            if finite_count != item_count:
+                raise RankingValidationContractError(
+                    "production source requires finite eligible scores"
+                )
+            if self.contiguous_global_rank is not True:
+                raise RankingValidationContractError(
+                    "production source requires contiguous global ranks"
+                )
+            if self.availability_cutoff.date() != self.signal_date:
+                raise RankingValidationContractError(
+                    "production source cutoff must match signal date"
+                )
 
 
 def _source_event_payload(event: RankingValidationSourceEvent) -> dict[str, object]:
@@ -145,11 +272,23 @@ def _source_event_payload(event: RankingValidationSourceEvent) -> dict[str, obje
     return payload
 
 
+def freeze_ranking_validation_source_event(
+    event: RankingValidationSourceEvent,
+) -> RankingValidationSourceEvent:
+    """Return an event with its canonical immutable hash populated."""
+
+    return replace(
+        event,
+        immutable_hash=stable_contract_hash(_source_event_payload(event)),
+    )
+
+
 @dataclass(frozen=True)
 class RankingValidationSourceCohort:
     ranking_source_kind: RankingSourceKind
     score_version: str
     score_field: str
+    rule_version: str
     price_basis: str
     source_replay_run_key: str | None
     source_replay_contract_hash: str | None
@@ -205,6 +344,7 @@ def freeze_ranking_validation_source_cohort(
             item.ranking_contract_hash,
             item.score_version,
             item.score_field,
+            item.rule_version,
             item.price_basis,
         )
         for item in ordered
@@ -225,6 +365,7 @@ def freeze_ranking_validation_source_cohort(
         ranking_source_kind=ranking_source_kind,
         score_version=ordered[0].score_version,
         score_field=ordered[0].score_field,
+        rule_version=ordered[0].rule_version,
         price_basis=ordered[0].price_basis,
         source_replay_run_key=(
             ordered[0].source_replay_run_key

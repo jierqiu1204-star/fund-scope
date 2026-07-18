@@ -192,6 +192,8 @@ def test_api_contracts_keep_new_snapshot_fields_nullable() -> None:
     }
     expected_asset_fields = {"ranking_score", "score_eligible", "global_rank"}
     expected_validation_fields = {
+        "source_manifest_hash",
+        "source_event_count",
         "source_ranking_contract_hash",
         "source_scope_kind",
         "source_scope_hash",
@@ -211,3 +213,6 @@ def test_api_contracts_keep_new_snapshot_fields_nullable() -> None:
         assert ShortResearchAssetOut.model_fields[field_name].default is None
     for field_name in expected_validation_fields:
         assert EtfSignalValidationRunOut.model_fields[field_name].default is None
+    assert (
+        EtfSignalValidationRunOut.model_fields["source_events"].default_factory is list
+    )

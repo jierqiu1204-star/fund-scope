@@ -39,6 +39,30 @@ class Settings(BaseSettings):
     auth_bootstrap_admin_password: str = Field(default="", alias="AUTH_BOOTSTRAP_ADMIN_PASSWORD")
     nginx_basic_auth_user: str = Field(default="", alias="NGINX_BASIC_AUTH_USER")
     nginx_basic_auth_pass: str = Field(default="", alias="NGINX_BASIC_AUTH_PASS")
+    readiness_expected_database_instance_uuid: str = Field(
+        default="",
+        alias="READINESS_EXPECTED_DATABASE_INSTANCE_UUID",
+    )
+    readiness_expected_environment: str = Field(
+        default="",
+        alias="READINESS_EXPECTED_ENVIRONMENT",
+    )
+    readiness_deploy_artifact: str = Field(
+        default="",
+        alias="READINESS_DEPLOY_ARTIFACT",
+    )
+    readiness_expected_schema_head: str = Field(
+        default="",
+        alias="READINESS_EXPECTED_SCHEMA_HEAD",
+    )
+    readiness_attestation_key_id: str = Field(
+        default="",
+        alias="READINESS_ATTESTATION_KEY_ID",
+    )
+    readiness_attestation_secret: str = Field(
+        default="",
+        alias="READINESS_ATTESTATION_SECRET",
+    )
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:3000"],
         alias="CORS_ORIGINS",

@@ -13,6 +13,7 @@ from app.services.intraday_etf.service import (
     current_market_state,
     fetch_spot_quotes_with_metadata,
     is_fresh_decision_quote,
+    is_quote_time_fallback,
     latest_quotes_by_code,
     persist_quotes,
     quote_consensus_status,
@@ -108,6 +109,7 @@ async def intraday_etf_watch_job(
             "provider_error": provider_error,
             "quote_audit": _sample_mapping(quote_audit),
             "quote_audit_count": len(quote_audit),
+            "decision_quote_summary": _decision_quote_summary(quote_audit),
         }
         await session.commit()
         return _result(run)
@@ -153,6 +155,7 @@ def _quote_audit_for_watchlist(watch_codes: set[str], latest_quotes: dict[str, A
             "quote_freshness": freshness,
             "source": quote.source,
             "quote_time": quote.quote_time.isoformat() if quote.quote_time else None,
+            "quote_time_is_fallback": is_quote_time_fallback(quote),
             "consensus_status": quote_consensus_status(quote),
             "provider_count": quote_provider_count(quote),
             "fresh_provider_count": quote_fresh_provider_count(quote),
@@ -161,6 +164,43 @@ def _quote_audit_for_watchlist(watch_codes: set[str], latest_quotes: dict[str, A
             "limitation_reason": None if decision_eligible else quote_decision_limitation_reason(quote, local_now),
         }
     return audit
+
+
+def _decision_quote_summary(quote_audit: dict[str, Any]) -> dict[str, Any]:
+    covered_count_by_trade_date: dict[str, int] = {}
+    latest_quote_time_by_trade_date: dict[str, str] = {}
+    for raw_evidence in quote_audit.values():
+        if not isinstance(raw_evidence, dict):
+            continue
+        if (
+            raw_evidence.get("decision_eligible") is not True
+            or raw_evidence.get("quote_time_is_fallback") is not False
+            or raw_evidence.get("quote_freshness") != "fresh"
+            or raw_evidence.get("consensus_status")
+            in {"diverged", "stale", "unavailable"}
+        ):
+            continue
+        raw_quote_time = raw_evidence.get("quote_time")
+        if not isinstance(raw_quote_time, str):
+            continue
+        try:
+            quote_time = datetime.fromisoformat(
+                raw_quote_time.strip().replace("Z", "+00:00")
+            )
+        except ValueError:
+            continue
+        trade_date = quote_time.date().isoformat()
+        covered_count_by_trade_date[trade_date] = (
+            covered_count_by_trade_date.get(trade_date, 0) + 1
+        )
+        normalized_time = quote_time.isoformat()
+        previous_time = latest_quote_time_by_trade_date.get(trade_date)
+        if previous_time is None or normalized_time > previous_time:
+            latest_quote_time_by_trade_date[trade_date] = normalized_time
+    return {
+        "covered_count_by_trade_date": covered_count_by_trade_date,
+        "latest_quote_time_by_trade_date": latest_quote_time_by_trade_date,
+    }
 
 
 def _watchlist_source_counts(items: list[Any]) -> dict[str, int]:
