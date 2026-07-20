@@ -46,3 +46,5 @@
 - [x] 7.1 Add regression tests and switch remaining ETF latest-signal, advisor, and live-watch consumers from the legacy `final_score_v3` selector to the dual-surface selector, keeping live Top 20 membership actionable-only.
 - [x] 7.2 Reconcile the production-shaped deterministic hash with the current frozen component contracts and update the recorded evidence only after deterministic regeneration passes.
 - [x] 7.3 Re-run bounded backend, frontend, domain-boundary, Ruff, and strict OpenSpec validation.
+- [x] 7.4 Use the dual research-surface selector in both post-close publication gates so a legacy snapshot cannot suppress current dual-surface generation.
+- [x] 7.5 Default ETF discovery to the comprehensive ranking while retaining the separate intraday-entry ranking option.

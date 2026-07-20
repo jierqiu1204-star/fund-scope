@@ -549,6 +549,7 @@ async def test_etf_score_bucket_validation_job_defaults_to_opportunity_topn(monk
 @pytest.mark.asyncio
 async def test_post_close_etf_signals_job_materializes_and_publishes_without_sync(monkeypatch) -> None:
     calls: list[dict[str, Any]] = []
+    selection_calls: list[dict[str, Any]] = []
 
     async def fake_generate_and_publish(_session: object, **kwargs: Any) -> SimpleNamespace:
         calls.append(kwargs)
@@ -571,7 +572,8 @@ async def test_post_close_etf_signals_job_materializes_and_publishes_without_syn
     async def fake_authoritative(*_args: Any, **_kwargs: Any) -> tuple[bool, str | None]:
         return True, None
 
-    async def fake_selection(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+    async def fake_selection(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+        selection_calls.append(kwargs)
         return SimpleNamespace(state="waiting", run=None)
 
     async def fake_barrier(*_args: Any, **_kwargs: Any) -> _CoverageBarrier:
@@ -580,7 +582,11 @@ async def test_post_close_etf_signals_job_materializes_and_publishes_without_syn
     monkeypatch.setattr(jobs_module, "generate_and_publish_etf_snapshot", fake_generate_and_publish)
     monkeypatch.setattr(jobs_module, "run_signal_generation", fail_legacy_generation)
     monkeypatch.setattr(jobs_module, "_latest_authoritative_etf_universe_refresh", fake_authoritative)
-    monkeypatch.setattr(jobs_module, "resolve_current_canonical_etf_snapshot", fake_selection)
+    monkeypatch.setattr(
+        jobs_module,
+        "resolve_current_etf_ranking_surface_snapshot",
+        fake_selection,
+    )
     monkeypatch.setattr(jobs_module, "build_etf_coverage_barrier", fake_barrier)
     monkeypatch.setattr(
         jobs_module,
@@ -607,6 +613,12 @@ async def test_post_close_etf_signals_job_materializes_and_publishes_without_syn
     assert result["items"] == 9
     assert result["etfs"] == 9
     assert result["publication_state"] == "published"
+    assert selection_calls == [
+        {
+            "required_trade_date": date(2026, 6, 25),
+            "ranking_surface": "research",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -637,11 +649,13 @@ async def test_adjusted_sync_job_resumes_one_bounded_batch_then_publishes_at_cov
     coverage_calls = 0
     sync_calls: list[dict[str, Any]] = []
     publish_calls: list[dict[str, Any]] = []
+    selection_calls: list[dict[str, Any]] = []
 
     async def fake_authoritative(*_args: Any, **_kwargs: Any) -> tuple[bool, str | None]:
         return True, None
 
-    async def fake_selection(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+    async def fake_selection(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+        selection_calls.append(kwargs)
         return SimpleNamespace(state="waiting", run=None)
 
     async def fake_barrier(*_args: Any, **_kwargs: Any) -> _CoverageBarrier:
@@ -664,7 +678,11 @@ async def test_adjusted_sync_job_resumes_one_bounded_batch_then_publishes_at_cov
         )
 
     monkeypatch.setattr(jobs_module, "_latest_authoritative_etf_universe_refresh", fake_authoritative)
-    monkeypatch.setattr(jobs_module, "resolve_current_canonical_etf_snapshot", fake_selection)
+    monkeypatch.setattr(
+        jobs_module,
+        "resolve_current_etf_ranking_surface_snapshot",
+        fake_selection,
+    )
     monkeypatch.setattr(jobs_module, "build_etf_coverage_barrier", fake_barrier)
     monkeypatch.setattr(jobs_module, "sync_short_research_data", fake_sync)
     monkeypatch.setattr(jobs_module, "generate_and_publish_etf_snapshot", fake_publish)
@@ -697,6 +715,12 @@ async def test_adjusted_sync_job_resumes_one_bounded_batch_then_publishes_at_cov
     ]
     assert result["publication_state"] == "published"
     assert result["coverage"]["coverage_ratio"] == 1.0
+    assert selection_calls == [
+        {
+            "required_trade_date": date(2026, 6, 25),
+            "ranking_surface": "research",
+        }
+    ]
 
 
 def test_post_close_etf_decision_context_requires_a_completed_trading_session() -> None:

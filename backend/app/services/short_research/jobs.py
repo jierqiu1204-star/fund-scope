@@ -42,7 +42,9 @@ from app.services.short_research.snapshot_publication import (
     SnapshotPublicationError,
     build_etf_coverage_barrier,
 )
-from app.services.short_research.snapshot_selector import resolve_current_canonical_etf_snapshot
+from app.services.short_research.snapshot_selector import (
+    resolve_current_etf_ranking_surface_snapshot,
+)
 from app.services.short_research.theme_catalysts import refresh_theme_catalyst_snapshots
 from app.services.short_research.theme_taxonomy import refresh_etf_theme_profiles
 from app.services.short_research.universe import refresh_etf_universe
@@ -458,9 +460,10 @@ async def post_close_etf_signals_job(session: AsyncSession) -> dict[str, Any]:
             reason="universe_not_authoritative",
             sync={"error": universe_error},
         )
-    current = await resolve_current_canonical_etf_snapshot(
+    current = await resolve_current_etf_ranking_surface_snapshot(
         session,
         required_trade_date=trade_date,
+        ranking_surface="research",
     )
     if current.run is not None:
         result = _signal_result(current.run)
@@ -513,9 +516,10 @@ async def post_close_etf_adjusted_sync_job(session: AsyncSession) -> dict[str, A
             reason="universe_not_authoritative",
             sync={"error": universe_error},
         )
-    current = await resolve_current_canonical_etf_snapshot(
+    current = await resolve_current_etf_ranking_surface_snapshot(
         session,
         required_trade_date=trade_date,
+        ranking_surface="research",
     )
     if current.run is not None:
         result = _signal_result(current.run)

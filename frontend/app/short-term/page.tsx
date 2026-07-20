@@ -103,7 +103,7 @@ const baseSortOptions: Array<{ key: SortKey; label: string }> = [
 ];
 
 const etfSortOptions: Array<{ key: SortKey; label: string }> = [
-  { key: "opportunity", label: "综合关注" },
+  { key: "opportunity", label: "综合榜单" },
   { key: "score", label: "盘中买点榜" }
 ];
 
@@ -1778,7 +1778,7 @@ function ShortTermClient() {
   const [assetType, setAssetType] = useState<AssetType>("etf");
   const [rankingSurface, setRankingSurface] = useState<RankingSurface>("research");
   const [theme, setTheme] = useState("all");
-  const [sort, setSort] = useState<SortKey>("score");
+  const [sort, setSort] = useState<SortKey>("opportunity");
   const [keyword, setKeyword] = useState("");
   const [labelFilters, setLabelFilters] = useState<LabelFilterState>(emptyLabelFilters);
   const [labelFilterExpanded, setLabelFilterExpanded] = useState(false);
@@ -2052,7 +2052,7 @@ function ShortTermClient() {
     },
     onSuccess: async (result) => {
       if (result.kind === "canonical_refresh") {
-        setSort("score");
+        setSort("opportunity");
         setAssetOffset(0);
         setLastResult({
           status: "refreshed",
@@ -4368,7 +4368,7 @@ function ShortTermClient() {
                 }`}
                 onClick={() => {
                   setAssetType(item);
-                  setSort("score");
+                  setSort(item === "etf" ? "opportunity" : "score");
                   setTheme("all");
                   setSelected(null);
                   setAssetOffset(0);

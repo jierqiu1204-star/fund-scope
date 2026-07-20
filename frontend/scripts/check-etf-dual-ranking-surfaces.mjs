@@ -25,6 +25,13 @@ const checks = [
       page.includes('params.set("ranking_surface", rankingSurface)')
   },
   {
+    name: "defaults ETF sorting to the comprehensive ranking",
+    pass:
+      page.includes('{ key: "opportunity", label: "综合榜单" }') &&
+      page.includes('useState<SortKey>("opportunity")') &&
+      page.includes('setSort(item === "etf" ? "opportunity" : "score")')
+  },
+  {
     name: "offers a separate actionable filter",
     pass:
       page.includes('["research", "研究榜（默认）"]') &&
