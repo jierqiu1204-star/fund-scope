@@ -69,6 +69,7 @@ class ProviderFetchResult:
     provider: str
     fallback_used: bool
     primary_error: str | None = None
+    provider_health: dict[str, Any] | None = None
 
 
 def is_short_term_eligible_name(name: str) -> bool:
@@ -105,7 +106,17 @@ def _research_price_fields(row: dict[str, Any], *, provider: str, source_timesta
     adjustment_version = str(row.get("adjustment_version") or "")
     provider_version = str(row.get("provider_version") or "")
     ineligibility_reason = None
-    if adjusted_value is None or not isfinite(adjusted_value) or adjusted_value <= 0:
+    market_values = {
+        field: _optional_number(row, field)
+        for field in ("open", "high", "low", "close", "volume", "turnover", "pct_change")
+    }
+    if (
+        any(value is None or not isfinite(value) for value in market_values.values())
+        or any((market_values[field] or 0.0) <= 0 for field in ("open", "high", "low", "close"))
+        or any((market_values[field] or 0.0) < 0 for field in ("volume", "turnover"))
+    ):
+        ineligibility_reason = "non_finite_or_invalid_market_values"
+    elif adjusted_value is None or not isfinite(adjusted_value) or adjusted_value <= 0:
         ineligibility_reason = "missing_total_return_provenance"
     elif price_basis != TOTAL_RETURN_PRICE_BASIS:
         ineligibility_reason = "incompatible_research_price_basis"
@@ -254,41 +265,64 @@ async def fetch_eastmoney_etf_price_history(
     to_date: date,
 ) -> PriceHistoryRows:
     async def fetch_primary() -> PriceHistoryRows:
-        common_params = {
-            "fields1": "f1,f2,f3,f4,f5,f6",
-            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
-            "ut": "7eea3edcaed734bea9cbfc24409ed989",
-            "invt": "2",
-            "klt": "101",
-            "beg": from_date.strftime("%Y%m%d"),
-            "end": to_date.strftime("%Y%m%d"),
-            "secid": f"{_eastmoney_market_id(code)}.{code}",
-        }
         async with httpx.AsyncClient(
             timeout=ETF_HISTORY_PROVIDER_TIMEOUT_SECONDS,
             headers=EASTMONEY_HISTORY_HEADERS,
         ) as client:
-            raw_response = await client.get(
-                EASTMONEY_HISTORY_URL,
-                params={**common_params, "fqt": "0"},
+            return await fetch_eastmoney_etf_price_history_once(
+                client,
+                code,
+                from_date,
+                to_date,
             )
-            raw_response.raise_for_status()
-            hfq_response = await client.get(
-                EASTMONEY_HISTORY_URL,
-                params={**common_params, "fqt": "2"},
-            )
-            hfq_response.raise_for_status()
-        return _attach_hfq_research_prices(
-            parse_eastmoney_history_payload(raw_response.json(), from_date, to_date),
-            parse_eastmoney_history_payload(hfq_response.json(), from_date, to_date),
-            EASTMONEY_HFQ_ADJUSTMENT_VERSION,
-        )
 
     return await retry_async(
         "fetch_eastmoney_etf_price_history",
         fetch_primary,
         retries=_provider_retries(),
         base_delay=_provider_retry_delay_seconds(),
+    )
+
+
+async def fetch_eastmoney_etf_price_history_once(
+    client: httpx.AsyncClient,
+    code: str,
+    from_date: date,
+    to_date: date,
+    *,
+    keep_alive: bool = False,
+) -> PriceHistoryRows:
+    common_params = {
+        "fields1": "f1,f2,f3,f4,f5,f6",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+        "ut": "7eea3edcaed734bea9cbfc24409ed989",
+        "invt": "2",
+        "klt": "101",
+        "beg": from_date.strftime("%Y%m%d"),
+        "end": to_date.strftime("%Y%m%d"),
+        "secid": f"{_eastmoney_market_id(code)}.{code}",
+    }
+    headers = (
+        {key: value for key, value in EASTMONEY_HISTORY_HEADERS.items() if key != "Connection"}
+        if keep_alive
+        else EASTMONEY_HISTORY_HEADERS
+    )
+    raw_response = await client.get(
+        EASTMONEY_HISTORY_URL,
+        params={**common_params, "fqt": "0"},
+        headers=headers,
+    )
+    raw_response.raise_for_status()
+    hfq_response = await client.get(
+        EASTMONEY_HISTORY_URL,
+        params={**common_params, "fqt": "2"},
+        headers=headers,
+    )
+    hfq_response.raise_for_status()
+    return _attach_hfq_research_prices(
+        parse_eastmoney_history_payload(raw_response.json(), from_date, to_date),
+        parse_eastmoney_history_payload(hfq_response.json(), from_date, to_date),
+        EASTMONEY_HFQ_ADJUSTMENT_VERSION,
     )
 
 
@@ -350,37 +384,51 @@ async def fetch_tickflow_etf_price_history(
     to_date: date,
 ) -> PriceHistoryRows:
     async def fetch_backup() -> PriceHistoryRows:
-        common_params: dict[str, str | int] = {
-            "symbol": _tickflow_symbol(code),
-            "period": "1d",
-            "count": 10_000,
-            "start_time": _tickflow_timestamp(from_date - timedelta(days=7)),
-            "end_time": _tickflow_timestamp(to_date),
-        }
         async with httpx.AsyncClient(timeout=ETF_HISTORY_PROVIDER_TIMEOUT_SECONDS) as client:
-            raw_response = await client.get(
-                TICKFLOW_HISTORY_URL,
-                params={**common_params, "adjust": "none"},
+            return await fetch_tickflow_etf_price_history_once(
+                client,
+                code,
+                from_date,
+                to_date,
             )
-            raw_response.raise_for_status()
-            adjusted_response = await client.get(
-                TICKFLOW_HISTORY_URL,
-                params={**common_params, "adjust": "backward"},
-            )
-            adjusted_response.raise_for_status()
-        return _attach_hfq_research_prices(
-            parse_tickflow_history_payload(raw_response.json().get("data"), from_date, to_date),
-            parse_tickflow_history_payload(
-                adjusted_response.json().get("data"), from_date, to_date
-            ),
-            TICKFLOW_BACKWARD_ADJUSTMENT_VERSION,
-        )
 
     return await retry_async(
         "fetch_tickflow_etf_price_history",
         fetch_backup,
         retries=_provider_retries(),
         base_delay=_provider_retry_delay_seconds(),
+    )
+
+
+async def fetch_tickflow_etf_price_history_once(
+    client: httpx.AsyncClient,
+    code: str,
+    from_date: date,
+    to_date: date,
+) -> PriceHistoryRows:
+    common_params: dict[str, str | int] = {
+        "symbol": _tickflow_symbol(code),
+        "period": "1d",
+        "count": 10_000,
+        "start_time": _tickflow_timestamp(from_date - timedelta(days=7)),
+        "end_time": _tickflow_timestamp(to_date),
+    }
+    raw_response = await client.get(
+        TICKFLOW_HISTORY_URL,
+        params={**common_params, "adjust": "none"},
+    )
+    raw_response.raise_for_status()
+    adjusted_response = await client.get(
+        TICKFLOW_HISTORY_URL,
+        params={**common_params, "adjust": "backward"},
+    )
+    adjusted_response.raise_for_status()
+    return _attach_hfq_research_prices(
+        parse_tickflow_history_payload(raw_response.json().get("data"), from_date, to_date),
+        parse_tickflow_history_payload(
+            adjusted_response.json().get("data"), from_date, to_date
+        ),
+        TICKFLOW_BACKWARD_ADJUSTMENT_VERSION,
     )
 
 
@@ -425,36 +473,44 @@ def parse_sina_history_payload(payload: str, from_date: date, to_date: date) -> 
 
 async def fetch_efinance_etf_price_history(code: str, from_date: date, to_date: date) -> list[dict[str, float | str]]:
     async def fetch_backup() -> list[dict[str, float | str]]:
-        import efinance as ef  # type: ignore[import-untyped]
-
-        common_kwargs = {
-            "beg": from_date.strftime("%Y%m%d"),
-            "end": to_date.strftime("%Y%m%d"),
-            "suppress_error": False,
-        }
-        raw_frame = await asyncio.to_thread(
-            ef.stock.get_quote_history,
-            code,
-            **common_kwargs,
-            fqt=0,
-        )
-        hfq_frame = await asyncio.to_thread(
-            ef.stock.get_quote_history,
-            code,
-            **common_kwargs,
-            fqt=2,
-        )
-        return _attach_hfq_research_prices(
-            parse_etf_history_frame(raw_frame, from_date, to_date),
-            parse_etf_history_frame(hfq_frame, from_date, to_date),
-            EFINANCE_HFQ_ADJUSTMENT_VERSION,
-        )
+        return await fetch_efinance_etf_price_history_once(code, from_date, to_date)
 
     return await retry_async(
         "fetch_efinance_etf_price_history",
         fetch_backup,
         retries=_provider_retries(),
         base_delay=_provider_retry_delay_seconds(),
+    )
+
+
+async def fetch_efinance_etf_price_history_once(
+    code: str,
+    from_date: date,
+    to_date: date,
+) -> PriceHistoryRows:
+    import efinance as ef  # type: ignore[import-untyped]
+
+    common_kwargs = {
+        "beg": from_date.strftime("%Y%m%d"),
+        "end": to_date.strftime("%Y%m%d"),
+        "suppress_error": False,
+    }
+    raw_frame = await asyncio.to_thread(
+        ef.stock.get_quote_history,
+        code,
+        **common_kwargs,
+        fqt=0,
+    )
+    hfq_frame = await asyncio.to_thread(
+        ef.stock.get_quote_history,
+        code,
+        **common_kwargs,
+        fqt=2,
+    )
+    return _attach_hfq_research_prices(
+        parse_etf_history_frame(raw_frame, from_date, to_date),
+        parse_etf_history_frame(hfq_frame, from_date, to_date),
+        EFINANCE_HFQ_ADJUSTMENT_VERSION,
     )
 
 

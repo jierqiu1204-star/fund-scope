@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
@@ -60,13 +59,15 @@ from app.services.workflows.etf_history_readiness import (
     current_etf_history_contract_hash,
     read_etf_history_readiness,
 )
+from app.services.workflows.etf_publish_readiness import (
+    run_post_close_etf_publication_readiness,
+)
 from app.services.workflows.short_research_data import (
     sync_short_research_data_with_tracking_priority as sync_short_research_data,
 )
 
 SHORT_RESEARCH_DAILY_ASSET_TYPES = [ASSET_TYPE_FUND, ASSET_TYPE_ETF]
 ETF_HISTORY_BACKFILL_ALLOWED_DAYS = (365, 730, 1095)
-ETF_ADJUSTED_SYNC_SLICE_TIMEOUT_SECONDS = 50
 ETF_CANONICAL_MIN_COVERAGE = 0.95
 
 
@@ -321,6 +322,24 @@ async def daily_etf_taxonomy_job(session: AsyncSession) -> dict[str, Any]:
     return await refresh_etf_theme_profiles(session)
 
 
+async def daily_short_research_fund_data_job(session: AsyncSession) -> dict[str, Any]:
+    today = date.today()
+    result = await sync_short_research_data(
+        session,
+        from_date=today - timedelta(days=120),
+        to_date=today,
+        asset_type=ASSET_TYPE_FUND,
+    )
+    return {
+        "from_date": (today - timedelta(days=120)).isoformat(),
+        "to_date": today.isoformat(),
+        "asset_types": [ASSET_TYPE_FUND],
+        "fund": result,
+        "asset_count": _count(result, "asset_count"),
+        "failed": _count(result, "failed"),
+    }
+
+
 async def daily_etf_theme_catalyst_job(session: AsyncSession) -> dict[str, Any]:
     return await refresh_theme_catalyst_snapshots(session)
 
@@ -356,6 +375,20 @@ def post_close_etf_decision_context(now: datetime | None = None) -> tuple[date, 
     if not is_etf_exchange_trading_day(trade_date) or local_now.time() < time(15, 0):
         return None
     return trade_date, datetime.combine(trade_date, time(15, 0))
+
+
+def publication_readiness_decision_context(
+    now: datetime | None = None,
+) -> tuple[date, datetime] | None:
+    context = post_close_etf_decision_context(now)
+    if context is None:
+        return None
+    local_now = now or datetime.now(ASIA_SHANGHAI)
+    if local_now.tzinfo is not None:
+        local_now = local_now.astimezone(ASIA_SHANGHAI)
+    if not time(15, 15) <= local_now.time() <= time(22, 55):
+        return None
+    return context
 
 
 async def _latest_authoritative_etf_universe_refresh(
@@ -497,7 +530,7 @@ async def post_close_etf_signals_job(session: AsyncSession) -> dict[str, Any]:
 
 
 async def post_close_etf_adjusted_sync_job(session: AsyncSession) -> dict[str, Any]:
-    context = post_close_etf_decision_context()
+    context = publication_readiness_decision_context()
     if context is None:
         return {
             "asset_type": ASSET_TYPE_ETF,
@@ -506,83 +539,10 @@ async def post_close_etf_adjusted_sync_job(session: AsyncSession) -> dict[str, A
             "reason": "no_completed_trading_session",
         }
     trade_date, decision_cutoff = context
-    authoritative, universe_error = await _latest_authoritative_etf_universe_refresh(
-        session,
-        trade_date=trade_date,
-    )
-    if not authoritative:
-        return _waiting_etf_publication(
-            trade_date=trade_date,
-            reason="universe_not_authoritative",
-            sync={"error": universe_error},
-        )
-    current = await resolve_current_etf_ranking_surface_snapshot(
-        session,
-        required_trade_date=trade_date,
-        ranking_surface="research",
-    )
-    if current.run is not None:
-        result = _signal_result(current.run)
-        return {
-            "asset_type": ASSET_TYPE_ETF,
-            "publication_state": "published",
-            "already_published": True,
-            "etf": result,
-            **result,
-        }
-
-    source_cutoff = etf_source_availability_cutoff(trade_date)
-    coverage = await build_etf_coverage_barrier(
-        session,
-        as_of_trade_date=trade_date,
-        data_cutoff=source_cutoff,
-    )
-    sync_result: dict[str, Any] | None = None
-    if not coverage.expected_codes or coverage.coverage_ratio < ETF_CANONICAL_MIN_COVERAGE:
-        try:
-            async with asyncio.timeout(ETF_ADJUSTED_SYNC_SLICE_TIMEOUT_SECONDS):
-                sync_result = await sync_short_research_data(
-                    session,
-                    from_date=trade_date,
-                    to_date=trade_date,
-                    asset_type=ASSET_TYPE_ETF,
-                )
-        except TimeoutError:
-            await session.rollback()
-            source_cutoff = etf_source_availability_cutoff(trade_date)
-            coverage = await build_etf_coverage_barrier(
-                session,
-                as_of_trade_date=trade_date,
-                data_cutoff=source_cutoff,
-            )
-            return _waiting_etf_publication(
-                trade_date=trade_date,
-                reason="bounded_adjusted_price_sync_timed_out",
-                coverage=coverage.to_dict(),
-                sync={"timeout_seconds": ETF_ADJUSTED_SYNC_SLICE_TIMEOUT_SECONDS},
-            )
-        source_cutoff = etf_source_availability_cutoff(trade_date)
-        coverage = await build_etf_coverage_barrier(
-            session,
-            as_of_trade_date=trade_date,
-            data_cutoff=source_cutoff,
-        )
-
-    coverage_payload = coverage.to_dict()
-    if not coverage.expected_codes or coverage.coverage_ratio < ETF_CANONICAL_MIN_COVERAGE:
-        return _waiting_etf_publication(
-            trade_date=trade_date,
-            reason="adjusted_price_coverage_below_publication_gate",
-            coverage=coverage_payload,
-            sync=sync_result,
-        )
-    return await _publish_etf_snapshot_at_gate(
+    return await run_post_close_etf_publication_readiness(
         session,
         trade_date=trade_date,
         decision_cutoff=decision_cutoff,
-        source_availability_cutoff=source_cutoff,
-        coverage=coverage_payload,
-        sync=sync_result,
     )
 
 

@@ -38,6 +38,13 @@ async def _seed_etf_prices(app, code: str, *, start: date, days: int, base: floa
                     volume=1_000_000 + offset * 1000,
                     turnover=100_000_000 + offset * 1_000_000,
                     pct_change=0.0 if offset == 0 else daily_step / (base + (offset - 1) * daily_step) * 100,
+                    raw_price_basis="raw_ohlc",
+                    research_adjusted_value=close,
+                    research_price_basis="total_return_adjusted",
+                    data_provider="eastmoney",
+                    provider_version="test-hfq-v1",
+                    adjustment_version="test-hfq-v1",
+                    decision_eligible=True,
                 )
             )
         await session.commit()

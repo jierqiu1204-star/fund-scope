@@ -8,9 +8,9 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
-from sqlalchemy import event, func, select
+from sqlalchemy import case, event, func, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +28,41 @@ Clock = Callable[[], float]
 RssReader = Callable[[], int]
 PageCommitHook = Callable[[], None]
 MAX_SQL_STATEMENTS_PER_PAGE = 8
+HISTORY_SELECTION_POLICY = "history_depth"
+PUBLICATION_READINESS_SELECTION_POLICY = "publication_readiness"
+
+
+@dataclass(frozen=True)
+class PublicationReadinessCandidate:
+    code: str
+    has_target_date: bool
+    warmup_depth: int
+    priority: bool = False
+
+
+def plan_publication_readiness_candidates(
+    candidates: Sequence[PublicationReadinessCandidate],
+    *,
+    rotation_anchor: str | None = None,
+) -> list[PublicationReadinessCandidate]:
+    pending = [
+        candidate
+        for candidate in candidates
+        if not candidate.has_target_date or candidate.warmup_depth < 61
+    ]
+    ordered = sorted(
+        pending,
+        key=lambda candidate: (
+            1 if candidate.has_target_date else 0,
+            0 if candidate.priority else 1,
+            candidate.warmup_depth,
+            candidate.code,
+        ),
+    )
+    codes = [candidate.code for candidate in ordered]
+    rotated_codes = _rotate_after(codes, rotation_anchor)
+    by_code = {candidate.code: candidate for candidate in ordered}
+    return [by_code[code] for code in rotated_codes]
 
 
 @dataclass(frozen=True)
@@ -47,6 +82,13 @@ class BoundedHistorySyncRequest:
     process_deadline_seconds: float = 60.0
     rss_limit_bytes: int = 768 * 1024 * 1024
     provider_timeout_seconds: float = 8.0
+    target_trade_date: date | None = None
+    selection_policy: Literal["history_depth", "publication_readiness"] = HISTORY_SELECTION_POLICY
+    provider_policy_version: str = "legacy-adjusted-provider-policy-v1"
+    adjustment_contract: str = "total-return-adjusted-v1"
+    price_basis: str = "total_return_adjusted"
+    required_trade_dates: tuple[date, ...] = ()
+    priority_codes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.scope:
@@ -63,7 +105,10 @@ class BoundedHistorySyncRequest:
             raise ValueError("from_date must not be after to_date")
         if self.required_sessions <= 0:
             raise ValueError("required_sessions must be positive")
-        if not 1 <= self.max_codes <= 10:
+        max_codes = 20 if self.selection_policy == PUBLICATION_READINESS_SELECTION_POLICY else 10
+        if not 1 <= self.max_codes <= max_codes:
+            if self.selection_policy == PUBLICATION_READINESS_SELECTION_POLICY:
+                raise ValueError("publication readiness max_codes must be between 1 and 20")
             raise ValueError("max_codes must be between 1 and 10")
         if not 1 <= self.page_size <= 500:
             raise ValueError("page_size must be between 1 and 500")
@@ -80,6 +125,36 @@ class BoundedHistorySyncRequest:
             raise ValueError("rss_limit_bytes must be positive")
         if not 0 < self.provider_timeout_seconds <= 8:
             raise ValueError("provider_timeout_seconds must be between 0 and 8")
+        if self.selection_policy not in {
+            HISTORY_SELECTION_POLICY,
+            PUBLICATION_READINESS_SELECTION_POLICY,
+        }:
+            raise ValueError("unsupported history selection policy")
+        if self.selection_policy == PUBLICATION_READINESS_SELECTION_POLICY:
+            if self.target_trade_date is None:
+                raise ValueError("publication readiness target_trade_date is required")
+            if not self.from_date <= self.target_trade_date <= self.to_date:
+                raise ValueError("publication readiness target_trade_date must be in range")
+            if self.required_sessions != 61:
+                raise ValueError("publication readiness requires 61 sessions")
+            if self.rss_limit_bytes > 512 * 1024 * 1024:
+                raise ValueError("publication readiness rss limit must not exceed 512 MiB")
+            if self.provider_timeout_seconds > 6:
+                raise ValueError("publication readiness provider timeout must not exceed 6 seconds")
+            if (
+                len(self.required_trade_dates) != self.required_sessions
+                or self.required_trade_dates != tuple(sorted(set(self.required_trade_dates)))
+                or self.required_trade_dates[-1] != self.target_trade_date
+            ):
+                raise ValueError(
+                    "publication readiness requires 61 unique ordered trade dates ending at target"
+                )
+        if not self.provider_policy_version:
+            raise ValueError("provider_policy_version is required")
+        if not self.adjustment_contract:
+            raise ValueError("adjustment_contract is required")
+        if self.price_basis != "total_return_adjusted":
+            raise ValueError("bounded history sync requires total_return_adjusted price basis")
 
     @property
     def identity_hash(self) -> str:
@@ -95,6 +170,22 @@ class BoundedHistorySyncRequest:
             "max_codes": self.max_codes,
             "page_size": self.page_size,
             "max_rows": self.max_rows,
+            "target_trade_date": (
+                self.target_trade_date.isoformat() if self.target_trade_date else None
+            ),
+            "selection_policy": self.selection_policy,
+            "provider_policy_version": self.provider_policy_version,
+            "adjustment_contract": self.adjustment_contract,
+            "price_basis": self.price_basis,
+            "required_trade_dates": [
+                trade_date.isoformat() for trade_date in self.required_trade_dates
+            ],
+            "priority_codes": sorted(set(self.priority_codes)),
+            "admission_deadline_seconds": self.admission_deadline_seconds,
+            "worker_deadline_seconds": self.worker_deadline_seconds,
+            "process_deadline_seconds": self.process_deadline_seconds,
+            "rss_limit_bytes": self.rss_limit_bytes,
+            "provider_timeout_seconds": self.provider_timeout_seconds,
         }
         encoded = json.dumps(
             payload,
@@ -285,6 +376,47 @@ async def _eligible_depths(
     return {str(code): int(count or 0) for code, count in rows}
 
 
+async def _publication_readiness_candidates(
+    session: AsyncSession,
+    *,
+    request: BoundedHistorySyncRequest,
+) -> list[PublicationReadinessCandidate]:
+    priority_codes = set(request.priority_codes)
+    rows = (
+        await session.execute(
+            select(
+                TradableEtf.code,
+                TradableEtf.is_watchlist,
+                func.sum(
+                    case(
+                        (EtfPriceHistory.trade_date == request.target_trade_date, 1),
+                        else_=0,
+                    )
+                ),
+                func.count(func.distinct(EtfPriceHistory.trade_date)),
+            )
+            .outerjoin(
+                EtfPriceHistory,
+                (EtfPriceHistory.etf_code == TradableEtf.code)
+                & (EtfPriceHistory.trade_date.in_(request.required_trade_dates))
+                & (EtfPriceHistory.decision_eligible.is_(True))
+                & (EtfPriceHistory.research_price_basis == request.price_basis),
+            )
+            .where(TradableEtf.code.in_(request.eligible_codes))
+            .group_by(TradableEtf.code, TradableEtf.is_watchlist)
+        )
+    ).all()
+    return [
+        PublicationReadinessCandidate(
+            code=str(code),
+            has_target_date=bool(target_count),
+            warmup_depth=int(warmup_depth or 0),
+            priority=bool(is_watchlist) or str(code) in priority_codes,
+        )
+        for code, is_watchlist, target_count, warmup_depth in rows
+    ]
+
+
 def _rotate_after(codes: list[str], last_code: str | None) -> list[str]:
     if not codes or last_code not in codes:
         return codes
@@ -335,6 +467,24 @@ async def _previous_attempt_anchor(
     if not isinstance(attempted, list) or not attempted:
         return None
     return str(attempted[-1])
+
+
+async def read_latest_compatible_provider_health(
+    session: AsyncSession,
+    *,
+    request: BoundedHistorySyncRequest,
+) -> dict[str, Any]:
+    run = await session.scalar(
+        select(JobRun)
+        .where(JobRun.job_name == f"etf_history_continuation:{request.scope}")
+        .order_by(JobRun.id.desc())
+        .limit(1)
+    )
+    details = run.details_json or {} if run is not None else {}
+    if details.get("identity_hash") != request.identity_hash:
+        return {}
+    health = details.get("provider_health")
+    return dict(health) if isinstance(health, dict) else {}
 
 
 def _row_values(
@@ -529,6 +679,7 @@ async def _persist_pages(
                 "elapsed_seconds": round(clock() - started, 6),
                 "peak_rss_bytes": totals["peak_rss_bytes"],
                 "sql_statements": totals["sql_statements"],
+                "provider_health": provider_result.provider_health,
             }
             job.details_json = checkpoint
             if before_page_commit is not None:
@@ -587,6 +738,33 @@ async def _depth_is_complete(
         int(target_count or 0) == request.required_sessions
         and int(covered_count or 0) == request.required_sessions
     )
+
+
+async def _publication_readiness_state(
+    session: AsyncSession,
+    *,
+    code: str,
+    request: BoundedHistorySyncRequest,
+) -> tuple[bool, int]:
+    target_count, warmup_depth = (
+        await session.execute(
+            select(
+                func.sum(
+                    case(
+                        (EtfPriceHistory.trade_date == request.target_trade_date, 1),
+                        else_=0,
+                    )
+                ),
+                func.count(func.distinct(EtfPriceHistory.trade_date)),
+            ).where(
+                EtfPriceHistory.etf_code == code,
+                EtfPriceHistory.trade_date.in_(request.required_trade_dates),
+                EtfPriceHistory.decision_eligible.is_(True),
+                EtfPriceHistory.research_price_basis == request.price_basis,
+            )
+        )
+    ).one()
+    return bool(target_count), int(warmup_depth or 0)
 
 
 async def _advance_cursor(
@@ -728,6 +906,7 @@ async def run_bounded_history_sync_slice(
     completed_codes: list[str] = []
     exclusions: list[tuple[str, str]] = []
     checkpoint: dict[str, Any] | None = None
+    latest_provider_health: dict[str, Any] | None = None
     job_name = f"etf_history_continuation:{request.scope}"
 
     try:
@@ -768,6 +947,13 @@ async def run_bounded_history_sync_slice(
                 "scope": request.scope,
                 "contract_hash": request.contract_hash,
                 "universe_hash": request.universe_hash,
+                "selection_policy": request.selection_policy,
+                "profile_max_codes": request.max_codes,
+                "target_trade_date": (
+                    request.target_trade_date.isoformat()
+                    if request.target_trade_date
+                    else None
+                ),
             },
         )
         session.add(job)
@@ -779,18 +965,34 @@ async def run_bounded_history_sync_slice(
         job_id = job.id
         totals["sql_statements"] += 1
 
-        depths = await _run_before(
-            lambda: _eligible_depths(session, request=request),
-            deadline=hard_worker_deadline,
-            timeout_message="history sync worker deadline exhausted reading depth",
-        )
+        if request.selection_policy == PUBLICATION_READINESS_SELECTION_POLICY:
+            readiness_candidates = await _run_before(
+                lambda: _publication_readiness_candidates(session, request=request),
+                deadline=hard_worker_deadline,
+                timeout_message="history sync worker deadline exhausted reading readiness",
+            )
+            depths: dict[str, int] = {}
+        else:
+            depths = await _run_before(
+                lambda: _eligible_depths(session, request=request),
+                deadline=hard_worker_deadline,
+                timeout_message="history sync worker deadline exhausted reading depth",
+            )
+            readiness_candidates = []
         totals["sql_statements"] += 1
     except TimeoutError:
         await _rollback_before(session, deadline=hard_process_deadline)
         raise
-    pending = [code for code, depth in depths.items() if depth < request.required_sessions]
-    rotation_anchor = previous_attempt_anchor if previous_attempt_anchor in pending else None
-    pending = _rotate_after(pending, rotation_anchor)
+    if request.selection_policy == PUBLICATION_READINESS_SELECTION_POLICY:
+        planned = plan_publication_readiness_candidates(
+            readiness_candidates,
+            rotation_anchor=previous_attempt_anchor,
+        )
+        pending = [candidate.code for candidate in planned]
+    else:
+        pending = [code for code, depth in depths.items() if depth < request.required_sessions]
+        rotation_anchor = previous_attempt_anchor if previous_attempt_anchor in pending else None
+        pending = _rotate_after(pending, rotation_anchor)
     selected = pending[: request.max_codes]
     stop_reason: str | None = None
     consecutive_provider_failures = 0
@@ -813,12 +1015,14 @@ async def run_bounded_history_sync_slice(
             break
 
         attempted_codes.append(code)
-        remaining = min(
-            request.provider_timeout_seconds,
+        remaining_limits = [
             request.admission_deadline_seconds - elapsed,
             request.worker_deadline_seconds - elapsed,
             _remaining_hard_seconds(hard_worker_deadline),
-        )
+        ]
+        if request.selection_policy != PUBLICATION_READINESS_SELECTION_POLICY:
+            remaining_limits.append(request.provider_timeout_seconds)
+        remaining = min(remaining_limits)
         if remaining <= 0:
             stop_reason = "worker_deadline"
             break
@@ -852,6 +1056,9 @@ async def run_bounded_history_sync_slice(
                 break
             continue
         except Exception as exc:  # noqa: BLE001
+            error_health = getattr(exc, "provider_health", None)
+            if isinstance(error_health, dict):
+                latest_provider_health = error_health
             reason = f"provider_error:{type(exc).__name__}:{str(exc)[:160]}"
             exclusions.append((code, reason))
             consecutive_provider_failures += 1
@@ -861,6 +1068,8 @@ async def run_bounded_history_sync_slice(
             continue
 
         consecutive_provider_failures = 0
+        if isinstance(provider_result.provider_health, dict):
+            latest_provider_health = provider_result.provider_health
         if provider_result.fallback_used:
             totals["retries"] += 1
         elapsed = clock() - started
@@ -961,13 +1170,27 @@ async def run_bounded_history_sync_slice(
             stop_reason = "worker_deadline"
             break
         try:
-            depth_complete = await asyncio.wait_for(
-                _depth_is_complete(session, code=code, request=request),
-                timeout=min(
-                    remaining_worker - checkpoint_reserve_seconds,
-                    _remaining_hard_seconds(hard_worker_deadline),
-                ),
-            )
+            if request.selection_policy == PUBLICATION_READINESS_SELECTION_POLICY:
+                has_target_date, warmup_depth = await asyncio.wait_for(
+                    _publication_readiness_state(session, code=code, request=request),
+                    timeout=min(
+                        remaining_worker - checkpoint_reserve_seconds,
+                        _remaining_hard_seconds(hard_worker_deadline),
+                    ),
+                )
+                depth_complete = (
+                    has_target_date and warmup_depth >= request.required_sessions
+                )
+            else:
+                has_target_date = None
+                warmup_depth = None
+                depth_complete = await asyncio.wait_for(
+                    _depth_is_complete(session, code=code, request=request),
+                    timeout=min(
+                        remaining_worker - checkpoint_reserve_seconds,
+                        _remaining_hard_seconds(hard_worker_deadline),
+                    ),
+                )
         except TimeoutError:
             await _rollback_before(session, deadline=hard_process_deadline)
             stop_reason = "worker_deadline"
@@ -1006,6 +1229,15 @@ async def run_bounded_history_sync_slice(
                 remaining_worker = request.worker_deadline_seconds - elapsed
                 if remaining_worker <= 0:
                     raise TimeoutError
+                job.details_json = {
+                    **(job.details_json or {}),
+                    "identity_hash": request.identity_hash,
+                    "last_completed_code": code,
+                    "target_date_complete": has_target_date,
+                    "warmup_depth": warmup_depth,
+                    "attempted_codes": attempted_codes,
+                    "completed_codes": completed_codes,
+                }
                 await asyncio.wait_for(
                     session.commit(),
                     timeout=min(
@@ -1042,10 +1274,18 @@ async def run_bounded_history_sync_slice(
             checkpoint=checkpoint,
         )
     try:
-        remaining_depths = await asyncio.wait_for(
-            _eligible_depths(session, request=request),
-            timeout=remaining_process,
-        )
+        if request.selection_policy == PUBLICATION_READINESS_SELECTION_POLICY:
+            remaining_candidates = await asyncio.wait_for(
+                _publication_readiness_candidates(session, request=request),
+                timeout=remaining_process,
+            )
+            remaining_depths = {}
+        else:
+            remaining_depths = await asyncio.wait_for(
+                _eligible_depths(session, request=request),
+                timeout=remaining_process,
+            )
+            remaining_candidates = []
     except TimeoutError:
         await _rollback_before(session, deadline=hard_process_deadline)
         return _result(
@@ -1059,7 +1299,15 @@ async def run_bounded_history_sync_slice(
             checkpoint=checkpoint,
         )
     totals["sql_statements"] += 1
-    all_complete = all(depth >= request.required_sessions for depth in remaining_depths.values())
+    if request.selection_policy == PUBLICATION_READINESS_SELECTION_POLICY:
+        remaining_planned = plan_publication_readiness_candidates(remaining_candidates)
+        remaining_candidate_count = len(remaining_planned)
+        all_complete = remaining_candidate_count == 0
+    else:
+        remaining_candidate_count = sum(
+            depth < request.required_sessions for depth in remaining_depths.values()
+        )
+        all_complete = remaining_candidate_count == 0
     if not all_complete and stop_reason is None:
         if totals["fetched_rows"] >= request.max_rows:
             stop_reason = "row_limit"
@@ -1073,6 +1321,11 @@ async def run_bounded_history_sync_slice(
     final_details = {
         **(checkpoint or job.details_json or {}),
         "identity_hash": request.identity_hash,
+        "selection_policy": request.selection_policy,
+        "profile_max_codes": request.max_codes,
+        "target_trade_date": (
+            request.target_trade_date.isoformat() if request.target_trade_date else None
+        ),
         "status": status,
         "stop_reason": stop_reason,
         "attempted_codes": attempted_codes,
@@ -1088,10 +1341,9 @@ async def run_bounded_history_sync_slice(
         "excluded_rows": totals["excluded_rows"],
         "provider_attempt_count": len(attempted_codes),
         "last_completed_code": completed_codes[-1] if completed_codes else None,
-        "remaining_candidate_count": sum(
-            depth < request.required_sessions for depth in remaining_depths.values()
-        ),
+        "remaining_candidate_count": remaining_candidate_count,
         "circuit_state": "open" if stop_reason == "provider_circuit_open" else "closed",
+        "provider_health": latest_provider_health,
         "rows_per_second": (
             round(totals["persisted_rows"] / max(clock() - started, 0.000001), 3)
         ),
@@ -1148,5 +1400,6 @@ __all__ = [
     "BoundedHistorySyncRequest",
     "BoundedHistorySyncResult",
     "read_process_rss_bytes",
+    "read_latest_compatible_provider_health",
     "run_bounded_history_sync_slice",
 ]

@@ -645,82 +645,41 @@ async def test_post_close_etf_signals_job_waits_without_authoritative_universe(m
 
 
 @pytest.mark.asyncio
-async def test_adjusted_sync_job_resumes_one_bounded_batch_then_publishes_at_coverage_gate(monkeypatch) -> None:
-    coverage_calls = 0
-    sync_calls: list[dict[str, Any]] = []
-    publish_calls: list[dict[str, Any]] = []
-    selection_calls: list[dict[str, Any]] = []
+async def test_adjusted_sync_job_delegates_to_publication_readiness_coordinator(
+    monkeypatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
 
-    async def fake_authoritative(*_args: Any, **_kwargs: Any) -> tuple[bool, str | None]:
-        return True, None
+    async def fake_coordinator(_session: object, **kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {
+            "asset_type": ASSET_TYPE_ETF,
+            "status": "waiting",
+            "publication_state": "not_run",
+            "reason": "adjusted_price_or_warmup_coverage_below_publication_gate",
+        }
 
-    async def fake_selection(*_args: Any, **kwargs: Any) -> SimpleNamespace:
-        selection_calls.append(kwargs)
-        return SimpleNamespace(state="waiting", run=None)
-
-    async def fake_barrier(*_args: Any, **_kwargs: Any) -> _CoverageBarrier:
-        nonlocal coverage_calls
-        coverage_calls += 1
-        return _CoverageBarrier(0 if coverage_calls == 1 else 2)
-
-    async def fake_sync(_session: object, **kwargs: Any) -> dict[str, Any]:
-        sync_calls.append(kwargs)
-        return {"asset_count": 2, "failed": 0, "etfs": {"processed": 2, "skipped": 0}}
-
-    async def fake_publish(_session: object, **kwargs: Any) -> SimpleNamespace:
-        publish_calls.append(kwargs)
-        return SimpleNamespace(
-            id=88,
-            status="success",
-            as_of_date=date(2026, 6, 25),
-            publication_state="published",
-            summary_json={"item_count": 2, "fund_count": 0, "etf_count": 2},
-        )
-
-    monkeypatch.setattr(jobs_module, "_latest_authoritative_etf_universe_refresh", fake_authoritative)
     monkeypatch.setattr(
         jobs_module,
-        "resolve_current_etf_ranking_surface_snapshot",
-        fake_selection,
+        "run_post_close_etf_publication_readiness",
+        fake_coordinator,
     )
-    monkeypatch.setattr(jobs_module, "build_etf_coverage_barrier", fake_barrier)
-    monkeypatch.setattr(jobs_module, "sync_short_research_data", fake_sync)
-    monkeypatch.setattr(jobs_module, "generate_and_publish_etf_snapshot", fake_publish)
     monkeypatch.setattr(
         jobs_module,
-        "post_close_etf_decision_context",
+        "publication_readiness_decision_context",
         lambda: (date(2026, 6, 25), datetime(2026, 6, 25, 15, 0)),
-    )
-    monkeypatch.setattr(
-        jobs_module,
-        "etf_source_availability_cutoff",
-        lambda _trade_date: datetime(2026, 6, 25, 21, 5),
     )
 
     result = await jobs_module.post_close_etf_adjusted_sync_job(object())  # type: ignore[arg-type]
 
-    assert sync_calls == [
-        {
-            "from_date": date(2026, 6, 25),
-            "to_date": date(2026, 6, 25),
-            "asset_type": ASSET_TYPE_ETF,
-        }
-    ]
-    assert publish_calls == [
+    assert calls == [
         {
             "trade_date": date(2026, 6, 25),
             "decision_cutoff": datetime(2026, 6, 25, 15, 0),
-            "source_availability_cutoff": datetime(2026, 6, 25, 21, 5),
         }
     ]
-    assert result["publication_state"] == "published"
-    assert result["coverage"]["coverage_ratio"] == 1.0
-    assert selection_calls == [
-        {
-            "required_trade_date": date(2026, 6, 25),
-            "ranking_surface": "research",
-        }
-    ]
+    assert result["status"] == "waiting"
+    assert result["publication_state"] == "not_run"
 
 
 def test_post_close_etf_decision_context_requires_a_completed_trading_session() -> None:
@@ -731,6 +690,21 @@ def test_post_close_etf_decision_context_requires_a_completed_trading_session() 
     assert jobs_module.post_close_etf_decision_context(datetime(2026, 6, 25, 15, 0)) == (
         date(2026, 6, 25),
         datetime(2026, 6, 25, 15, 0),
+    )
+    assert (
+        jobs_module.publication_readiness_decision_context(
+            datetime(2026, 6, 25, 15, 14)
+        )
+        is None
+    )
+    assert jobs_module.publication_readiness_decision_context(
+        datetime(2026, 6, 25, 15, 15)
+    ) == (date(2026, 6, 25), datetime(2026, 6, 25, 15, 0))
+    assert (
+        jobs_module.publication_readiness_decision_context(
+            datetime(2026, 6, 25, 22, 56)
+        )
+        is None
     )
 
 

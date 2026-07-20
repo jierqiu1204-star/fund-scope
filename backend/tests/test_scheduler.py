@@ -43,6 +43,7 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     daily_etf_theme_catalyst = scheduler.get_job("daily_etf_theme_catalyst")
     post_close_etf_signals = scheduler.get_job("post_close_etf_signals")
     post_close_etf_adjusted_sync = scheduler.get_job("post_close_etf_adjusted_sync")
+    daily_short_research_data = scheduler.get_job("daily_short_research_data")
     post_close_etf_label_review = scheduler.get_job("post_close_etf_label_outcome_review")
     post_close_etf_observation = scheduler.get_job("post_close_etf_observation_portfolio")
     etf_exit_signal_credibility = scheduler.get_job("etf_exit_signal_credibility")
@@ -76,6 +77,7 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     assert daily_etf_theme_catalyst is not None
     assert post_close_etf_signals is not None
     assert post_close_etf_adjusted_sync is not None
+    assert daily_short_research_data is not None
     assert post_close_etf_label_review is not None
     assert post_close_etf_observation is not None
     assert etf_exit_signal_credibility is not None
@@ -90,8 +92,11 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     assert trigger_field(daily_etf_theme_catalyst, "minute") == "9"
     assert trigger_field(post_close_etf_signals, "hour") == "15"
     assert trigger_field(post_close_etf_signals, "minute") == "10"
-    assert trigger_field(post_close_etf_adjusted_sync, "hour") == "21-22"
-    assert trigger_field(post_close_etf_adjusted_sync, "minute") == "5,15,35,45,55"
+    assert trigger_field(post_close_etf_adjusted_sync, "hour") == "15-22"
+    assert trigger_field(post_close_etf_adjusted_sync, "minute") == "*"
+    assert post_close_etf_adjusted_sync.max_instances == 1
+    assert post_close_etf_adjusted_sync.coalesce is True
+    assert daily_short_research_data.args[2] is scheduler_module.daily_short_research_fund_data_job
     assert trigger_field(post_close_etf_label_review, "hour") == "15"
     assert trigger_field(post_close_etf_label_review, "minute") == "11"
     assert trigger_field(post_close_etf_observation, "hour") == "15"
