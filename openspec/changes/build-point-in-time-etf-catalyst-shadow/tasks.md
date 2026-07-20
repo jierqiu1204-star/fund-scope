@@ -54,5 +54,5 @@
 - [x] 8.2 Require dated, verified exchange-session paths for catalyst T+1 entry and 1/3/5/10-session exits.
 - [x] 8.3 Replace the mislabeled Bonferroni confidence adjustment with actual Holm-Bonferroni primary-comparison evidence.
 - [x] 8.4 Make catalyst database lease acquisition atomic across workers while retaining the in-process single-worker bound.
-- [ ] 8.5 Run one bounded real allowlisted-source shadow session and record honest source receipts or reproducible unavailable evidence without substituting fixtures.
+- [x] 8.5 Run one bounded real allowlisted-source shadow session and record honest source receipts or reproducible unavailable evidence without substituting fixtures.
 - [x] 8.6 Re-run bounded catalyst, frontend, domain-boundary, Ruff, migration, and strict OpenSpec validation.
