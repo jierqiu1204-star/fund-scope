@@ -159,3 +159,26 @@ class StrategyEvaluationOut(BaseModel):
     conclusion: str
     risk_flags: list[str]
     items: list[StrategyEvaluationItemOut] = Field(default_factory=list)
+
+
+class EtfFactorEvidenceOut(BaseModel):
+    manifest_hash: str
+    ranking_contract_hash: str
+    code_version: str
+    evidence_hash: str
+    development: dict[str, Any]
+    validation: dict[str, Any]
+    holdout: dict[str, Any]
+    samples: list[dict[str, Any]]
+    aggregates: dict[str, Any]
+    exclusions: list[dict[str, Any]]
+    intervals: dict[str, Any]
+    costs: dict[str, Any]
+    limitations: list[str]
+    promotion_state: Literal[
+        "eligible_for_v4_proposal",
+        "retain_current_ranking",
+    ]
+    report: dict[str, Any]
+    research_only: Literal[True]
+    production_mutation_allowed: Literal[False]

@@ -31,10 +31,15 @@ from app.services.portfolio_allocation import (
     black_litterman_covariance_summary,
     build_black_litterman_allocation,
 )
+from app.services.short_research.ranking_surfaces import (
+    ACTIONABLE_CONTRACT_ID,
+    actionable_rank_manifest,
+    validate_rank_derived_action_context,
+)
 from app.services.short_research.snapshot_selector import (
     CanonicalSnapshotSelection,
     required_etf_snapshot_trade_date,
-    resolve_current_canonical_etf_snapshot,
+    resolve_current_etf_ranking_surface_snapshot,
 )
 
 OPTIMIZED_ALLOCATION_METHOD_SET = "stable_min_vol_risk_parity_black_litterman_v1"
@@ -160,9 +165,10 @@ def optimized_method_weights(
 
 
 async def _current_canonical_etf_selection(session: AsyncSession) -> CanonicalSnapshotSelection:
-    return await resolve_current_canonical_etf_snapshot(
+    return await resolve_current_etf_ranking_surface_snapshot(
         session,
         required_trade_date=required_etf_snapshot_trade_date(),
+        ranking_surface="actionable",
     )
 
 
@@ -315,19 +321,43 @@ def _source_cutoff_utc(signal_run: ShortResearchSignalRun) -> datetime | None:
 
 
 async def _eligible_candidates(session: AsyncSession, signal_run: ShortResearchSignalRun) -> list[OptimizerCandidate]:
-    signal_rows = (
+    stored_rows = (
         await session.scalars(
             select(ShortResearchSignalItem)
             .where(
                 ShortResearchSignalItem.run_id == signal_run.id,
                 ShortResearchSignalItem.asset_type == ASSET_TYPE_ETF,
-                ShortResearchSignalItem.score_eligible.is_(True),
-                ShortResearchSignalItem.ranking_score.is_not(None),
             )
-            .order_by(ShortResearchSignalItem.rank.asc())
-            .limit(120)
         )
     ).all()
+    actionable_manifest = actionable_rank_manifest()
+    actionable_rows: list[tuple[int, float, ShortResearchSignalItem]] = []
+    action_date = signal_run.as_of_trade_date or signal_run.as_of_date
+    for row in stored_rows:
+        metrics = dict(row.metrics_json or {})
+        rank = metrics.get("actionable_rank")
+        score = metrics.get("actionable_score")
+        action_decision = validate_rank_derived_action_context(
+            metrics,
+            required_as_of_date=action_date,
+            required_contract_hash=actionable_manifest.manifest_hash,
+        )
+        if (
+            not action_decision.allowed
+            or not isinstance(rank, int)
+            or rank <= 0
+            or isinstance(score, bool)
+            or not isinstance(score, int | float)
+            or not math.isfinite(float(score))
+        ):
+            continue
+        actionable_rows.append((rank, float(score), row))
+    actionable_rows.sort(key=lambda item: (item[0], item[2].asset_code))
+    actionable_rows = actionable_rows[:120]
+    signal_rows = [row for _rank, _score, row in actionable_rows]
+    actionable_score_by_code = {
+        row.asset_code: score for _rank, score, row in actionable_rows
+    }
     codes = [row.asset_code for row in signal_rows]
     if not codes:
         return []
@@ -367,8 +397,7 @@ async def _eligible_candidates(session: AsyncSession, signal_run: ShortResearchS
 
     candidates: list[OptimizerCandidate] = []
     for signal in signal_rows:
-        if signal.ranking_score is None or not math.isfinite(float(signal.ranking_score)):
-            continue
+        actionable_score = actionable_score_by_code[signal.asset_code]
         risk_flags = set(signal.risk_flags_json or [])
         if risk_flags & set(PORTFOLIO_RISK_FLAGS_FORBIDDEN):
             continue
@@ -451,7 +480,7 @@ async def _eligible_candidates(session: AsyncSession, signal_run: ShortResearchS
             OptimizerCandidate(
                 code=signal.asset_code,
                 name=etf.name if etf is not None else signal.asset_code,
-                score=float(signal.ranking_score),
+                score=actionable_score,
                 theme_group=frozen_theme_group,
                 data_date=rows[-1].trade_date,
                 expected_return=mean(returns[-60:]) if returns[-60:] else None,
@@ -519,7 +548,8 @@ async def run_etf_optimized_allocation(session: AsyncSession) -> EtfOptimizedAll
             ).isoformat(),
             "source_data_cutoff": signal_run.data_cutoff,
             "source_input_snapshot_hash": signal_run.input_snapshot_hash,
-            "source_ranking_contract_hash": signal_run.ranking_contract_hash,
+            "source_ranking_contract_id": ACTIONABLE_CONTRACT_ID,
+            "source_ranking_contract_hash": actionable_rank_manifest().manifest_hash,
             "price_basis": signal_run.price_basis,
             "candidate_input_hash": candidate_input_hash,
             "constraints": constraints,
@@ -571,6 +601,8 @@ async def run_etf_optimized_allocation(session: AsyncSession) -> EtfOptimizedAll
             signal_run.data_cutoff.isoformat() if signal_run.data_cutoff else None
         ),
         "source_input_snapshot_hash": signal_run.input_snapshot_hash,
+        "source_ranking_contract_id": ACTIONABLE_CONTRACT_ID,
+        "source_ranking_contract_hash": actionable_rank_manifest().manifest_hash,
         "candidate_input_hash": candidate_input_hash,
         "candidate_count": len(candidates),
         "latest_data_date": max(latest_dates).isoformat() if latest_dates else None,

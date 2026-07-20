@@ -579,6 +579,58 @@ export type ShortResearchFactorGroupScore = {
   factor_ids?: string[];
 };
 
+export type EtfCatalystShadowEvent = {
+  event_id: string;
+  event_version: number;
+  event_type: string;
+  title: string;
+  summary: string;
+  source_published_at: string;
+  first_received_at: string;
+  effective_start: string;
+  effective_end: string;
+  direction: "positive" | "negative" | "mixed" | "neutral" | string;
+  mapping_kind: "direct" | "proxy";
+  is_correction: boolean;
+  receipt_ids: string[];
+  limitations: string[];
+};
+
+export type EtfCatalystShadowTheme = {
+  receipts: Array<{
+    receipt_id: string;
+    canonical_url: string | null;
+    source_id: string;
+    source_published_at: string | null;
+    first_received_at: string;
+    correction_of_receipt_id: string | null;
+  }>;
+  events: EtfCatalystShadowEvent[];
+  snapshot: {
+    theme_id: string;
+    session_date: string;
+    cutoff_at: string;
+    coverage_state: "active" | "observed_none" | "unavailable" | "not_applicable";
+    snapshot_hash: string;
+  };
+  coverage: Array<Record<string, unknown>>;
+  limitations: string[];
+  evidence_hash: string;
+};
+
+export type EtfCatalystShadow = {
+  coverage_state: "active" | "observed_none" | "unavailable" | "not_applicable";
+  themes: EtfCatalystShadowTheme[];
+  limitations: string[];
+  shadow_only: true;
+  ranking_weight: 0;
+  changes_research_rank: false;
+  changes_actionable_rank: false;
+  changes_allocation: false;
+  changes_tracked_position_action: false;
+  changes_email_trigger: false;
+};
+
 export type ShortResearchAsset = {
   asset_type: "fund" | "etf";
   code: string;
@@ -587,6 +639,20 @@ export type ShortResearchAsset = {
   ranking_score?: number | null;
   score_eligible?: boolean | null;
   global_rank?: number | null;
+  filtered_position?: number | null;
+  ranking_surface?: "research" | "actionable" | null;
+  research_rank?: number | null;
+  research_score?: number | null;
+  research_eligible?: boolean | null;
+  research_contract_hash?: string | null;
+  actionable_rank?: number | null;
+  actionable_score?: number | null;
+  actionable_eligible?: boolean | null;
+  actionable_contract_hash?: string | null;
+  actionable_exclusion_reasons?: string[];
+  actionable_field_statuses?: Record<string, string>;
+  actionable_source_times?: Record<string, string>;
+  history_confidence_tier?: string | null;
   total_score: number | null;
   technical_score?: number | null;
   opportunity_score?: number | null;
@@ -603,6 +669,7 @@ export type ShortResearchAsset = {
   catalyst_summary?: string | null;
   catalyst_events?: Array<Record<string, unknown>>;
   catalyst_limitations?: string[];
+  catalyst_shadow?: EtfCatalystShadow;
   factor_profile_version?: string | null;
   factor_profile_status?: string | null;
   factor_profile_score?: number | null;
@@ -692,6 +759,7 @@ export type ShortResearchAssetList = {
   generated_at: string | null;
   as_of_date: string | null;
   snapshot?: EtfRankingSnapshotMetadata | null;
+  ranking_surface?: "research" | "actionable" | null;
   theme_heat?: {
     theme: string;
     count: number;
@@ -1532,8 +1600,10 @@ export type IntradayEtfWatchStatus = {
 };
 
 export type EtfRankingSnapshotMetadata = {
+  ranking_surface?: "research" | "actionable" | null;
   snapshot_id?: number | null;
   score_version?: string | null;
+  score_field?: string | null;
   ranking_contract_hash?: string | null;
   scope_kind?: string | null;
   as_of_trade_date?: string | null;

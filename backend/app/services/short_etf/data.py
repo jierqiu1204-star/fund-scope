@@ -37,6 +37,7 @@ STALE_DATA_DAYS = 7
 DEFAULT_SYNC_DELAY_SECONDS = 1.0
 DEFAULT_PROVIDER_RETRIES = 2
 DEFAULT_PROVIDER_RETRY_DELAY_SECONDS = 1.0
+ETF_HISTORY_PROVIDER_TIMEOUT_SECONDS = 20.0
 
 INELIGIBLE_NAME_KEYWORDS = ("一年持有", "持有期", "定开", "封闭", "封闭期")
 PRICE_HISTORY_PROVIDER_NAMES = ("tickflow", "eastmoney", "efinance", "sina")
@@ -263,7 +264,10 @@ async def fetch_eastmoney_etf_price_history(
             "end": to_date.strftime("%Y%m%d"),
             "secid": f"{_eastmoney_market_id(code)}.{code}",
         }
-        async with httpx.AsyncClient(timeout=20, headers=EASTMONEY_HISTORY_HEADERS) as client:
+        async with httpx.AsyncClient(
+            timeout=ETF_HISTORY_PROVIDER_TIMEOUT_SECONDS,
+            headers=EASTMONEY_HISTORY_HEADERS,
+        ) as client:
             raw_response = await client.get(
                 EASTMONEY_HISTORY_URL,
                 params={**common_params, "fqt": "0"},
@@ -353,7 +357,7 @@ async def fetch_tickflow_etf_price_history(
             "start_time": _tickflow_timestamp(from_date - timedelta(days=7)),
             "end_time": _tickflow_timestamp(to_date),
         }
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with httpx.AsyncClient(timeout=ETF_HISTORY_PROVIDER_TIMEOUT_SECONDS) as client:
             raw_response = await client.get(
                 TICKFLOW_HISTORY_URL,
                 params={**common_params, "adjust": "none"},
@@ -457,7 +461,7 @@ async def fetch_efinance_etf_price_history(code: str, from_date: date, to_date: 
 async def fetch_sina_etf_price_history(code: str, from_date: date, to_date: date) -> list[dict[str, float | str]]:
     async def fetch_backup() -> list[dict[str, float | str]]:
         async with httpx.AsyncClient(
-            timeout=20,
+            timeout=ETF_HISTORY_PROVIDER_TIMEOUT_SECONDS,
             headers={
                 "User-Agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

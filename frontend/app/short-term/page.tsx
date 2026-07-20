@@ -45,6 +45,7 @@ import type {
 } from "@/lib/types";
 
 type AssetType = "fund" | "etf";
+type RankingSurface = "research" | "actionable";
 type SortKey = "score" | "opportunity" | "return_5d" | "return_20d" | "drawdown_low" | "risk_low" | "liquidity";
 type OrderTimeBucket = "before_15" | "after_15" | "unknown";
 type MobileTab = "ranking" | "detail" | "tracking" | "explanation";
@@ -641,6 +642,27 @@ function assetScoreSummaryText(asset: ShortResearchAsset | null | undefined) {
   return `综合分 ${score === null ? "暂无" : score.toFixed(1)}`;
 }
 
+function historyTierText(tier: string | null | undefined) {
+  switch (tier) {
+    case "provisional_short_history":
+      return "短样本（61-119 个交易日）";
+    case "standard_history":
+      return "标准历史（120-249 个交易日）";
+    case "full_history_context":
+      return "完整历史背景（至少 250 个交易日）";
+    default:
+      return "历史层级暂无";
+  }
+}
+
+function actionableStateText(asset: ShortResearchAsset) {
+  if (asset.actionable_eligible && asset.actionable_rank !== null && asset.actionable_rank !== undefined) {
+    return `可行动榜 #${asset.actionable_rank}`;
+  }
+  const reasons = asset.actionable_exclusion_reasons ?? [];
+  return reasons.length ? `暂不可行动：${reasons.slice(0, 2).join("；")}` : "暂不可行动：缺少行动证据";
+}
+
 function opportunityScoreText(asset: ShortResearchAsset | null | undefined) {
   if (!asset?.opportunity_score && asset?.opportunity_score !== 0) {
     return "暂无主题辅助";
@@ -665,12 +687,10 @@ function opportunityVersionText(asset: ShortResearchAsset | null | undefined) {
     case "etf_factor_profile_v1_unavailable":
       return "暂无主题辅助口径";
     case "opportunity_score_v2_full":
-      return "口径：技术 60% + 板块 20% + 催化 15% + 事件 5%";
     case "opportunity_score_v2_sector_only":
-      return "口径：技术 75% + 板块 25%";
     case "opportunity_score_v2_catalyst_only":
     case "opportunity_score_v1":
-      return "口径：技术 70% + 催化 20% + 事件 10%";
+      return "历史主题辅助口径已停用；催化上下文仅作独立影子研究。";
     default:
       return "暂无主题辅助口径";
   }
@@ -728,7 +748,101 @@ function sectorTrendText(asset: ShortResearchAsset | null | undefined) {
 }
 
 function catalystSummaryText(asset: ShortResearchAsset | null | undefined) {
-  return asset?.catalyst_summary || "暂无主题催化数据，先按技术结构观察。";
+  if (asset?.asset_type !== "etf") {
+    return asset?.catalyst_summary || "暂无主题催化数据，先按技术结构观察。";
+  }
+  switch (asset.catalyst_shadow?.coverage_state) {
+    case "active":
+      return "有已核验、在当前截止时点有效的催化事实；仅作影子研究。";
+    case "observed_none":
+      return "官方来源已观测，本期没有适用的催化事件。";
+    case "not_applicable":
+      return "已登记来源不适用于当前主题。";
+    case "unavailable":
+    default:
+      return "催化影子证据暂不可用，不按中性或无事件处理。";
+  }
+}
+
+function catalystDirectionText(direction: string) {
+  const labels: Record<string, string> = {
+    positive: "正向",
+    negative: "负向",
+    mixed: "混合",
+    neutral: "中性"
+  };
+  return labels[direction] ?? direction;
+}
+
+function CatalystShadowPanel({ asset }: { asset: ShortResearchAsset }) {
+  const shadow = asset.catalyst_shadow;
+  if (!shadow) {
+    return (
+      <div className="rounded-[10px] border border-dashed border-ink/20 bg-paper p-4">
+        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">催化影子研究</p>
+        <p className="mt-2 text-sm leading-6 text-ink/60">尚无已完成的缓存影子快照。</p>
+      </div>
+    );
+  }
+  const events = shadow.themes.flatMap((theme) =>
+    theme.events.map((event) => {
+      const receipt = theme.receipts.find((item) => event.receipt_ids.includes(item.receipt_id));
+      return { event, receipt, themeId: theme.snapshot.theme_id };
+    })
+  );
+  const directEvents = events.filter(({ event }) => event.mapping_kind === "direct");
+  const proxyEvents = events.filter(({ event }) => event.mapping_kind === "proxy");
+  return (
+    <div
+      data-catalyst-shadow
+      className="rounded-[10px] border border-dashed border-accent/35 bg-paper p-4"
+    >
+      <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">催化影子研究</p>
+        <p className="text-xs text-ink/50">覆盖状态：{shadow.coverage_state}</p>
+      </div>
+      <p className="mt-2 text-sm leading-6 text-ink/65">{catalystSummaryText(asset)}</p>
+      {directEvents.length ? (
+        <div className="mt-3 space-y-2">
+          {directEvents.map(({ event, receipt, themeId }) => (
+            <article key={`${event.event_id}:${event.event_version}:${themeId}`} className="rounded-[8px] border border-ink/10 bg-white p-3">
+              <p className="text-sm font-semibold text-ink">
+                {event.title}
+                {event.is_correction ? <span className="ml-2 text-xs text-accent">更正版</span> : null}
+              </p>
+              <p className="mt-1 text-xs text-ink/50">
+                直接映射 · {themeId} · {catalystDirectionText(event.direction)} · 发布 {formatDate(event.source_published_at)}
+                {" · "}首次收到 {formatDate(event.first_received_at)}
+              </p>
+              <p className="mt-2 text-sm leading-6 text-ink/65">{event.summary}</p>
+              <p className="mt-1 text-xs text-ink/50">
+                有效期 {formatDate(event.effective_start)} 至 {formatDate(event.effective_end)}
+                {receipt?.canonical_url ? (
+                  <>
+                    {" · "}
+                    <a className="text-accent underline" href={receipt.canonical_url} target="_blank" rel="noreferrer">
+                      官方来源
+                    </a>
+                  </>
+                ) : null}
+              </p>
+            </article>
+          ))}
+        </div>
+      ) : null}
+      {proxyEvents.length ? (
+        <p className="mt-3 text-xs leading-5 text-ink/55">
+          代理映射（仅展示）：{proxyEvents.map(({ event, themeId }) => `${event.title} → ${themeId}`).join("；")}
+        </p>
+      ) : null}
+      {shadow.limitations.length ? (
+        <p className="mt-3 text-xs leading-5 text-ink/50">限制：{shadow.limitations.join("；")}</p>
+      ) : null}
+      <p className="mt-3 border-t border-ink/10 pt-3 text-xs font-medium leading-5 text-ink/60">
+        影子研究，权重为 0；不改变研究榜、可行动榜、组合配置、持仓动作或邮件状态。
+      </p>
+    </div>
+  );
 }
 
 const v3ScoreDimensionLabels: Array<{ key: string; label: string }> = [
@@ -1662,6 +1776,7 @@ function ShortTermClient() {
   const explanationSectionRef = useRef<HTMLDivElement | null>(null);
   const trackingSectionRef = useRef<HTMLDivElement | null>(null);
   const [assetType, setAssetType] = useState<AssetType>("etf");
+  const [rankingSurface, setRankingSurface] = useState<RankingSurface>("research");
   const [theme, setTheme] = useState("all");
   const [sort, setSort] = useState<SortKey>("score");
   const [keyword, setKeyword] = useState("");
@@ -1721,21 +1836,8 @@ function ShortTermClient() {
   });
 
   const assets = useQuery({
-    queryKey: ["short-research", "assets", assetType, theme, sort, keyword, assetOffset, labelFilterSignature],
+    queryKey: ["short-research", "assets", assetType, rankingSurface, theme, sort, keyword, assetOffset, labelFilterSignature],
     queryFn: async ({ signal }) => {
-      if (assetType === "etf" && sort === "score") {
-        const params = new URLSearchParams();
-        params.set("limit", String(ASSET_PAGE_SIZE));
-        params.set("offset", String(assetOffset));
-        appendLabelFilterParams(params, labelFilters);
-        if (theme !== "all") {
-          params.set("theme", theme);
-        }
-        if (keyword.trim()) {
-          params.set("q", keyword.trim());
-        }
-        return (await api.get<IntradayEtfLiveRankingList>(`/api/etf-quotes/live-rankings?${params.toString()}`, { signal })).data;
-      }
       const params = new URLSearchParams();
       params.set("asset_type", assetType);
       params.set("limit", String(ASSET_PAGE_SIZE));
@@ -1748,16 +1850,12 @@ function ShortTermClient() {
         params.set("q", keyword.trim());
       }
       params.set("sort", sort);
+      if (assetType === "etf") {
+        params.set("ranking_surface", rankingSurface);
+      }
       return (await api.get<ShortResearchAssetList>(`/api/short-research/assets?${params.toString()}`, { signal })).data;
     },
-    refetchInterval: (query) => {
-      const data = query.state.data as RankedAssetResponse | undefined;
-      if (!isLiveRankingResponse(data)) {
-        return false;
-      }
-      const seconds = data.market_status === "open" ? data.page_poll_seconds : data.next_poll_seconds;
-      return seconds && seconds > 0 ? seconds * 1_000 : false;
-    }
+    refetchInterval: false
   });
 
   const etfLiveStatusQuery = useQuery({
@@ -1782,7 +1880,7 @@ function ShortTermClient() {
     queryFn: async () =>
       (
         await api.get<ShortResearchAssetList>(
-          "/api/short-research/assets?asset_type=etf&universe=all&sort=score&limit=1&offset=0"
+          "/api/short-research/assets?asset_type=etf&ranking_surface=research&universe=all&sort=score&limit=1&offset=0"
         )
       ).data,
     staleTime: 5 * 60_000
@@ -2855,6 +2953,49 @@ function ShortTermClient() {
             每页 12 条
           </span>
         </div>
+        {assetType === "etf" ? (
+          <div className="mb-4 rounded-[8px] border border-border bg-paper p-3">
+            <div className="flex flex-wrap gap-2">
+              {(
+                [
+                  ["research", "研究榜（默认）"],
+                  ["actionable", "可行动榜"]
+                ] as const
+              ).map(([surface, label]) => (
+                <button
+                  key={surface}
+                  type="button"
+                  className={`rounded-full px-3 py-1.5 text-xs font-semibold transition ${
+                    rankingSurface === surface
+                      ? "bg-ink text-white"
+                      : "border border-ink/10 bg-white text-ink/65 hover:border-accent"
+                  }`}
+                  onClick={() => {
+                    setRankingSurface(surface);
+                    setAssetOffset(0);
+                    setSelected(null);
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <p className="mt-2 text-xs leading-5 text-ink/55">
+              {rankingSurface === "research"
+                ? "研究榜只使用可追溯复权日线，覆盖更广；行动资格与行动名次单独展示。"
+                : "可行动榜仅保留具备同日买卖价、IOPV、溢折价、健康 provider 与一致性证据的 ETF；缺失时不使用回退候选。"}
+            </p>
+            <p className="mt-1 text-xs text-ink/45">
+              覆盖率：
+              {shortAssetData?.snapshot?.coverage_ratio === null ||
+              shortAssetData?.snapshot?.coverage_ratio === undefined
+                ? "暂无"
+                : `${(shortAssetData.snapshot.coverage_ratio * 100).toFixed(1)}%`}
+              {" · "}截至 {formatDate(shortAssetData?.snapshot?.as_of_trade_date)}
+              {" · "}生成于 {formatUtcDateTime(shortAssetData?.snapshot?.generated_at)}
+            </p>
+          </div>
+        ) : null}
         <div className={`grid gap-3 ${compact ? "" : "md:grid-cols-2"}`}>
           <div className="rounded-[6px] border border-border bg-white px-3 py-2 text-sm font-medium text-ink">{mode.classification}</div>
           <input
@@ -3057,6 +3198,15 @@ function ShortTermClient() {
                       </span>
                       {item.asset_type === "etf" ? (
                         <>
+                          <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                            研究榜 #{item.research_rank ?? "-"} · {formatOptionalScore(item.research_score)} 分
+                          </span>
+                          <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                            {historyTierText(item.history_confidence_tier)}
+                          </span>
+                          <span className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                            {actionableStateText(item)}
+                          </span>
                           {item.sector_trend_score !== null && item.sector_trend_score !== undefined ? (
                             <span className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
                               板块趋势：{sectorTrendText(item)}
@@ -3104,7 +3254,9 @@ function ShortTermClient() {
           ) : null}
           {!assets.isLoading && !assets.isError && rawAssets.length === 0 ? (
             <div className="rounded-[10px] border border-dashed border-ink/20 p-6 text-sm leading-6 text-ink/55">
-              {mode.noResults}
+              {assetType === "etf" && rankingSurface === "actionable"
+                ? "当前没有通过行动合同的 ETF。系统已按 provider 健康、同日时间戳和必填执行字段失败关闭，不会用研究榜、旧行情或估算数据补候选。"
+                : mode.noResults}
             </div>
           ) : null}
           <AssetPaginationBar
@@ -3160,13 +3312,23 @@ function ShortTermClient() {
             </div>
             {selectedAsset.asset_type === "etf" ? (
               <div className="rounded-[8px] bg-paper px-4 py-3 sm:col-span-2">
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">主题/板块辅助</p>
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">研究榜与行动资格</p>
+                <p className="mt-2 text-sm leading-6 text-ink/65">
+                  研究榜 #{selectedAsset.research_rank ?? "-"} · {formatOptionalScore(selectedAsset.research_score)} 分
+                  {"；"}{historyTierText(selectedAsset.history_confidence_tier)}
+                </p>
+                <p className="mt-1 text-sm leading-6 text-ink/65">{actionableStateText(selectedAsset)}</p>
+                <p className="mt-3 text-xs font-semibold uppercase tracking-[0.18em] text-accent">主题/板块辅助</p>
                 <p className="mt-2 text-base font-semibold text-ink">
                   {opportunityStatusText(selectedAsset)}
                 </p>
                 <p className="mt-1 text-xs text-ink/50">{opportunityVersionText(selectedAsset)}</p>
                 <p className="mt-2 text-sm leading-6 text-ink/65">板块趋势：{sectorTrendText(selectedAsset)}</p>
-                <p className="mt-2 text-sm leading-6 text-ink/65">{catalystSummaryText(selectedAsset)}</p>
+              </div>
+            ) : null}
+            {selectedAsset.asset_type === "etf" ? (
+              <div className="sm:col-span-2">
+                <CatalystShadowPanel asset={selectedAsset} />
               </div>
             ) : null}
           </div>
@@ -4705,8 +4867,14 @@ function ShortTermClient() {
 
                   {selectedAsset.asset_type === "etf" ? (
                     <div className="mt-3 rounded-[10px] border border-accent/20 bg-white p-4">
+                      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">研究榜与行动资格</p>
+                      <p className="mt-2 text-sm leading-6 text-ink/65">
+                        研究榜 #{selectedAsset.research_rank ?? "-"} · {formatOptionalScore(selectedAsset.research_score)} 分
+                        {"；"}{historyTierText(selectedAsset.history_confidence_tier)}
+                      </p>
+                      <p className="mt-1 text-sm leading-6 text-ink/65">{actionableStateText(selectedAsset)}</p>
                       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">主题/板块辅助</p>
+                        <p className="mt-4 text-xs font-semibold uppercase tracking-[0.18em] text-accent">主题/板块辅助</p>
                         <p className="text-sm font-semibold text-ink">
                           {opportunityStatusText(selectedAsset)}
                         </p>
@@ -4717,13 +4885,10 @@ function ShortTermClient() {
                       <p className="mt-2 text-sm leading-6 text-ink/65">
                         板块趋势：{selectedAsset.sector_trend_summary || sectorTrendText(selectedAsset)}
                       </p>
-                      <p className="mt-2 text-sm leading-6 text-ink/65">{catalystSummaryText(selectedAsset)}</p>
-                      <div className="mt-3 grid gap-2 sm:grid-cols-5">
+                      <div className="mt-3 grid gap-2 sm:grid-cols-3">
                         <StatPill label="技术分" value={formatOptionalScore(selectedAsset.technical_score)} tone="bg-paper text-ink" />
                         <StatPill label="因子综合" value={formatOptionalScore(selectedAsset.factor_profile_score)} tone="bg-paper text-ink" />
                         <StatPill label="板块趋势" value={formatOptionalScore(selectedAsset.sector_trend_score)} tone="bg-paper text-ink" />
-                        <StatPill label="催化分" value={formatOptionalScore(selectedAsset.catalyst_score)} tone="bg-paper text-ink" />
-                        <StatPill label="事件热度" value={formatOptionalScore(selectedAsset.sentiment_heat_score)} tone="bg-paper text-ink" />
                       </div>
                       {factorGroupHighlights(selectedAsset).length ? (
                         <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
@@ -4735,11 +4900,12 @@ function ShortTermClient() {
                           ))}
                         </div>
                       ) : null}
-                      {selectedAsset.catalyst_limitations?.length ? (
-                        <p className="mt-2 text-xs leading-5 text-ink/50">
-                          限制：{selectedAsset.catalyst_limitations.slice(0, 2).join("；")}
-                        </p>
-                      ) : null}
+                    </div>
+                  ) : null}
+
+                  {selectedAsset.asset_type === "etf" ? (
+                    <div className="mt-3">
+                      <CatalystShadowPanel asset={selectedAsset} />
                     </div>
                   ) : null}
 

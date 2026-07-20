@@ -45,6 +45,7 @@ from app.schemas.short_research import (
     ShortResearchSignalRunRequest,
     ShortResearchStatusOut,
 )
+from app.services.etf_catalyst_shadow.evidence import catalyst_shadow_contexts
 from app.services.etf_exit_calibration import (
     etf_exit_hyperopt_payload,
     latest_etf_exit_hyperopt_run,
@@ -82,13 +83,14 @@ from app.services.short_research.optimized_allocation import (
     optimized_allocation_payload,
     run_etf_optimized_allocation,
 )
+from app.services.short_research.ranking_surfaces import DUAL_RANKING_RULE_VERSION
 from app.services.short_research.service import (
     VALIDATION_MODE_FORWARD_LIVE,
     VALIDATION_MODE_HISTORICAL_REPLAY,
     VALIDATION_MODE_SCORE_BUCKET_REPLAY,
     ComputedAsset,
     cached_signal_assets,
-    current_etf_snapshot_selection,
+    current_etf_ranking_surface_selection,
     etf_observation_portfolio,
     get_asset_detail,
     has_available_opportunity_score,
@@ -126,6 +128,90 @@ def _csv_values(raw: str | None) -> set[str]:
     return {item.strip() for item in raw.split(",") if item.strip()}
 
 
+def _asset_catalyst_theme_ids(asset: ComputedAsset) -> tuple[str, ...]:
+    metrics = dict(asset.metrics or {})
+    profile = metrics.get("theme_profile")
+    profile = profile if isinstance(profile, dict) else {}
+    values = [
+        profile.get("primary_theme"),
+        *(profile.get("secondary_themes") or []),
+        metrics.get("primary_theme"),
+        metrics.get("theme_group"),
+        *asset.metadata.theme_tags,
+    ]
+    return tuple(
+        dict.fromkeys(
+            str(value).strip()
+            for value in values
+            if value is not None and str(value).strip()
+        )
+    )
+
+
+async def _catalyst_shadow_by_asset_code(
+    session: AsyncSession,
+    assets: list[ComputedAsset],
+    *,
+    as_of_date: date,
+) -> dict[str, dict[str, Any]]:
+    themes_by_code = {
+        asset.metadata.code: _asset_catalyst_theme_ids(asset)
+        for asset in assets
+        if asset.metadata.asset_type == "etf"
+    }
+    all_theme_ids = tuple(
+        dict.fromkeys(
+            theme_id
+            for theme_ids in themes_by_code.values()
+            for theme_id in theme_ids
+        )
+    )
+    contexts = await catalyst_shadow_contexts(
+        session,
+        theme_ids=all_theme_ids,
+        as_of_date=as_of_date,
+    )
+    result: dict[str, dict[str, Any]] = {}
+    for code, theme_ids in themes_by_code.items():
+        themes = [contexts[theme_id] for theme_id in theme_ids if theme_id in contexts]
+        states = [
+            str(theme["snapshot"]["coverage_state"])
+            for theme in themes
+            if isinstance(theme.get("snapshot"), dict)
+        ]
+        if "active" in states:
+            coverage_state = "active"
+        elif "unavailable" in states or not states:
+            coverage_state = "unavailable"
+        elif "observed_none" in states:
+            coverage_state = "observed_none"
+        else:
+            coverage_state = "not_applicable"
+        result[code] = {
+            "coverage_state": coverage_state,
+            "themes": themes,
+            "limitations": (
+                ["没有已完成的缓存催化影子快照。"]
+                if not themes
+                else sorted(
+                    {
+                        limitation
+                        for theme in themes
+                        for limitation in theme.get("limitations", [])
+                    }
+                )
+            ),
+            "shadow_only": True,
+            "ranking_weight": 0,
+            "changes_research_rank": False,
+            "changes_actionable_rank": False,
+            "changes_allocation": False,
+            "changes_tracked_position_action": False,
+            "changes_email_trigger": False,
+        }
+    return result
+
+
 def _advisor_report_out(report: Any | None) -> ShortResearchAdvisorReportOut | None:
     if report is None:
         return None
@@ -154,6 +240,7 @@ def _asset_out(
     signal_run: ShortResearchSignalRun | None = None,
     validation_evidence: dict[str, Any] | None = None,
     observation_portfolio: dict[str, Any] | None = None,
+    catalyst_shadow: dict[str, Any] | None = None,
     ) -> ShortResearchAssetOut:
     metrics = dict(asset.metrics or {})
     catalyst_unavailable = asset.metadata.asset_type == "etf" and has_unavailable_theme_catalyst(metrics)
@@ -214,6 +301,55 @@ def _asset_out(
         score_eligible=asset.score_eligible,
         global_rank=asset.global_rank if asset.global_rank is not None else asset.rank,
         filtered_position=asset.filtered_position,
+        ranking_surface=(
+            str(metrics["ranking_surface"])
+            if metrics.get("ranking_surface") in {"research", "actionable"}
+            else None
+        ),
+        research_rank=int(metrics["research_rank"])
+        if isinstance(metrics.get("research_rank"), int)
+        else None,
+        research_score=float(metrics["research_score"])
+        if isinstance(metrics.get("research_score"), int | float)
+        else None,
+        research_eligible=(
+            metrics.get("research_score_eligible")
+            if isinstance(metrics.get("research_score_eligible"), bool)
+            else None
+        ),
+        research_contract_hash=(
+            str(metrics["research_contract_hash"])
+            if metrics.get("research_contract_hash")
+            else None
+        ),
+        actionable_rank=int(metrics["actionable_rank"])
+        if isinstance(metrics.get("actionable_rank"), int)
+        else None,
+        actionable_score=float(metrics["actionable_score"])
+        if isinstance(metrics.get("actionable_score"), int | float)
+        else None,
+        actionable_eligible=(
+            metrics.get("actionable_eligible")
+            if isinstance(metrics.get("actionable_eligible"), bool)
+            else None
+        ),
+        actionable_contract_hash=(
+            str(metrics["actionable_contract_hash"])
+            if metrics.get("actionable_contract_hash")
+            else None
+        ),
+        actionable_exclusion_reasons=list(
+            metrics.get("actionable_exclusion_reasons") or []
+        ),
+        actionable_field_statuses=dict(
+            metrics.get("actionable_field_statuses") or {}
+        ),
+        actionable_source_times=dict(metrics.get("actionable_source_times") or {}),
+        history_confidence_tier=(
+            str(metrics["history_confidence_tier"])
+            if metrics.get("history_confidence_tier")
+            else None
+        ),
         total_score=round(asset.total_score, 2),
         technical_score=round(float(metrics["technical_score"]), 2) if isinstance(metrics.get("technical_score"), (int, float)) else None,
         opportunity_score=round(float(opportunity_score), 2)
@@ -231,19 +367,38 @@ def _asset_out(
         sector_trend_reason=str(metrics.get("sector_trend_reason")) if metrics.get("sector_trend_reason") else None,
         sector_trend_status=str(metrics.get("sector_trend_status")) if metrics.get("sector_trend_status") else None,
         sector_peer_count=int(metrics["sector_peer_count"]) if isinstance(metrics.get("sector_peer_count"), int | float) else None,
-        catalyst_score=None
-        if catalyst_unavailable
-        else round(float(metrics["catalyst_score"]), 2)
-        if isinstance(metrics.get("catalyst_score"), (int, float))
-        else None,
-        sentiment_heat_score=None
-        if catalyst_unavailable
-        else round(float(metrics["sentiment_heat_score"]), 2)
-        if isinstance(metrics.get("sentiment_heat_score"), (int, float))
-        else None,
-        catalyst_summary=str(metrics.get("catalyst_summary")) if metrics.get("catalyst_summary") else None,
-        catalyst_events=list(metrics.get("catalyst_events") or []),
-        catalyst_limitations=list(metrics.get("catalyst_limitations") or []),
+        catalyst_score=(
+            None
+            if asset.metadata.asset_type == "etf"
+            else round(float(metrics["catalyst_score"]), 2)
+            if isinstance(metrics.get("catalyst_score"), (int, float))
+            else None
+        ),
+        sentiment_heat_score=(
+            None
+            if asset.metadata.asset_type == "etf"
+            else round(float(metrics["sentiment_heat_score"]), 2)
+            if isinstance(metrics.get("sentiment_heat_score"), (int, float))
+            else None
+        ),
+        catalyst_summary=(
+            None
+            if asset.metadata.asset_type == "etf"
+            else str(metrics.get("catalyst_summary"))
+            if metrics.get("catalyst_summary")
+            else None
+        ),
+        catalyst_events=(
+            []
+            if asset.metadata.asset_type == "etf"
+            else list(metrics.get("catalyst_events") or [])
+        ),
+        catalyst_limitations=(
+            ["旧主题催化评分已停用；请查看独立的催化影子证据。"]
+            if asset.metadata.asset_type == "etf"
+            else list(metrics.get("catalyst_limitations") or [])
+        ),
+        catalyst_shadow=dict(catalyst_shadow or {}),
         factor_profile_version=str(metrics.get("factor_profile_version"))
         if metrics.get("factor_profile_version")
         else None,
@@ -557,6 +712,35 @@ async def get_short_research_status(
     return await status_summary(session, include_health=include_health)
 
 
+def _ranking_surface_snapshot_metadata(
+    run: ShortResearchSignalRun | None,
+    *,
+    ranking_surface: Literal["research", "actionable"],
+    selection_state: str | None = None,
+) -> dict[str, Any]:
+    metadata = {
+        **snapshot_metadata(run, selection_state=selection_state),
+        "ranking_surface": ranking_surface,
+    }
+    if run is None or run.rule_version != DUAL_RANKING_RULE_VERSION:
+        return metadata
+    surfaces = (run.summary_json or {}).get("ranking_surfaces")
+    surface = surfaces.get(ranking_surface) if isinstance(surfaces, dict) else None
+    if not isinstance(surface, dict):
+        return metadata
+    eligible_count = int(surface.get("eligible_count") or 0)
+    coverage_ratio = float(surface.get("coverage_ratio") or 0.0)
+    return {
+        **metadata,
+        "score_version": surface.get("contract_id"),
+        "score_field": surface.get("score_field"),
+        "ranking_contract_hash": surface.get("contract_hash"),
+        "score_eligible_item_count": eligible_count,
+        "score_coverage_ratio": coverage_ratio,
+        "coverage_ratio": coverage_ratio,
+    }
+
+
 @router.get("/assets", response_model=ShortResearchAssetListOut)
 async def list_short_research_assets(
     asset_type: str | None = Query(default=None),
@@ -567,6 +751,7 @@ async def list_short_research_assets(
     observation_labels: str | None = Query(default=None),
     entry_labels: str | None = Query(default=None),
     tracking_states: str | None = Query(default=None),
+    ranking_surface: Literal["research", "actionable"] = Query(default="research"),
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_db_session),
@@ -579,7 +764,14 @@ async def list_short_research_assets(
             raise HTTPException(status_code=401, detail="持仓筛选需要登录")
         if tracking_filters and asset_type == "fund":
             raise ValueError("持仓筛选仅支持 ETF")
-        selection = await current_etf_snapshot_selection(session) if asset_type == "etf" else None
+        selection = (
+            await current_etf_ranking_surface_selection(
+                session,
+                ranking_surface=ranking_surface,
+            )
+            if asset_type == "etf"
+            else None
+        )
         run = selection.run if selection is not None else await latest_signal_run(
             session,
             asset_type=asset_type,
@@ -592,11 +784,15 @@ async def list_short_research_assets(
                 items=[],
                 total=0,
                 snapshot=EtfRankingSnapshotMetadataOut.model_validate(
-                    snapshot_metadata(
+                    _ranking_surface_snapshot_metadata(
                         None,
+                        ranking_surface=ranking_surface,
                         selection_state=selection.state if selection is not None else None,
                     )
+                    if asset_type == "etf"
+                    else snapshot_metadata(None)
                 ),
+                ranking_surface=ranking_surface if asset_type == "etf" else None,
             )
         assets, total = await cached_signal_assets(
             session,
@@ -610,6 +806,7 @@ async def list_short_research_assets(
             offset=0 if tracking_filters else offset,
             observation_labels=_csv_values(observation_labels),
             entry_labels=_csv_values(entry_labels),
+            ranking_surface=ranking_surface if asset_type == "etf" else None,
         )
         if tracking_filters:
             assert user is not None
@@ -626,9 +823,24 @@ async def list_short_research_assets(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     advisor_reports = await latest_reports_by_asset(session, run.id) if run is not None else {}
     validation_by_label = await latest_validation_evidence_by_label(session) if asset_type in {None, "etf"} else {}
+    actionable_selection = (
+        await current_etf_ranking_surface_selection(
+            session,
+            ranking_surface="actionable",
+        )
+        if asset_type in {None, "etf"}
+        else None
+    )
     portfolio_context_by_code = (
         _portfolio_contexts(
-            await etf_observation_portfolio(session, source_run=run if asset_type == "etf" else None)
+            await etf_observation_portfolio(
+                session,
+                source_run=(
+                    actionable_selection.run
+                    if actionable_selection is not None
+                    else None
+                ),
+            )
         )
         if asset_type in {None, "etf"}
         else {}
@@ -643,8 +855,21 @@ async def list_short_research_assets(
             universe=universe,
             limit=2000,
             offset=0,
+            ranking_surface=(
+                "research"
+                if (
+                    run.score_version == "daily_reconstructable_v1"
+                    and run.rule_version == DUAL_RANKING_RULE_VERSION
+                )
+                else None
+            ),
         )
         theme_heat = _theme_heat_summary(heat_assets)
+    catalyst_shadow_by_code = await _catalyst_shadow_by_asset_code(
+        session,
+        assets,
+        as_of_date=run.as_of_date,
+    )
     return ShortResearchAssetListOut(
         items=[
             _asset_out(
@@ -653,6 +878,10 @@ async def list_short_research_assets(
                 signal_run=run,
                 validation_evidence=_validation_for_asset(item, validation_by_label),
                 observation_portfolio=portfolio_context_by_code.get(item.metadata.code, {}),
+                catalyst_shadow=catalyst_shadow_by_code.get(
+                    item.metadata.code,
+                    {},
+                ),
             )
             for item in assets
         ],
@@ -660,7 +889,15 @@ async def list_short_research_assets(
         generated_at=run.finished_at or run.started_at,
         as_of_date=run.as_of_date,
         theme_heat=theme_heat,
-        snapshot=EtfRankingSnapshotMetadataOut.model_validate(snapshot_metadata(run)),
+        snapshot=EtfRankingSnapshotMetadataOut.model_validate(
+            _ranking_surface_snapshot_metadata(
+                run,
+                ranking_surface=ranking_surface,
+            )
+            if asset_type == "etf"
+            else snapshot_metadata(run)
+        ),
+        ranking_surface=ranking_surface if asset_type == "etf" else None,
     )
 
 
@@ -973,7 +1210,10 @@ async def get_short_research_asset_detail(
 ) -> ShortResearchAssetDetailOut:
     run = None
     if asset_type == "etf":
-        selection = await current_etf_snapshot_selection(session)
+        selection = await current_etf_ranking_surface_selection(
+            session,
+            ranking_surface="research",
+        )
         if selection.run is None:
             raise HTTPException(
                 status_code=503,
@@ -994,6 +1234,11 @@ async def get_short_research_asset_detail(
         if asset.metadata.asset_type == "etf"
         else {}
     )
+    catalyst_shadow_by_code = await _catalyst_shadow_by_asset_code(
+        session,
+        [asset],
+        as_of_date=run.as_of_date if run is not None else asset.latest_date or date.today(),
+    )
     return ShortResearchAssetDetailOut(
         asset=_asset_out(
             asset,
@@ -1001,6 +1246,7 @@ async def get_short_research_asset_detail(
             signal_run=run,
             validation_evidence=_validation_for_asset(asset, validation_by_label),
             observation_portfolio=portfolio_context_by_code.get(asset.metadata.code, {}),
+            catalyst_shadow=catalyst_shadow_by_code.get(asset.metadata.code, {}),
         ),
         chart=[
             ShortResearchChartPointOut(

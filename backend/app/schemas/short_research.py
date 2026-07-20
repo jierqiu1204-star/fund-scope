@@ -54,8 +54,10 @@ class ShortResearchStatusOut(BaseModel):
 
 
 class EtfRankingSnapshotMetadataOut(BaseModel):
+    ranking_surface: Literal["research", "actionable"] | None = None
     snapshot_id: int | None = None
     score_version: str | None = None
+    score_field: str | None = None
     ranking_contract_hash: str | None = None
     scope_kind: str | None = None
     as_of_trade_date: date | None = None
@@ -230,6 +232,19 @@ class ShortResearchAssetOut(BaseModel):
     score_eligible: bool | None = None
     global_rank: int | None = Field(default=None, description="不可变快照内的全局名次")
     filtered_position: int | None = Field(default=None, description="当前筛选和排序结果中的位置")
+    ranking_surface: Literal["research", "actionable"] | None = None
+    research_rank: int | None = None
+    research_score: float | None = None
+    research_eligible: bool | None = None
+    research_contract_hash: str | None = None
+    actionable_rank: int | None = None
+    actionable_score: float | None = None
+    actionable_eligible: bool | None = None
+    actionable_contract_hash: str | None = None
+    actionable_exclusion_reasons: list[str] = Field(default_factory=list)
+    actionable_field_statuses: dict[str, str] = Field(default_factory=dict)
+    actionable_source_times: dict[str, str] = Field(default_factory=dict)
+    history_confidence_tier: str | None = None
     total_score: float
     technical_score: float | None = None
     opportunity_score: float | None = None
@@ -246,6 +261,7 @@ class ShortResearchAssetOut(BaseModel):
     catalyst_summary: str | None = None
     catalyst_events: list[dict[str, Any]] = Field(default_factory=list)
     catalyst_limitations: list[str] = Field(default_factory=list)
+    catalyst_shadow: dict[str, Any] = Field(default_factory=dict)
     factor_profile_version: str | None = None
     factor_profile_status: str | None = None
     factor_profile_score: float | None = None
@@ -291,6 +307,7 @@ class ShortResearchAssetListOut(BaseModel):
     as_of_date: date | None = None
     theme_heat: list[dict[str, Any]] = Field(default_factory=list)
     snapshot: EtfRankingSnapshotMetadataOut | None = None
+    ranking_surface: Literal["research", "actionable"] | None = None
 
 
 class ShortResearchAssetDetailOut(BaseModel):

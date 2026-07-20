@@ -1,0 +1,54 @@
+name: ETF Catalyst Shadow Acceptance
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: etf-catalyst-shadow-acceptance
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  COMPOSE_FILE: ${{ vars.VPS_COMPOSE_FILE || 'docker-compose.yml' }}
+
+jobs:
+  server-database-acceptance:
+    runs-on: [self-hosted, Linux, X64, fundscope-vps]
+    timeout-minutes: 2
+    steps:
+      - name: Run one bounded real-source session
+        run: |
+          set -euo pipefail
+
+          case "$COMPOSE_FILE" in
+            docker-compose.yml|docker-compose.ip.yml) ;;
+            *)
+              echo "Unsupported VPS_COMPOSE_FILE: $COMPOSE_FILE" >&2
+              exit 1
+              ;;
+          esac
+
+          deploy_dir=/srv/fundscope
+          deployed_sha=$(cat "$deploy_dir/.deploy-version")
+          test "$deployed_sha" = "$GITHUB_SHA"
+
+          cd "$deploy_dir/deploy"
+          session_key="acceptance-${GITHUB_SHA:0:12}"
+          result=$(
+            timeout 55 sudo docker compose -f "$COMPOSE_FILE" exec -T backend \
+              python scripts/run_etf_catalyst_shadow_source.py \
+              --source-id ndrc_policy \
+              --session-key "$session_key" \
+              --maximum-items 3 \
+              --timeout-seconds 20
+          )
+          printf '%s\n' "$result"
+          {
+            echo "### Server database catalyst acceptance"
+            echo
+            echo "- Deployed SHA: \`$deployed_sha\`"
+            echo "- Session: \`$session_key\`"
+            echo "- Result: \`$result\`"
+          } >> "$GITHUB_STEP_SUMMARY"

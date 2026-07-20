@@ -30,6 +30,7 @@ EXCLUDED_ETF_KEYWORDS = (
 LIVE_DISCOVERY_MIN_RETENTION_RATIO = 0.8
 EASTMONEY_UNIVERSE_SOURCE = "eastmoney.push2.clist"
 AKSHARE_UNIVERSE_SOURCE = "akshare.fund_etf_spot_em"
+ETF_UNIVERSE_PROVIDER_TIMEOUT_SECONDS = 20.0
 
 
 @dataclass(frozen=True)
@@ -311,7 +312,7 @@ async def _discover_akshare_universe() -> EtfUniverseDiscovery:
     source = AKSHARE_UNIVERSE_SOURCE
     records: list[EtfUniverseRecord] = []
     try:
-        async with asyncio.timeout(20):
+        async with asyncio.timeout(ETF_UNIVERSE_PROVIDER_TIMEOUT_SECONDS):
             frame = await asyncio.to_thread(ak.fund_etf_spot_em)
         source_row_count = int(len(frame.index))
         for _, row in frame.iterrows():

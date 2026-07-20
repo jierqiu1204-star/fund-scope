@@ -19,7 +19,7 @@ from app.models.entities import (
 )
 from app.services.llm import LLMClient
 from app.services.short_research.service import (
-    current_etf_snapshot_selection,
+    current_etf_ranking_surface_selection,
     latest_signal_run,
     list_signal_items,
     run_signal_generation,
@@ -444,7 +444,10 @@ async def run_advisor_generation(
     canonical_etf_run = None
     default_source_request = asset_type is None and source_signal_run_id is None
     if asset_type == ASSET_TYPE_ETF or explicit_source_has_etf or default_source_request:
-        canonical_selection = await current_etf_snapshot_selection(session)
+        canonical_selection = await current_etf_ranking_surface_selection(
+            session,
+            ranking_surface="research",
+        )
         canonical_etf_run = canonical_selection.run
         if canonical_etf_run is None and (asset_type == ASSET_TYPE_ETF or explicit_source_has_etf):
             raise ValueError(

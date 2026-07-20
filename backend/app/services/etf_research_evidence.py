@@ -90,6 +90,7 @@ _CONTRACT_HASH_FIELDS = (
     "contract_hash",
 )
 _EVIDENCE_IDENTITY_FIELDS = (
+    (("ranking_surface",), ("ranking_surface", "source_ranking_surface")),
     (("score_version",), ("source_score_version", "score_version")),
     (("score_field",), ("source_score_field", "score_field")),
     (("rule_version",), ("source_rule_version", "rule_version")),
@@ -252,6 +253,8 @@ class ReplayContract:
     fee_model: str
     date_range: dict[str, str | None]
     data_cutoff: str | None
+    ranking_surface: str | None = None
+    warmup_range: dict[str, str | None] | None = None
     evidence_schema_version: str = EVIDENCE_SCHEMA_VERSION
     replay_contract_version: str = REPLAY_CONTRACT_VERSION
 
@@ -387,6 +390,9 @@ def build_replay_contract(
     start_date: date | None,
     end_date: date | None,
     data_cutoff: date | datetime | None,
+    ranking_surface: str | None = None,
+    warmup_start_date: date | None = None,
+    warmup_end_date: date | None = None,
 ) -> dict[str, Any]:
     return ReplayContract(
         replay_run_id=replay_run_id,
@@ -402,6 +408,11 @@ def build_replay_contract(
             "end_date": end_date.isoformat() if end_date else None,
         },
         data_cutoff=str(_canonical(data_cutoff)) if data_cutoff is not None else None,
+        ranking_surface=ranking_surface,
+        warmup_range={
+            "start_date": warmup_start_date.isoformat() if warmup_start_date else None,
+            "end_date": warmup_end_date.isoformat() if warmup_end_date else None,
+        },
     ).to_dict()
 
 

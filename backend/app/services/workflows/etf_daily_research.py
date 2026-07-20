@@ -11,11 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.defaults.short_research import ASSET_TYPE_ETF
 from app.models.entities import EtfDailyWorkflowLock, ShortResearchSignalRun, utcnow
 from app.services.market_data import ASIA_SHANGHAI
-from app.services.short_research.snapshot_materialization import materialize_final_score_v3_snapshot
+from app.services.short_research.dual_snapshot_materialization import (
+    materialize_dual_ranking_snapshot,
+    publish_dual_ranking_snapshot,
+)
 from app.services.short_research.snapshot_publication import (
     SnapshotPublicationError,
     build_etf_coverage_barrier,
-    publish_full_snapshot,
 )
 from app.services.short_research.universe import refresh_etf_universe
 from app.services.workflows.short_research_data import (
@@ -52,14 +54,14 @@ async def generate_and_publish_etf_snapshot(
     source_availability_cutoff: datetime | None = None,
 ) -> ShortResearchSignalRun:
     source_cutoff = source_availability_cutoff or etf_source_availability_cutoff(trade_date)
-    generated = await materialize_final_score_v3_snapshot(
+    generated = await materialize_dual_ranking_snapshot(
         session,
         trade_date=trade_date,
         decision_cutoff=decision_cutoff,
         source_availability_cutoff=source_cutoff,
     )
     await session.commit()
-    return await publish_full_snapshot(session, run_id=generated.id)
+    return await publish_dual_ranking_snapshot(session, run_id=generated.id)
 
 
 async def try_acquire_etf_daily_workflow_lock(
@@ -121,6 +123,26 @@ async def finish_etf_daily_workflow_lock(
     await session.commit()
 
 
+async def record_etf_ranking_batch_progress(
+    session: AsyncSession,
+    trade_date: date,
+    progress: dict[str, Any],
+) -> None:
+    lock = await session.get(EtfDailyWorkflowLock, trade_date)
+    if lock is None or lock.status != ETF_DAILY_WORKFLOW_RUNNING:
+        raise RuntimeError("ETF daily workflow lock is not held")
+    details = dict(lock.details_json or {})
+    batches = list(details.get("ranking_batches") or [])
+    batches.append(dict(progress))
+    lock.details_json = {
+        **details,
+        "ranking_cursor": progress.get("cursor"),
+        "ranking_remaining": progress.get("remaining"),
+        "ranking_batches": batches,
+    }
+    await session.commit()
+
+
 async def run_daily_etf_research_workflow(
     session: AsyncSession,
     *,
@@ -175,15 +197,19 @@ async def run_daily_etf_research_workflow(
             await finish_etf_daily_workflow_lock(session, trade_date, "failed", result)
             return result
 
-        generated = await materialize_final_score_v3_snapshot(
+        async def record_progress(progress: dict[str, Any]) -> None:
+            await record_etf_ranking_batch_progress(session, trade_date, progress)
+
+        generated = await materialize_dual_ranking_snapshot(
             session,
             trade_date=trade_date,
             decision_cutoff=etf_decision_cutoff(trade_date),
             source_availability_cutoff=source_cutoff,
+            batch_progress_callback=record_progress,
         )
         await session.commit()
         try:
-            published = await publish_full_snapshot(session, run_id=generated.id)
+            published = await publish_dual_ranking_snapshot(session, run_id=generated.id)
         except SnapshotPublicationError as exc:
             await session.rollback()
             result = {

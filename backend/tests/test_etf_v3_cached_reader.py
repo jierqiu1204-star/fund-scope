@@ -26,6 +26,7 @@ from app.services.short_research.optimized_allocation import (
     optimized_allocation_payload,
     run_etf_optimized_allocation,
 )
+from app.services.short_research.ranking_surfaces import actionable_rank_manifest
 from app.services.short_research.service import cached_signal_assets
 from app.services.short_research.snapshot_selector import CanonicalSnapshotSelection
 
@@ -201,11 +202,14 @@ async def test_optimized_allocation_run_waits_without_canonical_v3(app) -> None:
 @pytest.mark.asyncio
 async def test_optimized_candidates_require_typed_eligible_ranking_score(app) -> None:
     async with app.state.db.session() as session:
+        actionable = actionable_rank_manifest()
+        signal_date = date(2026, 7, 15)
         run = ShortResearchSignalRun(
             status="success",
             started_at=utcnow(),
             finished_at=utcnow(),
-            as_of_date=date(2026, 7, 15),
+            as_of_date=signal_date,
+            as_of_trade_date=signal_date,
             data_cutoff=datetime(2026, 7, 15, 15, 0),
         )
         session.add(run)
@@ -240,6 +244,12 @@ async def test_optimized_candidates_require_typed_eligible_ranking_score(app) ->
                     risk_flags_json=[],
                     rationale_json={},
                     metrics_json={
+                        "actionable_contract_id": actionable.contract_id,
+                        "actionable_contract_hash": actionable.manifest_hash,
+                        "actionable_as_of_date": signal_date.isoformat(),
+                        "actionable_eligible": score_eligible,
+                        "actionable_rank": 1 if score_eligible else None,
+                        "actionable_score": ranking_score if score_eligible else None,
                         "market_data_reliability": "verified",
                         "theme_group": "frozen_theme",
                     },
@@ -278,6 +288,7 @@ async def test_optimized_candidates_require_typed_eligible_ranking_score(app) ->
 async def test_optimized_candidates_use_only_adjusted_prices_available_by_signal_date(app) -> None:
     code = "510313"
     signal_date = date(2026, 7, 15)
+    actionable = actionable_rank_manifest()
     async with app.state.db.session() as session:
         session.add(
             TradableEtf(
@@ -293,6 +304,7 @@ async def test_optimized_candidates_use_only_adjusted_prices_available_by_signal
         run = ShortResearchSignalRun(
             status="success",
             as_of_date=signal_date,
+            as_of_trade_date=signal_date,
             data_cutoff=datetime(2026, 7, 15, 15, 0),
         )
         session.add(run)
@@ -310,6 +322,12 @@ async def test_optimized_candidates_use_only_adjusted_prices_available_by_signal
                 conclusion="短线观察",
                 risk_flags_json=[],
                 metrics_json={
+                    "actionable_contract_id": actionable.contract_id,
+                    "actionable_contract_hash": actionable.manifest_hash,
+                    "actionable_as_of_date": signal_date.isoformat(),
+                    "actionable_eligible": True,
+                    "actionable_rank": 1,
+                    "actionable_score": 80.0,
                     "market_data_reliability": "verified",
                     "theme_group": "frozen_theme",
                 },

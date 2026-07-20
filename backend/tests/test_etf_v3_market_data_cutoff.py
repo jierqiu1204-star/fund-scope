@@ -285,11 +285,30 @@ async def test_v3_snapshot_batch_prefetch_keeps_sequential_output_and_cutoff_sem
                 key: value
                 for key, value in asset.metrics.items()
                 if key != "v3_adjusted_price_history_digest"
+                and not key.startswith("research_")
+                and key != "history_confidence_tier"
+            },
+            score_breakdown={
+                key: value
+                for key, value in asset.score_breakdown.items()
+                if key != "daily_reconstructable_v1"
             },
         )
         for asset in actual
     ]
-    assert actual_without_history_digest == expected
+    expected_without_research_metadata = [
+        replace(
+            asset,
+            metrics={
+                key: value
+                for key, value in asset.metrics.items()
+                if not key.startswith("research_")
+                and key != "history_confidence_tier"
+            },
+        )
+        for asset in expected
+    ]
+    assert actual_without_history_digest == expected_without_research_metadata
     assert [asset.metadata.code for asset in actual] == sorted(codes)
     assert actual[0].latest_date == as_of_date - timedelta(days=1)
 

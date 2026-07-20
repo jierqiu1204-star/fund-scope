@@ -17,6 +17,7 @@ COPY pyproject.toml ./
 COPY app ./app
 COPY alembic.ini ./alembic.ini
 COPY alembic ./alembic
+COPY scripts ./scripts
 
 RUN printf 'FundScope backend\n' > /README.md
 

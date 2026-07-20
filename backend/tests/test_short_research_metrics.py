@@ -462,7 +462,7 @@ async def test_v3_shadow_propagates_verified_premium_reliability(app, monkeypatc
                     conclusion="谨慎观察",
                     latest_date=observed_at.date(),
                     latest_value=1.0,
-                    usable_days=60,
+                    usable_days=120,
                     sample_level="充足",
                     metrics={
                         "ranking_asset_bucket": "broad-equity",

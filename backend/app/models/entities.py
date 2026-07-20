@@ -47,6 +47,10 @@ class ValidationEvidenceImmutableError(ValueError):
     pass
 
 
+class CatalystEvidenceImmutableError(ValueError):
+    pass
+
+
 _SNAPSHOT_PUBLICATION_AUTHORIZATION_KEY = "snapshot_publication_authorized_run_ids"
 
 
@@ -1307,6 +1311,248 @@ class EtfThemeCatalystSnapshot(Base):
     generated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class EtfCatalystSourceRegistry(Base):
+    __tablename__ = "etf_catalyst_source_registry"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_id",
+            "registry_version",
+            name="uq_etf_catalyst_source_registry_version",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    registry_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_class: Mapped[str] = mapped_column(String(32), nullable=False)
+    allowed_domain: Mapped[str] = mapped_column(String(255), nullable=False)
+    endpoint: Mapped[str] = mapped_column(String(1000), nullable=False)
+    timezone: Mapped[str] = mapped_column(String(64), nullable=False)
+    cadence: Mapped[str] = mapped_column(String(64), nullable=False)
+    fetch_policy_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    raw_retention_policy_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    policy_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class EtfCatalystReceipt(Base):
+    __tablename__ = "etf_catalyst_receipts"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_registry_id",
+            "item_identity_hash",
+            "content_hash",
+            name="uq_etf_catalyst_receipt_version",
+        ),
+        SaIndex(
+            "ix_etf_catalyst_receipt_cutoff",
+            "source_registry_id",
+            "first_received_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    receipt_id: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    source_registry_id: Mapped[int] = mapped_column(
+        ForeignKey("etf_catalyst_source_registry.id", ondelete="RESTRICT")
+    )
+    external_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    canonical_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    source_published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    published_time_precision: Mapped[str] = mapped_column(String(32), nullable=False)
+    first_received_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    fetch_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    receipt_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    item_identity_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    raw_content_ref: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    parser_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    correction_of_receipt_id: Mapped[int | None] = mapped_column(
+        ForeignKey("etf_catalyst_receipts.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class EtfCatalystExtractionAttempt(Base):
+    __tablename__ = "etf_catalyst_extraction_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "receipt_id",
+            "extractor_version",
+            "attempt_hash",
+            name="uq_etf_catalyst_extraction_attempt",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    receipt_id: Mapped[int] = mapped_column(
+        ForeignKey("etf_catalyst_receipts.id", ondelete="RESTRICT")
+    )
+    extractor_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    extraction_method: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    candidate_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    cited_receipt_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempt_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class EtfCatalystEventVersion(Base):
+    __tablename__ = "etf_catalyst_event_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "event_id",
+            "event_version",
+            name="uq_etf_catalyst_event_version",
+        ),
+        SaIndex(
+            "ix_etf_catalyst_event_cutoff",
+            "verification_state",
+            "first_received_at",
+            "effective_start",
+            "effective_end",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    event_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    entities_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    supporting_receipt_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    source_published_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    first_received_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    effective_start: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    effective_end: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    direction: Mapped[str] = mapped_column(String(16), nullable=False)
+    direct_theme_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    proxy_theme_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    taxonomy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    extraction_method: Mapped[str] = mapped_column(String(32), nullable=False)
+    verification_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    supersedes_event_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("etf_catalyst_event_versions.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    event_hash: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    limitations_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class EtfCatalystCoverageObservation(Base):
+    __tablename__ = "etf_catalyst_coverage_observations"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_registry_id",
+            "theme_id",
+            "session_date",
+            "cutoff_at",
+            name="uq_etf_catalyst_coverage_observation",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_registry_id: Mapped[int] = mapped_column(
+        ForeignKey("etf_catalyst_source_registry.id", ondelete="RESTRICT")
+    )
+    theme_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    session_date: Mapped[date] = mapped_column(Date, nullable=False)
+    cutoff_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    policy_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    receipt_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    observation_hash: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class EtfCatalystShadowSnapshot(Base):
+    __tablename__ = "etf_catalyst_shadow_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "theme_id",
+            "session_date",
+            "cutoff_at",
+            "contract_version",
+            name="uq_etf_catalyst_shadow_snapshot_cutoff",
+        ),
+        SaIndex(
+            "ix_etf_catalyst_shadow_snapshot_latest",
+            "theme_id",
+            "session_date",
+            "cutoff_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    theme_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    session_date: Mapped[date] = mapped_column(Date, nullable=False)
+    cutoff_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    taxonomy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    contract_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    coverage_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    event_versions_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    source_coverage_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    receipt_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    limitations_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    snapshot_hash: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class EtfCatalystRunCheckpoint(Base):
+    __tablename__ = "etf_catalyst_run_checkpoints"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('idle', 'running', 'partial', 'complete', 'failed')",
+            name="ck_etf_catalyst_run_status",
+        ),
+        UniqueConstraint(
+            "run_kind",
+            "policy_hash",
+            name="uq_etf_catalyst_run_identity",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    policy_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    source_cursor_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    processed_receipt_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    batch_hashes_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lease_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    details_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class EtfCatalystEventStudyEvidence(Base):
+    __tablename__ = "etf_catalyst_event_study_evidence"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    manifest_hash: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    ranking_contract_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    evidence_hash: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    cohorts_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    outcomes_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    exclusions_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    intervals_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    result_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    limitations_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class EtfOptimizedAllocationSnapshot(Base):
     __tablename__ = "etf_optimized_allocation_snapshots"
     __table_args__ = (SaIndex("ix_etf_optimized_allocation_status_created", "status", "created_at"),)
@@ -2561,6 +2807,61 @@ class PaperPortfolio(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
+class EtfFactorExperimentEvidence(Base):
+    __tablename__ = "etf_factor_experiment_evidence"
+    __table_args__ = (
+        UniqueConstraint("manifest_hash", name="uq_etf_factor_evidence_manifest"),
+        UniqueConstraint("evidence_hash", name="uq_etf_factor_evidence_hash"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    manifest_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    ranking_contract_hash: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    code_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    evidence_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    samples_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    aggregates_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    exclusions_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    intervals_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    split_reports_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    costs_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    limitations_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    promotion_state: Mapped[str] = mapped_column(String(64), nullable=False)
+    report_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class EtfFactorExperimentCheckpoint(Base):
+    __tablename__ = "etf_factor_experiment_checkpoints"
+    __table_args__ = (
+        UniqueConstraint(
+            "manifest_hash",
+            "code_version",
+            name="uq_etf_factor_checkpoint_identity",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    manifest_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    code_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    cursor_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    processed_asset_codes_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    completed_batch_hashes_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    cached_factor_rows_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    exclusion_count: Mapped[int] = mapped_column(Integer, default=0)
+    batch_count: Mapped[int] = mapped_column(Integer, default=0)
+    peak_batch_size: Mapped[int] = mapped_column(Integer, default=0)
+    runtime_seconds: Mapped[float] = mapped_column(Float, default=0.0)
+    coverage_ratio: Mapped[float] = mapped_column(Float, default=0.0)
+    peak_memory_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lease_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class JobRun(Base):
     __tablename__ = "job_runs"
 
@@ -2645,6 +2946,25 @@ def _prevent_published_snapshot_mutation(session: Session, _flush_context: objec
             raise ValidationEvidenceImmutableError(
                 "validation materialized samples are immutable"
             )
+        if isinstance(instance, EtfFactorExperimentEvidence):
+            raise ValidationEvidenceImmutableError(
+                "factor experiment evidence is immutable"
+            )
+        if isinstance(
+            instance,
+            (
+                EtfCatalystSourceRegistry,
+                EtfCatalystReceipt,
+                EtfCatalystExtractionAttempt,
+                EtfCatalystEventVersion,
+                EtfCatalystCoverageObservation,
+                EtfCatalystShadowSnapshot,
+                EtfCatalystEventStudyEvidence,
+            ),
+        ):
+            raise CatalystEvidenceImmutableError(
+                "catalyst registry and evidence records are immutable"
+            )
         if isinstance(instance, EtfSignalValidationSourceEvent):
             validation_run = session.get(
                 EtfSignalValidationRun,
@@ -2715,10 +3035,27 @@ def _prevent_published_snapshot_mutation(session: Session, _flush_context: objec
                 EtfSignalValidationSourceEvent,
                 EtfValidationMaterializedSample,
                 EtfValidationContinuation,
+                EtfFactorExperimentEvidence,
             ),
         ):
             raise ValidationEvidenceImmutableError(
                 "validation evidence cannot be deleted"
+            )
+        if isinstance(
+            instance,
+            (
+                EtfCatalystSourceRegistry,
+                EtfCatalystReceipt,
+                EtfCatalystExtractionAttempt,
+                EtfCatalystEventVersion,
+                EtfCatalystCoverageObservation,
+                EtfCatalystShadowSnapshot,
+                EtfCatalystRunCheckpoint,
+                EtfCatalystEventStudyEvidence,
+            ),
+        ):
+            raise CatalystEvidenceImmutableError(
+                "catalyst registry and evidence records cannot be deleted"
             )
         if isinstance(instance, ShortResearchSignalRun) and instance.publication_state == "published":
             raise PublishedSnapshotImmutableError("published ranking snapshot is immutable")

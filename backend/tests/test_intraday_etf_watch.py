@@ -54,6 +54,13 @@ from app.services.intraday_etf.service import (
     summarize_and_cleanup_intraday_quotes,
 )
 from app.services.short_research import service as short_research_service
+from app.services.short_research.daily_reconstructable import (
+    daily_reconstructable_manifest,
+)
+from app.services.short_research.ranking_surfaces import (
+    DUAL_RANKING_RULE_VERSION,
+    actionable_rank_manifest,
+)
 from app.services.short_research.service import CONCLUSION_HIGH_WATCH, CONCLUSION_WATCH
 from app.services.short_research.snapshot_selector import CanonicalSnapshotSelection
 from app.services.tracked_positions.service import (
@@ -83,13 +90,15 @@ async def _seed_signal_run(
     count: int = 25,
     conclusions: list[str] | None = None,
     total_scores: list[float] | None = None,
-    canonical: bool = False,
+    canonical: bool = True,
     as_of_date: date | None = None,
     metrics_overrides: dict[str, dict[str, object]] | None = None,
 ) -> int:
     conclusions = conclusions or [CONCLUSION_WATCH] * count
     total_scores = total_scores or [100.0 - i for i in range(count)]
     signal_date = as_of_date or date(2026, 6, 12)
+    research_manifest = daily_reconstructable_manifest()
+    actionable_manifest = actionable_rank_manifest()
     async with app.state.db.session() as session:
         session.add_all([_etf(f"51{i:04d}") for i in range(count)])
         run = ShortResearchSignalRun(
@@ -98,15 +107,38 @@ async def _seed_signal_run(
             finished_at=utcnow(),
             as_of_date=signal_date,
             config_json={"asset_type": "etf", "theme": None, "codes": [], "language": "research_only"},
-            summary_json={"item_count": count, "etf_count": count},
+            summary_json={
+                "item_count": count,
+                "etf_count": count,
+                **(
+                    {
+                        "ranking_surfaces": {
+                            "research": {
+                                "contract_id": research_manifest.contract_id,
+                                "score_field": research_manifest.score_field,
+                                "contract_hash": research_manifest.manifest_hash,
+                                "eligible_count": count,
+                            },
+                            "actionable": {
+                                "contract_id": actionable_manifest.contract_id,
+                                "score_field": actionable_manifest.score_field,
+                                "contract_hash": actionable_manifest.manifest_hash,
+                                "eligible_count": count,
+                            },
+                        }
+                    }
+                    if canonical
+                    else {}
+                ),
+            },
             scope_kind="full" if canonical else None,
             scope_hash="test-full-scope" if canonical else None,
             universe_snapshot_hash="test-universe" if canonical else None,
             input_snapshot_hash="test-input" if canonical else None,
-            score_version="final_score_v3" if canonical else None,
-            rule_version="final_score_v3_rule_v2" if canonical else None,
+            score_version=research_manifest.contract_id if canonical else None,
+            rule_version=DUAL_RANKING_RULE_VERSION if canonical else None,
             ranking_contract_hash="test-ranking-contract" if canonical else None,
-            score_field="ranking_score" if canonical else None,
+            score_field=research_manifest.score_field if canonical else None,
             data_cutoff=datetime.combine(signal_date, time(15, 0)) if canonical else None,
             as_of_trade_date=signal_date if canonical else None,
             price_basis="total_return_adjusted" if canonical else None,
@@ -145,7 +177,25 @@ async def _seed_signal_run(
                         "default_display_eligible": True,
                         "entry_timing_label": "趋势延续",
                         "entry_timing_reason": "日线趋势仍在。",
-                        **({"score_version": "final_score_v3"} if canonical else {}),
+                        **(
+                            {
+                                "score_version": research_manifest.contract_id,
+                                "research_rank": i + 1,
+                                "research_score": (
+                                    total_scores[i]
+                                    if i < len(total_scores)
+                                    else 100.0 - i
+                                ),
+                                "actionable_rank": i + 1,
+                                "actionable_score": (
+                                    total_scores[i]
+                                    if i < len(total_scores)
+                                    else 100.0 - i
+                                ),
+                            }
+                            if canonical
+                            else {}
+                        ),
                         **(
                             {"ranking_asset_bucket": "equity", "volatility_20d": 0.01}
                             if canonical
@@ -680,7 +730,11 @@ async def test_live_rankings_pins_the_signal_run_selected_for_its_watchlist(clie
         assert run is not None
         return CanonicalSnapshotSelection(state="ready", run=run)
 
-    monkeypatch.setattr(live_ranking_workflow, "current_etf_snapshot_selection", one_source_run)
+    monkeypatch.setattr(
+        live_ranking_workflow,
+        "current_etf_ranking_surface_selection",
+        one_source_run,
+    )
 
     response = await client.get("/api/etf-quotes/live-rankings?limit=10")
 
@@ -851,51 +905,50 @@ async def test_live_rankings_search_keeps_global_rank_and_does_not_rank_incompar
 
 @pytest.mark.asyncio
 async def test_live_rank_change_requires_matching_scope_and_score_version(client, app, monkeypatch) -> None:
-    run_id = await _seed_signal_run(app, count=2, total_scores=[80.0, 70.0])
+    await _seed_signal_run(app, count=2, total_scores=[80.0, 70.0])
+    now = datetime(2026, 6, 12, 16, 0, 0)
+    monkeypatch.setattr(
+        "app.services.intraday_etf.service.current_market_state",
+        lambda: MarketState("closed", "after_close", now.replace(tzinfo=ASIA_SHANGHAI)),
+    )
+
+    comparable = await client.get("/api/etf-quotes/live-rankings?q=510000")
+    assert comparable.status_code == 200
+    assert comparable.json()["items"][0]["rank_change"] == 0
+
+
+
+@pytest.mark.asyncio
+async def test_live_rank_change_rejects_mismatched_item_score_version(
+    client,
+    app,
+    monkeypatch,
+) -> None:
+    await _seed_signal_run(
+        app,
+        count=2,
+        total_scores=[80.0, 70.0],
+        metrics_overrides={"510000": {"score_version": "other_score_version"}},
+    )
+    now = datetime(2026, 6, 12, 16, 0, 0)
+    monkeypatch.setattr(
+        "app.services.intraday_etf.service.current_market_state",
+        lambda: MarketState("closed", "after_close", now.replace(tzinfo=ASIA_SHANGHAI)),
+    )
+    mismatched_version = await client.get("/api/etf-quotes/live-rankings?q=510000")
+    assert mismatched_version.status_code == 200
+    assert mismatched_version.json()["items"][0]["rank_change"] is None
+
+
+@pytest.mark.asyncio
+async def test_live_rank_change_rejects_mismatched_scope(client, app, monkeypatch) -> None:
+    await _seed_signal_run(app, count=2, total_scores=[80.0, 70.0])
     now = datetime(2026, 6, 12, 16, 0, 0)
     monkeypatch.setattr(
         "app.services.intraday_etf.service.current_market_state",
         lambda: MarketState("closed", "after_close", now.replace(tzinfo=ASIA_SHANGHAI)),
     )
     async with app.state.db.session() as session:
-        run = await session.get(ShortResearchSignalRun, run_id)
-        assert run is not None
-        run.score_version = "final_score_v2"
-        items = (
-            await session.scalars(select(ShortResearchSignalItem).where(ShortResearchSignalItem.run_id == run_id))
-        ).all()
-        for item in items:
-            item.metrics_json = {**dict(item.metrics_json or {}), "score_version": "final_score_v2"}
-        await session.commit()
-
-    comparable = await client.get("/api/etf-quotes/live-rankings?q=510000")
-    assert comparable.status_code == 200
-    assert comparable.json()["items"][0]["rank_change"] == 0
-
-    async with app.state.db.session() as session:
-        item = await session.scalar(
-            select(ShortResearchSignalItem).where(
-                ShortResearchSignalItem.run_id == run_id,
-                ShortResearchSignalItem.asset_code == "510000",
-            )
-        )
-        assert item is not None
-        item.metrics_json = {**dict(item.metrics_json or {}), "score_version": "other_score_version"}
-        await session.commit()
-
-    mismatched_version = await client.get("/api/etf-quotes/live-rankings?q=510000")
-    assert mismatched_version.status_code == 200
-    assert mismatched_version.json()["items"][0]["rank_change"] is None
-
-    async with app.state.db.session() as session:
-        item = await session.scalar(
-            select(ShortResearchSignalItem).where(
-                ShortResearchSignalItem.run_id == run_id,
-                ShortResearchSignalItem.asset_code == "510000",
-            )
-        )
-        assert item is not None
-        item.metrics_json = {**dict(item.metrics_json or {}), "score_version": "final_score_v2"}
         session.add(_etf("159999", "Scope-only ETF"))
         await session.commit()
 

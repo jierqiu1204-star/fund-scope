@@ -18,6 +18,7 @@ from app.models.entities import (
 from app.schemas.strategy_lab import (
     BacktestRequest,
     EquityPointOut,
+    EtfFactorEvidenceOut,
     EvaluationRequest,
     OrderOut,
     PaperPortfolioOut,
@@ -44,6 +45,10 @@ from app.services.strategy_lab.engine import (
     run_paper_update,
     start_paper_portfolio,
 )
+from app.services.strategy_lab.etf_factor_evidence import (
+    factor_evidence_view,
+    get_factor_evidence,
+)
 from app.services.strategy_lab.evaluation import (
     get_evaluation,
     list_evaluation_items,
@@ -52,6 +57,20 @@ from app.services.strategy_lab.evaluation import (
 )
 
 router = APIRouter(prefix="/api/strategy-lab", tags=["strategy-lab"])
+
+
+@router.get(
+    "/etf-factor-evidence/{manifest_hash}",
+    response_model=EtfFactorEvidenceOut,
+)
+async def get_etf_factor_evidence(
+    manifest_hash: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> EtfFactorEvidenceOut:
+    evidence = await get_factor_evidence(session, manifest_hash)
+    if evidence is None:
+        raise HTTPException(status_code=404, detail="ETF factor evidence not found")
+    return EtfFactorEvidenceOut(**factor_evidence_view(evidence))
 
 
 async def _fund_name_map(session: AsyncSession, asset_codes: set[str]) -> dict[str, str]:

@@ -122,3 +122,16 @@ def test_etf_research_evidence_contract_has_no_database_or_business_service_depe
             "app.services.notifier",
         ),
     )
+
+
+def test_etf_catalyst_shadow_cannot_import_production_decision_domains() -> None:
+    forbidden = (
+        "app.services.short_research",
+        "app.services.portfolio_allocation",
+        "app.services.tracked_positions",
+        "app.services.risk_alerts",
+        "app.services.notifier",
+        "app.services.workflows",
+    )
+    for path in (ROOT / "etf_catalyst_shadow").glob("*.py"):
+        _assert_no_forbidden_imports(path, forbidden)

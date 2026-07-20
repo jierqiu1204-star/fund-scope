@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import math
 import os
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from random import Random
 from statistics import mean, median, pstdev
-from typing import Any, cast
+from time import perf_counter
+from typing import Any, Literal, cast
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -81,6 +83,13 @@ from app.services.portfolio_allocation import (
     PORTFOLIO_TOTAL_EXPOSURE_CAP,
 )
 from app.services.short_etf.data import sync_etf_price_history
+from app.services.short_research.daily_reconstructable import (
+    AdjustedOhlcvBar,
+    AdjustmentProvenance,
+    DailyReconstructableScore,
+    DailyReconstructableUnavailableError,
+    score_daily_reconstructable,
+)
 from app.services.short_research.dynamic_thresholds import (
     ThresholdPricePoint,
     dynamic_threshold_context,
@@ -113,11 +122,19 @@ from app.services.short_research.ranking_contract import (
     final_score_v3_manifest,
     scope_kind_for_filters,
 )
+from app.services.short_research.ranking_surfaces import (
+    DUAL_RANKING_RULE_VERSION,
+    ActionableFieldEvidence,
+    evaluate_actionable_rank,
+    history_confidence_tier,
+    validate_rank_derived_action_context,
+)
 from app.services.short_research.sector_trends import build_sector_trend_payloads
 from app.services.short_research.snapshot_selector import (
     CanonicalSnapshotSelection,
     required_etf_snapshot_trade_date,
     resolve_current_canonical_etf_snapshot,
+    resolve_current_etf_ranking_surface_snapshot,
     snapshot_metadata,
 )
 from app.services.short_research.theme_catalysts import (
@@ -136,6 +153,8 @@ from app.services.short_research.universe import refresh_etf_universe
 RUN_STATUS_SUCCESS = "success"
 RUN_STATUS_FAILED = "failed"
 RUN_STATUS_RUNNING = "running"
+ETF_RANKING_BATCH_SIZE = 20
+ETF_RANKING_BATCH_TIMEOUT_SECONDS = 55.0
 
 CONCLUSION_WATCH = "短线观察"
 CONCLUSION_HIGH_WATCH = "高位观察"
@@ -438,7 +457,10 @@ async def _latest_signal_run(
     codes: list[str] | None = None,
 ) -> ShortResearchSignalRun | None:
     if asset_type == ASSET_TYPE_ETF:
-        selection = await current_etf_snapshot_selection(session)
+        selection = await current_etf_ranking_surface_selection(
+            session,
+            ranking_surface="research",
+        )
         return selection.run
     rows = (
         await session.scalars(
@@ -452,7 +474,12 @@ async def _latest_signal_run(
         )
     ).all()
     if asset_type is None and theme is None and codes is None:
-        canonical_etf_run = (await current_etf_snapshot_selection(session)).run
+        canonical_etf_run = (
+            await current_etf_ranking_surface_selection(
+                session,
+                ranking_surface="research",
+            )
+        ).run
         candidates = [
             row
             for row in rows
@@ -553,6 +580,21 @@ async def current_etf_snapshot_selection(
     return await resolve_current_canonical_etf_snapshot(
         session,
         required_trade_date=required_etf_snapshot_trade_date(now),
+    )
+
+
+async def current_etf_ranking_surface_selection(
+    session: AsyncSession,
+    *,
+    ranking_surface: Literal["research", "actionable"] = "research",
+    now: datetime | None = None,
+) -> CanonicalSnapshotSelection:
+    if ranking_surface not in {"research", "actionable"}:
+        raise ValueError("ranking_surface 只支持 research 或 actionable")
+    return await resolve_current_etf_ranking_surface_snapshot(
+        session,
+        required_trade_date=required_etf_snapshot_trade_date(now),
+        ranking_surface=ranking_surface,
     )
 
 
@@ -738,6 +780,7 @@ async def cached_signal_assets(
     offset: int = 0,
     observation_labels: set[str] | None = None,
     entry_labels: set[str] | None = None,
+    ranking_surface: Literal["research", "actionable"] | None = None,
 ) -> tuple[list[ComputedAsset], int]:
     if universe not in {UNIVERSE_DEFAULT, UNIVERSE_ALL, UNIVERSE_ILLIQUID}:
         raise ValueError("ETF universe 只支持 default、all、illiquid")
@@ -769,12 +812,46 @@ async def cached_signal_assets(
         if keyword and keyword not in metadata.code.lower() and keyword not in metadata.name.lower():
             continue
         asset = _cached_asset_from_signal_item(item, metadata, as_of_date=run.as_of_date)
+        if item.asset_type == ASSET_TYPE_ETF and ranking_surface is not None:
+            score = _float_metric(asset.metrics.get(f"{ranking_surface}_score"))
+            rank_value = _int_metric(asset.metrics.get(f"{ranking_surface}_rank"))
+            eligible_key = (
+                "research_score_eligible"
+                if ranking_surface == "research"
+                else "actionable_eligible"
+            )
+            eligible = asset.metrics.get(eligible_key) is True
+            if ranking_surface == "actionable":
+                action_decision = validate_rank_derived_action_context(
+                    asset.metrics,
+                    required_as_of_date=run.as_of_trade_date or run.as_of_date,
+                )
+                eligible = eligible and action_decision.allowed
+            if score is None or rank_value is None or not eligible:
+                continue
+            asset = replace(
+                asset,
+                rank=rank_value,
+                global_rank=rank_value,
+                total_score=score,
+                ranking_score=score,
+                score_eligible=True,
+                metrics={
+                    **asset.metrics,
+                    "ranking_surface": ranking_surface,
+                },
+            )
         if observation_filters and asset.conclusion not in observation_filters:
             continue
         if entry_filters and asset.entry_timing_label not in entry_filters:
             continue
-        if item.asset_type == ASSET_TYPE_ETF and universe == UNIVERSE_DEFAULT and not bool(
+        if (
+            item.asset_type == ASSET_TYPE_ETF
+            and ranking_surface is None
+            and universe == UNIVERSE_DEFAULT
+            and not bool(
             asset.metrics.get("default_display_eligible", True)
+            )
         ):
             continue
         if item.asset_type == ASSET_TYPE_ETF and universe == UNIVERSE_ILLIQUID and bool(
@@ -924,12 +1001,18 @@ async def _prefetch_etf_snapshot_series(
     codes: list[str],
     as_of_date: date,
     data_cutoff: datetime,
-) -> tuple[dict[str, list[PricePoint]], dict[str, int], dict[str, str]]:
+) -> tuple[
+    dict[str, list[PricePoint]],
+    dict[str, int],
+    dict[str, str],
+    dict[str, DailyReconstructableScore],
+    dict[str, str],
+]:
     unique_codes = sorted(set(codes))
     series_by_code: dict[str, list[PricePoint]] = {code: [] for code in unique_codes}
     usable_days_by_code = {code: 0 for code in unique_codes}
     if not unique_codes:
-        return series_by_code, usable_days_by_code, {}
+        return series_by_code, usable_days_by_code, {}, {}, {}
 
     provider_filters = [
         and_(
@@ -981,6 +1064,9 @@ async def _prefetch_etf_snapshot_series(
     )
     rows = await session.stream(statement)
     history_digest_by_code: dict[str, str] = {}
+    history_rows_by_code: dict[str, list[EtfPriceHistory]] = {
+        code: [] for code in unique_codes
+    }
     digest_code: str | None = None
     digest_rows: list[dict[str, Any]] = []
     async for row, usable_days in rows:
@@ -999,6 +1085,7 @@ async def _prefetch_etf_snapshot_series(
             digest_rows = []
         point = _price_point_from_etf_history(row, research_value)
         series_by_code[row.etf_code].append(point)
+        history_rows_by_code[row.etf_code].append(row)
         usable_days_by_code[row.etf_code] = int(usable_days)
         digest_rows.append(_etf_history_digest_payload(row, point))
     if digest_code is not None:
@@ -1013,7 +1100,62 @@ async def _prefetch_etf_snapshot_series(
     )
     for code in unique_codes:
         history_digest_by_code.setdefault(code, empty_digest)
-    return series_by_code, usable_days_by_code, history_digest_by_code
+    research_score_by_code: dict[str, DailyReconstructableScore] = {}
+    research_error_by_code: dict[str, str] = {}
+    for code, history_rows in history_rows_by_code.items():
+        if len(history_rows) < 61:
+            research_error_by_code[code] = "insufficient_61_eligible_adjusted_sessions"
+            continue
+        score_rows = history_rows[-61:]
+        provenance_values = {
+            (
+                str(row.data_provider or "").strip().lower(),
+                str(row.adjustment_version or "").strip(),
+            )
+            for row in score_rows
+        }
+        if len(provenance_values) != 1:
+            research_error_by_code[code] = "mixed_adjustment_provenance"
+            continue
+        provider, adjustment_version = next(iter(provenance_values))
+        try:
+            bars: list[AdjustedOhlcvBar] = []
+            for row in score_rows:
+                if row.close <= 0 or row.research_adjusted_value is None:
+                    raise DailyReconstructableUnavailableError(
+                        "invalid_adjusted_ohlcv",
+                        f"{code}:{row.trade_date.isoformat()}",
+                    )
+                factor = float(row.research_adjusted_value) / float(row.close)
+                bars.append(
+                    AdjustedOhlcvBar(
+                        session_date=row.trade_date,
+                        adjusted_open=float(row.open) * factor,
+                        adjusted_high=float(row.high) * factor,
+                        adjusted_low=float(row.low) * factor,
+                        adjusted_close=float(row.research_adjusted_value),
+                        volume=float(row.volume),
+                    )
+                )
+            research_score_by_code[code] = score_daily_reconstructable(
+                bars,
+                provenance=AdjustmentProvenance(
+                    provider=provider,
+                    adjustment_version=adjustment_version,
+                    price_basis="total_return_adjusted",
+                    transform_kind="constant_multiplicative",
+                    scale_invariance_proven=True,
+                ),
+            )
+        except DailyReconstructableUnavailableError as exc:
+            research_error_by_code[code] = exc.reason
+    return (
+        series_by_code,
+        usable_days_by_code,
+        history_digest_by_code,
+        research_score_by_code,
+        research_error_by_code,
+    )
 
 
 async def _prefetch_etf_data_health(
@@ -4067,6 +4209,111 @@ def _v3_structure_inputs(
     }
 
 
+def _actionable_field_evidence(
+    quote: EtfIntradayLatestQuote | Any | None,
+    *,
+    premium_inputs: Mapping[str, Any],
+    as_of_date: date,
+    decision_cutoff: datetime,
+) -> dict[str, ActionableFieldEvidence]:
+    if quote is None:
+        return {}
+    observed_at = getattr(quote, "quote_time", None)
+    source_time = observed_at.isoformat() if isinstance(observed_at, datetime) else None
+    raw = quote.raw_json if isinstance(getattr(quote, "raw_json", None), Mapping) else {}
+    window_status = _v3_quote_window_status(
+        quote,
+        as_of_date=as_of_date,
+        decision_cutoff=decision_cutoff,
+    )
+
+    def numeric_status(value: object, *, positive: bool = True) -> str:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int | float)
+            or not math.isfinite(float(value))
+            or (positive and float(value) <= 0)
+        ):
+            return "missing"
+        return "available"
+
+    freshness_status = "available"
+    if window_status == "stale" or getattr(quote, "freshness_status", None) == "stale":
+        freshness_status = "stale"
+    elif (
+        window_status is not None
+        or getattr(quote, "freshness_status", None) != "fresh"
+        or raw.get("quote_time_is_fallback") is True
+        or raw.get("decision_eligible") is not True
+    ):
+        freshness_status = "missing"
+
+    consensus = raw.get("consensus_status")
+    if consensus in {"consistent", "single_provider"}:
+        consensus_status = "available"
+    elif consensus in {"diverged", "stale"}:
+        consensus_status = "inconsistent" if consensus == "diverged" else "stale"
+    else:
+        consensus_status = "missing"
+
+    raw_provider_health = raw.get("provider_health")
+    if not isinstance(raw_provider_health, list):
+        raw_provider_health = raw.get("provider_status")
+    provider_health_status = str(raw.get("provider_health_status") or "").lower()
+    explicitly_healthy = provider_health_status in {"healthy", "success", "verified"}
+    if isinstance(raw_provider_health, list):
+        explicitly_healthy = explicitly_healthy or any(
+            isinstance(item, Mapping)
+            and str(item.get("status") or "").lower() in {"healthy", "success", "verified"}
+            and not item.get("error")
+            for item in raw_provider_health
+        )
+
+    premium_status = str(premium_inputs.get("premium_input_status") or "unavailable")
+    if premium_status in {"verified", "alternate_provider"}:
+        premium_field_status = "available"
+    elif premium_status == "stale":
+        premium_field_status = "stale"
+    else:
+        premium_field_status = "missing"
+
+    bid_status = numeric_status(getattr(quote, "bid_price", None))
+    ask_status = numeric_status(getattr(quote, "ask_price", None))
+    bid = getattr(quote, "bid_price", None)
+    ask = getattr(quote, "ask_price", None)
+    if bid_status == "available" and ask_status == "available" and float(ask) < float(bid):
+        ask_status = "inconsistent"
+
+    return {
+        "bid": ActionableFieldEvidence(status=cast(Any, bid_status), source_time=source_time),
+        "ask": ActionableFieldEvidence(status=cast(Any, ask_status), source_time=source_time),
+        "iopv": ActionableFieldEvidence(
+            status=cast(Any, numeric_status(getattr(quote, "iopv", None))),
+            source_time=source_time,
+        ),
+        "premium_discount": ActionableFieldEvidence(
+            status=cast(Any, premium_field_status),
+            source_time=source_time,
+        ),
+        "provider": ActionableFieldEvidence(
+            status="available" if str(getattr(quote, "source", "") or "").strip() else "missing",
+            source_time=source_time,
+        ),
+        "provider_health": ActionableFieldEvidence(
+            status="available" if explicitly_healthy else "unhealthy",
+            source_time=source_time,
+        ),
+        "freshness": ActionableFieldEvidence(
+            status=cast(Any, freshness_status),
+            source_time=source_time,
+        ),
+        "provider_consensus": ActionableFieldEvidence(
+            status=cast(Any, consensus_status),
+            source_time=source_time,
+        ),
+    }
+
+
 def _v3_theme_catalyst_inputs(
     events: list[EtfThemeCatalystEvent] | list[Any],
     *,
@@ -4328,6 +4575,16 @@ async def _with_final_score_v3_shadow(
             asset.metadata.code,
             _v3_theme_catalyst_inputs([], as_of_date=as_of_date, cutoff=decision_cutoff),
         )
+        actionable = evaluate_actionable_rank(
+            result,
+            eligible_sessions=asset.usable_days,
+            field_evidence=_actionable_field_evidence(
+                quote_by_code.get(asset.metadata.code),
+                premium_inputs=premium_inputs,
+                as_of_date=as_of_date,
+                decision_cutoff=decision_cutoff,
+            ),
+        )
         component_source_dates = dict(asset.metrics.get("component_source_dates") or {})
         component_source_dates["premium_discount"] = premium_inputs["premium_source_date"]
         component_source_dates["structure_liquidity"] = structure_inputs["structure_source_date"]
@@ -4370,6 +4627,20 @@ async def _with_final_score_v3_shadow(
                 for key in sorted(contract_input_keys)
             },
             "tracked_underlying_id": underlying_by_code.get(asset.metadata.code),
+            "actionable_contract_id": actionable.contract_id,
+            "actionable_score_field": actionable.score_field,
+            "actionable_contract_hash": actionable.manifest_hash,
+            "actionable_eligibility_policy_version": actionable.eligibility_policy_version,
+            "actionable_product_field_policy_id": actionable.product_field_policy_id,
+            "actionable_product_field_policy_hash": actionable.product_field_policy_hash,
+            "actionable_referenced_score_contract_id": actionable.referenced_score_contract_id,
+            "actionable_referenced_score_contract_hash": actionable.referenced_score_contract_hash,
+            "actionable_score": actionable.actionable_score,
+            "actionable_eligible": actionable.actionable_eligible,
+            "actionable_field_statuses": dict(actionable.field_statuses),
+            "actionable_source_times": dict(actionable.source_times),
+            "actionable_exclusion_reasons": list(actionable.exclusion_reasons),
+            "history_confidence_tier": actionable.history_tier,
         }
         updated.append(
             replace(
@@ -4404,6 +4675,8 @@ async def compute_asset(
     prefetched_health: EtfDataHealth | None = None,
     health_prefetched: bool = False,
     adjusted_price_history_digest: str | None = None,
+    prefetched_research_score: DailyReconstructableScore | None = None,
+    research_score_error: str | None = None,
 ) -> ComputedAsset:
     effective_date = as_of_date or await latest_data_date(session) or date.today()
     series = (
@@ -4469,6 +4742,38 @@ async def compute_asset(
             )
         },
     }
+    history_tier = history_confidence_tier(int(metrics["usable_days"]))
+    research_metrics: dict[str, Any] = {
+        "research_contract_id": "daily_reconstructable_v1",
+        "research_score_field": "research_score",
+        "research_score": None,
+        "research_score_eligible": False,
+        "research_score_unavailable_reason": research_score_error,
+        "history_confidence_tier": history_tier,
+    }
+    if prefetched_research_score is not None:
+        research_metrics.update(
+            {
+                "research_contract_id": prefetched_research_score.contract_id,
+                "research_score_field": prefetched_research_score.score_field,
+                "research_contract_hash": prefetched_research_score.manifest_hash,
+                "research_score": prefetched_research_score.research_score,
+                "research_score_eligible": True,
+                "research_score_unavailable_reason": None,
+            }
+        )
+        score_breakdown["daily_reconstructable_v1"] = {
+            "score": prefetched_research_score.research_score,
+            "score_eligible": True,
+            "contract_id": prefetched_research_score.contract_id,
+            "score_field": prefetched_research_score.score_field,
+            "contract_hash": prefetched_research_score.manifest_hash,
+            "components": {
+                "trend": prefetched_research_score.trend_score,
+                "risk": prefetched_research_score.risk_score,
+                "liquidity": prefetched_research_score.liquidity_score,
+            },
+        }
     computed = ComputedAsset(
         metadata=metadata,
         rank=rank,
@@ -4484,6 +4789,7 @@ async def compute_asset(
                 if adjusted_price_history_digest is not None
                 else {}
             ),
+            **research_metrics,
             **{
                 key: metrics[key]
                 for key in (
@@ -4727,34 +5033,106 @@ async def compute_etf_snapshot_assets(
     as_of_date: date,
     decision_cutoff: datetime,
     data_cutoff: datetime | None = None,
+    batch_audit: list[dict[str, Any]] | None = None,
+    batch_progress_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    resume_after_code: str | None = None,
+    resumed_assets_by_code: Mapping[str, ComputedAsset] | None = None,
 ) -> list[ComputedAsset]:
     candidates = await _available_assets(session, asset_type=ASSET_TYPE_ETF, codes=codes)
+    candidates = sorted(candidates, key=lambda candidate: candidate.code)
     candidate_codes = [candidate.code for candidate in candidates]
     effective_data_cutoff = data_cutoff or decision_cutoff
-    series_by_code, usable_days_by_code, history_digest_by_code = (
-        await _prefetch_etf_snapshot_series(
-            session,
-            codes=candidate_codes,
-            as_of_date=as_of_date,
-            data_cutoff=effective_data_cutoff,
-        )
-    )
-    health_by_code = await _prefetch_etf_data_health(session, codes=candidate_codes)
-    computed: list[ComputedAsset] = []
-    for item in candidates:
-        computed.append(
-            await compute_asset(
+    resumed = dict(resumed_assets_by_code or {})
+    start_index = 0
+    if resume_after_code is not None:
+        if resume_after_code not in candidate_codes:
+            raise ValueError("ranking batch cursor is outside the current universe")
+        start_index = candidate_codes.index(resume_after_code) + 1
+        if any(code not in resumed for code in candidate_codes[:start_index]):
+            raise ValueError("ranking batch cursor has no persisted assets")
+    computed_by_code = {
+        code: resumed[code] for code in candidate_codes[:start_index]
+    }
+    for batch_start in range(start_index, len(candidates), ETF_RANKING_BATCH_SIZE):
+        started = perf_counter()
+        batch = candidates[batch_start : batch_start + ETF_RANKING_BATCH_SIZE]
+        batch_codes = [item.code for item in batch]
+        (
+            series_by_code,
+            usable_days_by_code,
+            history_digest_by_code,
+            research_score_by_code,
+            research_error_by_code,
+        ) = await asyncio.wait_for(
+            _prefetch_etf_snapshot_series(
                 session,
-                item,
+                codes=batch_codes,
                 as_of_date=as_of_date,
                 data_cutoff=effective_data_cutoff,
-                prefetched_series=series_by_code[item.code],
-                usable_days_override=usable_days_by_code[item.code],
-                prefetched_health=health_by_code.get(item.code),
-                health_prefetched=True,
-                adjusted_price_history_digest=history_digest_by_code[item.code],
-            )
+            ),
+            timeout=ETF_RANKING_BATCH_TIMEOUT_SECONDS,
         )
+        health_by_code = await asyncio.wait_for(
+            _prefetch_etf_data_health(session, codes=batch_codes),
+            timeout=ETF_RANKING_BATCH_TIMEOUT_SECONDS,
+        )
+        failed: list[dict[str, str]] = []
+        batch_assets: list[ComputedAsset] = []
+        for item in batch:
+            try:
+                asset = await compute_asset(
+                    session,
+                    item,
+                    as_of_date=as_of_date,
+                    data_cutoff=effective_data_cutoff,
+                    prefetched_series=series_by_code[item.code],
+                    usable_days_override=usable_days_by_code[item.code],
+                    prefetched_health=health_by_code.get(item.code),
+                    health_prefetched=True,
+                    adjusted_price_history_digest=history_digest_by_code[item.code],
+                    prefetched_research_score=research_score_by_code.get(item.code),
+                    research_score_error=research_error_by_code.get(item.code),
+                )
+            except Exception as exc:  # noqa: BLE001
+                failed.append(
+                    {
+                        "asset_code": item.code,
+                        "error": f"{type(exc).__name__}: {exc}"[:500],
+                    }
+                )
+                continue
+            computed_by_code[item.code] = asset
+            batch_assets.append(asset)
+        processed = len(batch_assets)
+        research_eligible = sum(
+            asset.metrics.get("research_score_eligible") is True
+            for asset in batch_assets
+        )
+        progress = {
+            "batch_number": batch_start // ETF_RANKING_BATCH_SIZE + 1,
+            "batch_size": len(batch),
+            "first_code": batch_codes[0],
+            "last_code": batch_codes[-1],
+            "cursor": batch_codes[-1],
+            "duration_ms": round((perf_counter() - started) * 1000, 3),
+            "processed": processed,
+            "eligible": research_eligible,
+            "excluded": processed - research_eligible,
+            "failed": len(failed),
+            "failures": failed,
+            "remaining": len(candidates) - batch_start - len(batch),
+            "peak_history_row_bound": len(batch)
+            * ETF_SNAPSHOT_SCORE_HISTORY_ROWS,
+        }
+        if batch_audit is not None:
+            batch_audit.append(progress)
+        if batch_progress_callback is not None:
+            await batch_progress_callback(progress)
+    computed = [
+        computed_by_code[code]
+        for code in candidate_codes
+        if code in computed_by_code
+    ]
     computed = _with_final_score_v2(computed)
     computed = _with_sector_trend_scores(computed)
     computed = await _with_opportunity_scores(session, computed, as_of_date)
@@ -6255,7 +6633,20 @@ async def etf_observation_portfolio(
     include_optimized: bool = True,
     source_run: ShortResearchSignalRun | None = None,
 ) -> dict[str, Any]:
-    run = source_run or await latest_signal_run(session, asset_type=ASSET_TYPE_ETF)
+    if source_run is not None:
+        run = (
+            source_run
+            if source_run.score_version == "daily_reconstructable_v1"
+            and source_run.rule_version == DUAL_RANKING_RULE_VERSION
+            and source_run.publication_state == "published"
+            else None
+        )
+    else:
+        selection = await current_etf_ranking_surface_selection(
+            session,
+            ranking_surface="actionable",
+        )
+        run = selection.run
     if use_snapshot and source_run is None and universe == UNIVERSE_DEFAULT:
         snapshot = await latest_observation_portfolio_snapshot(session)
         if (
@@ -6322,6 +6713,7 @@ async def etf_observation_portfolio(
         sort="score",
         universe=universe,
         limit=max(50, min(limit * 10, 200)),
+        ranking_surface="actionable",
     )
     primary_candidates: list[ComputedAsset] = []
     satellite_candidates: list[tuple[ComputedAsset, str | None]] = []

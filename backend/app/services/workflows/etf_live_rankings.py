@@ -34,7 +34,7 @@ from app.services.intraday_etf.service import (
 from app.services.short_research.service import (
     CONCLUSION_HIGH_WATCH,
     CONCLUSION_WATCH,
-    current_etf_snapshot_selection,
+    current_etf_ranking_surface_selection,
 )
 from app.services.short_research.snapshot_selector import (
     required_etf_snapshot_trade_date,
@@ -56,7 +56,7 @@ LIVE_LABEL_TREND_CONTINUATION = "趋势延续"
 LIVE_LABEL_CHASE_WARNING = "冲高别追"
 _INTRADAY_RANKING_DATA_INSUFFICIENT_REASON = "暂无新鲜盘中行情，暂不做盘中加分。"
 _INTRADAY_BASE_PRICE_BASIS = "total_return_adjusted"
-_INTRADAY_BASE_SCORE_FIELD = "ranking_score"
+_INTRADAY_BASE_SCORE_FIELD = "research_score"
 _INTRADAY_BASE_MIN_COVERAGE = 0.95
 _INTRADAY_ADJUSTMENT_VERSION = "intraday_adjustment_v2"
 _MIN_SAME_TIME_ACTIVITY_SAMPLES = 5
@@ -126,14 +126,18 @@ def _eligible_intraday_base(
     if snapshot.price_basis != _INTRADAY_BASE_PRICE_BASIS:
         return None, "日线基座价格口径不兼容。"
     if snapshot.score_field != _INTRADAY_BASE_SCORE_FIELD:
-        return None, "日线基座未声明当前最终分字段。"
+        return None, "日线基座未声明当前研究分字段。"
     if snapshot.coverage_ratio is None or snapshot.coverage_ratio < _INTRADAY_BASE_MIN_COVERAGE:
         return None, "日线基座覆盖率不足。"
     if snapshot.as_of_trade_date is None or snapshot.as_of_trade_date != required_base_trade_date:
         return None, "日线基座不是最近已收盘交易日，盘中综合分不可用。"
-    score = item.ranking_score if item is not None else None
+    score = (
+        (item.metrics_json or {}).get(_INTRADAY_BASE_SCORE_FIELD)
+        if item is not None
+        else None
+    )
     if item is None or item.score_eligible is not True or score is None or not _is_finite_score(score):
-        return None, "日线基座缺少可用最终分。"
+        return None, "日线基座缺少可用研究分。"
     return float(score), None
 
 
@@ -371,7 +375,11 @@ def _entry_filter_labels(
 async def _build_research_watchlist(session: AsyncSession, *, now: datetime | None = None) -> WatchlistResult:
     watchlist = await build_watchlist(session)
     watch_map = {item.etf_code: item for item in watchlist.items}
-    selection = await current_etf_snapshot_selection(session, now=now)
+    selection = await current_etf_ranking_surface_selection(
+        session,
+        ranking_surface="research",
+        now=now,
+    )
     run = selection.run
     signal_status = selection.state
     message = watchlist.message
@@ -394,8 +402,15 @@ async def _build_research_watchlist(session: AsyncSession, *, now: datetime | No
         ).all()
         for item in signal_items:
             watch_item = watch_map.setdefault(item.asset_code, WatchItem(etf_code=item.asset_code, sources={SOURCE_ALL_ETF}))
-            watch_item.rank = item.rank
-            if item.rank is not None and item.rank <= TOP_SIGNAL_LIMIT:
+            actionable_rank = (item.metrics_json or {}).get("actionable_rank")
+            watch_item.rank = (
+                actionable_rank
+                if isinstance(actionable_rank, int)
+                and not isinstance(actionable_rank, bool)
+                and actionable_rank > 0
+                else None
+            )
+            if watch_item.rank is not None and watch_item.rank <= TOP_SIGNAL_LIMIT:
                 watch_item.sources.add(SOURCE_TOP20_SIGNAL)
             if item.conclusion == CONCLUSION_WATCH:
                 watch_item.sources.add(SOURCE_SHORT_WATCH)

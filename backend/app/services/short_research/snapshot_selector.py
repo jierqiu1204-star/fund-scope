@@ -14,7 +14,13 @@ from app.services.intraday_etf.exchange_calendar import (
     is_trading_day,
     localize_exchange_time,
 )
+from app.services.short_research.daily_reconstructable import (
+    daily_reconstructable_manifest,
+)
 from app.services.short_research.ranking_contract import final_score_v3_contract
+from app.services.short_research.ranking_surfaces import (
+    DUAL_RANKING_RULE_VERSION,
+)
 
 
 @dataclass(frozen=True)
@@ -248,6 +254,63 @@ async def resolve_current_canonical_etf_snapshot(
         )
     )
     return CanonicalSnapshotSelection("legacy" if legacy is not None else "waiting", None)
+
+
+async def resolve_current_etf_ranking_surface_snapshot(
+    session: AsyncSession,
+    *,
+    required_trade_date: date,
+    ranking_surface: Literal["research", "actionable"],
+) -> CanonicalSnapshotSelection:
+    research = daily_reconstructable_manifest()
+    has_etf_item, has_non_etf_item = _etf_item_clauses()
+    base = (
+        ShortResearchSignalRun.status == "success",
+        ShortResearchSignalRun.publication_state == "published",
+        ShortResearchSignalRun.scope_kind == "full",
+        ShortResearchSignalRun.score_version == research.contract_id,
+        ShortResearchSignalRun.rule_version == DUAL_RANKING_RULE_VERSION,
+        ShortResearchSignalRun.score_field == research.score_field,
+        ShortResearchSignalRun.price_basis == research.price_basis,
+        ShortResearchSignalRun.ranking_contract_hash.is_not(None),
+        has_etf_item,
+        ~has_non_etf_item,
+    )
+    runs = (
+        await session.scalars(
+            select(ShortResearchSignalRun)
+            .where(
+                *base,
+                ShortResearchSignalRun.as_of_trade_date == required_trade_date,
+            )
+            .order_by(
+                ShortResearchSignalRun.published_at.desc(),
+                ShortResearchSignalRun.id.desc(),
+            )
+        )
+    ).all()
+    for run in runs:
+        if ranking_surface == "research":
+            return CanonicalSnapshotSelection("ready", run)
+        surfaces = (run.summary_json or {}).get("ranking_surfaces")
+        actionable = (
+            surfaces.get("actionable")
+            if isinstance(surfaces, dict)
+            else None
+        )
+        if isinstance(actionable, dict) and int(actionable.get("eligible_count") or 0) > 0:
+            return CanonicalSnapshotSelection("ready", run)
+    if runs:
+        return CanonicalSnapshotSelection("waiting", None)
+    stale = await session.scalar(
+        select(ShortResearchSignalRun.id).where(
+            *base,
+            ShortResearchSignalRun.as_of_trade_date != required_trade_date,
+        )
+    )
+    if stale is not None:
+        return CanonicalSnapshotSelection("stale", None)
+    return CanonicalSnapshotSelection("waiting", None)
 
 
 async def select_canonical_etf_snapshot(

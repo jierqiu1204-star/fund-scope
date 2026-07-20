@@ -46,11 +46,10 @@ async def test_etf_daily_research_workflow_uses_one_lock_and_sequences_publicati
         return _CoverageBarrier()
 
     async def fake_materialize(_session, **kwargs):
-        assert kwargs == {
-            "trade_date": date(2026, 7, 10),
-            "decision_cutoff": datetime(2026, 7, 10, 15, 0),
-            "source_availability_cutoff": datetime(2026, 7, 10, 15, 0),
-        }
+        assert kwargs["trade_date"] == date(2026, 7, 10)
+        assert kwargs["decision_cutoff"] == datetime(2026, 7, 10, 15, 0)
+        assert kwargs["source_availability_cutoff"] == datetime(2026, 7, 10, 15, 0)
+        assert callable(kwargs["batch_progress_callback"])
         events.append("score")
         return SimpleNamespace(id=12)
 
@@ -62,8 +61,8 @@ async def test_etf_daily_research_workflow_uses_one_lock_and_sequences_publicati
     monkeypatch.setattr(etf_daily_research, "refresh_etf_universe", fake_refresh)
     monkeypatch.setattr(etf_daily_research, "sync_short_research_data_with_tracking_priority", fake_sync)
     monkeypatch.setattr(etf_daily_research, "build_etf_coverage_barrier", fake_barrier)
-    monkeypatch.setattr(etf_daily_research, "materialize_final_score_v3_snapshot", fake_materialize)
-    monkeypatch.setattr(etf_daily_research, "publish_full_snapshot", fake_publish)
+    monkeypatch.setattr(etf_daily_research, "materialize_dual_ranking_snapshot", fake_materialize)
+    monkeypatch.setattr(etf_daily_research, "publish_dual_ranking_snapshot", fake_publish)
 
     async with app.state.db.session() as session:
         result = await etf_daily_research.run_daily_etf_research_workflow(
@@ -129,6 +128,35 @@ async def test_etf_daily_research_workflow_reclaims_expired_running_lock(app) ->
 
 
 @pytest.mark.asyncio
+async def test_etf_daily_research_lock_persists_ranking_batch_cursor(app) -> None:
+    trade_date = date(2026, 7, 10)
+    async with app.state.db.session() as session:
+        assert await etf_daily_research.try_acquire_etf_daily_workflow_lock(
+            session,
+            trade_date,
+        )
+        await etf_daily_research.record_etf_ranking_batch_progress(
+            session,
+            trade_date,
+            {"cursor": "510019", "remaining": 25, "processed": 20},
+        )
+        await etf_daily_research.record_etf_ranking_batch_progress(
+            session,
+            trade_date,
+            {"cursor": "510039", "remaining": 5, "processed": 20},
+        )
+        lock = await session.get(EtfDailyWorkflowLock, trade_date)
+
+    assert lock is not None
+    assert lock.details_json["ranking_cursor"] == "510039"
+    assert lock.details_json["ranking_remaining"] == 5
+    assert [item["cursor"] for item in lock.details_json["ranking_batches"]] == [
+        "510019",
+        "510039",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_etf_daily_research_workflow_fails_closed_below_coverage_threshold(app, monkeypatch) -> None:
     class IncompleteCoverage(_CoverageBarrier):
         expected_codes = ["510300", "510500"]
@@ -180,8 +208,8 @@ async def test_etf_daily_research_workflow_reports_legacy_snapshot_publication_f
     monkeypatch.setattr(etf_daily_research, "refresh_etf_universe", fake_refresh)
     monkeypatch.setattr(etf_daily_research, "sync_short_research_data_with_tracking_priority", fake_sync)
     monkeypatch.setattr(etf_daily_research, "build_etf_coverage_barrier", fake_barrier)
-    monkeypatch.setattr(etf_daily_research, "materialize_final_score_v3_snapshot", fake_materialize)
-    monkeypatch.setattr(etf_daily_research, "publish_full_snapshot", fake_publish)
+    monkeypatch.setattr(etf_daily_research, "materialize_dual_ranking_snapshot", fake_materialize)
+    monkeypatch.setattr(etf_daily_research, "publish_dual_ranking_snapshot", fake_publish)
 
     async with app.state.db.session() as session:
         result = await etf_daily_research.run_daily_etf_research_workflow(
@@ -216,8 +244,8 @@ async def test_generate_and_publish_etf_snapshot_never_starts_history_sync(app, 
         return SimpleNamespace(id=21, publication_state="published")
 
     monkeypatch.setattr(etf_daily_research, "sync_short_research_data_with_tracking_priority", fail_sync)
-    monkeypatch.setattr(etf_daily_research, "materialize_final_score_v3_snapshot", fake_materialize)
-    monkeypatch.setattr(etf_daily_research, "publish_full_snapshot", fake_publish)
+    monkeypatch.setattr(etf_daily_research, "materialize_dual_ranking_snapshot", fake_materialize)
+    monkeypatch.setattr(etf_daily_research, "publish_dual_ranking_snapshot", fake_publish)
 
     async with app.state.db.session() as session:
         run = await etf_daily_research.generate_and_publish_etf_snapshot(
