@@ -67,7 +67,7 @@ def test_ineligible_exit_watch_produces_no_action() -> None:
 @pytest.mark.parametrize(
     ("alert_type", "expected_action", "expected_class", "expected_target"),
     [
-        (ALERT_TRAILING_TAKE_PROFIT, "reduce", ACTION_CLASS_ACTIONABLE_EXIT, 0.5),
+        (ALERT_TRAILING_TAKE_PROFIT, "trim", ACTION_CLASS_ACTIONABLE_EXIT, 0.75),
         (ALERT_CONFIRMED_TREND_WEAKENING, "reduce", ACTION_CLASS_ACTIONABLE_EXIT, 0.5),
         (ALERT_TREND_WEAKENING, "no_add", ACTION_CLASS_GUARD_ONLY, 1.0),
         (ALERT_TAKE_PROFIT_WATCH, "hold", ACTION_CLASS_SOFT_WATCH, 1.0),
@@ -85,6 +85,26 @@ def test_frozen_rule_mapping(
     assert decision.action == expected_action
     assert decision.action_class == expected_class
     assert decision.target_remaining_fraction == expected_target
+
+
+def test_trailing_take_profit_uses_two_stages_and_never_clears_on_trend_alone() -> None:
+    first_stage = map_exit_signal_to_position_action(
+        alert_type=ALERT_TRAILING_TAKE_PROFIT,
+        allow_full_exit=True,
+        trend_weakening=True,
+        current_remaining_fraction=1.0,
+    )
+    second_stage = map_exit_signal_to_position_action(
+        alert_type=ALERT_TRAILING_TAKE_PROFIT,
+        allow_full_exit=True,
+        trend_weakening=True,
+        current_remaining_fraction=0.75,
+    )
+
+    assert first_stage.action == "trim"
+    assert first_stage.target_remaining_fraction == 0.75
+    assert second_stage.action == "reduce"
+    assert second_stage.target_remaining_fraction == 0.5
 
 
 def _tracked_etf() -> TrackedPosition:
