@@ -58,7 +58,7 @@ def test_position_sizing_hard_stop_exits_when_allowed() -> None:
     assert sizing.recommended_trade_shares == 1500.0
 
 
-def test_position_sizing_trailing_take_profit_reduces_half() -> None:
+def test_position_sizing_trailing_take_profit_uses_first_stage_target() -> None:
     sizing = calculate_position_sizing(
         asset_type="etf",
         alert_type=ALERT_TRAILING_TAKE_PROFIT,
@@ -68,13 +68,13 @@ def test_position_sizing_trailing_take_profit_reduces_half() -> None:
         allow_full_exit=True,
     )
 
-    assert sizing.action == "reduce"
-    assert sizing.target_account_weight == 0.15
-    assert sizing.recommended_trade_amount == 1500.0
-    assert sizing.recommended_trade_shares == 750.0
+    assert sizing.action == "trim"
+    assert sizing.target_account_weight == 0.225
+    assert sizing.recommended_trade_amount == 750.0
+    assert sizing.recommended_trade_shares == 375.0
 
 
-def test_repeated_half_reduction_keeps_one_exposure_baseline_target() -> None:
+def test_repeated_trailing_reduction_uses_two_absolute_baseline_targets() -> None:
     current_market_value = 3000.0
     target_weights: list[float | None] = []
 
@@ -91,7 +91,7 @@ def test_repeated_half_reduction_keeps_one_exposure_baseline_target() -> None:
         target_weights.append(sizing.target_account_weight)
         current_market_value = float(sizing.target_account_weight or 0.0) * 10000.0
 
-    assert target_weights == [0.15, 0.15, 0.15]
+    assert target_weights == [0.225, 0.15, 0.15]
     assert current_market_value == 1500.0
 
 
