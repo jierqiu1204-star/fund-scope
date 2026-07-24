@@ -1,5 +1,6 @@
 from datetime import date, timedelta
 
+from app.schemas.tracked_positions import TrackedPositionExitSignal
 from app.services.risk_alerts import (
     ACTION_CLASS_GUARD_ONLY,
     ALERT_CONFIRMED_TREND_WEAKENING,
@@ -12,8 +13,8 @@ from app.services.risk_alerts import (
     BUCKET_THRESHOLD_SOURCE_INSUFFICIENT,
     POSITION_ACTION_EXIT,
     POSITION_ACTION_NO_ADD,
-    POSITION_ACTION_REENTRY_CANDIDATE,
     POSITION_ACTION_REDUCE,
+    POSITION_ACTION_REENTRY_CANDIDATE,
     REENTRY_STATE_BLOCKED,
     REENTRY_STATE_CANDIDATE,
     REENTRY_STATE_WAITING_COOLDOWN,
@@ -21,7 +22,6 @@ from app.services.risk_alerts import (
     calculate_position_sizing,
     evaluate_reentry_state,
 )
-from app.schemas.tracked_positions import TrackedPositionExitSignal
 from app.services.tracked_positions.service import PositionAnalysis, merge_exit_state
 
 
@@ -90,9 +90,9 @@ def test_hard_stop_exit_watch_trailing_and_take_profit_have_explicit_actions() -
 
     assert hard_stop.action == POSITION_ACTION_EXIT
     assert exit_watch.action == POSITION_ACTION_EXIT
-    assert trailing.action == POSITION_ACTION_REDUCE
+    assert trailing.action == "trim"
     assert watch.action == "hold"
-    assert trailing.recommended_trade_amount == 1500
+    assert trailing.recommended_trade_amount == 750
     assert watch.recommended_trade_amount is None
 
 
