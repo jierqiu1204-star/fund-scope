@@ -15,7 +15,7 @@ ALERT_TREND_WEAKENING = "trend_weakening"
 ALERT_CONFIRMED_TREND_WEAKENING = "confirmed_trend_weakening"
 ALERT_HARD_STOP = "hard_stop"
 
-EXIT_ACTION_VERSION = "etf_exit_action_v2"
+EXIT_ACTION_VERSION = "etf_exit_action_v3"
 REENTRY_RULE_VERSION = "etf_reentry_rule_v1"
 BUCKET_THRESHOLD_VERSION = "etf_bucket_threshold_v1"
 EXIT_EVIDENCE_VERSION = "etf_exit_evidence_v2"
@@ -45,6 +45,8 @@ ETF_TRAILING_PROFIT_START_MAX_PCT = 4.0
 ETF_TRAILING_GIVEBACK_VOL_MULTIPLIER = 0.65
 ETF_TRAILING_GIVEBACK_MIN_PCT = 1.8
 ETF_TRAILING_GIVEBACK_MAX_PCT = 2.5
+TRAILING_FIRST_TARGET_REMAINING_FRACTION = 0.75
+TRAILING_SECOND_TARGET_REMAINING_FRACTION = 0.50
 HARD_STOP_LOSS_PCT = -4.0
 TAKE_PROFIT_WATCH_COOLDOWN_DAYS = 3
 DEFAULT_ETF_TRADING_CAPITAL = 10000.0
@@ -263,7 +265,10 @@ def map_exit_signal_to_position_action(
     market_regime_weak: bool = False,
     evidence_eligible: bool = True,
     exit_watch_target_remaining_fraction: float | None = None,
+    current_remaining_fraction: float = 1.0,
 ) -> PositionActionDecision:
+    if not math.isfinite(current_remaining_fraction) or not 0.0 <= current_remaining_fraction <= 1.0:
+        raise ValueError("current_remaining_fraction must be a finite fraction")
     if alert_type == ALERT_HARD_STOP:
         return PositionActionDecision(
             action=POSITION_ACTION_EXIT,
@@ -297,20 +302,23 @@ def map_exit_signal_to_position_action(
             reason="有效退出观察证据触发版本化绝对持仓目标。",
         )
     if alert_type == ALERT_TRAILING_TAKE_PROFIT:
-        if trend_weakening and allow_full_exit:
+        if current_remaining_fraction > TRAILING_FIRST_TARGET_REMAINING_FRACTION:
             return PositionActionDecision(
-                action=POSITION_ACTION_EXIT,
+                action=POSITION_ACTION_TRIM,
                 action_class=ACTION_CLASS_ACTIONABLE_EXIT,
-                label=position_action_label(POSITION_ACTION_EXIT),
-                target_remaining_fraction=0.0,
-                reason="移动止盈同时叠加趋势转弱，允许清仓参考。",
+                label=position_action_label(POSITION_ACTION_TRIM),
+                target_remaining_fraction=TRAILING_FIRST_TARGET_REMAINING_FRACTION,
+                reason="首次触发移动止盈，先将持仓降至 exposure baseline 的 75%，避免一次性退出。",
             )
         return PositionActionDecision(
             action=POSITION_ACTION_REDUCE,
             action_class=ACTION_CLASS_ACTIONABLE_EXIT,
             label=position_action_label(POSITION_ACTION_REDUCE),
-            target_remaining_fraction=0.5,
-            reason="触发移动止盈，优先明显减仓保护利润，不默认清仓。",
+            target_remaining_fraction=TRAILING_SECOND_TARGET_REMAINING_FRACTION,
+            reason=(
+                "移动止盈再次触发，将持仓降至 exposure baseline 的 50%；"
+                "趋势转弱本身不会把该目标升级为清仓。"
+            ),
         )
     if alert_type == ALERT_CONFIRMED_TREND_WEAKENING:
         return PositionActionDecision(
@@ -530,10 +538,15 @@ def calculate_position_sizing(
         )
     baseline_quantity = exposure_baseline_quantity or (current_market_value / current_price)
     baseline_weight = baseline_quantity * current_price / capital
+    current_remaining_fraction = min(
+        1.0,
+        max(0.0, current_market_value / (baseline_quantity * current_price)),
+    )
     action_decision = map_exit_signal_to_position_action(
         alert_type=alert_type,
         allow_full_exit=allow_full_exit,
         trend_weakening=trend_weakening,
+        current_remaining_fraction=current_remaining_fraction,
     )
     action = action_decision.action
     reason = action_decision.reason
