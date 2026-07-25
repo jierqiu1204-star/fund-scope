@@ -47,8 +47,11 @@ TOTAL_RETURN_PRICE_BASIS = "total_return_adjusted"
 EASTMONEY_HFQ_ADJUSTMENT_VERSION = "eastmoney.push2his.kline.hfq_v1"
 EFINANCE_HFQ_ADJUSTMENT_VERSION = "efinance.stock.get_quote_history.fqt2_v1"
 TICKFLOW_BACKWARD_ADJUSTMENT_VERSION = "tickflow.free.klines.backward_v1"
+TENCENT_HFQ_ADJUSTMENT_VERSION = "tencent.ifzq.fqkline.hfq_v1"
 EASTMONEY_HISTORY_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 TICKFLOW_HISTORY_URL = "https://free-api.tickflow.org/v1/klines"
+TENCENT_RAW_HISTORY_URL = "https://web.ifzq.gtimg.cn/appstock/app/kline/kline"
+TENCENT_HFQ_HISTORY_URL = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
 EASTMONEY_HISTORY_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -57,6 +60,11 @@ EASTMONEY_HISTORY_HEADERS = {
     "Accept": "application/json,text/plain,*/*",
     "Referer": "https://quote.eastmoney.com/",
     "Connection": "close",
+}
+TENCENT_HISTORY_HEADERS = {
+    "User-Agent": EASTMONEY_HISTORY_HEADERS["User-Agent"],
+    "Accept": "application/json,text/plain,*/*",
+    "Referer": "https://gu.qq.com/",
 }
 
 PriceHistoryRows = list[dict[str, float | str]]
@@ -429,6 +437,107 @@ async def fetch_tickflow_etf_price_history_once(
             adjusted_response.json().get("data"), from_date, to_date
         ),
         TICKFLOW_BACKWARD_ADJUSTMENT_VERSION,
+    )
+
+
+def _tencent_symbol(code: str) -> str:
+    return f"sh{code}" if code.startswith(("5", "6")) else f"sz{code}"
+
+
+def parse_tencent_history_payload(
+    payload: Any,
+    *,
+    symbol: str,
+    series_names: tuple[str, ...],
+    from_date: date,
+    to_date: date,
+) -> PriceHistoryRows:
+    root = payload.get("data") if isinstance(payload, dict) else None
+    instrument = root.get(symbol) if isinstance(root, dict) else None
+    if not isinstance(instrument, dict):
+        return []
+    records: Any = None
+    for series_name in series_names:
+        candidate = instrument.get(series_name)
+        if isinstance(candidate, list):
+            records = candidate
+            break
+    if not isinstance(records, list):
+        return []
+
+    rows: PriceHistoryRows = []
+    previous_close: float | None = None
+    for item in records:
+        if not isinstance(item, list | tuple) or len(item) < 6:
+            raise ValueError("腾讯返回了不完整的 ETF 日线数据")
+        trade_date = _parse_date(item[0])
+        close = float(item[2])
+        pct_change = close / previous_close * 100 - 100 if previous_close else 0.0
+        previous_close = close
+        if not from_date <= trade_date <= to_date:
+            continue
+        volume = float(item[5])
+        rows.append(
+            {
+                "date": trade_date.isoformat(),
+                "open": float(item[1]),
+                "close": close,
+                "high": float(item[3]),
+                "low": float(item[4]),
+                "volume": volume,
+                "turnover": volume * close,
+                "pct_change": pct_change,
+            }
+        )
+    return rows
+
+
+async def fetch_tencent_etf_price_history_once(
+    client: httpx.AsyncClient,
+    code: str,
+    from_date: date,
+    to_date: date,
+) -> PriceHistoryRows:
+    symbol = _tencent_symbol(code)
+    count = min(2_000, max(1, (to_date - from_date).days + 1))
+    raw_response = await client.get(
+        TENCENT_RAW_HISTORY_URL,
+        params={
+            "param": (
+                f"{symbol},day,{from_date.isoformat()},"
+                f"{to_date.isoformat()},{count}"
+            )
+        },
+        headers=TENCENT_HISTORY_HEADERS,
+    )
+    raw_response.raise_for_status()
+    hfq_response = await client.get(
+        TENCENT_HFQ_HISTORY_URL,
+        params={
+            "param": (
+                f"{symbol},day,{from_date.isoformat()},"
+                f"{to_date.isoformat()},{count},hfq"
+            )
+        },
+        headers=TENCENT_HISTORY_HEADERS,
+    )
+    hfq_response.raise_for_status()
+    return _attach_hfq_research_prices(
+        parse_tencent_history_payload(
+            raw_response.json(),
+            symbol=symbol,
+            series_names=("day",),
+            from_date=from_date,
+            to_date=to_date,
+        ),
+        parse_tencent_history_payload(
+            hfq_response.json(),
+            symbol=symbol,
+            series_names=("hfqday", "day"),
+            from_date=from_date,
+            to_date=to_date,
+        ),
+        TENCENT_HFQ_ADJUSTMENT_VERSION,
     )
 
 

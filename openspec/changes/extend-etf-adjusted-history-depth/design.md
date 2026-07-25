@@ -82,12 +82,24 @@ short-history count, bounded samples, effective profile, elapsed time, RSS,
 rows/sec, checkpoint identity, and stop reason. Full code arrays remain internal
 to the runner and are not persisted in scheduler job summaries.
 
+### 6. Keep one independent adjusted fallback
+
+The adjusted provider chain may use Tencent raw and `hfq` daily series as an
+explicitly versioned fallback after TickFlow and Eastmoney. Tencent rows become
+decision eligible only when raw and `hfq` dates pair successfully and every row
+passes the existing provenance checks. Tencent remains a fallback because its
+three-decimal adjusted values are less precise than TickFlow. It is independent
+of Eastmoney's `push2his` host, so an Eastmoney/efinance network block does not
+force raw-price substitution.
+
 ## Risks / Trade-offs
 
 - [Many ETFs are genuinely new] → Keep them in the denominator, persist factual
   short-history observations, and wait rather than fabricate data.
 - [Provider returns a capped range] → Record requested and returned boundaries;
   retry after cooldown and never infer a listing date.
+- [Eastmoney host is unreachable] → Try the independently hosted, explicitly
+  versioned Tencent `hfq` response; never promote Tencent raw-only rows.
 - [More rows raise memory] → Retain 500-row pages, 5,000-row slices, 512 MiB RSS,
   and adaptive downshift.
 - [Profile changes lose progress] → Resume rotation from the durable scope

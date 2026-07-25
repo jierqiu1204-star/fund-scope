@@ -16,6 +16,7 @@ def _adjusted_row(provider: str) -> list[dict[str, float | str]]:
     versions = {
         "tickflow": data.TICKFLOW_BACKWARD_ADJUSTMENT_VERSION,
         "eastmoney": data.EASTMONEY_HFQ_ADJUSTMENT_VERSION,
+        "tencent": data.TENCENT_HFQ_ADJUSTMENT_VERSION,
         "efinance": data.EFINANCE_HFQ_ADJUSTMENT_VERSION,
     }
     version = versions[provider]
@@ -275,4 +276,49 @@ async def test_deepest_valid_partial_is_kept_when_all_providers_are_short() -> N
             "short_history_count"
         ]
         == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_independent_tencent_adjusted_fallback_survives_eastmoney_failure() -> None:
+    calls: list[str] = []
+
+    async def shallow(*_args: object) -> list[dict[str, float | str]]:
+        calls.append("tickflow")
+        return _adjusted_rows("tickflow", 2)
+
+    async def disconnected(*_args: object) -> list[dict[str, float | str]]:
+        calls.append("eastmoney")
+        raise ConnectionError("push2his disconnected")
+
+    async def independent(*_args: object) -> list[dict[str, float | str]]:
+        calls.append("tencent")
+        return _adjusted_rows("tencent", 3)
+
+    async def unused(*_args: object) -> list[dict[str, float | str]]:
+        raise AssertionError("efinance must not run after a sufficient result")
+
+    async with PublicationAdjustedHistoryFetcher(
+        attempt_timeout_seconds=0.1,
+        minimum_eligible_rows=3,
+        providers=(
+            ("tickflow", shallow),
+            ("eastmoney", disconnected),
+            ("tencent", independent),
+            ("efinance", unused),
+        ),
+    ) as fetch:
+        result = await fetch(
+            "510050",
+            date(2026, 7, 20),
+            date(2026, 7, 22),
+        )
+
+    assert calls == ["tickflow", "eastmoney", "tencent"]
+    assert result.provider == "tencent"
+    assert result.fallback_used is True
+    assert len(result.rows) == 3
+    assert result.provider_health is not None
+    assert result.provider_health["providers"]["eastmoney"]["last_error"].startswith(
+        "ConnectionError:"
     )

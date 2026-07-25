@@ -18,6 +18,7 @@ from app.services.short_etf.bounded_history_sync import (
     run_bounded_history_sync_slice,
 )
 from app.services.short_etf.publication_providers import (
+    PUBLICATION_PROVIDER_POLICY_VERSION,
     PublicationAdjustedHistoryFetcher,
 )
 from app.services.short_research.history_readiness import SCORE_WARMUP_SESSIONS
@@ -40,7 +41,6 @@ from app.services.workflows.etf_history_readiness import (
     read_etf_history_readiness,
 )
 
-PUBLICATION_PROVIDER_POLICY_VERSION = "adjusted-provider-policy-v1"
 PUBLICATION_ADJUSTMENT_CONTRACT = "total-return-adjusted-provenance-v1"
 PUBLICATION_READINESS_SCOPE_PREFIX = "publication_readiness"
 PUBLICATION_RSS_LIMIT_BYTES = 512 * 1024 * 1024

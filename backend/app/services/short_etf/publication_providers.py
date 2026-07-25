@@ -12,12 +12,13 @@ import httpx
 from app.services.short_etf import data
 from app.services.short_etf.data import PriceHistoryRows, ProviderFetchResult
 
-PUBLICATION_PROVIDER_POLICY_VERSION = "adjusted-provider-policy-v1"
+PUBLICATION_PROVIDER_POLICY_VERSION = "adjusted-provider-policy-v2"
 MAX_PROVIDER_ATTEMPT_SECONDS = 6.0
 PROVIDER_COOLDOWN_SECONDS = 300
 ACCEPTED_ADJUSTED_PROVIDER_VERSIONS = {
     "tickflow": data.TICKFLOW_BACKWARD_ADJUSTMENT_VERSION,
     "eastmoney": data.EASTMONEY_HFQ_ADJUSTMENT_VERSION,
+    "tencent": data.TENCENT_HFQ_ADJUSTMENT_VERSION,
     "efinance": data.EFINANCE_HFQ_ADJUSTMENT_VERSION,
 }
 
@@ -119,6 +120,15 @@ class PublicationAdjustedHistoryFetcher:
                     from_date,
                     to_date,
                     keep_alive=True,
+                ),
+            ),
+            (
+                "tencent",
+                lambda code, from_date, to_date: data.fetch_tencent_etf_price_history_once(
+                    self._require_client(),
+                    code,
+                    from_date,
+                    to_date,
                 ),
             ),
             ("efinance", data.fetch_efinance_etf_price_history_once),

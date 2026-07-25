@@ -19,6 +19,9 @@
 - [x] 2.4 Continue through provenance-valid adjusted fallbacks when an earlier
   provider is shallower than the requested lane, and retain the deepest valid
   partial response when every provider is short.
+- [x] 2.5 Add an independently hosted Tencent raw-plus-hfq fallback with a
+  distinct provider version, row pairing, and rejection tests so Eastmoney
+  network blocks never cause raw-price substitution.
 
 ## 3. Extend The Bounded Runner
 

@@ -179,6 +179,64 @@ async def test_tickflow_history_requests_raw_and_backward_with_total_return_prov
 
 
 @pytest.mark.asyncio
+async def test_tencent_history_pairs_raw_and_hfq_with_total_return_provenance() -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        symbol = "sh510050"
+        if request.url.path.endswith("/fqkline/get"):
+            instrument = {
+                "hfqday": [
+                    ["2026-07-10", "2.0", "2.0", "2.1", "1.9", "100"]
+                ]
+            }
+        else:
+            instrument = {
+                "day": [
+                    ["2026-07-10", "1.0", "1.0", "1.1", "0.9", "100"]
+                ]
+            }
+        return httpx.Response(200, json={"data": {symbol: instrument}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        rows = await data.fetch_tencent_etf_price_history_once(
+            client,
+            "510050",
+            date(2026, 7, 10),
+            date(2026, 7, 10),
+        )
+
+    assert len(requests) == 2
+    assert requests[0].url.path.endswith("/kline/kline")
+    assert requests[0].url.params["param"] == (
+        "sh510050,day,2026-07-10,2026-07-10,1"
+    )
+    assert requests[1].url.path.endswith("/fqkline/get")
+    assert requests[1].url.params["param"] == (
+        "sh510050,day,2026-07-10,2026-07-10,1,hfq"
+    )
+    assert all(request.headers["referer"] == "https://gu.qq.com/" for request in requests)
+    assert rows[0]["close"] == 1.0
+    assert rows[0]["turnover"] == 100.0
+    assert rows[0]["research_adjusted_value"] == 2.0
+    assert rows[0]["research_price_basis"] == data.TOTAL_RETURN_PRICE_BASIS
+    assert rows[0]["adjustment_version"] == data.TENCENT_HFQ_ADJUSTMENT_VERSION
+    assert rows[0]["provider_version"] == data.TENCENT_HFQ_ADJUSTMENT_VERSION
+
+
+def test_tencent_parser_rejects_incomplete_rows() -> None:
+    with pytest.raises(ValueError, match="腾讯返回了不完整"):
+        data.parse_tencent_history_payload(
+            {"data": {"sh510050": {"day": [["2026-07-10", "1.0"]]}}},
+            symbol="sh510050",
+            series_names=("day",),
+            from_date=date(2026, 7, 10),
+            to_date=date(2026, 7, 10),
+        )
+
+
+@pytest.mark.asyncio
 async def test_sync_records_primary_source_failure_for_raw_fallback(app, monkeypatch) -> None:
     async with app.state.db.session() as session:
         session.add(

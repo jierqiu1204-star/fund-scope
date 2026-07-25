@@ -13,6 +13,13 @@ version-incompatible rows without increasing decision coverage.
 - **THEN** the bounded provider chain may try the next configured adjusted
   provider within its six-second per-attempt and slice deadlines
 
+#### Scenario: Eastmoney hosts are unreachable
+
+- **WHEN** Eastmoney and efinance cannot reach their shared history host
+- **THEN** an independently hosted Tencent raw-plus-hfq response may satisfy the
+  adjusted lane only under its explicit provider version and existing per-row
+  provenance checks
+
 #### Scenario: Primary adjusted history is shallower than the lane target
 
 - **WHEN** the first provider returns valid adjusted rows but fewer unique
