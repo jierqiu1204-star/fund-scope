@@ -37,6 +37,7 @@ from app.services.short_research.jobs import (
     post_close_etf_label_outcome_review_job,
     post_close_etf_observation_portfolio_job,
     post_close_etf_signals_job,
+    post_publication_etf_research_history_job,
 )
 from app.services.strategy_lab.jobs import daily_strategy_paper_job
 from app.services.tracked_positions.jobs import daily_tracked_position_alerts_job
@@ -294,6 +295,22 @@ def register_default_jobs(
         hour=22,
         minute=0,
         id="daily_tracked_position_alerts",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_tracked_job,
+        "cron",
+        args=[
+            db,
+            "post_publication_etf_research_history",
+            post_publication_etf_research_history_job,
+        ],
+        day_of_week="mon-fri",
+        hour=23,
+        minute="0-28/2",
+        id="post_publication_etf_research_history",
+        max_instances=1,
+        coalesce=True,
         replace_existing=True,
     )
     scheduler.add_job(

@@ -96,4 +96,4 @@ def test_validation_continuation_migration_is_reversible_and_single_head() -> No
 
     config = Config()
     config.set_main_option("script_location", str(VERSIONS_DIR.parent))
-    assert ScriptDirectory.from_config(config).get_heads() == ["20260717_000051"]
+    assert len(ScriptDirectory.from_config(config).get_heads()) == 1

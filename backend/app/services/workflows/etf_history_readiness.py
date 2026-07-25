@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from datetime import date
 from typing import Any
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, false, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.entities import (
@@ -14,6 +14,8 @@ from app.models.entities import (
 )
 from app.services.short_research.history_readiness import (
     DAILY_FRESHNESS_SCOPE,
+    DEEP_TELEMETRY_DEPTH_SCOPE,
+    DEEP_TELEMETRY_DEPTH_SESSIONS,
     SCORE_WARMUP_SCOPE,
     SCORE_WARMUP_SESSIONS,
     TELEMETRY_DEPTH_SCOPE,
@@ -183,6 +185,7 @@ async def read_etf_history_readiness(
     contract_hash = current_etf_history_contract_hash(horizons=frozen_horizons)
     contract_scope = history_depth_scope(contract_hash)
     contract_required = derived_replay_depth_sessions(horizons=frozen_horizons)
+    maximum_required = max(contract_required, DEEP_TELEMETRY_DEPTH_SESSIONS)
     universe = await build_point_in_time_universe_snapshot(
         session,
         as_of_date=effective_date,
@@ -192,24 +195,28 @@ async def read_etf_history_readiness(
     session_dates_result = await session.scalars(
         select(EtfPriceHistory.trade_date)
         .where(
-            EtfPriceHistory.etf_code.in_(codes) if codes else False,
+            EtfPriceHistory.etf_code.in_(codes) if codes else false(),
             EtfPriceHistory.trade_date <= effective_date,
             EtfPriceHistory.decision_eligible.is_(True),
             EtfPriceHistory.research_price_basis == "total_return_adjusted",
         )
         .distinct()
         .order_by(EtfPriceHistory.trade_date.desc())
-        .limit(contract_required)
+        .limit(maximum_required)
     )
     session_dates = tuple(reversed(session_dates_result.all()))
     warmup_dates = frozenset(session_dates[-SCORE_WARMUP_SESSIONS:])
     telemetry_dates = frozenset(session_dates[-TELEMETRY_DEPTH_SESSIONS:])
     contract_dates = frozenset(session_dates[-contract_required:])
+    deep_telemetry_dates = frozenset(
+        session_dates[-DEEP_TELEMETRY_DEPTH_SESSIONS:]
+    )
 
     daily_by_code = {code: 0 for code in codes}
     warmup_by_code = {code: 0 for code in codes}
     telemetry_by_code = {code: 0 for code in codes}
     contract_by_code = {code: 0 for code in codes}
+    deep_telemetry_by_code = {code: 0 for code in codes}
     if codes and session_dates:
         rows = await session.execute(
             select(
@@ -226,25 +233,39 @@ async def read_etf_history_readiness(
                 func.sum(
                     case((EtfPriceHistory.trade_date.in_(contract_dates), 1), else_=0)
                 ),
+                func.sum(
+                    case(
+                        (
+                            EtfPriceHistory.trade_date.in_(deep_telemetry_dates),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
             )
             .where(
                 EtfPriceHistory.etf_code.in_(codes),
-                EtfPriceHistory.trade_date.in_(contract_dates),
+                EtfPriceHistory.trade_date.in_(deep_telemetry_dates),
                 EtfPriceHistory.decision_eligible.is_(True),
                 EtfPriceHistory.research_price_basis == "total_return_adjusted",
             )
             .group_by(EtfPriceHistory.etf_code)
         )
-        for code, daily, warmup, telemetry, contract in rows:
+        for code, daily, warmup, telemetry, contract, deep_telemetry in rows:
             key = str(code)
             daily_by_code[key] = int(daily or 0)
             warmup_by_code[key] = int(warmup or 0)
             telemetry_by_code[key] = int(telemetry or 0)
             contract_by_code[key] = int(contract or 0)
+            deep_telemetry_by_code[key] = int(deep_telemetry or 0)
 
     daily_attempted = await _latest_attempted_codes(session, scope=DAILY_FRESHNESS_SCOPE)
     warmup_attempted = await _latest_attempted_codes(session, scope=SCORE_WARMUP_SCOPE)
     contract_attempted = await _latest_attempted_codes(session, scope=contract_scope)
+    deep_telemetry_attempted = await _latest_attempted_codes(
+        session,
+        scope=DEEP_TELEMETRY_DEPTH_SCOPE,
+    )
     daily = _lane_payload(
         scope=DAILY_FRESHNESS_SCOPE,
         required_sessions=1,
@@ -281,10 +302,24 @@ async def read_etf_history_readiness(
         attempted_codes=(),
         available_session_count=len(telemetry_dates),
     )
+    deep_telemetry = _lane_payload(
+        scope=DEEP_TELEMETRY_DEPTH_SCOPE,
+        required_sessions=DEEP_TELEMETRY_DEPTH_SESSIONS,
+        authoritative=False,
+        codes=codes,
+        depth_by_code=deep_telemetry_by_code,
+        attempted_codes=deep_telemetry_attempted,
+        available_session_count=len(deep_telemetry_dates),
+    )
     source_date_count = await _compatible_production_source_date_count(session)
     continuation_health = await _continuation_health_by_scope(
         session,
-        scopes=(DAILY_FRESHNESS_SCOPE, SCORE_WARMUP_SCOPE, contract_scope),
+        scopes=(
+            DAILY_FRESHNESS_SCOPE,
+            SCORE_WARMUP_SCOPE,
+            contract_scope,
+            DEEP_TELEMETRY_DEPTH_SCOPE,
+        ),
     )
     history_publication_gate_passed = (
         daily["coverage_ratio"] >= PUBLICATION_COVERAGE_THRESHOLD
@@ -311,6 +346,7 @@ async def read_etf_history_readiness(
         "history_depth_61": warmup,
         "contract_depth": contract,
         "telemetry_depth_180": telemetry,
+        "telemetry_depth_500": deep_telemetry,
         "historical_production_snapshots": {
             "compatible_source_date_count": source_date_count,
             "required_source_date_count": 20,
@@ -321,6 +357,9 @@ async def read_etf_history_readiness(
             "daily_freshness": continuation_health[DAILY_FRESHNESS_SCOPE],
             "history_depth_61": continuation_health[SCORE_WARMUP_SCOPE],
             "contract_depth": continuation_health[contract_scope],
+            "telemetry_depth_500": continuation_health[
+                DEEP_TELEMETRY_DEPTH_SCOPE
+            ],
         },
         "history_publication_gate_passed": history_publication_gate_passed,
         "publication_coverage_threshold": PUBLICATION_COVERAGE_THRESHOLD,

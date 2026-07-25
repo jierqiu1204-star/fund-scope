@@ -62,6 +62,9 @@ from app.services.workflows.etf_history_readiness import (
 from app.services.workflows.etf_publish_readiness import (
     run_post_close_etf_publication_readiness,
 )
+from app.services.workflows.etf_research_history_sync import (
+    run_post_publication_etf_research_history_slice,
+)
 from app.services.workflows.short_research_data import (
     sync_short_research_data_with_tracking_priority as sync_short_research_data,
 )
@@ -544,6 +547,12 @@ async def post_close_etf_adjusted_sync_job(session: AsyncSession) -> dict[str, A
         trade_date=trade_date,
         decision_cutoff=decision_cutoff,
     )
+
+
+async def post_publication_etf_research_history_job(
+    session: AsyncSession,
+) -> dict[str, Any]:
+    return await run_post_publication_etf_research_history_slice(session)
 
 
 async def daily_short_research_advisor_job(

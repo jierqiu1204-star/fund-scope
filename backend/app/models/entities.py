@@ -456,6 +456,46 @@ class EtfSyncCursor(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
+class EtfAdjustedHistoryAvailability(Base):
+    __tablename__ = "etf_adjusted_history_availability"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('sufficient', 'source_history_shortfall')",
+            name="ck_etf_adjusted_history_availability_status",
+        ),
+        CheckConstraint(
+            "eligible_session_count >= 0",
+            name="ck_etf_adjusted_history_availability_count",
+        ),
+        SaIndex(
+            "ix_etf_adjusted_history_availability_retry",
+            "provider_policy_version",
+            "retry_after",
+        ),
+    )
+
+    etf_code: Mapped[str] = mapped_column(
+        ForeignKey("tradable_etfs.code", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    provider_policy_version: Mapped[str] = mapped_column(
+        String(128),
+        primary_key=True,
+    )
+    provider: Mapped[str] = mapped_column(String(64))
+    provider_version: Mapped[str] = mapped_column(String(128))
+    adjustment_version: Mapped[str] = mapped_column(String(128))
+    requested_from: Mapped[date] = mapped_column(Date)
+    requested_to: Mapped[date] = mapped_column(Date)
+    earliest_eligible_date: Mapped[date] = mapped_column(Date)
+    latest_eligible_date: Mapped[date] = mapped_column(Date)
+    eligible_session_count: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32))
+    observed_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    retry_after: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    evidence_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
 class DatabaseInstanceIdentity(Base):
     __tablename__ = "database_instance_identity"
     __table_args__ = (

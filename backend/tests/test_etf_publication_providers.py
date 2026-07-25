@@ -37,6 +37,20 @@ def _adjusted_row(provider: str) -> list[dict[str, float | str]]:
     ]
 
 
+def _adjusted_rows(
+    provider: str,
+    count: int,
+) -> list[dict[str, float | str]]:
+    base = _adjusted_row(provider)[0]
+    return [
+        {
+            **base,
+            "date": date(2026, 7, 20 + offset).isoformat(),
+        }
+        for offset in range(count)
+    ]
+
+
 @pytest.mark.asyncio
 async def test_per_provider_timeout_allows_adjusted_fallback() -> None:
     calls: list[str] = []
@@ -177,3 +191,88 @@ async def test_invalid_adjusted_provenance_is_rejected(
     ) as fetch:
         with pytest.raises(PublicationProviderError):
             await fetch("510050", date(2026, 7, 20), date(2026, 7, 20))
+
+
+@pytest.mark.asyncio
+async def test_provider_filters_invalid_rows_from_partly_valid_response() -> None:
+    async def mixed(*_args: object) -> list[dict[str, float | str]]:
+        valid = _adjusted_row("eastmoney")[0]
+        invalid = {**valid, "date": "2026-07-21", "provider_version": "wrong"}
+        return [valid, invalid]
+
+    async with PublicationAdjustedHistoryFetcher(
+        attempt_timeout_seconds=0.1,
+        providers=(("eastmoney", mixed),),
+    ) as fetch:
+        result = await fetch(
+            "510050",
+            date(2026, 7, 20),
+            date(2026, 7, 21),
+        )
+
+    assert result.rows == _adjusted_row("eastmoney")
+
+
+@pytest.mark.asyncio
+async def test_short_primary_history_falls_through_to_deeper_adjusted_provider() -> None:
+    calls: list[str] = []
+
+    async def shallow(*_args: object) -> list[dict[str, float | str]]:
+        calls.append("tickflow")
+        return _adjusted_rows("tickflow", 2)
+
+    async def deep(*_args: object) -> list[dict[str, float | str]]:
+        calls.append("eastmoney")
+        return _adjusted_rows("eastmoney", 3)
+
+    async with PublicationAdjustedHistoryFetcher(
+        attempt_timeout_seconds=0.1,
+        minimum_eligible_rows=3,
+        providers=(("tickflow", shallow), ("eastmoney", deep)),
+    ) as fetch:
+        result = await fetch(
+            "510050",
+            date(2026, 7, 20),
+            date(2026, 7, 22),
+        )
+
+    assert calls == ["tickflow", "eastmoney"]
+    assert result.provider == "eastmoney"
+    assert result.fallback_used is True
+    assert len(result.rows) == 3
+    assert result.primary_error == "tickflow:eligible_rows_below_minimum:2<3"
+    assert result.provider_health is not None
+    assert (
+        result.provider_health["providers"]["tickflow"]["short_history_count"]
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_deepest_valid_partial_is_kept_when_all_providers_are_short() -> None:
+    async def two_rows(*_args: object) -> list[dict[str, float | str]]:
+        return _adjusted_rows("tickflow", 2)
+
+    async def three_rows(*_args: object) -> list[dict[str, float | str]]:
+        return _adjusted_rows("eastmoney", 3)
+
+    async with PublicationAdjustedHistoryFetcher(
+        attempt_timeout_seconds=0.1,
+        minimum_eligible_rows=5,
+        providers=(("tickflow", two_rows), ("eastmoney", three_rows)),
+    ) as fetch:
+        result = await fetch(
+            "510050",
+            date(2026, 7, 20),
+            date(2026, 7, 24),
+        )
+
+    assert result.provider == "eastmoney"
+    assert len(result.rows) == 3
+    assert result.provider_health is not None
+    assert (
+        result.provider_health["providers"]["eastmoney"][
+            "short_history_count"
+        ]
+        == 1
+    )

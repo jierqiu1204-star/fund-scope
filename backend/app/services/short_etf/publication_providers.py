@@ -34,6 +34,7 @@ def _default_health() -> dict[str, Any]:
     return {
         "consecutive_failures": 0,
         "accepted_successes": 0,
+        "short_history_count": 0,
         "timeout_count": 0,
         "latency_ms": 0.0,
         "circuit_state": "closed",
@@ -42,14 +43,15 @@ def _default_health() -> dict[str, Any]:
     }
 
 
-def _has_accepted_adjusted_row(
+def _accepted_adjusted_rows(
     provider: str,
     rows: PriceHistoryRows,
     *,
     from_date: date,
     to_date: date,
-) -> bool:
+) -> PriceHistoryRows:
     expected_version = ACCEPTED_ADJUSTED_PROVIDER_VERSIONS[provider]
+    accepted: PriceHistoryRows = []
     for row in rows:
         try:
             trade_date = date.fromisoformat(str(row["date"]))
@@ -64,8 +66,8 @@ def _has_accepted_adjusted_row(
             and row.get("adjustment_version") == expected_version
             and row.get("provider_version") == expected_version
         ):
-            return True
-    return False
+            accepted.append(row)
+    return accepted
 
 
 class PublicationAdjustedHistoryFetcher:
@@ -73,12 +75,16 @@ class PublicationAdjustedHistoryFetcher:
         self,
         *,
         attempt_timeout_seconds: float = MAX_PROVIDER_ATTEMPT_SECONDS,
+        minimum_eligible_rows: int = 1,
         restored_health: Mapping[str, Mapping[str, Any]] | None = None,
         providers: tuple[tuple[str, AdjustedProvider], ...] | None = None,
     ) -> None:
         if not 0 < attempt_timeout_seconds <= MAX_PROVIDER_ATTEMPT_SECONDS:
             raise ValueError("provider attempt timeout must be between 0 and 6 seconds")
+        if not 1 <= minimum_eligible_rows <= 5_000:
+            raise ValueError("minimum eligible rows must be between 1 and 5000")
         self.attempt_timeout_seconds = attempt_timeout_seconds
+        self.minimum_eligible_rows = minimum_eligible_rows
         self._injected_providers = providers
         self._providers: tuple[tuple[str, AdjustedProvider], ...] = ()
         self._client: httpx.AsyncClient | None = None
@@ -157,6 +163,7 @@ class PublicationAdjustedHistoryFetcher:
             raise RuntimeError("publication provider pool is not open")
         errors: list[str] = []
         attempted_index = 0
+        deepest_partial: tuple[int, str, PriceHistoryRows, int] | None = None
         now = datetime.utcnow()
         for provider, fetcher in self._providers:
             if provider not in ACCEPTED_ADJUSTED_PROVIDER_VERSIONS:
@@ -169,18 +176,19 @@ class PublicationAdjustedHistoryFetcher:
                 continue
             health["circuit_state"] = "closed"
             started = time.monotonic()
-            task = asyncio.create_task(fetcher(code, from_date, to_date))
+            task = asyncio.ensure_future(fetcher(code, from_date, to_date))
             try:
                 rows = await asyncio.wait_for(
                     task,
                     timeout=self.attempt_timeout_seconds,
                 )
-                if not _has_accepted_adjusted_row(
+                accepted_rows = _accepted_adjusted_rows(
                     provider,
                     rows,
                     from_date=from_date,
                     to_date=to_date,
-                ):
+                )
+                if not accepted_rows:
                     raise ValueError("no_provenance_valid_adjusted_rows")
             except asyncio.CancelledError:
                 task.cancel()
@@ -194,18 +202,41 @@ class PublicationAdjustedHistoryFetcher:
             except Exception as exc:  # noqa: BLE001
                 error = f"{type(exc).__name__}:{str(exc)[:120]}"
             else:
+                eligible_date_count = len(
+                    {str(row["date"]) for row in accepted_rows}
+                )
                 health["consecutive_failures"] = 0
                 health["accepted_successes"] = int(health["accepted_successes"] or 0) + 1
                 health["latency_ms"] = round((time.monotonic() - started) * 1000, 3)
                 health["retry_after"] = None
                 health["last_error"] = None
-                return ProviderFetchResult(
-                    rows=rows,
-                    provider=provider,
-                    fallback_used=attempted_index > 0,
-                    primary_error=errors[0] if errors else None,
-                    provider_health=self.health_payload(),
+                if eligible_date_count >= self.minimum_eligible_rows:
+                    return ProviderFetchResult(
+                        rows=accepted_rows,
+                        provider=provider,
+                        fallback_used=attempted_index > 0,
+                        primary_error=errors[0] if errors else None,
+                        provider_health=self.health_payload(),
+                    )
+                health["short_history_count"] = (
+                    int(health["short_history_count"] or 0) + 1
                 )
+                if (
+                    deepest_partial is None
+                    or eligible_date_count > deepest_partial[0]
+                ):
+                    deepest_partial = (
+                        eligible_date_count,
+                        provider,
+                        accepted_rows,
+                        attempted_index,
+                    )
+                errors.append(
+                    f"{provider}:eligible_rows_below_minimum:"
+                    f"{eligible_date_count}<{self.minimum_eligible_rows}"
+                )
+                attempted_index += 1
+                continue
             health["consecutive_failures"] = int(health["consecutive_failures"] or 0) + 1
             health["latency_ms"] = round((time.monotonic() - started) * 1000, 3)
             health["last_error"] = error
@@ -216,6 +247,15 @@ class PublicationAdjustedHistoryFetcher:
                 ).isoformat()
             errors.append(f"{provider}:{error}")
             attempted_index += 1
+        if deepest_partial is not None:
+            _, provider, rows, provider_index = deepest_partial
+            return ProviderFetchResult(
+                rows=rows,
+                provider=provider,
+                fallback_used=provider_index > 0,
+                primary_error=errors[0] if errors else None,
+                provider_health=self.health_payload(),
+            )
         raise PublicationProviderError(";".join(errors), self.health_payload())
 
 

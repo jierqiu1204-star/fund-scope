@@ -57,5 +57,5 @@ def test_database_identity_revision_remains_in_the_single_head_chain() -> None:
     config.set_main_option("script_location", str(VERSIONS_DIR.parent))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["20260717_000051"]
+    assert len(script.get_heads()) == 1
     assert script.get_revision("20260717_000050") is not None

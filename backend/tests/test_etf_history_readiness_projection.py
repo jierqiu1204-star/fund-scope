@@ -90,6 +90,8 @@ async def test_readiness_separates_current_freshness_from_61_session_depth(app) 
     assert report["contract_depth"]["required_sessions"] == 200
     assert report["contract_depth"]["covered_count"] == 0
     assert report["telemetry_depth_180"]["authoritative"] is False
+    assert report["telemetry_depth_500"]["required_sessions"] == 500
+    assert report["telemetry_depth_500"]["authoritative"] is False
     assert report["historical_production_snapshots"]["ready"] is False
     assert report["history_publication_gate_passed"] is False
 
@@ -156,6 +158,7 @@ async def test_short_etf_data_status_exposes_independent_history_lanes(client) -
     assert readiness["daily_freshness"]["scope"] == "daily_freshness"
     assert readiness["history_depth_61"]["scope"] == "history_depth_61"
     assert readiness["contract_depth"]["scope"].startswith("history_depth_required:")
+    assert readiness["telemetry_depth_500"]["scope"] == "history_depth_500_telemetry"
 
 
 @pytest.mark.asyncio

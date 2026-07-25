@@ -9,8 +9,10 @@ from datetime import date
 DAILY_FRESHNESS_SCOPE = "daily_freshness"
 SCORE_WARMUP_SCOPE = "history_depth_61"
 TELEMETRY_DEPTH_SCOPE = "history_depth_180_telemetry"
+DEEP_TELEMETRY_DEPTH_SCOPE = "history_depth_500_telemetry"
 SCORE_WARMUP_SESSIONS = 61
 TELEMETRY_DEPTH_SESSIONS = 180
+DEEP_TELEMETRY_DEPTH_SESSIONS = 500
 REQUIRED_INDEPENDENT_DATES = 20
 
 
@@ -86,6 +88,7 @@ class EtfHistoryReadiness:
     history_depth_61: EtfHistoryLaneCoverage
     contract_depth: EtfHistoryLaneCoverage
     telemetry_depth_180: EtfHistoryLaneCoverage
+    telemetry_depth_500: EtfHistoryLaneCoverage
     historical_production_snapshots: HistoricalProductionSnapshotReadiness
     score_eligible_codes: tuple[str, ...]
 
@@ -175,12 +178,21 @@ def build_etf_history_readiness(
         attempted_codes=attempted,
         depth_by_code=depth_by_code,
     )
+    deep_telemetry = _lane(
+        scope=DEEP_TELEMETRY_DEPTH_SCOPE,
+        required_sessions=DEEP_TELEMETRY_DEPTH_SESSIONS,
+        authoritative=False,
+        codes=codes,
+        attempted_codes=attempted,
+        depth_by_code=depth_by_code,
+    )
     source_date_count = len(set(compatible_production_source_dates))
     return EtfHistoryReadiness(
         daily_freshness=daily,
         history_depth_61=warmup,
         contract_depth=derived,
         telemetry_depth_180=telemetry,
+        telemetry_depth_500=deep_telemetry,
         historical_production_snapshots=HistoricalProductionSnapshotReadiness(
             compatible_source_date_count=source_date_count,
             required_source_date_count=REQUIRED_INDEPENDENT_DATES,

@@ -32,6 +32,8 @@ def test_current_day_data_leaves_freshness_gap_but_stays_in_warmup_lane() -> Non
     assert readiness.contract_depth.required_sessions == 300
     assert readiness.contract_depth.covered_count == 0
     assert readiness.telemetry_depth_180.authoritative is False
+    assert readiness.telemetry_depth_500.required_sessions == 500
+    assert readiness.telemetry_depth_500.authoritative is False
     assert readiness.score_eligible_codes == ()
 
 

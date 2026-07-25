@@ -8,7 +8,13 @@ import pytest
 from sqlalchemy import func, select
 
 import app.services.short_etf.bounded_history_sync as bounded_history_sync
-from app.models.entities import EtfPriceHistory, EtfSyncCursor, JobRun, TradableEtf
+from app.models.entities import (
+    EtfAdjustedHistoryAvailability,
+    EtfPriceHistory,
+    EtfSyncCursor,
+    JobRun,
+    TradableEtf,
+)
 from app.services.short_etf.bounded_history_sync import (
     BoundedHistorySyncRequest,
     read_process_rss_bytes,
@@ -88,8 +94,238 @@ def _request(
     )
 
 
+def _research_request(
+    *,
+    max_codes: int = 5,
+    eligible_codes: tuple[str, ...] = ("510000",),
+    required_sessions: int = 3,
+) -> BoundedHistorySyncRequest:
+    return replace(
+        _request(max_codes=1, eligible_codes=eligible_codes),
+        scope="research_depth:" + "c" * 64,
+        required_sessions=required_sessions,
+        max_codes=max_codes,
+        rss_limit_bytes=512 * 1024 * 1024,
+        provider_timeout_seconds=6.0,
+        selection_policy="research_depth",
+        provider_policy_version="adjusted-provider-policy-v1",
+    )
+
+
 def test_process_rss_reader_returns_positive_value() -> None:
     assert read_process_rss_bytes() > 0
+
+
+def test_research_depth_profile_enforces_resource_bounds() -> None:
+    assert _research_request(max_codes=5).max_codes == 5
+    assert _research_request(max_codes=20).max_codes == 20
+    with pytest.raises(ValueError, match="between 5 and 20"):
+        _research_request(max_codes=4)
+    with pytest.raises(ValueError, match="between 5 and 20"):
+        _research_request(max_codes=21)
+    with pytest.raises(ValueError, match="512 MiB"):
+        replace(
+            _research_request(),
+            rss_limit_bytes=513 * 1024 * 1024,
+        )
+    with pytest.raises(ValueError, match="6 seconds"):
+        replace(_research_request(), provider_timeout_seconds=6.1)
+
+
+@pytest.mark.asyncio
+async def test_research_depth_short_history_is_cooled_down_without_losing_denominator(
+    app,
+) -> None:
+    code = "510098"
+    calls: list[str] = []
+
+    async def fetch(
+        current_code: str,
+        _from: date,
+        _to: date,
+    ) -> ProviderFetchResult:
+        calls.append(current_code)
+        return ProviderFetchResult(
+            rows=_rows(date(2026, 7, 1), 2),
+            provider="eastmoney",
+            fallback_used=False,
+        )
+
+    request = _research_request(eligible_codes=(code,))
+    async with app.state.db.session() as session:
+        session.add(_etf(code))
+        await session.commit()
+        first = await run_bounded_history_sync_slice(
+            session,
+            request=request,
+            fetcher=fetch,
+            rss_reader=lambda: 32 * 1024 * 1024,
+        )
+        observation = await session.get(
+            EtfAdjustedHistoryAvailability,
+            (code, request.provider_policy_version),
+        )
+        second = await run_bounded_history_sync_slice(
+            session,
+            request=request,
+            fetcher=fetch,
+            rss_reader=lambda: 32 * 1024 * 1024,
+        )
+        observation = await session.get(
+            EtfAdjustedHistoryAvailability,
+            (code, request.provider_policy_version),
+        )
+        assert observation is not None
+        observation.retry_after = datetime.utcnow() - timedelta(seconds=1)
+        await session.commit()
+        third = await run_bounded_history_sync_slice(
+            session,
+            request=request,
+            fetcher=fetch,
+            rss_reader=lambda: 32 * 1024 * 1024,
+        )
+
+    assert first.status == "partial"
+    assert first.completed_codes == ()
+    assert observation is not None
+    assert observation.status == "source_history_shortfall"
+    assert observation.eligible_session_count == 2
+    assert observation.retry_after is not None
+    assert observation.evidence_json["inferred_listing_date"] is False
+    assert second.status == "partial"
+    assert second.stop_reason == "history_availability_cooldown"
+    assert second.attempted_codes == ()
+    assert calls == [code, code]
+    assert third.attempted_codes == (code,)
+
+
+@pytest.mark.asyncio
+async def test_raw_history_cannot_create_research_depth_availability(app) -> None:
+    code = "510097"
+
+    async def fetch(
+        _code: str,
+        _from: date,
+        _to: date,
+    ) -> ProviderFetchResult:
+        return ProviderFetchResult(
+            rows=_rows(date(2026, 7, 1), 3, adjusted=False),
+            provider="sina",
+            fallback_used=False,
+        )
+
+    request = _research_request(eligible_codes=(code,))
+    async with app.state.db.session() as session:
+        session.add(_etf(code))
+        await session.commit()
+        result = await run_bounded_history_sync_slice(
+            session,
+            request=request,
+            fetcher=fetch,
+            rss_reader=lambda: 32 * 1024 * 1024,
+        )
+        observation = await session.get(
+            EtfAdjustedHistoryAvailability,
+            (code, request.provider_policy_version),
+        )
+
+    assert result.status == "partial"
+    assert result.completed_codes == ()
+    assert observation is None
+
+
+@pytest.mark.asyncio
+async def test_research_cursor_survives_adaptive_profile_identity_change(app) -> None:
+    codes = tuple(f"5107{index:02d}" for index in range(7))
+    first_calls: list[str] = []
+    second_calls: list[str] = []
+
+    async def failing_fetch(
+        code: str,
+        _from: date,
+        _to: date,
+    ) -> ProviderFetchResult:
+        first_calls.append(code)
+        raise TimeoutError
+
+    async def healthy_fetch(
+        code: str,
+        _from: date,
+        _to: date,
+    ) -> ProviderFetchResult:
+        second_calls.append(code)
+        return ProviderFetchResult(
+            rows=_rows(date(2026, 7, 1), 3),
+            provider="eastmoney",
+            fallback_used=False,
+        )
+
+    first_request = _research_request(
+        max_codes=5,
+        eligible_codes=codes,
+    )
+    second_request = _research_request(
+        max_codes=10,
+        eligible_codes=codes,
+    )
+    assert first_request.identity_hash != second_request.identity_hash
+
+    async with app.state.db.session() as session:
+        session.add_all([_etf(code) for code in codes])
+        await session.commit()
+        first = await run_bounded_history_sync_slice(
+            session,
+            request=first_request,
+            fetcher=failing_fetch,
+            rss_reader=lambda: 32 * 1024 * 1024,
+        )
+        second = await run_bounded_history_sync_slice(
+            session,
+            request=second_request,
+            fetcher=healthy_fetch,
+            rss_reader=lambda: 32 * 1024 * 1024,
+        )
+
+    assert first.stop_reason == "provider_circuit_open"
+    assert first_calls == list(codes[:3])
+    assert second_calls == list(codes[3:] + codes[:3])
+    assert second.status == "complete"
+
+
+@pytest.mark.asyncio
+async def test_history_lease_is_global_across_lane_scopes(app) -> None:
+    request = _research_request(eligible_codes=("510096",))
+    called = False
+
+    async def fetch(
+        _code: str,
+        _from: date,
+        _to: date,
+    ) -> ProviderFetchResult:
+        nonlocal called
+        called = True
+        raise AssertionError("global history lease must block provider work")
+
+    async with app.state.db.session() as session:
+        session.add(_etf("510096"))
+        session.add(
+            JobRun(
+                job_name="etf_history_continuation:history_depth_61",
+                status="running",
+                started_at=datetime.utcnow(),
+                details_json={"identity_hash": "d" * 64},
+            )
+        )
+        await session.commit()
+        result = await run_bounded_history_sync_slice(
+            session,
+            request=request,
+            fetcher=fetch,
+        )
+
+    assert result.status == "skipped"
+    assert result.stop_reason == "overlapping_worker_lease"
+    assert called is False
 
 
 @pytest.mark.asyncio

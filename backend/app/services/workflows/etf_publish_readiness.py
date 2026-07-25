@@ -84,6 +84,8 @@ def choose_publication_profile(
             if isinstance(provider_health, Mapping)
             else {}
         )
+        if not isinstance(providers, Mapping):
+            providers = {}
         provider_degraded = any(
             state.get("circuit_state") != "closed"
             or state.get("last_error") is not None
@@ -242,6 +244,11 @@ def compact_readiness_payload(readiness: Mapping[str, Any]) -> dict[str, Any]:
         "telemetry_depth_180": _compact_lane(
             readiness.get("telemetry_depth_180")
             if isinstance(readiness.get("telemetry_depth_180"), Mapping)
+            else None
+        ),
+        "telemetry_depth_500": _compact_lane(
+            readiness.get("telemetry_depth_500")
+            if isinstance(readiness.get("telemetry_depth_500"), Mapping)
             else None
         ),
         "history_publication_gate_passed": bool(
@@ -499,6 +506,7 @@ async def run_post_close_etf_publication_readiness(
             )
             async with PublicationAdjustedHistoryFetcher(
                 attempt_timeout_seconds=request.provider_timeout_seconds,
+                minimum_eligible_rows=request.required_sessions,
                 restored_health=restored.get("providers")
                 if isinstance(restored.get("providers"), Mapping)
                 else None,

@@ -1,0 +1,74 @@
+## ADDED Requirements
+
+### Requirement: ETF adjusted history accumulates in prioritized bounded lanes
+
+The system SHALL preserve target-date and 61-session publication priority, SHALL
+advance the registered 300-session adjusted research-depth lane only after both
+publication coverage ratios reach 95 percent, and SHALL treat 500-session depth
+as lower-priority non-authoritative telemetry.
+
+#### Scenario: Publication prerequisites are incomplete
+
+- **WHEN** target-date or 61-session decision-eligible adjusted coverage is below
+  95 percent
+- **THEN** research-depth provider work does not start and the existing
+  publication continuation retains priority
+
+#### Scenario: Research depth is incomplete
+
+- **WHEN** both publication gates pass and fewer than the required ETFs have 300
+  eligible adjusted sessions
+- **THEN** one bounded continuation advances the 300-session lane
+
+#### Scenario: Primary research depth is ready
+
+- **WHEN** 300-session coverage is ready
+- **THEN** later bounded continuations may accumulate 500-session telemetry
+  without changing publication or promotion evidence
+
+### Requirement: Research-depth synchronization remains resource bounded
+
+The system SHALL use one worker, adaptive batches of 5 to 20 ETFs, no more than
+500 rows per page, 5,000 rows per slice, 512 MiB RSS, six seconds per provider
+attempt, 45 seconds for admission, 55 seconds for durable completion, and 60
+seconds for process return.
+
+#### Scenario: Healthy slices increase throughput
+
+- **WHEN** consecutive real slices finish below resource and provider-health
+  limits with monotonic checkpoints
+- **THEN** the effective batch may increase by five up to twenty without changing
+  result identity or coverage facts
+
+#### Scenario: A slice degrades
+
+- **WHEN** timeout, memory pressure, provider circuit, or checkpoint failure is
+  observed
+- **THEN** the next effective batch is reduced to no fewer than five and no
+  concurrent worker is started
+
+### Requirement: Adjusted-history availability is factual and durable
+
+The system SHALL persist provider-observed adjusted-history boundaries and
+cooldowns, SHALL keep deferred ETFs in coverage denominators, and SHALL NOT infer
+listing dates from returned price history.
+
+#### Scenario: Accepted provider returns too little history
+
+- **WHEN** a provenance-valid adjusted provider returns fewer eligible sessions
+  than requested
+- **THEN** the system records `source_history_shortfall`, the observed range, and
+  a retry-after while leaving the ETF incomplete
+
+#### Scenario: A cooldown is active
+
+- **WHEN** a short-history observation has not reached its retry-after
+- **THEN** the ETF is deferred from provider work but remains visible in compact
+  blockers and coverage counts
+
+#### Scenario: Raw history is deeper
+
+- **WHEN** raw Sina, efinance, intraday, estimated, or display-only rows extend
+  earlier than accepted adjusted history
+- **THEN** those rows do not change adjusted depth, availability status, or
+  readiness coverage
