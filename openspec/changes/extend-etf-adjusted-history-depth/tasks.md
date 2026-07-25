@@ -79,3 +79,11 @@
   the API and ETF research UI.
 - [ ] 7.3 Add boundary tests for 89/90/95 percent, run focused backend and
   frontend checks, deploy, and verify production without raw-price substitution.
+
+## 8. Bound Research-Depth Preflight
+
+- [x] 8.1 Materialize the target-session set before per-ETF aggregation so the
+  300-session research lane does not execute a full-universe outer join with a
+  nested session subquery; preserve watchlist-first and shallowest-first order.
+- [ ] 8.2 Deploy the preflight optimization and prove one production slice
+  reaches provider work or returns a durable bounded result within 60 seconds.

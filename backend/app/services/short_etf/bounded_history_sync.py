@@ -378,42 +378,52 @@ async def _eligible_depths(
     *,
     request: BoundedHistorySyncRequest,
 ) -> dict[str, int]:
-    target_sessions = (
-        select(EtfPriceHistory.trade_date)
-        .where(
-            EtfPriceHistory.trade_date >= request.from_date,
-            EtfPriceHistory.trade_date <= request.to_date,
-            EtfPriceHistory.decision_eligible.is_(True),
-            EtfPriceHistory.research_price_basis == request.price_basis,
+    target_sessions = tuple(
+        await session.scalars(
+            select(EtfPriceHistory.trade_date)
+            .where(
+                EtfPriceHistory.trade_date >= request.from_date,
+                EtfPriceHistory.trade_date <= request.to_date,
+                EtfPriceHistory.decision_eligible.is_(True),
+                EtfPriceHistory.research_price_basis == request.price_basis,
+            )
+            .distinct()
+            .order_by(EtfPriceHistory.trade_date.desc())
+            .limit(request.required_sessions)
         )
-        .distinct()
-        .order_by(EtfPriceHistory.trade_date.desc())
-        .limit(request.required_sessions)
-        .subquery()
     )
-    rows = (
+    depth_rows = (
         await session.execute(
             select(
-                TradableEtf.code,
+                EtfPriceHistory.etf_code,
                 func.count(func.distinct(EtfPriceHistory.trade_date)),
             )
-            .outerjoin(
-                EtfPriceHistory,
-                (EtfPriceHistory.etf_code == TradableEtf.code)
-                & (EtfPriceHistory.trade_date.in_(select(target_sessions.c.trade_date)))
-                & (EtfPriceHistory.decision_eligible.is_(True))
-                & (EtfPriceHistory.research_price_basis == request.price_basis),
+            .where(
+                EtfPriceHistory.etf_code.in_(request.eligible_codes),
+                EtfPriceHistory.trade_date.in_(target_sessions),
+                EtfPriceHistory.decision_eligible.is_(True),
+                EtfPriceHistory.research_price_basis == request.price_basis,
             )
-            .where(TradableEtf.code.in_(request.eligible_codes))
-            .group_by(TradableEtf.code, TradableEtf.is_watchlist)
-            .order_by(
-                TradableEtf.is_watchlist.desc(),
-                func.count(func.distinct(EtfPriceHistory.trade_date)).asc(),
-                TradableEtf.code.asc(),
+            .group_by(EtfPriceHistory.etf_code)
+        )
+    ).all()
+    depths = {str(code): int(count or 0) for code, count in depth_rows}
+    watchlist_rows = (
+        await session.execute(
+            select(TradableEtf.code, TradableEtf.is_watchlist).where(
+                TradableEtf.code.in_(request.eligible_codes)
             )
         )
     ).all()
-    return {str(code): int(count or 0) for code, count in rows}
+    ordered = sorted(
+        ((str(code), bool(is_watchlist)) for code, is_watchlist in watchlist_rows),
+        key=lambda item: (
+            not item[1],
+            depths.get(item[0], 0),
+            item[0],
+        ),
+    )
+    return {code: depths.get(code, 0) for code, _is_watchlist in ordered}
 
 
 async def _publication_readiness_candidates(

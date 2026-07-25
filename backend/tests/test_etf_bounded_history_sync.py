@@ -133,6 +133,59 @@ def test_research_depth_profile_enforces_resource_bounds() -> None:
 
 
 @pytest.mark.asyncio
+async def test_research_depth_preflight_orders_materialized_depths_without_join(
+    app,
+) -> None:
+    codes = ("510091", "510092", "510093", "510094")
+    async with app.state.db.session() as session:
+        session.add_all(
+            [
+                _etf("510091"),
+                _etf("510092", watchlist=True),
+                _etf("510093", watchlist=True),
+                _etf("510094"),
+            ]
+        )
+        for code in ("510092", "510094"):
+            session.add(
+                EtfPriceHistory(
+                    etf_code=code,
+                    trade_date=date(2026, 7, 1),
+                    open=1.0,
+                    high=1.0,
+                    low=1.0,
+                    close=1.0,
+                    volume=1_000_000.0,
+                    turnover=100_000_000.0,
+                    pct_change=0.0,
+                    research_adjusted_value=1.0,
+                    research_price_basis="total_return_adjusted",
+                    data_provider="eastmoney",
+                    provider_version="fixture-hfq-v1",
+                    source_timestamp=datetime(2026, 7, 1, 15, 0),
+                    adjustment_version="fixture-hfq-v1",
+                    decision_eligible=True,
+                )
+            )
+        await session.commit()
+        depths = await bounded_history_sync._eligible_depths(
+            session,
+            request=_research_request(
+                eligible_codes=codes,
+                required_sessions=3,
+            ),
+        )
+
+    assert list(depths) == ["510093", "510092", "510091", "510094"]
+    assert depths == {
+        "510093": 0,
+        "510092": 1,
+        "510091": 0,
+        "510094": 1,
+    }
+
+
+@pytest.mark.asyncio
 async def test_research_depth_short_history_is_cooled_down_without_losing_denominator(
     app,
 ) -> None:
