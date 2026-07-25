@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import event, select
@@ -438,6 +439,59 @@ async def test_full_decision_data_coverage_does_not_hide_low_score_coverage(app)
     async with app.state.db.session() as session:
         with pytest.raises(SnapshotPublicationError, match="score coverage"):
             await publish_full_snapshot(session, run_id=run_id)
+
+
+def test_publication_accepts_ninety_percent_score_coverage_as_degraded() -> None:
+    codes = [f"5100{index:02d}" for index in range(9)]
+    trade_date = date(2026, 7, 24)
+    items = [
+        SimpleNamespace(
+            asset_type="etf",
+            asset_code=code,
+            global_rank=index,
+            score_eligible=True,
+            ranking_score=80.0 - index,
+        )
+        for index, code in enumerate(codes, start=1)
+    ]
+    run = SimpleNamespace(
+        status="success",
+        scope_kind="full",
+        scope_hash="scope",
+        universe_snapshot_hash="universe",
+        input_snapshot_hash="input",
+        score_version="final_score_v3",
+        rule_version="final_score_v3_rule_v2",
+        ranking_contract_hash="contract",
+        score_field="ranking_score",
+        data_cutoff=datetime(2026, 7, 24, 15, 0),
+        as_of_date=trade_date,
+        as_of_trade_date=trade_date,
+        price_basis="total_return_adjusted",
+        expected_item_count=10,
+        decision_data_item_count=10,
+        decision_data_coverage_ratio=1.0,
+        eligible_item_count=9,
+        coverage_ratio=0.90,
+        idempotency_key="degraded-coverage-fixture",
+        summary_json={
+            "item_count": 9,
+            "coverage": {
+                "score": {
+                    "expected_count": 10,
+                    "eligible_count": 9,
+                    "eligible_codes": codes,
+                    "coverage_ratio": 0.90,
+                }
+            },
+        },
+    )
+
+    snapshot_publication._validate_publishable(
+        run,
+        items,
+        decision_data_codes={*codes, "510099"},
+    )
 
 
 @pytest.mark.asyncio

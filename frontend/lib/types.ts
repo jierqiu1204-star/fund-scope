@@ -1614,6 +1614,7 @@ export type EtfRankingSnapshotMetadata = {
   score_eligible_item_count?: number | null;
   score_coverage_ratio?: number | null;
   coverage_ratio?: number | null;
+  coverage_policy_mode?: "blocked" | "degraded" | "complete" | null;
   freshness_status?: string | null;
   limitations?: string[];
 };

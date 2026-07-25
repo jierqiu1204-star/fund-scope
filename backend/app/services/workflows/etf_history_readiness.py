@@ -12,6 +12,12 @@ from app.models.entities import (
     JobRun,
     ShortResearchSignalRun,
 )
+from app.services.short_research.coverage_policy import (
+    ETF_COMPLETE_SCORE_COVERAGE,
+    ETF_DAILY_DECISION_MIN_COVERAGE,
+    ETF_SCORE_PUBLICATION_MIN_COVERAGE,
+    etf_score_coverage_policy_mode,
+)
 from app.services.short_research.history_readiness import (
     DAILY_FRESHNESS_SCOPE,
     DEEP_TELEMETRY_DEPTH_SCOPE,
@@ -29,7 +35,6 @@ from app.services.short_research.ranking_contract import (
 )
 from app.services.short_research.universe import build_point_in_time_universe_snapshot
 
-PUBLICATION_COVERAGE_THRESHOLD = 0.95
 DEFAULT_HISTORY_HORIZONS = (1, 3, 5, 10)
 
 
@@ -167,8 +172,9 @@ async def _compatible_production_source_date_count(session: AsyncSession) -> int
             ShortResearchSignalRun.universe_snapshot_hash.is_not(None),
             ShortResearchSignalRun.input_snapshot_hash.is_not(None),
             ShortResearchSignalRun.decision_data_coverage_ratio
-            >= PUBLICATION_COVERAGE_THRESHOLD,
-            ShortResearchSignalRun.coverage_ratio >= PUBLICATION_COVERAGE_THRESHOLD,
+            >= ETF_DAILY_DECISION_MIN_COVERAGE,
+            ShortResearchSignalRun.coverage_ratio
+            >= ETF_COMPLETE_SCORE_COVERAGE,
         )
     )
     return int(count or 0)
@@ -322,14 +328,14 @@ async def read_etf_history_readiness(
         ),
     )
     history_publication_gate_passed = (
-        daily["coverage_ratio"] >= PUBLICATION_COVERAGE_THRESHOLD
-        and warmup["coverage_ratio"] >= PUBLICATION_COVERAGE_THRESHOLD
+        daily["coverage_ratio"] >= ETF_DAILY_DECISION_MIN_COVERAGE
+        and warmup["coverage_ratio"] >= ETF_SCORE_PUBLICATION_MIN_COVERAGE
     )
     blockers: list[str] = []
-    if daily["coverage_ratio"] < PUBLICATION_COVERAGE_THRESHOLD:
+    if daily["coverage_ratio"] < ETF_DAILY_DECISION_MIN_COVERAGE:
         blockers.append("daily_freshness_coverage_below_95pct")
-    if warmup["coverage_ratio"] < PUBLICATION_COVERAGE_THRESHOLD:
-        blockers.append("history_depth_61_coverage_below_95pct")
+    if warmup["coverage_ratio"] < ETF_SCORE_PUBLICATION_MIN_COVERAGE:
+        blockers.append("history_depth_61_coverage_below_90pct")
     if source_date_count < 20:
         blockers.append("compatible_production_source_dates_below_20")
     return {
@@ -362,14 +368,20 @@ async def read_etf_history_readiness(
             ],
         },
         "history_publication_gate_passed": history_publication_gate_passed,
-        "publication_coverage_threshold": PUBLICATION_COVERAGE_THRESHOLD,
+        "publication_coverage_threshold": ETF_SCORE_PUBLICATION_MIN_COVERAGE,
+        "publication_coverage_thresholds": {
+            "daily_freshness": ETF_DAILY_DECISION_MIN_COVERAGE,
+            "history_depth_61": ETF_SCORE_PUBLICATION_MIN_COVERAGE,
+        },
+        "coverage_policy_mode": etf_score_coverage_policy_mode(
+            warmup["coverage_ratio"]
+        ),
         "blockers": blockers,
     }
 
 
 __all__ = [
     "DEFAULT_HISTORY_HORIZONS",
-    "PUBLICATION_COVERAGE_THRESHOLD",
     "current_etf_history_contract_hash",
     "read_etf_history_readiness",
 ]

@@ -68,6 +68,7 @@ class EtfRankingSnapshotMetadataOut(BaseModel):
     score_eligible_item_count: int | None = None
     score_coverage_ratio: float | None = None
     coverage_ratio: float | None = None
+    coverage_policy_mode: Literal["blocked", "degraded", "complete"] | None = None
     freshness_status: str = "waiting"
     limitations: list[str] = Field(default_factory=list)
 

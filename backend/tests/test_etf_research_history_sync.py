@@ -150,10 +150,10 @@ async def test_research_depth_yields_to_either_publication_gate(monkeypatch) -> 
         return None
 
     async def fake_readiness(_session: object, **_kwargs: Any) -> dict[str, Any]:
-        return _readiness(daily=1.0, warmup=0.94)
+        return _readiness(daily=1.0, warmup=0.89)
 
     async def forbidden(*_args: object, **_kwargs: Any) -> None:
-        raise AssertionError("provider work must not start below the dual 95% gate")
+        raise AssertionError("provider work must not start below publication gates")
 
     monkeypatch.setattr(coordinator, "_active_history_lease", fake_lease)
     monkeypatch.setattr(coordinator, "read_etf_history_readiness", fake_readiness)
@@ -166,7 +166,10 @@ async def test_research_depth_yields_to_either_publication_gate(monkeypatch) -> 
 
     assert result["status"] == "skipped"
     assert result["reason"] == "publication_priority_active"
-    assert result["publication_gates"]["threshold"] == 0.95
+    assert result["publication_gates"]["thresholds"] == {
+        "daily_freshness": 0.95,
+        "history_depth_61": 0.90,
+    }
 
 
 @pytest.mark.asyncio
@@ -236,7 +239,11 @@ async def test_coordinator_runs_300_before_500_with_safe_bounded_profile(
         return []
 
     async def fake_readiness(_session: object, **_kwargs: Any) -> dict[str, Any]:
-        return _readiness(contract=contract_ratio, telemetry=0.0)
+        return _readiness(
+            warmup=0.90,
+            contract=contract_ratio,
+            telemetry=0.0,
+        )
 
     async def fake_run(
         _session: object,

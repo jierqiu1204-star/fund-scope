@@ -216,7 +216,7 @@ async def test_current_selector_rejects_wrong_rule_field_date_and_coverage(app) 
     await _seed_run(
         app,
         scope_kind="full",
-        score_coverage_ratio=0.94,
+        score_coverage_ratio=0.89,
         published_at=datetime(2026, 1, 2, 19, 0),
     )
     await _seed_run(
@@ -236,6 +236,29 @@ async def test_current_selector_rejects_wrong_rule_field_date_and_coverage(app) 
     assert selected.id == canonical_id
 
 
+@pytest.mark.asyncio
+async def test_current_selector_accepts_degraded_score_coverage_at_ninety_percent(
+    app,
+) -> None:
+    degraded_id = await _seed_run(
+        app,
+        scope_kind="full",
+        score_coverage_ratio=0.90,
+    )
+
+    async with app.state.db.session() as session:
+        selected = await select_current_canonical_etf_snapshot(
+            session,
+            required_trade_date=date(2026, 1, 2),
+        )
+        run = await session.get(ShortResearchSignalRun, degraded_id)
+        metadata = snapshot_metadata(run)
+
+    assert selected is not None
+    assert selected.id == degraded_id
+    assert metadata["coverage_policy_mode"] == "degraded"
+
+
 def test_required_etf_snapshot_trade_date_uses_completed_exchange_session() -> None:
     assert required_etf_snapshot_trade_date(datetime(2026, 7, 15, 14, 59)) == date(2026, 7, 14)
     assert required_etf_snapshot_trade_date(datetime(2026, 7, 15, 15, 0)) == date(2026, 7, 15)
@@ -253,3 +276,4 @@ async def test_snapshot_metadata_exposes_decision_and_score_coverage(app) -> Non
     assert metadata["decision_data_coverage_ratio"] == 1.0
     assert metadata["score_eligible_item_count"] == 1
     assert metadata["score_coverage_ratio"] == 1.0
+    assert metadata["coverage_policy_mode"] == "complete"

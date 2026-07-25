@@ -94,6 +94,10 @@ async def test_readiness_separates_current_freshness_from_61_session_depth(app) 
     assert report["telemetry_depth_500"]["authoritative"] is False
     assert report["historical_production_snapshots"]["ready"] is False
     assert report["history_publication_gate_passed"] is False
+    assert report["publication_coverage_thresholds"] == {
+        "daily_freshness": 0.95,
+        "history_depth_61": 0.90,
+    }
 
 
 @pytest.mark.asyncio

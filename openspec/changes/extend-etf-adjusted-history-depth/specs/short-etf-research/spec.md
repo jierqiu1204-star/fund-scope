@@ -26,7 +26,8 @@ bounded, resumable lanes.
 
 #### Scenario: Publication data retains priority
 
-- **WHEN** target-date or 61-session adjusted coverage is below 95 percent
+- **WHEN** target-date adjusted coverage is below 95 percent or 61-session
+  adjusted coverage is below 90 percent
 - **THEN** no 300-session or 500-session research-depth provider work starts
 
 #### Scenario: Research history accumulates after publication readiness
@@ -34,6 +35,7 @@ bounded, resumable lanes.
 - **WHEN** both publication gates pass
 - **THEN** scheduled serial slices advance 300 adjusted sessions first and only
   then advance non-authoritative 500-session telemetry
+- **AND** both research-depth completion gates remain 95 percent
 
 #### Scenario: Continuation is resumed
 

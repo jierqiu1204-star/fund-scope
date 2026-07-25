@@ -14,8 +14,10 @@ operational adjusted-history lane rather than another backtest engine.
 
 - Reach 300 decision-eligible adjusted sessions per eligible ETF as the primary
   research-depth objective, then accumulate 500 sessions as telemetry.
-- Preserve publication priority, dual 95 percent gates, one worker, bounded
-  memory, bounded commands, durable progress, and provider provenance.
+- Preserve a 95 percent current-day decision-data gate, a separate 90 percent
+  score-warmup publication gate, 95 percent research-depth completion gates,
+  one worker, bounded memory, bounded commands, durable progress, and provider
+  provenance.
 - Stop repeatedly calling providers for codes whose accepted adjusted source
   factually returned a short history.
 
@@ -33,11 +35,17 @@ operational adjusted-history lane rather than another backtest engine.
 ### 1. Preserve lane priority
 
 The scheduled research-depth coordinator first reads the authoritative
-point-in-time universe and existing readiness projection. If target-date or
-61-session coverage is below 95 percent, it returns
+point-in-time universe and existing readiness projection. If target-date
+coverage is below 95 percent or 61-session coverage is below 90 percent, it returns
 `publication_priority_active` and starts no provider work. Once both gates pass,
 it advances the registered 300-session contract lane. The 500-session telemetry
-lane is eligible only after the 300-session coverage target is met.
+lane is eligible only after the 300-session 95 percent coverage target is met.
+
+Snapshots published with score coverage from 90 percent up to but excluding 95
+percent are explicitly marked `degraded`; ETFs without 61 eligible sessions
+remain excluded from scoring. Decision-data publication coverage, 300/500
+research-depth completion, validation promotion, and raw-price rejection remain
+at their existing stricter policies.
 
 ### 2. Add a research-depth selection policy
 
@@ -100,7 +108,8 @@ force raw-price substitution.
 ## Risks / Trade-offs
 
 - [Many ETFs are genuinely new] → Keep them in the denominator, persist factual
-  short-history observations, and wait rather than fabricate data.
+  short-history observations, exclude them from scoring, and label a 90–95
+  percent publication as degraded rather than fabricate data.
 - [Provider returns a capped range] → Record requested and returned boundaries;
   retry after cooldown and never infer a listing date.
 - [Eastmoney host is unreachable] → Try the independently hosted, explicitly

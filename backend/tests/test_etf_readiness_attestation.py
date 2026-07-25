@@ -552,7 +552,7 @@ async def test_signed_readiness_fails_closed_without_real_data_gates(app) -> Non
     assert {item["key"] for item in report["blockers"]} >= {
         "current_day_published_snapshot_missing",
         "daily_freshness_coverage_below_95pct",
-        "history_depth_61_coverage_below_95pct",
+        "history_depth_61_coverage_below_90pct",
         "intraday_quote_evidence_missing",
         "registered_production_manifest_missing",
     }

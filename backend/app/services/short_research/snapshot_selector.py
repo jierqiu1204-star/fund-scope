@@ -14,6 +14,12 @@ from app.services.intraday_etf.exchange_calendar import (
     is_trading_day,
     localize_exchange_time,
 )
+from app.services.short_research.coverage_policy import (
+    ETF_DAILY_DECISION_MIN_COVERAGE,
+    ETF_SCORE_PUBLICATION_MIN_COVERAGE,
+    EtfCoveragePolicyMode,
+    etf_score_coverage_policy_mode,
+)
 from app.services.short_research.daily_reconstructable import (
     daily_reconstructable_manifest,
 )
@@ -42,6 +48,7 @@ class SnapshotMetadata(TypedDict):
     score_eligible_item_count: int | None
     score_coverage_ratio: float | None
     coverage_ratio: float | None
+    coverage_policy_mode: EtfCoveragePolicyMode | None
     freshness_status: str
     limitations: list[str]
 
@@ -66,6 +73,7 @@ def snapshot_metadata(
             "score_eligible_item_count": None,
             "score_coverage_ratio": None,
             "coverage_ratio": None,
+            "coverage_policy_mode": None,
             "freshness_status": freshness_status,
             "limitations": ["no_snapshot", f"canonical_snapshot_{freshness_status}"],
         }
@@ -108,6 +116,9 @@ def snapshot_metadata(
         "score_eligible_item_count": run.eligible_item_count,
         "score_coverage_ratio": run.coverage_ratio,
         "coverage_ratio": run.coverage_ratio,
+        "coverage_policy_mode": etf_score_coverage_policy_mode(
+            run.coverage_ratio
+        ),
         "freshness_status": freshness_status,
         "limitations": limitations,
     }
@@ -176,9 +187,11 @@ def _current_contract_clauses() -> tuple[ColumnElement[bool], ...]:
         ShortResearchSignalRun.data_cutoff.is_not(None),
         ShortResearchSignalRun.expected_item_count.is_not(None),
         ShortResearchSignalRun.decision_data_item_count.is_not(None),
-        ShortResearchSignalRun.decision_data_coverage_ratio >= 0.95,
+        ShortResearchSignalRun.decision_data_coverage_ratio
+        >= ETF_DAILY_DECISION_MIN_COVERAGE,
         ShortResearchSignalRun.eligible_item_count.is_not(None),
-        ShortResearchSignalRun.coverage_ratio >= 0.95,
+        ShortResearchSignalRun.coverage_ratio
+        >= ETF_SCORE_PUBLICATION_MIN_COVERAGE,
         ShortResearchSignalRun.idempotency_key.is_not(None),
     )
 

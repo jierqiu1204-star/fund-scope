@@ -20,6 +20,11 @@ from app.services.short_etf.publication_providers import (
     PUBLICATION_PROVIDER_POLICY_VERSION,
     PublicationAdjustedHistoryFetcher,
 )
+from app.services.short_research.coverage_policy import (
+    ETF_DAILY_DECISION_MIN_COVERAGE,
+    ETF_RESEARCH_DEPTH_MIN_COVERAGE,
+    ETF_SCORE_PUBLICATION_MIN_COVERAGE,
+)
 from app.services.short_research.history_readiness import (
     DEEP_TELEMETRY_DEPTH_SCOPE,
     DEEP_TELEMETRY_DEPTH_SESSIONS,
@@ -28,7 +33,6 @@ from app.services.short_research.history_readiness import (
 from app.services.short_research.ranking_contract import canonical_hash
 from app.services.workflows.etf_history_readiness import (
     DEFAULT_HISTORY_HORIZONS,
-    PUBLICATION_COVERAGE_THRESHOLD,
     current_etf_history_contract_hash,
     read_etf_history_readiness,
 )
@@ -269,13 +273,16 @@ async def run_post_publication_etf_research_history_slice(
     compact_gates = {
         "daily_freshness": _compact_lane(daily),
         "history_depth_61": _compact_lane(warmup),
-        "threshold": PUBLICATION_COVERAGE_THRESHOLD,
+        "thresholds": {
+            "daily_freshness": ETF_DAILY_DECISION_MIN_COVERAGE,
+            "history_depth_61": ETF_SCORE_PUBLICATION_MIN_COVERAGE,
+        },
     }
     if (
         float(daily.get("coverage_ratio") or 0.0)
-        < PUBLICATION_COVERAGE_THRESHOLD
+        < ETF_DAILY_DECISION_MIN_COVERAGE
         or float(warmup.get("coverage_ratio") or 0.0)
-        < PUBLICATION_COVERAGE_THRESHOLD
+        < ETF_SCORE_PUBLICATION_MIN_COVERAGE
     ):
         return {
             "asset_type": ASSET_TYPE_ETF,
@@ -288,7 +295,7 @@ async def run_post_publication_etf_research_history_slice(
     contract_lane = readiness.get("contract_depth") or {}
     if (
         float(contract_lane.get("coverage_ratio") or 0.0)
-        < PUBLICATION_COVERAGE_THRESHOLD
+        < ETF_RESEARCH_DEPTH_MIN_COVERAGE
     ):
         selected_lane = contract_lane
         scope = history_depth_scope(str(readiness["contract_hash"]))
@@ -302,7 +309,7 @@ async def run_post_publication_etf_research_history_slice(
 
     if (
         float(selected_lane.get("coverage_ratio") or 0.0)
-        >= PUBLICATION_COVERAGE_THRESHOLD
+        >= ETF_RESEARCH_DEPTH_MIN_COVERAGE
     ):
         return {
             "asset_type": ASSET_TYPE_ETF,

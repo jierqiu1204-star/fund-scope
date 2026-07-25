@@ -22,6 +22,10 @@ from app.services.short_research.backtest import (
     run_etf_portfolio_backtest,
     run_etf_strategy_comparison_backtest,
 )
+from app.services.short_research.coverage_policy import (
+    ETF_DAILY_DECISION_MIN_COVERAGE,
+    ETF_SCORE_PUBLICATION_MIN_COVERAGE,
+)
 from app.services.short_research.etf_exit_credibility import run_etf_exit_credibility
 from app.services.short_research.healthcheck import run_etf_strategy_healthcheck
 from app.services.short_research.history_readiness import (
@@ -55,7 +59,6 @@ from app.services.workflows.etf_daily_research import (
     generate_and_publish_etf_snapshot,
 )
 from app.services.workflows.etf_history_readiness import (
-    PUBLICATION_COVERAGE_THRESHOLD,
     current_etf_history_contract_hash,
     read_etf_history_readiness,
 )
@@ -226,7 +229,7 @@ async def etf_history_backfill_job(session: AsyncSession, *, days: int = 730) ->
                 "history_depth_61_coverage_ratio": warmup_ratio,
             },
         }
-    if eligible_codes and daily_ratio < PUBLICATION_COVERAGE_THRESHOLD:
+    if eligible_codes and daily_ratio < ETF_DAILY_DECISION_MIN_COVERAGE:
         return {
             "from_date": from_date.isoformat(),
             "to_date": today.isoformat(),
@@ -250,7 +253,7 @@ async def etf_history_backfill_job(session: AsyncSession, *, days: int = 730) ->
                 "history_depth_61_coverage_ratio": warmup_ratio,
             },
         }
-    if warmup_ratio < PUBLICATION_COVERAGE_THRESHOLD:
+    if warmup_ratio < ETF_SCORE_PUBLICATION_MIN_COVERAGE:
         lane_scope = SCORE_WARMUP_SCOPE
         required_sessions = SCORE_WARMUP_SESSIONS
     else:

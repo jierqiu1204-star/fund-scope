@@ -2994,6 +2994,13 @@ function ShortTermClient() {
               {" · "}截至 {formatDate(shortAssetData?.snapshot?.as_of_trade_date)}
               {" · "}生成于 {formatUtcDateTime(shortAssetData?.snapshot?.generated_at)}
             </p>
+            {rankingSurface === "research" &&
+            shortAssetData?.snapshot?.coverage_policy_mode === "degraded" ? (
+              <p className="mt-2 rounded-md bg-amber-50 px-2.5 py-2 text-xs leading-5 text-amber-800">
+                当前为降级覆盖发布：61 日复权预热覆盖已达到 90% 但不足 95%；
+                历史不足的 ETF 已排除，不参与本期排名。
+              </p>
+            ) : null}
           </div>
         ) : null}
         <div className={`grid gap-3 ${compact ? "" : "md:grid-cols-2"}`}>

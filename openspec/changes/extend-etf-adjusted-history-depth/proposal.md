@@ -10,8 +10,9 @@ research, walk-forward validation, and market-regime evidence starved.
 
 ## What Changes
 
-- Keep target-date and 61-session publication lanes unchanged and at the existing
-  dual 95 percent gate.
+- Keep target-date publication coverage at 95 percent, set the independent
+  61-session score-warmup publication minimum to 90 percent, and expose
+  90–95 percent snapshots as degraded coverage rather than complete coverage.
 - Add a separate, lower-priority research-depth coordinator that runs only after
   publication prerequisites pass, advances the existing 300-session contract
   lane first, and advances a non-authoritative 500-session telemetry lane only
@@ -40,7 +41,8 @@ research, walk-forward validation, and market-regime evidence starved.
 ### Modified Capabilities
 
 - `short-etf-research`: Adds a scheduled post-publication research-depth lane
-  without changing the ranking formula or publication gates.
+  without changing the ranking formula; only the independent score-warmup
+  publication minimum changes.
 - `short-etf-research-reliability`: Persists adjusted-provider availability
   observations without treating raw history or inferred listing dates as
   decision evidence.

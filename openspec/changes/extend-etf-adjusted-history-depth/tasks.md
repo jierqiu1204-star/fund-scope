@@ -1,7 +1,8 @@
 ## 1. Freeze Contracts
 
 - [x] 1.1 Add tests proving publication work always outranks 300/500-session
-  research work and both 95 percent gates remain unchanged.
+  research work and the original coverage contracts are frozen before the
+  explicitly approved split in section 7.
 - [x] 1.2 Add tests proving 300 sessions are authoritative research depth while
   500 sessions are non-authoritative telemetry.
 - [x] 1.3 Add tests proving raw/display-only data and inferred listing dates
@@ -67,3 +68,14 @@
   validation in separately bounded commands.
 - [ ] 6.3 Record the deploy/rollback path and leave real production coverage
   tasks open until bounded VPS slices provide factual evidence.
+
+## 7. Split Publication Coverage Policy
+
+- [x] 7.1 Keep target-date decision coverage at 95 percent, set only the
+  61-session score-warmup publication minimum to 90 percent, and keep 300/500
+  research-depth completion at 95 percent.
+- [x] 7.2 Publish and select 90–95 percent score-coverage snapshots as
+  `degraded`, exclude insufficient-history ETFs, and expose the policy mode in
+  the API and ETF research UI.
+- [ ] 7.3 Add boundary tests for 89/90/95 percent, run focused backend and
+  frontend checks, deploy, and verify production without raw-price substitution.

@@ -42,7 +42,18 @@ def _readiness(daily: float, warmup: float) -> dict[str, Any]:
             "coverage_ratio": warmup,
             "pending_codes": codes,
         },
-        "history_publication_gate_passed": daily >= 0.95 and warmup >= 0.95,
+        "history_publication_gate_passed": daily >= 0.95 and warmup >= 0.90,
+        "publication_coverage_thresholds": {
+            "daily_freshness": 0.95,
+            "history_depth_61": 0.90,
+        },
+        "coverage_policy_mode": (
+            "blocked"
+            if warmup < 0.90
+            else "degraded"
+            if warmup < 0.95
+            else "complete"
+        ),
         "blockers": [],
     }
 
@@ -177,7 +188,7 @@ def test_profile_cadence_is_five_or_two_minutes() -> None:
     ("before", "after"),
     [
         ((0.94, 1.0), (0.94, 1.0)),
-        ((1.0, 0.94), (1.0, 0.94)),
+        ((1.0, 0.89), (1.0, 0.89)),
     ],
 )
 async def test_coordinator_requires_both_independent_gates_and_never_publishes_below_gate(
@@ -218,7 +229,7 @@ async def test_coordinator_remeasures_then_publishes_once_both_gates_pass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_common(monkeypatch)
-    readings = iter([_readiness(0.94, 0.94), _readiness(0.95, 0.95)])
+    readings = iter([_readiness(0.94, 0.89), _readiness(0.95, 0.90)])
     publish_calls: list[dict[str, Any]] = []
 
     async def read(*_args: Any, **_kwargs: Any) -> dict[str, Any]:

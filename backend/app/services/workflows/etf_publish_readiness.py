@@ -21,6 +21,10 @@ from app.services.short_etf.publication_providers import (
     PUBLICATION_PROVIDER_POLICY_VERSION,
     PublicationAdjustedHistoryFetcher,
 )
+from app.services.short_research.coverage_policy import (
+    ETF_DAILY_DECISION_MIN_COVERAGE,
+    ETF_SCORE_PUBLICATION_MIN_COVERAGE,
+)
 from app.services.short_research.history_readiness import SCORE_WARMUP_SESSIONS
 from app.services.short_research.snapshot_publication import (
     SnapshotPublicationError,
@@ -37,7 +41,6 @@ from app.services.workflows.etf_daily_research import (
     try_acquire_etf_daily_workflow_lock,
 )
 from app.services.workflows.etf_history_readiness import (
-    PUBLICATION_COVERAGE_THRESHOLD,
     read_etf_history_readiness,
 )
 
@@ -254,6 +257,10 @@ def compact_readiness_payload(readiness: Mapping[str, Any]) -> dict[str, Any]:
         "history_publication_gate_passed": bool(
             readiness.get("history_publication_gate_passed")
         ),
+        "publication_coverage_thresholds": dict(
+            readiness.get("publication_coverage_thresholds") or {}
+        ),
+        "coverage_policy_mode": readiness.get("coverage_policy_mode"),
         "blockers": list(readiness.get("blockers") or ()),
     }
 
@@ -404,9 +411,10 @@ def _both_gates_pass(readiness: Mapping[str, Any]) -> bool:
     daily = readiness.get("daily_freshness") or {}
     warmup = readiness.get("history_depth_61") or {}
     return (
-        float(daily.get("coverage_ratio") or 0.0) >= PUBLICATION_COVERAGE_THRESHOLD
+        float(daily.get("coverage_ratio") or 0.0)
+        >= ETF_DAILY_DECISION_MIN_COVERAGE
         and float(warmup.get("coverage_ratio") or 0.0)
-        >= PUBLICATION_COVERAGE_THRESHOLD
+        >= ETF_SCORE_PUBLICATION_MIN_COVERAGE
     )
 
 
@@ -540,7 +548,7 @@ async def run_post_close_etf_publication_readiness(
         )
         if (
             not coverage.expected_codes
-            or coverage.coverage_ratio < PUBLICATION_COVERAGE_THRESHOLD
+            or coverage.coverage_ratio < ETF_DAILY_DECISION_MIN_COVERAGE
         ):
             result = _waiting(
                 trade_date,

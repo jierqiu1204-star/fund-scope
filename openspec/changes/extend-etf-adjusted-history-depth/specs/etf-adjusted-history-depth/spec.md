@@ -3,16 +3,25 @@
 ### Requirement: ETF adjusted history accumulates in prioritized bounded lanes
 
 The system SHALL preserve target-date and 61-session publication priority, SHALL
-advance the registered 300-session adjusted research-depth lane only after both
-publication coverage ratios reach 95 percent, and SHALL treat 500-session depth
-as lower-priority non-authoritative telemetry.
+require 95 percent target-date decision-data coverage and 90 percent 61-session
+score-warmup coverage before publication or research-depth work, SHALL keep
+300/500-session research-depth completion at 95 percent, and SHALL treat
+500-session depth as lower-priority non-authoritative telemetry.
 
 #### Scenario: Publication prerequisites are incomplete
 
-- **WHEN** target-date or 61-session decision-eligible adjusted coverage is below
-  95 percent
+- **WHEN** target-date decision-eligible adjusted coverage is below 95 percent
+  or 61-session score-warmup coverage is below 90 percent
 - **THEN** research-depth provider work does not start and the existing
   publication continuation retains priority
+
+#### Scenario: Warmup coverage is degraded but publishable
+
+- **WHEN** target-date coverage is at least 95 percent and 61-session score
+  coverage is at least 90 percent but below 95 percent
+- **THEN** the eligible ETF subset may publish and research-depth work may start
+- **AND** the snapshot is marked `degraded` while ETFs lacking 61 sessions
+  remain excluded from ranking
 
 #### Scenario: Research depth is incomplete
 
@@ -22,7 +31,7 @@ as lower-priority non-authoritative telemetry.
 
 #### Scenario: Primary research depth is ready
 
-- **WHEN** 300-session coverage is ready
+- **WHEN** 300-session coverage reaches 95 percent
 - **THEN** later bounded continuations may accumulate 500-session telemetry
   without changing publication or promotion evidence
 
