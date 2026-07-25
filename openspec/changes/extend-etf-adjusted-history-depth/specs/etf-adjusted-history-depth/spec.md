@@ -66,6 +66,13 @@ listing dates from returned price history.
 - **THEN** the ETF is deferred from provider work but remains visible in compact
   blockers and coverage counts
 
+#### Scenario: A new ETF blocks publication depth
+
+- **WHEN** a 61-session publication attempt factually returns too little
+  adjusted history
+- **THEN** its attempt cursor and cooldown are persisted before later slices
+  rotate to other repairable gaps while the new ETF remains in the denominator
+
 #### Scenario: Raw history is deeper
 
 - **WHEN** raw Sina, efinance, intraday, estimated, or display-only rows extend

@@ -22,6 +22,9 @@
 - [x] 2.5 Add an independently hosted Tencent raw-plus-hfq fallback with a
   distinct provider version, row pairing, and rejection tests so Eastmoney
   network blocks never cause raw-price substitution.
+- [x] 2.6 Apply factual short-history cooldowns and durable attempt rotation to
+  the 61-session publication lane so newly listed ETFs remain blockers without
+  starving repairable gaps.
 
 ## 3. Extend The Bounded Runner
 

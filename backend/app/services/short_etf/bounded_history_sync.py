@@ -518,7 +518,10 @@ async def _previous_attempt_anchor(
         attempted = (previous.details_json or {}).get("attempted_codes")
         if isinstance(attempted, list) and attempted:
             return str(attempted[-1])
-    if request.selection_policy != RESEARCH_DEPTH_SELECTION_POLICY:
+    if request.selection_policy not in {
+        PUBLICATION_READINESS_SELECTION_POLICY,
+        RESEARCH_DEPTH_SELECTION_POLICY,
+    }:
         return None
     cursor = await session.get(EtfSyncCursor, request.scope)
     if cursor is None:
@@ -531,7 +534,10 @@ async def _active_history_cooldowns(
     *,
     request: BoundedHistorySyncRequest,
 ) -> dict[str, datetime]:
-    if request.selection_policy != RESEARCH_DEPTH_SELECTION_POLICY:
+    if request.selection_policy not in {
+        PUBLICATION_READINESS_SELECTION_POLICY,
+        RESEARCH_DEPTH_SELECTION_POLICY,
+    }:
         return {}
     rows = (
         await session.execute(
@@ -601,7 +607,10 @@ async def _record_history_availability(
     request: BoundedHistorySyncRequest,
     provider_result: ProviderFetchResult,
 ) -> None:
-    if request.selection_policy != RESEARCH_DEPTH_SELECTION_POLICY:
+    if request.selection_policy not in {
+        PUBLICATION_READINESS_SELECTION_POLICY,
+        RESEARCH_DEPTH_SELECTION_POLICY,
+    }:
         return
     observation = _eligible_provider_observation(
         provider_result,
@@ -979,20 +988,23 @@ async def _advance_cursor(
     await session.flush()
 
 
-async def _advance_research_attempt_cursor(
+async def _advance_history_attempt_cursor(
     session: AsyncSession,
     *,
     request: BoundedHistorySyncRequest,
     code: str,
 ) -> None:
-    if request.selection_policy != RESEARCH_DEPTH_SELECTION_POLICY:
+    if request.selection_policy not in {
+        PUBLICATION_READINESS_SELECTION_POLICY,
+        RESEARCH_DEPTH_SELECTION_POLICY,
+    }:
         return
     cursor = await session.get(EtfSyncCursor, request.scope)
     if cursor is None:
         cursor = EtfSyncCursor(scope=request.scope)
         session.add(cursor)
     cursor.last_priority_code = code
-    cursor.last_lane = "research_attempt"
+    cursor.last_lane = "history_attempt"
     cursor.updated_at = _utcnow()
     await session.flush()
 
@@ -1209,17 +1221,17 @@ async def run_bounded_history_sync_slice(
         pending = [code for code, depth in depths.items() if depth < request.required_sessions]
         rotation_anchor = previous_attempt_anchor if previous_attempt_anchor in pending else None
         pending = _rotate_after(pending, rotation_anchor)
-        deferred_cooldowns = await _run_before(
-            lambda: _active_history_cooldowns(session, request=request),
-            deadline=hard_worker_deadline,
-            timeout_message=(
-                "history sync worker deadline exhausted reading availability cooldowns"
-            ),
-        )
-        if deferred_cooldowns:
-            pending = [
-                code for code in pending if code not in deferred_cooldowns
-            ]
+    deferred_cooldowns = await _run_before(
+        lambda: _active_history_cooldowns(session, request=request),
+        deadline=hard_worker_deadline,
+        timeout_message=(
+            "history sync worker deadline exhausted reading availability cooldowns"
+        ),
+    )
+    if deferred_cooldowns:
+        pending = [
+            code for code in pending if code not in deferred_cooldowns
+        ]
     selected = pending[: request.max_codes]
     stop_reason: str | None = None
     consecutive_provider_failures = 0
@@ -1242,11 +1254,14 @@ async def run_bounded_history_sync_slice(
             break
 
         attempted_codes.append(code)
-        if request.selection_policy == RESEARCH_DEPTH_SELECTION_POLICY:
+        if request.selection_policy in {
+            PUBLICATION_READINESS_SELECTION_POLICY,
+            RESEARCH_DEPTH_SELECTION_POLICY,
+        }:
             try:
                 await _run_before(
                     partial(
-                        _advance_research_attempt_cursor,
+                        _advance_history_attempt_cursor,
                         session,
                         request=request,
                         code=code,
@@ -1254,7 +1269,7 @@ async def run_bounded_history_sync_slice(
                     deadline=hard_worker_deadline,
                     timeout_message=(
                         "history sync worker deadline exhausted advancing "
-                        "research attempt cursor"
+                        "history attempt cursor"
                     ),
                 )
                 await _run_before(
@@ -1262,7 +1277,7 @@ async def run_bounded_history_sync_slice(
                     deadline=hard_worker_deadline,
                     timeout_message=(
                         "history sync worker deadline exhausted committing "
-                        "research attempt cursor"
+                        "history attempt cursor"
                     ),
                 )
             except TimeoutError:

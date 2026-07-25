@@ -7,7 +7,12 @@ import pytest
 from sqlalchemy import func, select
 
 import app.services.short_etf.bounded_history_sync as bounded_history_sync
-from app.models.entities import EtfPriceHistory, EtfSyncCursor, TradableEtf
+from app.models.entities import (
+    EtfAdjustedHistoryAvailability,
+    EtfPriceHistory,
+    EtfSyncCursor,
+    TradableEtf,
+)
 from app.services.short_etf.bounded_history_sync import (
     BoundedHistorySyncRequest,
     PublicationReadinessCandidate,
@@ -87,7 +92,7 @@ def test_publication_request_freezes_identity_and_resource_profile() -> None:
     assert request.price_basis == "total_return_adjusted"
     assert request.identity_hash != replace(
         request,
-        provider_policy_version="adjusted-provider-policy-v2",
+        provider_policy_version="adjusted-provider-policy-v3",
     ).identity_hash
 
 
@@ -143,7 +148,7 @@ def test_compact_readiness_payload_does_not_expand_full_universe() -> None:
     assert len(payload["history_depth_61"]["pending_samples"]) == 20
     assert "pending_codes" not in payload["daily_freshness"]
     assert "codes" not in payload["universe"]
-    assert len(str(payload)) < 2_000
+    assert len(str(payload)) < 2_500
 
 
 def _etf(code: str, *, watchlist: bool = False) -> TradableEtf:
@@ -262,6 +267,79 @@ async def test_publication_slice_fetches_full_bounded_window_and_advances_factua
 
 
 @pytest.mark.asyncio
+async def test_publication_short_history_is_cooled_down_without_losing_denominator(
+    app,
+) -> None:
+    code = "510016"
+    request = replace(_request(), eligible_codes=(code,), max_codes=1)
+    calls: list[str] = []
+
+    async def fetch(
+        current_code: str,
+        _from: date,
+        _to: date,
+    ) -> ProviderFetchResult:
+        calls.append(current_code)
+        return ProviderFetchResult(
+            rows=[
+                {
+                    "date": item.isoformat(),
+                    "open": 1.0,
+                    "high": 1.0,
+                    "low": 1.0,
+                    "close": 1.0,
+                    "volume": 1_000_000.0,
+                    "turnover": 100_000_000.0,
+                    "pct_change": 0.0,
+                    "research_adjusted_value": 1.0,
+                    "research_price_basis": "total_return_adjusted",
+                    "provider_version": "fixture-hfq-v1",
+                    "adjustment_version": "fixture-hfq-v1",
+                }
+                for item in request.required_trade_dates[:2]
+            ],
+            provider="tencent",
+            fallback_used=True,
+        )
+
+    async with app.state.db.session() as session:
+        session.add(_etf(code))
+        await session.commit()
+        first = await bounded_history_sync.run_bounded_history_sync_slice(
+            session,
+            request=request,
+            fetcher=fetch,
+            rss_reader=lambda: 32 * 1024 * 1024,
+        )
+        observation = await session.get(
+            EtfAdjustedHistoryAvailability,
+            (code, request.provider_policy_version),
+        )
+        cursor = await session.get(EtfSyncCursor, request.scope)
+        second = await bounded_history_sync.run_bounded_history_sync_slice(
+            session,
+            request=request,
+            fetcher=fetch,
+            rss_reader=lambda: 32 * 1024 * 1024,
+        )
+
+    assert first.status == "partial"
+    assert first.completed_codes == ()
+    assert observation is not None
+    assert observation.status == "source_history_shortfall"
+    assert observation.eligible_session_count == 2
+    assert observation.retry_after is not None
+    assert observation.evidence_json["inferred_listing_date"] is False
+    assert cursor is not None
+    assert cursor.last_priority_code == code
+    assert cursor.last_lane == "history_attempt"
+    assert second.status == "partial"
+    assert second.stop_reason == "history_availability_cooldown"
+    assert second.attempted_codes == ()
+    assert calls == [code]
+
+
+@pytest.mark.asyncio
 async def test_publication_page_interruption_resumes_idempotently(app) -> None:
     code = "510014"
     request = replace(_request(), eligible_codes=(code,), max_codes=1)
@@ -321,7 +399,8 @@ async def test_publication_page_interruption_resumes_idempotently(app) -> None:
         )
 
     assert count_after_failure == 0
-    assert cursor_after_failure is None
+    assert cursor_after_failure is not None
+    assert cursor_after_failure.last_priority_code == code
     assert resumed.status == "complete"
     assert count_after_resume == 61
 

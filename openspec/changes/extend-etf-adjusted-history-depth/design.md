@@ -68,6 +68,11 @@ the cooldown and prove deeper history. No field is called or exposed as a
 listing date unless an authoritative listing source is added in a separate
 change.
 
+The same factual cooldown and durable attempt cursor apply to the 61-session
+publication lane. Otherwise a newly listed ETF can be selected on every slice
+and starve older, repairable gaps even though it correctly remains in the
+publication denominator.
+
 ### 4. Schedule a non-overlapping bounded window
 
 Register one weekday scheduler trigger every two minutes from 23:00 through
