@@ -66,7 +66,7 @@
   provenance, and compact-response tests in separately bounded commands.
 - [ ] 6.2 Run backend domain-boundary and Ruff checks plus strict OpenSpec
   validation in separately bounded commands.
-- [ ] 6.3 Record the deploy/rollback path and leave real production coverage
+- [x] 6.3 Record the deploy/rollback path and leave real production coverage
   tasks open until bounded VPS slices provide factual evidence.
 
 ## 7. Split Publication Coverage Policy
@@ -77,7 +77,7 @@
 - [x] 7.2 Publish and select 90–95 percent score-coverage snapshots as
   `degraded`, exclude insufficient-history ETFs, and expose the policy mode in
   the API and ETF research UI.
-- [ ] 7.3 Add boundary tests for 89/90/95 percent, run focused backend and
+- [x] 7.3 Add boundary tests for 89/90/95 percent, run focused backend and
   frontend checks, deploy, and verify production without raw-price substitution.
 
 ## 8. Bound Research-Depth Preflight
@@ -85,5 +85,29 @@
 - [x] 8.1 Materialize the target-session set before per-ETF aggregation so the
   300-session research lane does not execute a full-universe outer join with a
   nested session subquery; preserve watchlist-first and shallowest-first order.
-- [ ] 8.2 Deploy the preflight optimization and prove one production slice
+- [x] 8.2 Deploy the preflight optimization and prove one production slice
   reaches provider work or returns a durable bounded result within 60 seconds.
+
+## Production Evidence — 2026-07-25
+
+- Coverage-policy deploy: `c1d7f19a043c0986bf5c57359e67e172b689fefd`.
+  Research-depth preflight deploy:
+  `e55d674ae2a8653d6f9932f4e055ec2f1ddd73d0`. Both are code-only changes with
+  no schema migration. Rollback is a normal `git revert` of the affected SHA
+  followed by the existing deploy workflow; production data remains compatible.
+- For trade date 2026-07-24 the authoritative universe contained 1,485 ETFs.
+  Daily total-return-adjusted coverage was 1,484/1,485 (99.93 percent) and the
+  strict 61-session warm-up coverage was 1,364/1,485 (91.85 percent), producing
+  `coverage_policy_mode=degraded` with thresholds 95/90 percent. Raw or
+  unversioned decision violations and non-finite decision values were both zero.
+- Formal publication was correctly refused by the independent PIT barrier:
+  1,484 rows were received after the 15:00 data cutoff and one row was missing.
+  No late data was relabeled, no raw-price substitute was used, and no snapshot
+  was published.
+- The first production research-depth slice after the preflight optimization
+  returned in 12.54 seconds, attempted 10 ETFs, fetched and persisted 633
+  total-return-adjusted rows at 50.49 rows/second, used 190,537,728 bytes peak
+  RSS, and saved checkpoint
+  `85d76d767a865007219f80ab58712b31913682c6a12be4f4b720ff0b907e228c`.
+  All ten selected ETFs remained below 300 contiguous sessions, so real 300-day
+  coverage remains open rather than being overstated.
