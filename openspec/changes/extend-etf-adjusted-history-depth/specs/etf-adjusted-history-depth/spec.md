@@ -73,6 +73,15 @@ listing dates from returned price history.
 - **THEN** its attempt cursor and cooldown are persisted before later slices
   rotate to other repairable gaps while the new ETF remains in the denominator
 
+#### Scenario: Buffer rows do not satisfy a missing frozen publication session
+
+- **WHEN** an ETF returns at least 61 eligible adjusted rows in the bounded
+  request window but one of the frozen 61 publication sessions is absent
+- **THEN** the availability observation records the exact required-session
+  coverage as insufficient
+- **AND** the ETF enters the same bounded cooldown without increasing formal
+  publication coverage
+
 #### Scenario: Raw history is deeper
 
 - **WHEN** raw Sina, efinance, intraday, estimated, or display-only rows extend

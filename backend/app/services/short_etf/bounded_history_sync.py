@@ -620,8 +620,13 @@ async def _record_history_availability(
         return
     eligible_dates, provider_version, adjustment_version = observation
     now = _utcnow()
+    covered_required_sessions = len(eligible_dates)
+    if request.selection_policy == PUBLICATION_READINESS_SELECTION_POLICY:
+        covered_required_sessions = len(
+            set(eligible_dates).intersection(request.required_trade_dates)
+        )
     provider_depth_sufficient = (
-        len(eligible_dates) >= request.required_sessions
+        covered_required_sessions >= request.required_sessions
     )
     status = (
         "sufficient"
@@ -651,6 +656,7 @@ async def _record_history_availability(
             "inferred_listing_date": False,
             "requested_sessions": request.required_sessions,
             "returned_eligible_sessions": len(eligible_dates),
+            "covered_required_sessions": covered_required_sessions,
             "price_basis": request.price_basis,
         },
     }

@@ -273,6 +273,16 @@ async def test_publication_short_history_is_cooled_down_without_losing_denominat
     code = "510016"
     request = replace(_request(), eligible_codes=(code,), max_codes=1)
     calls: list[str] = []
+    returned_dates = (
+        request.from_date,
+        *(
+            item
+            for index, item in enumerate(request.required_trade_dates)
+            if index != 10
+        ),
+    )
+    assert len(returned_dates) == request.required_sessions
+    assert request.from_date not in request.required_trade_dates
 
     async def fetch(
         current_code: str,
@@ -296,7 +306,7 @@ async def test_publication_short_history_is_cooled_down_without_losing_denominat
                     "provider_version": "fixture-hfq-v1",
                     "adjustment_version": "fixture-hfq-v1",
                 }
-                for item in request.required_trade_dates[:2]
+                for item in returned_dates
             ],
             provider="tencent",
             fallback_used=True,
@@ -327,9 +337,10 @@ async def test_publication_short_history_is_cooled_down_without_losing_denominat
     assert first.completed_codes == ()
     assert observation is not None
     assert observation.status == "source_history_shortfall"
-    assert observation.eligible_session_count == 2
+    assert observation.eligible_session_count == request.required_sessions
     assert observation.retry_after is not None
     assert observation.evidence_json["inferred_listing_date"] is False
+    assert observation.evidence_json["covered_required_sessions"] == 60
     assert cursor is not None
     assert cursor.last_priority_code == code
     assert cursor.last_lane == "history_attempt"

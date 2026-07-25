@@ -25,6 +25,9 @@
 - [x] 2.6 Apply factual short-history cooldowns and durable attempt rotation to
   the 61-session publication lane so newly listed ETFs remain blockers without
   starving repairable gaps.
+- [x] 2.7 Evaluate publication availability cooldowns against the exact frozen
+  61-session calendar so an ETF with an older buffer row but one missing
+  required session cannot be retried indefinitely.
 
 ## 3. Extend The Bounded Runner
 
