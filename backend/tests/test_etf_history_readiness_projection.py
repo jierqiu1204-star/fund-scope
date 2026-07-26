@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -13,7 +13,12 @@ from app.models.entities import (
 from app.services.workflows.etf_history_readiness import read_etf_history_readiness
 
 
-def _etf(code: str, *, eligible: bool = True) -> TradableEtf:
+def _etf(
+    code: str,
+    *,
+    eligible: bool = True,
+    listing_date: date | None = date(2020, 1, 1),
+) -> TradableEtf:
     return TradableEtf(
         code=code,
         name=f"ETF-{code}",
@@ -23,6 +28,9 @@ def _etf(code: str, *, eligible: bool = True) -> TradableEtf:
         asset_class="sector",
         is_short_term_eligible=eligible,
         is_watchlist=False,
+        listing_date=listing_date,
+        listing_date_source=("fixture-authoritative-universe" if listing_date else None),
+        listing_date_observed_at=(datetime(2026, 7, 1) if listing_date else None),
     )
 
 
@@ -141,7 +149,7 @@ async def test_readiness_uses_ranking_point_in_time_universe_denominator(app) ->
     assert report["universe"]["source"] == "ranking_point_in_time_snapshot"
     assert report["universe"]["codes"] == ["510710", "510712"]
     assert len(report["universe"]["snapshot_hash"]) == 64
-    for lane_name in ("daily_freshness", "history_depth_61", "contract_depth"):
+    for lane_name in ("daily_freshness", "history_depth_61"):
         lane = report[lane_name]
         assert lane["expected_count"] == 2
         assert set(lane) >= {
@@ -150,7 +158,94 @@ async def test_readiness_uses_ranking_point_in_time_universe_denominator(app) ->
             "eligible_count",
             "excluded_count",
         }
+    assert report["contract_depth"]["expected_count"] == 0
+    assert report["contract_depth"]["session_calendar_complete"] is False
+    assert report["contract_depth"]["full_universe_count"] == 2
     assert report["daily_freshness"]["covered_codes"] == ["510710", "510712"]
+
+
+@pytest.mark.asyncio
+async def test_research_depth_uses_a_seasoned_authoritative_cohort(app) -> None:
+    target = date(2026, 7, 17)
+    sessions = tuple(target - timedelta(days=offset) for offset in reversed(range(300)))
+    old_code = "510720"
+    new_code = "510721"
+    unknown_code = "510722"
+    async with app.state.db.session() as session:
+        session.add_all(
+            [
+                _etf(old_code, listing_date=sessions[0] - timedelta(days=1)),
+                _etf(new_code, listing_date=sessions[0] + timedelta(days=10)),
+                _etf(unknown_code, listing_date=None),
+            ]
+        )
+        session.add_all(
+            _membership(code, effective_from=sessions[0])
+            for code in (old_code, new_code, unknown_code)
+        )
+        session.add_all(_price(old_code, day, eligible=True) for day in sessions)
+        session.add_all(_price(new_code, day, eligible=False) for day in sessions)
+        await session.commit()
+
+        report = await read_etf_history_readiness(
+            session,
+            target_date=target,
+        )
+
+    contract = report["contract_depth"]
+    assert report["daily_freshness"]["expected_count"] == 3
+    assert contract["full_universe_count"] == 3
+    assert contract["expected_count"] == 1
+    assert contract["covered_codes"] == [old_code]
+    assert contract["structurally_unseasoned_count"] == 1
+    assert contract["structurally_unseasoned_samples"] == [new_code]
+    assert contract["unknown_listing_count"] == 1
+    assert contract["unknown_listing_samples"] == [unknown_code]
+    assert contract["listing_metadata_coverage_ratio"] == pytest.approx(2 / 3)
+    assert contract["completion_gate_passed"] is False
+    assert "authoritative_listing_metadata_below_95pct" in contract["completion_blockers"]
+
+
+@pytest.mark.asyncio
+async def test_raw_rows_extend_calendar_but_never_adjusted_coverage(app) -> None:
+    target = date(2026, 7, 17)
+    sessions = tuple(target - timedelta(days=offset) for offset in reversed(range(200)))
+    seasoned_code = "510730"
+    calendar_only_code = "510731"
+    async with app.state.db.session() as session:
+        session.add_all(
+            [
+                _etf(
+                    seasoned_code,
+                    listing_date=sessions[0] - timedelta(days=1),
+                ),
+                _etf(
+                    calendar_only_code,
+                    listing_date=sessions[0] + timedelta(days=1),
+                ),
+            ]
+        )
+        session.add_all(
+            _membership(code, effective_from=sessions[0])
+            for code in (seasoned_code, calendar_only_code)
+        )
+        session.add_all(_price(calendar_only_code, day, eligible=False) for day in sessions)
+        session.add_all(_price(seasoned_code, day, eligible=True) for day in sessions[1:])
+        await session.commit()
+
+        report = await read_etf_history_readiness(
+            session,
+            target_date=target,
+            horizons=(5,),
+        )
+
+    contract = report["contract_depth"]
+    assert report["observed_session_calendar"]["session_count"] == 200
+    assert report["observed_session_calendar"]["raw_rows_count_as_adjusted_coverage"] is False
+    assert contract["session_calendar_complete"] is True
+    assert contract["expected_count"] == 1
+    assert contract["covered_count"] == 0
+    assert contract["pending_codes"] == [seasoned_code]
 
 
 @pytest.mark.asyncio

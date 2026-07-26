@@ -50,3 +50,12 @@ version-incompatible rows without increasing decision coverage.
 
 - **WHEN** any 61, 300, or 500-session history worker holds a live lease
 - **THEN** another history lane cannot start provider work
+
+#### Scenario: A completion request contains a partial gap
+
+- **WHEN** persisted accepted adjusted rows leave only a subset of frozen
+  required sessions missing
+- **THEN** each provider is evaluated against those missing required dates
+  inside their enclosing date span
+- **AND** extra raw, invalid, or non-required dates cannot falsely satisfy the
+  missing-session minimum

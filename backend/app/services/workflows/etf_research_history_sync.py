@@ -38,7 +38,6 @@ from app.services.workflows.etf_history_readiness import (
 )
 
 RESEARCH_ADJUSTMENT_CONTRACT = "total-return-adjusted-provenance-v1"
-RESEARCH_DEPTH_FROM_DAYS = 1_095
 RESEARCH_RSS_LIMIT_BYTES = 512 * 1024 * 1024
 RESEARCH_PROFILE_MIN_CODES = 5
 RESEARCH_PROFILE_INITIAL_CODES = 10
@@ -174,6 +173,13 @@ def _deep_telemetry_contract_hash() -> str:
     )
 
 
+def _lane_completion_gate_passed(lane: Mapping[str, Any]) -> bool:
+    explicit = lane.get("completion_gate_passed")
+    if isinstance(explicit, bool):
+        return explicit
+    return float(lane.get("coverage_ratio") or 0.0) >= ETF_RESEARCH_DEPTH_MIN_COVERAGE
+
+
 def _compact_lane(lane: Mapping[str, Any]) -> dict[str, Any]:
     pending = lane.get("pending_codes")
     return {
@@ -184,6 +190,17 @@ def _compact_lane(lane: Mapping[str, Any]) -> dict[str, Any]:
         "covered_count": int(lane.get("covered_count") or 0),
         "excluded_count": int(lane.get("excluded_count") or 0),
         "coverage_ratio": float(lane.get("coverage_ratio") or 0.0),
+        "denominator_kind": lane.get("denominator_kind"),
+        "full_universe_count": int(lane.get("full_universe_count") or 0),
+        "cohort_hash": lane.get("cohort_hash"),
+        "first_required_session": lane.get("first_required_session"),
+        "listing_metadata_coverage_ratio": float(
+            lane.get("listing_metadata_coverage_ratio") or 0.0
+        ),
+        "listing_metadata_gate_passed": bool(lane.get("listing_metadata_gate_passed")),
+        "structurally_unseasoned_count": int(lane.get("structurally_unseasoned_count") or 0),
+        "completion_gate_passed": _lane_completion_gate_passed(lane),
+        "completion_blockers": list(lane.get("completion_blockers") or []),
         "pending_samples": (
             list(pending[:COMPACT_SAMPLE_LIMIT])
             if isinstance(pending, list)
@@ -293,10 +310,7 @@ async def run_post_publication_etf_research_history_slice(
         }
 
     contract_lane = readiness.get("contract_depth") or {}
-    if (
-        float(contract_lane.get("coverage_ratio") or 0.0)
-        < ETF_RESEARCH_DEPTH_MIN_COVERAGE
-    ):
+    if not _lane_completion_gate_passed(contract_lane):
         selected_lane = contract_lane
         scope = history_depth_scope(str(readiness["contract_hash"]))
         contract_hash = current_etf_history_contract_hash(
@@ -307,10 +321,7 @@ async def run_post_publication_etf_research_history_slice(
         scope = DEEP_TELEMETRY_DEPTH_SCOPE
         contract_hash = _deep_telemetry_contract_hash()
 
-    if (
-        float(selected_lane.get("coverage_ratio") or 0.0)
-        >= ETF_RESEARCH_DEPTH_MIN_COVERAGE
-    ):
+    if _lane_completion_gate_passed(selected_lane):
         return {
             "asset_type": ASSET_TYPE_ETF,
             "status": "complete",
@@ -320,16 +331,61 @@ async def run_post_publication_etf_research_history_slice(
             "lane": _compact_lane(selected_lane),
         }
 
+    required_sessions = int(selected_lane.get("required_sessions") or 0)
+    try:
+        required_trade_dates = tuple(
+            date.fromisoformat(str(value))
+            for value in selected_lane.get("required_trade_dates") or ()
+        )
+    except ValueError:
+        required_trade_dates = ()
+    if (
+        required_sessions <= 0
+        or len(required_trade_dates) != required_sessions
+        or required_trade_dates != tuple(sorted(set(required_trade_dates)))
+    ):
+        return {
+            "asset_type": ASSET_TYPE_ETF,
+            "status": "skipped",
+            "reason": "observed_session_calendar_incomplete",
+            "target_date": effective_date.isoformat(),
+            "publication_gates": compact_gates,
+            "lane": _compact_lane(selected_lane),
+        }
+
     universe = readiness.get("universe") or {}
-    codes = tuple(sorted({str(code) for code in universe.get("codes") or ()}))
-    universe_hash = str(universe.get("snapshot_hash") or "")
-    if not codes or len(universe_hash) != 64:
+    cohort_values = selected_lane.get("cohort_codes")
+    code_values = cohort_values if isinstance(cohort_values, list) else universe.get("codes") or ()
+    codes = tuple(sorted({str(code) for code in code_values}))
+    universe_hash = str(selected_lane.get("cohort_hash") or universe.get("snapshot_hash") or "")
+    if not codes:
+        return {
+            "asset_type": ASSET_TYPE_ETF,
+            "status": "skipped",
+            "reason": "seasoned_research_cohort_empty",
+            "target_date": effective_date.isoformat(),
+            "publication_gates": compact_gates,
+            "lane": _compact_lane(selected_lane),
+        }
+    if len(universe_hash) != 64:
         return {
             "asset_type": ASSET_TYPE_ETF,
             "status": "skipped",
             "reason": "point_in_time_universe_unavailable",
             "target_date": effective_date.isoformat(),
             "publication_gates": compact_gates,
+        }
+    if (
+        selected_lane.get("listing_metadata_gate_passed") is False
+        and float(selected_lane.get("coverage_ratio") or 0.0) >= ETF_RESEARCH_DEPTH_MIN_COVERAGE
+    ):
+        return {
+            "asset_type": ASSET_TYPE_ETF,
+            "status": "skipped",
+            "reason": "authoritative_listing_metadata_below_95pct",
+            "target_date": effective_date.isoformat(),
+            "publication_gates": compact_gates,
+            "lane": _compact_lane(selected_lane),
         }
 
     recent_runs = await _recent_lane_slices(session, scope=scope)
@@ -340,9 +396,10 @@ async def run_post_publication_etf_research_history_slice(
         contract_hash=contract_hash,
         universe_hash=universe_hash,
         eligible_codes=codes,
-        from_date=effective_date - timedelta(days=RESEARCH_DEPTH_FROM_DAYS),
-        to_date=effective_date,
-        required_sessions=int(selected_lane["required_sessions"]),
+        from_date=required_trade_dates[0],
+        to_date=required_trade_dates[-1],
+        required_sessions=required_sessions,
+        required_trade_dates=required_trade_dates,
         max_codes=profile_max_codes,
         page_size=500,
         max_rows=5_000,

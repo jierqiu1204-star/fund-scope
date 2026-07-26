@@ -20,13 +20,19 @@ operational adjusted-history lane rather than another backtest engine.
   provenance.
 - Stop repeatedly calling providers for codes whose accepted adjusted source
   factually returned a short history.
+- Separate the full publication denominator from factually seasoned 300/500
+  research cohorts without inventing historical membership.
+- Complete repairable histories first and fetch only the missing frozen-session
+  span for each selected ETF.
 
 **Non-Goals:**
 
 - Changing the 61-session ranking formula, factor weights, formal promotion
   gates, or historical visibility rules.
-- Inferring listing dates from first returned prices or excluding new ETFs from
-  the authoritative publication denominator.
+- Inferring listing dates from first returned prices, backdating universe
+  membership, or excluding new ETFs from the authoritative publication
+  denominator. A provider-observed listing date from the same complete
+  authoritative universe snapshot is permitted only with explicit provenance.
 - Using raw prices to synthesize adjusted history.
 - Running concurrent ETF fetches or an unbounded full-history job.
 
@@ -105,11 +111,55 @@ three-decimal adjusted values are less precise than TickFlow. It is independent
 of Eastmoney's `push2his` host, so an Eastmoney/efinance network block does not
 force raw-price substitution.
 
+### 7. Separate publication and seasoned research denominators
+
+The current authoritative point-in-time universe remains the exact denominator
+for target-date and 61-session publication coverage. A 300-session research
+cohort contains only current authoritative members whose provider-observed
+listing date is on or before the first frozen 300-session date. The 500-session
+cohort applies the same rule against the first frozen 500-session date.
+
+Listing metadata is accepted only from a complete authoritative universe
+snapshot and is persisted with source and observation time. Missing listing
+metadata stays explicit and cannot be inferred from price history or membership
+observation. A research lane cannot be declared complete unless listing metadata
+covers at least 95 percent of the full authoritative universe; unknown and
+structurally unseasoned ETFs are reported separately with stable hashes.
+
+The frozen session calendar is derived from observed ETF trade dates across all
+price bases because raw daily rows can prove that an exchange session existed.
+Only fully versioned decision-eligible `total_return_adjusted` rows count toward
+per-ETF coverage.
+
+### 8. Finish the nearest histories and request only missing spans
+
+Within a research cohort, pending ETFs are ordered by existing required-session
+depth descending, then watchlist priority and code. Durable rotation and
+cooldowns still prevent starvation, but do not make the queue start from the
+shallowest histories.
+
+Before provider work, the runner compares one ETF's accepted adjusted dates with
+the frozen required-session set. It requests from the earliest missing date to
+the latest missing date and asks the provider chain to satisfy the number and
+identity of missing required sessions. Persistence remains idempotent, and the
+same database comparison reconstructs the breakpoint after interruption or a
+batch-profile change.
+
 ## Risks / Trade-offs
 
 - [Many ETFs are genuinely new] → Keep them in the denominator, persist factual
-  short-history observations, exclude them from scoring, and label a 90–95
-  percent publication as degraded rather than fabricate data.
+  listing metadata, exclude them only from a research horizon they could not
+  factually satisfy, keep them in the publication denominator, and label a
+  90–95 percent publication as degraded rather than fabricate data.
+- [Listing metadata is incomplete] → Continue bounded work for the known
+  seasoned cohort but block research completion below 95 percent metadata
+  coverage and expose unknown codes separately.
+- [Raw rows pollute coverage] → Permit raw dates only in the shared observed
+  session calendar; every per-ETF depth query still requires decision-eligible,
+  versioned total-return-adjusted rows.
+- [Repeated full-range requests waste the slice] → Recompute exact missing
+  required dates from persisted adjusted rows before each fetch and request only
+  their enclosing span.
 - [Provider returns a capped range] → Record requested and returned boundaries;
   retry after cooldown and never infer a listing date.
 - [Eastmoney host is unreachable] → Try the independently hosted, explicitly
@@ -123,14 +173,15 @@ force raw-price substitution.
 
 ## Migration Plan
 
-1. Add availability persistence and migration.
-2. Add the research-depth request policy, cursor-compatible adaptive profile, and
-   tests.
-3. Add the coordinator and scheduler trigger disabled only by factual gate
-   blockers.
+1. Add authoritative listing-date persistence and migration.
+2. Project separate full-publication and seasoned 300/500 research denominators
+   with a 95 percent metadata gate.
+3. Freeze observed session calendars, add completion-first selection and
+   per-code missing-span requests.
 4. Run bounded local tests and production-shaped benchmarks.
 5. Deploy conservatively at ten codes; allow automatic growth only after healthy
    real slices.
 
-Rollback removes the research-depth scheduler trigger and leaves all accepted
-adjusted rows intact. The additive availability table may remain for audit.
+Rollback removes the research-depth scheduler trigger and reverts the
+cohort/queue code while leaving all accepted adjusted rows intact. The additive
+availability table and nullable listing metadata may remain for audit.

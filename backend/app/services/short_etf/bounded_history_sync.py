@@ -178,6 +178,15 @@ class BoundedHistorySyncRequest:
                     "publication readiness requires 61 unique ordered trade dates ending at target"
                 )
         if self.selection_policy == RESEARCH_DEPTH_SELECTION_POLICY:
+            if (
+                len(self.required_trade_dates) != self.required_sessions
+                or self.required_trade_dates != tuple(sorted(set(self.required_trade_dates)))
+                or self.required_trade_dates[0] != self.from_date
+                or self.required_trade_dates[-1] != self.to_date
+            ):
+                raise ValueError(
+                    "research depth requires an exact unique ordered frozen trade-date calendar"
+                )
             if self.rss_limit_bytes > 512 * 1024 * 1024:
                 raise ValueError("research depth rss limit must not exceed 512 MiB")
             if self.provider_timeout_seconds > 6:
@@ -378,20 +387,23 @@ async def _eligible_depths(
     *,
     request: BoundedHistorySyncRequest,
 ) -> dict[str, int]:
-    target_sessions = tuple(
-        await session.scalars(
-            select(EtfPriceHistory.trade_date)
-            .where(
-                EtfPriceHistory.trade_date >= request.from_date,
-                EtfPriceHistory.trade_date <= request.to_date,
-                EtfPriceHistory.decision_eligible.is_(True),
-                EtfPriceHistory.research_price_basis == request.price_basis,
+    if request.selection_policy == RESEARCH_DEPTH_SELECTION_POLICY:
+        target_sessions = request.required_trade_dates
+    else:
+        target_sessions = tuple(
+            await session.scalars(
+                select(EtfPriceHistory.trade_date)
+                .where(
+                    EtfPriceHistory.trade_date >= request.from_date,
+                    EtfPriceHistory.trade_date <= request.to_date,
+                    EtfPriceHistory.decision_eligible.is_(True),
+                    EtfPriceHistory.research_price_basis == request.price_basis,
+                )
+                .distinct()
+                .order_by(EtfPriceHistory.trade_date.desc())
+                .limit(request.required_sessions)
             )
-            .distinct()
-            .order_by(EtfPriceHistory.trade_date.desc())
-            .limit(request.required_sessions)
         )
-    )
     depth_rows = (
         await session.execute(
             select(
@@ -415,15 +427,63 @@ async def _eligible_depths(
             )
         )
     ).all()
+
+    def order_key(item: tuple[str, bool]) -> tuple[int | bool | str, ...]:
+        code, is_watchlist = item
+        if request.selection_policy == RESEARCH_DEPTH_SELECTION_POLICY:
+            return (-depths.get(code, 0), not is_watchlist, code)
+        return (not is_watchlist, depths.get(code, 0), code)
+
     ordered = sorted(
         ((str(code), bool(is_watchlist)) for code, is_watchlist in watchlist_rows),
-        key=lambda item: (
-            not item[1],
-            depths.get(item[0], 0),
-            item[0],
-        ),
+        key=order_key,
     )
     return {code: depths.get(code, 0) for code, _is_watchlist in ordered}
+
+
+async def _missing_required_trade_dates(
+    session: AsyncSession,
+    *,
+    code: str,
+    request: BoundedHistorySyncRequest,
+) -> tuple[date, ...]:
+    if request.selection_policy != RESEARCH_DEPTH_SELECTION_POLICY:
+        return ()
+    existing_dates = set(
+        await session.scalars(
+            select(EtfPriceHistory.trade_date).where(
+                EtfPriceHistory.etf_code == code,
+                EtfPriceHistory.trade_date.in_(request.required_trade_dates),
+                EtfPriceHistory.decision_eligible.is_(True),
+                EtfPriceHistory.research_price_basis == request.price_basis,
+            )
+        )
+    )
+    return tuple(
+        trade_date
+        for trade_date in request.required_trade_dates
+        if trade_date not in existing_dates
+    )
+
+
+async def _fetch_history_window(
+    fetcher: HistoryFetcher,
+    *,
+    code: str,
+    from_date: date,
+    to_date: date,
+    missing_trade_dates: tuple[date, ...],
+) -> ProviderFetchResult:
+    fetch_with_minimum = getattr(fetcher, "fetch_with_minimum", None)
+    if callable(fetch_with_minimum) and missing_trade_dates:
+        return await fetch_with_minimum(
+            code,
+            from_date,
+            to_date,
+            minimum_eligible_rows=len(missing_trade_dates),
+            required_trade_dates=missing_trade_dates,
+        )
+    return await fetcher(code, from_date, to_date)
 
 
 async def _publication_readiness_candidates(
@@ -578,6 +638,8 @@ def _eligible_provider_observation(
     provider_result: ProviderFetchResult,
     *,
     request: BoundedHistorySyncRequest,
+    requested_from: date,
+    requested_to: date,
 ) -> tuple[tuple[date, ...], str, str] | None:
     source_timestamp = _utcnow()
     eligible_rows: list[tuple[date, str, str]] = []
@@ -592,7 +654,7 @@ def _eligible_provider_observation(
         except (KeyError, TypeError, ValueError):
             continue
         if (
-            not request.from_date <= trade_date <= request.to_date
+            not requested_from <= trade_date <= requested_to
             or fields.get("decision_eligible") is not True
             or fields.get("research_price_basis") != request.price_basis
         ):
@@ -616,6 +678,10 @@ async def _record_history_availability(
     code: str,
     request: BoundedHistorySyncRequest,
     provider_result: ProviderFetchResult,
+    requested_from: date,
+    requested_to: date,
+    requested_trade_dates: tuple[date, ...],
+    depth_complete: bool,
 ) -> None:
     if request.selection_policy not in {
         PUBLICATION_READINESS_SELECTION_POLICY,
@@ -625,19 +691,18 @@ async def _record_history_availability(
     observation = _eligible_provider_observation(
         provider_result,
         request=request,
+        requested_from=requested_from,
+        requested_to=requested_to,
     )
     if observation is None:
         return
     eligible_dates, provider_version, adjustment_version = observation
     now = _utcnow()
-    covered_required_sessions = len(eligible_dates)
-    if request.selection_policy == PUBLICATION_READINESS_SELECTION_POLICY:
-        covered_required_sessions = len(
-            set(eligible_dates).intersection(request.required_trade_dates)
-        )
-    provider_depth_sufficient = (
-        covered_required_sessions >= request.required_sessions
+    effective_required_dates = requested_trade_dates or request.required_trade_dates
+    covered_required_sessions = len(
+        set(eligible_dates).intersection(effective_required_dates)
     )
+    provider_depth_sufficient = depth_complete
     status = (
         "sufficient"
         if provider_depth_sufficient
@@ -654,8 +719,8 @@ async def _record_history_availability(
         "provider": provider_result.provider,
         "provider_version": provider_version,
         "adjustment_version": adjustment_version,
-        "requested_from": request.from_date,
-        "requested_to": request.to_date,
+        "requested_from": requested_from,
+        "requested_to": requested_to,
         "earliest_eligible_date": eligible_dates[0],
         "latest_eligible_date": eligible_dates[-1],
         "eligible_session_count": len(eligible_dates),
@@ -664,9 +729,10 @@ async def _record_history_availability(
         "retry_after": retry_after,
         "evidence_json": {
             "inferred_listing_date": False,
-            "requested_sessions": request.required_sessions,
+            "requested_sessions": len(effective_required_dates),
             "returned_eligible_sessions": len(eligible_dates),
             "covered_required_sessions": covered_required_sessions,
+            "post_persist_depth_complete": depth_complete,
             "price_basis": request.price_basis,
         },
     }
@@ -929,6 +995,17 @@ async def _depth_is_complete(
     code: str,
     request: BoundedHistorySyncRequest,
 ) -> bool:
+    if request.selection_policy == RESEARCH_DEPTH_SELECTION_POLICY:
+        covered_count = await session.scalar(
+            select(func.count(func.distinct(EtfPriceHistory.trade_date))).where(
+                EtfPriceHistory.etf_code == code,
+                EtfPriceHistory.trade_date.in_(request.required_trade_dates),
+                EtfPriceHistory.decision_eligible.is_(True),
+                EtfPriceHistory.research_price_basis == request.price_basis,
+            )
+        )
+        return int(covered_count or 0) == request.required_sessions
+
     target_sessions = (
         select(EtfPriceHistory.trade_date)
         .where(
@@ -1251,6 +1328,7 @@ async def run_bounded_history_sync_slice(
     selected = pending[: request.max_codes]
     stop_reason: str | None = None
     consecutive_provider_failures = 0
+    fetch_windows: list[dict[str, Any]] = []
     checkpoint_reserve_seconds = (
         request.process_deadline_seconds - request.worker_deadline_seconds
     )
@@ -1299,6 +1377,45 @@ async def run_bounded_history_sync_slice(
             except TimeoutError:
                 stop_reason = "worker_deadline"
                 break
+        requested_from = request.from_date
+        requested_to = request.to_date
+        requested_trade_dates = (
+            request.required_trade_dates
+            if request.selection_policy == PUBLICATION_READINESS_SELECTION_POLICY
+            else ()
+        )
+        if request.selection_policy == RESEARCH_DEPTH_SELECTION_POLICY:
+            try:
+                requested_trade_dates = await _run_before(
+                    partial(
+                        _missing_required_trade_dates,
+                        session,
+                        code=code,
+                        request=request,
+                    ),
+                    deadline=hard_worker_deadline,
+                    timeout_message=(
+                        "history sync worker deadline exhausted reading missing required sessions"
+                    ),
+                )
+            except TimeoutError:
+                stop_reason = "worker_deadline"
+                break
+            totals["sql_statements"] += 1
+            if not requested_trade_dates:
+                completed_codes.append(code)
+                continue
+            requested_from = requested_trade_dates[0]
+            requested_to = requested_trade_dates[-1]
+        fetch_windows.append(
+            {
+                "code": code,
+                "from": requested_from.isoformat(),
+                "to": requested_to.isoformat(),
+                "missing_session_count": len(requested_trade_dates),
+            }
+        )
+        elapsed = clock() - started
         remaining_limits = [
             request.admission_deadline_seconds - elapsed,
             request.worker_deadline_seconds - elapsed,
@@ -1312,7 +1429,13 @@ async def run_bounded_history_sync_slice(
             break
         try:
             provider_result = await asyncio.wait_for(
-                fetcher(code, request.from_date, request.to_date),
+                _fetch_history_window(
+                    fetcher,
+                    code=code,
+                    from_date=requested_from,
+                    to_date=requested_to,
+                    missing_trade_dates=requested_trade_dates,
+                ),
                 timeout=remaining,
             )
         except asyncio.CancelledError:
@@ -1484,6 +1607,10 @@ async def run_bounded_history_sync_slice(
             code=code,
             request=request,
             provider_result=provider_result,
+            requested_from=requested_from,
+            requested_to=requested_to,
+            requested_trade_dates=requested_trade_dates,
+            depth_complete=depth_complete,
         )
         del provider_result
         if depth_complete:
@@ -1623,6 +1750,8 @@ async def run_bounded_history_sync_slice(
         "status": status,
         "stop_reason": stop_reason,
         "attempted_codes": attempted_codes,
+        "fetch_window_count": len(fetch_windows),
+        "fetch_window_samples": fetch_windows[:20],
         "completed_codes": completed_codes,
         "exclusions": exclusions,
         "elapsed_seconds": round(clock() - started, 6),

@@ -100,10 +100,16 @@ def _research_request(
     eligible_codes: tuple[str, ...] = ("510000",),
     required_sessions: int = 3,
 ) -> BoundedHistorySyncRequest:
+    required_trade_dates = tuple(
+        date(2026, 7, 1) + timedelta(days=offset) for offset in range(required_sessions)
+    )
     return replace(
         _request(max_codes=1, eligible_codes=eligible_codes),
         scope="research_depth:" + "c" * 64,
+        from_date=required_trade_dates[0],
+        to_date=required_trade_dates[-1],
         required_sessions=required_sessions,
+        required_trade_dates=required_trade_dates,
         max_codes=max_codes,
         rss_limit_bytes=512 * 1024 * 1024,
         provider_timeout_seconds=6.0,
@@ -176,13 +182,90 @@ async def test_research_depth_preflight_orders_materialized_depths_without_join(
             ),
         )
 
-    assert list(depths) == ["510093", "510092", "510091", "510094"]
+    assert list(depths) == ["510092", "510094", "510093", "510091"]
     assert depths == {
-        "510093": 0,
         "510092": 1,
-        "510091": 0,
         "510094": 1,
+        "510093": 0,
+        "510091": 0,
     }
+
+
+@pytest.mark.asyncio
+async def test_research_depth_fetches_only_the_missing_required_span(app) -> None:
+    code = "510095"
+    calls: list[tuple[date, date, int, tuple[date, ...]]] = []
+
+    class GapFetcher:
+        async def __call__(
+            self,
+            _code: str,
+            _from: date,
+            _to: date,
+        ) -> ProviderFetchResult:
+            raise AssertionError("research sync must use the dynamic gap minimum")
+
+        async def fetch_with_minimum(
+            self,
+            current_code: str,
+            from_date: date,
+            to_date: date,
+            *,
+            minimum_eligible_rows: int,
+            required_trade_dates: tuple[date, ...],
+        ) -> ProviderFetchResult:
+            assert current_code == code
+            calls.append(
+                (
+                    from_date,
+                    to_date,
+                    minimum_eligible_rows,
+                    required_trade_dates,
+                )
+            )
+            return ProviderFetchResult(
+                rows=_rows(date(2026, 7, 1), 1),
+                provider="eastmoney",
+                fallback_used=False,
+            )
+
+    async with app.state.db.session() as session:
+        session.add(_etf(code))
+        for trade_date in (date(2026, 7, 2), date(2026, 7, 3)):
+            session.add(
+                EtfPriceHistory(
+                    etf_code=code,
+                    trade_date=trade_date,
+                    open=1.0,
+                    high=1.0,
+                    low=1.0,
+                    close=1.0,
+                    volume=1_000_000.0,
+                    turnover=100_000_000.0,
+                    pct_change=0.0,
+                    research_adjusted_value=1.0,
+                    research_price_basis="total_return_adjusted",
+                    data_provider="eastmoney",
+                    provider_version="fixture-hfq-v1",
+                    source_timestamp=datetime(2026, 7, 3, 15, 0),
+                    adjustment_version="fixture-hfq-v1",
+                    decision_eligible=True,
+                )
+            )
+        await session.commit()
+        result = await run_bounded_history_sync_slice(
+            session,
+            request=_research_request(eligible_codes=(code,)),
+            fetcher=GapFetcher(),
+            rss_reader=lambda: 32 * 1024 * 1024,
+        )
+        row_count = await session.scalar(select(func.count()).select_from(EtfPriceHistory))
+
+    assert calls == [(date(2026, 7, 1), date(2026, 7, 1), 1, (date(2026, 7, 1),))]
+    assert result.status == "complete"
+    assert result.completed_codes == (code,)
+    assert result.fetched_rows == 1
+    assert row_count == 3
 
 
 @pytest.mark.asyncio

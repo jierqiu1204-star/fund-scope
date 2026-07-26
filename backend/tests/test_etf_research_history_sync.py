@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -16,6 +16,10 @@ def _lane(
     ratio: float,
     authoritative: bool,
 ) -> dict[str, Any]:
+    required_trade_dates = [
+        (date(2024, 12, 1) + timedelta(days=offset)).isoformat()
+        for offset in range(required_sessions)
+    ]
     return {
         "scope": scope,
         "required_sessions": required_sessions,
@@ -25,6 +29,15 @@ def _lane(
         "excluded_count": 2 - int(ratio * 2),
         "coverage_ratio": ratio,
         "pending_codes": [] if ratio >= 0.95 else ["510001"],
+        "cohort_codes": ["510001", "510002"],
+        "cohort_hash": "d" * 64,
+        "required_trade_dates": required_trade_dates,
+        "listing_metadata_gate_passed": True,
+        "listing_metadata_coverage_ratio": 1.0,
+        "completion_gate_passed": ratio >= 0.95,
+        "completion_blockers": (
+            [] if ratio >= 0.95 else ["adjusted_research_coverage_below_95pct"]
+        ),
     }
 
 
@@ -173,6 +186,41 @@ async def test_research_depth_yields_to_either_publication_gate(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_research_completion_waits_for_authoritative_listing_metadata(
+    monkeypatch,
+) -> None:
+    async def fake_lease(_session: object) -> None:
+        return None
+
+    async def fake_readiness(_session: object, **_kwargs: Any) -> dict[str, Any]:
+        result = _readiness(contract=1.0)
+        result["contract_depth"].update(
+            {
+                "completion_gate_passed": False,
+                "listing_metadata_gate_passed": False,
+                "listing_metadata_coverage_ratio": 0.94,
+                "completion_blockers": ["authoritative_listing_metadata_below_95pct"],
+            }
+        )
+        return result
+
+    async def forbidden(*_args: object, **_kwargs: Any) -> None:
+        raise AssertionError("no provider work remains for the known cohort")
+
+    monkeypatch.setattr(coordinator, "_active_history_lease", fake_lease)
+    monkeypatch.setattr(coordinator, "read_etf_history_readiness", fake_readiness)
+    monkeypatch.setattr(coordinator, "run_bounded_history_sync_slice", forbidden)
+
+    result = await coordinator.run_post_publication_etf_research_history_slice(
+        object(),  # type: ignore[arg-type]
+        target_date=date(2026, 7, 24),
+    )
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "authoritative_listing_metadata_below_95pct"
+
+
+@pytest.mark.asyncio
 async def test_research_depth_skips_weekend_active_lease_and_invalid_universe(
     monkeypatch,
 ) -> None:
@@ -201,6 +249,7 @@ async def test_research_depth_skips_weekend_active_lease_and_invalid_universe(
     ) -> dict[str, Any]:
         result = _readiness()
         result["universe"] = {"snapshot_hash": "", "codes": []}
+        result["contract_depth"]["cohort_hash"] = ""
         return result
 
     monkeypatch.setattr(coordinator, "_active_history_lease", no_lease)

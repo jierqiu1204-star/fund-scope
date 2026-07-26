@@ -3,14 +3,14 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 import akshare as ak
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.entities import EtfUniverseMembership, TradableEtf
+from app.models.entities import EtfUniverseMembership, TradableEtf, utcnow
 from app.services.intraday_etf.service import fetch_eastmoney_etf_spot_rows
 from app.services.short_research.ranking_contract import canonical_hash
 
@@ -42,6 +42,8 @@ class EtfUniverseRecord:
     theme_tags: list[str]
     trading_rule_label: str
     source: str
+    listing_date: date | None = None
+    listing_date_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -221,6 +223,23 @@ def _pick(record: Any, *keys: str) -> Any:
     return None
 
 
+def parse_provider_listing_date(value: Any) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    raw = str(value or "").strip()
+    if not raw or raw in {"-", "--", "0"}:
+        return None
+    digits = "".join(character for character in raw if character.isdigit())
+    try:
+        if len(digits) == 8:
+            return datetime.strptime(digits, "%Y%m%d").date()
+        return date.fromisoformat(raw[:10].replace("/", "-"))
+    except ValueError:
+        return None
+
+
 def normalize_source_row(record: Any, *, source: str) -> EtfUniverseRecord | None:
     code = normalize_etf_code(_pick(record, "代码", "基金代码", "symbol", "code"))
     name = str(_pick(record, "名称", "基金简称", "基金名称", "name") or "").strip()
@@ -235,6 +254,10 @@ def normalize_source_row(record: Any, *, source: str) -> EtfUniverseRecord | Non
         theme_tags=theme_tags,
         trading_rule_label=rule,
         source=source,
+        listing_date=parse_provider_listing_date(
+            _pick(record, "上市日期", "上市时间", "listing_date", "list_date")
+        ),
+        listing_date_source=source,
     )
 
 
@@ -293,6 +316,7 @@ async def _discover_eastmoney_universe() -> EtfUniverseDiscovery:
                 "code": row.get("f12"),
                 "name": row.get("f14"),
                 "exchange": exchange,
+                "listing_date": row.get("f26"),
             },
             source=source,
         )
@@ -444,6 +468,7 @@ async def refresh_etf_universe(
             "stale_universe": True,
         }
     memberships_to_activate: list[EtfUniverseRecord] = []
+    listing_observed_at = utcnow()
     existing_etfs = {
         etf.code: etf
         for etf in (await session.scalars(select(TradableEtf))).all()
@@ -465,6 +490,13 @@ async def refresh_etf_universe(
                     asset_class=record.category,
                     is_short_term_eligible=eligible,
                     is_watchlist=eligible,
+                    listing_date=record.listing_date,
+                    listing_date_source=(
+                        (record.listing_date_source or record.source)
+                        if record.listing_date is not None
+                        else None
+                    ),
+                    listing_date_observed_at=(listing_observed_at if record.listing_date else None),
                 )
                 session.add(existing)
                 existing_etfs[record.code] = existing
@@ -478,6 +510,10 @@ async def refresh_etf_universe(
                 existing.asset_class = record.category or existing.asset_class
                 existing.is_short_term_eligible = eligible
                 existing.is_watchlist = eligible
+                if record.listing_date is not None:
+                    existing.listing_date = record.listing_date
+                    existing.listing_date_source = record.listing_date_source or record.source
+                    existing.listing_date_observed_at = listing_observed_at
                 updated += 1
             active_membership = active_memberships.get(record.code)
             if eligible and active_membership is None:

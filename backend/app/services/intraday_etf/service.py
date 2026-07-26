@@ -624,7 +624,7 @@ async def fetch_eastmoney_etf_spot_rows() -> EastmoneyEtfSpotRows:
         "invt": "2",
         "fid": "f3",
         "fs": "b:MK0021,b:MK0022,b:MK0023,b:MK0024,b:MK0827",
-        "fields": "f12,f13,f14,f2,f3,f5,f6,f124",
+        "fields": "f12,f13,f14,f2,f3,f5,f6,f124,f26",
     }
     rows: list[dict[str, Any]] = []
     expected_total: int | None = None

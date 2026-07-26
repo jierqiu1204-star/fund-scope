@@ -250,6 +250,43 @@ async def test_short_primary_history_falls_through_to_deeper_adjusted_provider()
 
 
 @pytest.mark.asyncio
+async def test_dynamic_minimum_counts_only_missing_required_dates() -> None:
+    calls: list[str] = []
+
+    async def wrong_dates(*_args: object) -> list[dict[str, float | str]]:
+        calls.append("tickflow")
+        rows = _adjusted_rows("tickflow", 3)
+        return [rows[0], rows[2]]
+
+    async def exact_dates(*_args: object) -> list[dict[str, float | str]]:
+        calls.append("eastmoney")
+        return _adjusted_rows("eastmoney", 2)
+
+    required_dates = (date(2026, 7, 20), date(2026, 7, 21))
+    async with PublicationAdjustedHistoryFetcher(
+        attempt_timeout_seconds=0.1,
+        providers=(
+            ("tickflow", wrong_dates),
+            ("eastmoney", exact_dates),
+        ),
+    ) as fetch:
+        result = await fetch.fetch_with_minimum(
+            "510050",
+            date(2026, 7, 20),
+            date(2026, 7, 22),
+            minimum_eligible_rows=2,
+            required_trade_dates=required_dates,
+        )
+
+    assert calls == ["tickflow", "eastmoney"]
+    assert result.provider == "eastmoney"
+    assert [row["date"] for row in result.rows] == [
+        "2026-07-20",
+        "2026-07-21",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_deepest_valid_partial_is_kept_when_all_providers_are_short() -> None:
     async def two_rows(*_args: object) -> list[dict[str, float | str]]:
         return _adjusted_rows("tickflow", 2)

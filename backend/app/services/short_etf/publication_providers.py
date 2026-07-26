@@ -169,8 +169,33 @@ class PublicationAdjustedHistoryFetcher:
         from_date: date,
         to_date: date,
     ) -> ProviderFetchResult:
+        return await self.fetch_with_minimum(
+            code,
+            from_date,
+            to_date,
+            minimum_eligible_rows=self.minimum_eligible_rows,
+        )
+
+    async def fetch_with_minimum(
+        self,
+        code: str,
+        from_date: date,
+        to_date: date,
+        *,
+        minimum_eligible_rows: int,
+        required_trade_dates: tuple[date, ...] = (),
+    ) -> ProviderFetchResult:
         if not self._providers:
             raise RuntimeError("publication provider pool is not open")
+        if not 1 <= minimum_eligible_rows <= 5_000:
+            raise ValueError("minimum eligible rows must be between 1 and 5000")
+        if required_trade_dates and (
+            required_trade_dates != tuple(sorted(set(required_trade_dates)))
+            or required_trade_dates[0] < from_date
+            or required_trade_dates[-1] > to_date
+        ):
+            raise ValueError("required trade dates must be unique, ordered, and inside the request")
+        required_date_set = set(required_trade_dates)
         errors: list[str] = []
         attempted_index = 0
         deepest_partial: tuple[int, str, PriceHistoryRows, int] | None = None
@@ -212,15 +237,21 @@ class PublicationAdjustedHistoryFetcher:
             except Exception as exc:  # noqa: BLE001
                 error = f"{type(exc).__name__}:{str(exc)[:120]}"
             else:
+                accepted_dates = {
+                    date.fromisoformat(str(row["date"]))
+                    for row in accepted_rows
+                }
                 eligible_date_count = len(
-                    {str(row["date"]) for row in accepted_rows}
+                    accepted_dates & required_date_set
+                    if required_date_set
+                    else accepted_dates
                 )
                 health["consecutive_failures"] = 0
                 health["accepted_successes"] = int(health["accepted_successes"] or 0) + 1
                 health["latency_ms"] = round((time.monotonic() - started) * 1000, 3)
                 health["retry_after"] = None
                 health["last_error"] = None
-                if eligible_date_count >= self.minimum_eligible_rows:
+                if eligible_date_count >= minimum_eligible_rows:
                     return ProviderFetchResult(
                         rows=accepted_rows,
                         provider=provider,
@@ -243,7 +274,7 @@ class PublicationAdjustedHistoryFetcher:
                     )
                 errors.append(
                     f"{provider}:eligible_rows_below_minimum:"
-                    f"{eligible_date_count}<{self.minimum_eligible_rows}"
+                    f"{eligible_date_count}<{minimum_eligible_rows}"
                 )
                 attempted_index += 1
                 continue

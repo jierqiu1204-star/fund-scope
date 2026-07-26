@@ -23,6 +23,15 @@ research, walk-forward validation, and market-regime evidence starved.
 - Persist provider-observed adjusted-history availability and cooldowns so a
   genuinely short or upstream-truncated history is not retried every slice.
   Provider observation is not treated as an inferred listing date.
+- Persist provider-observed listing dates from a complete authoritative ETF
+  universe snapshot with source and observation time. Keep the full
+  point-in-time universe as the publication denominator, but use only ETFs
+  factually listed on or before the first frozen required session as the
+  300/500-session research denominator.
+- Freeze the 300/500 required-session calendars from observed exchange dates,
+  prioritize the closest-to-complete research histories, and request only each
+  ETF's missing required-date span. Raw rows may identify an exchange session
+  date, but cannot satisfy adjusted coverage.
 - Continue to accept only fully versioned `total_return_adjusted` rows. Sina,
   efinance raw, intraday snapshots, estimated prices, and display-only rows
   cannot increase any publication or research-depth coverage.
@@ -52,6 +61,7 @@ research, walk-forward validation, and market-regime evidence starved.
 - Backend bounded ETF history synchronization, post-close scheduling, readiness
   projection, and compact JobRun telemetry.
 - One additive table for per-ETF adjusted-history availability observations and
-  retry cooldown.
+  retry cooldown, plus additive authoritative-listing metadata on the ETF
+  master.
 - No ranking/API contract change, no new worker concurrency, and no production
   allocation, position, alert, or notification side effect.

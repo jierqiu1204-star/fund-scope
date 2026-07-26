@@ -111,3 +111,21 @@
   `85d76d767a865007219f80ab58712b31913682c6a12be4f4b720ff0b907e228c`.
   All ten selected ETFs remained below 300 contiguous sessions, so real 300-day
   coverage remains open rather than being overstated.
+
+## 9. Complete Seasoned Histories Efficiently
+
+- [x] 9.1 Persist authoritative provider-observed ETF listing dates with source
+  and observation time; never infer or backdate them from price history.
+- [x] 9.2 Keep the full point-in-time publication denominator and project
+  independent seasoned 300/500 research cohorts, stable cohort/exclusion hashes,
+  and a 95 percent listing-metadata completion gate.
+- [x] 9.3 Freeze research dates from the observed ETF exchange-session calendar
+  while proving raw rows can identify dates but never increase adjusted
+  coverage.
+- [x] 9.4 Change research selection to completion-first and fetch only each
+  code's missing required-date span with dynamic provider minimums.
+- [x] 9.5 Add the reversible migration and focused normalization, cohort,
+  no-raw-substitution, queue, gap-window, idempotency, and coordinator tests.
+- [ ] 9.6 Run bounded Ruff, domain-boundary, migration-head, focused test, and
+  strict OpenSpec validation; deploy and record one factual production slice
+  without starting a concurrent or unbounded sync.

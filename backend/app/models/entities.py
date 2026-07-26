@@ -290,6 +290,9 @@ class TradableEtf(Base):
     asset_class: Mapped[str] = mapped_column(String(64))
     is_short_term_eligible: Mapped[bool] = mapped_column(Boolean, default=True)
     is_watchlist: Mapped[bool] = mapped_column(Boolean, default=True)
+    listing_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    listing_date_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    listing_date_observed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 

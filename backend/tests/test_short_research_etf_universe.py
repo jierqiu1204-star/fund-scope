@@ -27,6 +27,7 @@ from app.services.short_research.universe import (
     EtfUniverseRecord,
     build_point_in_time_universe_snapshot,
     discover_etf_universe,
+    parse_provider_listing_date,
     refresh_etf_universe,
 )
 from app.services.workflows.short_research_data import (
@@ -48,8 +49,8 @@ async def test_universe_discovery_uses_complete_eastmoney_snapshot_before_akshar
         calls["eastmoney"] += 1
         return SimpleNamespace(
             rows=(
-                {"f12": "510300", "f14": "沪深300ETF"},
-                {"f12": "159915", "f14": "创业板ETF"},
+                {"f12": "510300", "f14": "沪深300ETF", "f26": 20120528},
+                {"f12": "159915", "f14": "创业板ETF", "f26": "20110920"},
             ),
             expected_total=2,
             complete=True,
@@ -76,7 +77,19 @@ async def test_universe_discovery_uses_complete_eastmoney_snapshot_before_akshar
     assert result.source_row_count == 2
     assert result.normalized_row_count == 2
     assert [record.code for record in result.records] == ["159915", "510300"]
+    assert [record.listing_date for record in result.records] == [
+        date(2011, 9, 20),
+        date(2012, 5, 28),
+    ]
+    assert all(record.listing_date_source == "eastmoney.push2.clist" for record in result.records)
     assert calls == {"eastmoney": 1, "akshare": 0}
+
+
+def test_provider_listing_date_parser_never_uses_partial_or_invalid_values() -> None:
+    assert parse_provider_listing_date("2020/01/02") == date(2020, 1, 2)
+    assert parse_provider_listing_date(20200102) == date(2020, 1, 2)
+    assert parse_provider_listing_date("--") is None
+    assert parse_provider_listing_date("202001") is None
 
 
 @pytest.mark.asyncio
@@ -555,6 +568,8 @@ async def test_etf_universe_refresh_is_idempotent_excludes_unsuitable_and_preser
                 theme_tags=["科创"],
                 trading_rule_label="证券账户 T+1 ETF",
                 source="pytest",
+                listing_date=date(2018, 11, 15),
+                listing_date_source="pytest.authoritative_snapshot",
             ),
             EtfUniverseRecord(
                 code="511990",
@@ -580,6 +595,9 @@ async def test_etf_universe_refresh_is_idempotent_excludes_unsuitable_and_preser
         assert kept.name == "科创50ETF"
         assert kept.theme_tags_json == ["人工维护主题"]
         assert kept.is_short_term_eligible is True
+        assert kept.listing_date == date(2018, 11, 15)
+        assert kept.listing_date_source == "pytest.authoritative_snapshot"
+        assert kept.listing_date_observed_at is not None
 
         money = await session.scalar(select(TradableEtf).where(TradableEtf.code == "511990"))
         assert money is not None

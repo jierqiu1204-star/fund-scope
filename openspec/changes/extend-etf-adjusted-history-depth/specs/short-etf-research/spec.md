@@ -43,3 +43,11 @@ bounded, resumable lanes.
   slice
 - **THEN** the next slice resumes from the durable scope cursor without
   restarting the universe
+
+#### Scenario: Publication and research horizons have different eligibility
+
+- **WHEN** a current authoritative ETF is factually too new to have existed at
+  the first required 300-session or 500-session date
+- **THEN** it remains part of the publication universe
+- **AND** only the corresponding seasoned research cohort excludes it, with the
+  listing source, metadata coverage, cohort hash, and exclusion reason exposed

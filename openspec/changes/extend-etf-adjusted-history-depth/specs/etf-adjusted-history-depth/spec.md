@@ -97,3 +97,61 @@ listing dates from returned price history.
   earlier than accepted adjusted history
 - **THEN** those rows do not change adjusted depth, availability status, or
   readiness coverage
+
+### Requirement: Publication and research use explicit independent denominators
+
+The system SHALL keep the complete authoritative point-in-time ETF universe as
+the publication denominator, SHALL derive 300/500-session research cohorts only
+from authoritative provider-observed listing metadata, and SHALL block research
+completion when listing metadata coverage is below 95 percent.
+
+#### Scenario: An ETF is too new for a research horizon
+
+- **WHEN** an authoritative ETF's observed listing date is later than the first
+  frozen required session for a 300-session or 500-session lane
+- **THEN** the ETF remains in daily and 61-session publication denominators
+- **AND** it is reported as structurally unseasoned rather than missing adjusted
+  history for that research horizon
+
+#### Scenario: Listing metadata is unavailable
+
+- **WHEN** an authoritative ETF has no provider-observed listing date
+- **THEN** the system does not infer one from its earliest price or membership
+  record
+- **AND** the ETF is reported as unknown listing metadata
+- **AND** the research lane cannot be declared complete unless metadata coverage
+  across the full universe is at least 95 percent
+
+#### Scenario: Raw dates extend the observed session calendar
+
+- **WHEN** a raw daily row proves an exchange session existed before the
+  currently stored adjusted range
+- **THEN** that date may enter the frozen shared session calendar
+- **BUT** the raw row does not increase any ETF's adjusted-session coverage
+
+### Requirement: Research backfill is completion-first and gap bounded
+
+The system SHALL prioritize pending seasoned ETFs nearest to the frozen depth
+target and SHALL request only the enclosing span of each ETF's missing required
+sessions.
+
+#### Scenario: Several seasoned ETFs have incomplete histories
+
+- **WHEN** pending ETFs have different accepted adjusted depths
+- **THEN** the runner orders greater depth first, then watchlist priority and
+  stable code order, while preserving durable rotation and cooldown behavior
+
+#### Scenario: Only an older segment is missing
+
+- **WHEN** an ETF already stores recent required sessions but lacks an older
+  required segment
+- **THEN** the provider request begins at the earliest missing required date and
+  ends at the latest missing required date instead of refetching the full
+  research horizon
+
+#### Scenario: A slice is interrupted
+
+- **WHEN** the process stops after one or more idempotent page commits
+- **THEN** the next slice reconstructs the remaining required dates from
+  persisted adjusted rows and resumes without duplicate coverage or an
+  in-memory-only checkpoint

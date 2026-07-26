@@ -11,10 +11,12 @@ from app.models.entities import (
     EtfPriceHistory,
     JobRun,
     ShortResearchSignalRun,
+    TradableEtf,
 )
 from app.services.short_research.coverage_policy import (
     ETF_COMPLETE_SCORE_COVERAGE,
     ETF_DAILY_DECISION_MIN_COVERAGE,
+    ETF_RESEARCH_DEPTH_MIN_COVERAGE,
     ETF_SCORE_PUBLICATION_MIN_COVERAGE,
     etf_score_coverage_policy_mode,
 )
@@ -147,6 +149,7 @@ def _lane_payload(
         "required_sessions": required_sessions,
         "available_session_count": available_session_count,
         "authoritative": authoritative,
+        "denominator_kind": "full_authoritative_universe",
         "expected_count": expected_count,
         "attempted_count": sum(code in attempted_set for code in codes),
         "covered_count": covered_count,
@@ -155,6 +158,88 @@ def _lane_payload(
         "coverage_ratio": covered_count / expected_count if expected_count else 0.0,
         "covered_codes": list(covered),
         "pending_codes": list(pending),
+    }
+
+
+def _research_lane_payload(
+    *,
+    scope: str,
+    required_sessions: int,
+    authoritative: bool,
+    full_universe_codes: tuple[str, ...],
+    listing_dates_by_code: dict[str, date | None],
+    required_trade_dates: tuple[date, ...],
+    depth_by_code: dict[str, int],
+    attempted_codes: tuple[str, ...],
+) -> dict[str, Any]:
+    calendar_complete = len(required_trade_dates) == required_sessions
+    first_required_session = required_trade_dates[0] if calendar_complete else None
+    unknown_listing_codes = tuple(
+        code for code in full_universe_codes if listing_dates_by_code.get(code) is None
+    )
+    known_listing_codes = tuple(
+        code for code in full_universe_codes if listing_dates_by_code.get(code) is not None
+    )
+    seasoned_codes = (
+        tuple(
+            code
+            for code in known_listing_codes
+            if listing_dates_by_code[code] <= first_required_session
+        )
+        if first_required_session is not None
+        else ()
+    )
+    structurally_unseasoned_codes = (
+        tuple(
+            code
+            for code in known_listing_codes
+            if listing_dates_by_code[code] > first_required_session
+        )
+        if first_required_session is not None
+        else ()
+    )
+    full_count = len(full_universe_codes)
+    metadata_ratio = len(known_listing_codes) / full_count if full_count else 0.0
+    metadata_gate_passed = metadata_ratio >= ETF_RESEARCH_DEPTH_MIN_COVERAGE
+    payload = _lane_payload(
+        scope=scope,
+        required_sessions=required_sessions,
+        authoritative=authoritative,
+        codes=seasoned_codes,
+        depth_by_code=depth_by_code,
+        attempted_codes=attempted_codes,
+        available_session_count=len(required_trade_dates),
+    )
+    blockers: list[str] = []
+    if not calendar_complete:
+        blockers.append("observed_session_calendar_incomplete")
+    if not metadata_gate_passed:
+        blockers.append("authoritative_listing_metadata_below_95pct")
+    if not seasoned_codes:
+        blockers.append("seasoned_research_cohort_empty")
+    if payload["coverage_ratio"] < ETF_RESEARCH_DEPTH_MIN_COVERAGE:
+        blockers.append("adjusted_research_coverage_below_95pct")
+    return {
+        **payload,
+        "denominator_kind": "authoritative_seasoned_listing_cohort",
+        "full_universe_count": full_count,
+        "cohort_codes": list(seasoned_codes),
+        "cohort_hash": canonical_hash(list(seasoned_codes)),
+        "first_required_session": (
+            first_required_session.isoformat() if first_required_session else None
+        ),
+        "required_trade_dates": [item.isoformat() for item in required_trade_dates],
+        "session_calendar_complete": calendar_complete,
+        "listing_metadata_coverage_ratio": metadata_ratio,
+        "listing_metadata_gate_passed": metadata_gate_passed,
+        "unknown_listing_count": len(unknown_listing_codes),
+        "unknown_listing_hash": canonical_hash(list(unknown_listing_codes)),
+        "unknown_listing_samples": list(unknown_listing_codes[:20]),
+        "structurally_unseasoned_count": len(structurally_unseasoned_codes),
+        "structurally_unseasoned_hash": canonical_hash(list(structurally_unseasoned_codes)),
+        "structurally_unseasoned_samples": list(structurally_unseasoned_codes[:20]),
+        "completion_gate_passed": not blockers,
+        "completion_blockers": blockers,
     }
 
 
@@ -198,23 +283,58 @@ async def read_etf_history_readiness(
     )
     codes = tuple(str(member["asset_code"]) for member in universe.members)
 
+    listing_rows = (
+        await session.execute(
+            select(
+                TradableEtf.code,
+                TradableEtf.listing_date,
+                TradableEtf.listing_date_source,
+                TradableEtf.listing_date_observed_at,
+            ).where(TradableEtf.code.in_(codes) if codes else false())
+        )
+    ).all()
+    listing_dates_by_code = {
+        str(code): (
+            listing_date
+            if listing_date is not None and source and observed_at is not None
+            else None
+        )
+        for code, listing_date, source, observed_at in listing_rows
+    }
+    known_listing_codes = tuple(
+        code for code in codes if listing_dates_by_code.get(code) is not None
+    )
+    unknown_listing_codes = tuple(code for code in codes if listing_dates_by_code.get(code) is None)
+    listing_sources = sorted(
+        {
+            str(source)
+            for _code, listing_date, source, _observed_at in listing_rows
+            if listing_date is not None and source
+        }
+    )
+    observed_times = [
+        observed_at
+        for _code, listing_date, _source, observed_at in listing_rows
+        if listing_date is not None and observed_at is not None
+    ]
+
+    # Raw daily rows may prove an exchange session existed. Per-code coverage
+    # below remains strictly decision-eligible total-return-adjusted data.
     session_dates_result = await session.scalars(
         select(EtfPriceHistory.trade_date)
         .where(
             EtfPriceHistory.etf_code.in_(codes) if codes else false(),
             EtfPriceHistory.trade_date <= effective_date,
-            EtfPriceHistory.decision_eligible.is_(True),
-            EtfPriceHistory.research_price_basis == "total_return_adjusted",
         )
         .distinct()
         .order_by(EtfPriceHistory.trade_date.desc())
         .limit(maximum_required)
     )
     session_dates = tuple(reversed(session_dates_result.all()))
-    warmup_dates = frozenset(session_dates[-SCORE_WARMUP_SESSIONS:])
-    telemetry_dates = frozenset(session_dates[-TELEMETRY_DEPTH_SESSIONS:])
-    contract_dates = frozenset(session_dates[-contract_required:])
-    deep_telemetry_dates = frozenset(
+    warmup_dates = tuple(session_dates[-SCORE_WARMUP_SESSIONS:])
+    telemetry_dates = tuple(session_dates[-TELEMETRY_DEPTH_SESSIONS:])
+    contract_dates = tuple(session_dates[-contract_required:])
+    deep_telemetry_dates = tuple(
         session_dates[-DEEP_TELEMETRY_DEPTH_SESSIONS:]
     )
 
@@ -290,14 +410,15 @@ async def read_etf_history_readiness(
         attempted_codes=warmup_attempted,
         available_session_count=len(warmup_dates),
     )
-    contract = _lane_payload(
+    contract = _research_lane_payload(
         scope=contract_scope,
         required_sessions=contract_required,
         authoritative=True,
-        codes=codes,
+        full_universe_codes=codes,
+        listing_dates_by_code=listing_dates_by_code,
+        required_trade_dates=contract_dates,
         depth_by_code=contract_by_code,
         attempted_codes=contract_attempted,
-        available_session_count=len(contract_dates),
     )
     telemetry = _lane_payload(
         scope=TELEMETRY_DEPTH_SCOPE,
@@ -308,14 +429,15 @@ async def read_etf_history_readiness(
         attempted_codes=(),
         available_session_count=len(telemetry_dates),
     )
-    deep_telemetry = _lane_payload(
+    deep_telemetry = _research_lane_payload(
         scope=DEEP_TELEMETRY_DEPTH_SCOPE,
         required_sessions=DEEP_TELEMETRY_DEPTH_SESSIONS,
         authoritative=False,
-        codes=codes,
+        full_universe_codes=codes,
+        listing_dates_by_code=listing_dates_by_code,
+        required_trade_dates=deep_telemetry_dates,
         depth_by_code=deep_telemetry_by_code,
         attempted_codes=deep_telemetry_attempted,
-        available_session_count=len(deep_telemetry_dates),
     )
     source_date_count = await _compatible_production_source_date_count(session)
     continuation_health = await _continuation_health_by_scope(
@@ -338,6 +460,7 @@ async def read_etf_history_readiness(
         blockers.append("history_depth_61_coverage_below_90pct")
     if source_date_count < 20:
         blockers.append("compatible_production_source_dates_below_20")
+    listing_metadata_ratio = len(known_listing_codes) / len(codes) if codes else 0.0
     return {
         "target_date": effective_date.isoformat(),
         "contract_hash": contract_hash,
@@ -347,6 +470,27 @@ async def read_etf_history_readiness(
             "snapshot_hash": universe.universe_snapshot_hash,
             "expected_count": len(codes),
             "codes": list(codes),
+        },
+        "observed_session_calendar": {
+            "source": "etf_price_history_observed_dates_all_price_bases",
+            "session_count": len(session_dates),
+            "session_hash": canonical_hash([item.isoformat() for item in session_dates]),
+            "dates": [item.isoformat() for item in session_dates],
+            "raw_dates_allowed": True,
+            "raw_rows_count_as_adjusted_coverage": False,
+        },
+        "listing_metadata": {
+            "source_kind": "authoritative_universe_provider_observation",
+            "sources": listing_sources,
+            "expected_count": len(codes),
+            "observed_count": len(known_listing_codes),
+            "coverage_ratio": listing_metadata_ratio,
+            "required_coverage_ratio": ETF_RESEARCH_DEPTH_MIN_COVERAGE,
+            "gate_passed": (listing_metadata_ratio >= ETF_RESEARCH_DEPTH_MIN_COVERAGE),
+            "unknown_count": len(unknown_listing_codes),
+            "unknown_hash": canonical_hash(list(unknown_listing_codes)),
+            "unknown_samples": list(unknown_listing_codes[:20]),
+            "latest_observed_at": (max(observed_times).isoformat() if observed_times else None),
         },
         "daily_freshness": daily,
         "history_depth_61": warmup,
@@ -377,6 +521,8 @@ async def read_etf_history_readiness(
             warmup["coverage_ratio"]
         ),
         "blockers": blockers,
+        "research_depth_gate_passed": contract["completion_gate_passed"],
+        "research_depth_blockers": contract["completion_blockers"],
     }
 
 
