@@ -129,3 +129,22 @@
 - [ ] 9.6 Run bounded Ruff, domain-boundary, migration-head, focused test, and
   strict OpenSpec validation; deploy and record one factual production slice
   without starting a concurrent or unbounded sync.
+
+## Section 9 Production Evidence — 2026-07-26
+
+- Commit `33be8e898d266414fcf8e852d89f3e53e6378aa7` deployed successfully in
+  GitHub Actions Deploy run 45. Production reported schema head
+  `20260726_000055` and `app/db=ok`.
+- For target trade date 2026-07-24 the authoritative universe remained 1,485;
+  1,484/1,485 daily adjusted rows passed (99.93 percent), while 1,364/1,485
+  passed the 61-session warm-up (91.85 percent, above the approved 90 percent).
+- Listing metadata remained 0/1,485. The bounded Eastmoney diagnostic returned
+  `Server disconnected without sending a response` with zero rows; the complete
+  AKShare fallback refreshed 1,555 source rows and 1,485 eligible members but
+  exposed no authoritative listing dates.
+- The production coordinator returned in 3.8 seconds with
+  `seasoned_research_cohort_empty`; no history provider work, concurrent worker,
+  raw-price substitution, ranking publication, or unbounded sync was started.
+- Research completion remains blocked below the independent 95 percent listing
+  metadata gate. Strict OpenSpec validation is still unavailable on this Mac,
+  so task 9.6 remains open rather than overstating completion.

@@ -182,6 +182,11 @@ def _lane_completion_gate_passed(lane: Mapping[str, Any]) -> bool:
 
 def _compact_lane(lane: Mapping[str, Any]) -> dict[str, Any]:
     pending = lane.get("pending_codes")
+    full_universe_count = lane.get("full_universe_count")
+    listing_metadata_ratio = lane.get("listing_metadata_coverage_ratio")
+    listing_metadata_gate = lane.get("listing_metadata_gate_passed")
+    structurally_unseasoned_count = lane.get("structurally_unseasoned_count")
+    completion_gate = lane.get("completion_gate_passed")
     return {
         "scope": lane.get("scope"),
         "required_sessions": int(lane.get("required_sessions") or 0),
@@ -191,15 +196,29 @@ def _compact_lane(lane: Mapping[str, Any]) -> dict[str, Any]:
         "excluded_count": int(lane.get("excluded_count") or 0),
         "coverage_ratio": float(lane.get("coverage_ratio") or 0.0),
         "denominator_kind": lane.get("denominator_kind"),
-        "full_universe_count": int(lane.get("full_universe_count") or 0),
+        "full_universe_count": (
+            int(full_universe_count) if full_universe_count is not None else None
+        ),
         "cohort_hash": lane.get("cohort_hash"),
         "first_required_session": lane.get("first_required_session"),
-        "listing_metadata_coverage_ratio": float(
-            lane.get("listing_metadata_coverage_ratio") or 0.0
+        "listing_metadata_coverage_ratio": (
+            float(listing_metadata_ratio)
+            if listing_metadata_ratio is not None
+            else None
         ),
-        "listing_metadata_gate_passed": bool(lane.get("listing_metadata_gate_passed")),
-        "structurally_unseasoned_count": int(lane.get("structurally_unseasoned_count") or 0),
-        "completion_gate_passed": _lane_completion_gate_passed(lane),
+        "listing_metadata_gate_passed": (
+            listing_metadata_gate
+            if isinstance(listing_metadata_gate, bool)
+            else None
+        ),
+        "structurally_unseasoned_count": (
+            int(structurally_unseasoned_count)
+            if structurally_unseasoned_count is not None
+            else None
+        ),
+        "completion_gate_passed": (
+            completion_gate if isinstance(completion_gate, bool) else None
+        ),
         "completion_blockers": list(lane.get("completion_blockers") or []),
         "pending_samples": (
             list(pending[:COMPACT_SAMPLE_LIMIT])

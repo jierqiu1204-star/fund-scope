@@ -107,6 +107,28 @@ def _sync_result() -> SimpleNamespace:
     )
 
 
+def test_compact_publication_lane_does_not_invent_research_gate_evidence() -> None:
+    result = coordinator._compact_lane(
+        {
+            "scope": "history_depth_61",
+            "required_sessions": 61,
+            "authoritative": True,
+            "expected_count": 1_485,
+            "covered_count": 1_364,
+            "excluded_count": 121,
+            "coverage_ratio": 1_364 / 1_485,
+            "denominator_kind": "full_authoritative_universe",
+            "pending_codes": ["159008"],
+        }
+    )
+
+    assert result["completion_gate_passed"] is None
+    assert result["listing_metadata_gate_passed"] is None
+    assert result["listing_metadata_coverage_ratio"] is None
+    assert result["full_universe_count"] is None
+    assert result["structurally_unseasoned_count"] is None
+
+
 def test_adaptive_research_profile_grows_and_backs_off() -> None:
     healthy = {
         "status": "partial",
