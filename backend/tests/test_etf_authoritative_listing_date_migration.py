@@ -16,14 +16,16 @@ from app.models.entities import (
 )
 
 VERSIONS_DIR = Path(__file__).resolve().parents[1] / "alembic" / "versions"
-MIGRATION_PATH = VERSIONS_DIR / "20260726_000055_etf_authoritative_listing_date.py"
+BASE_MIGRATION_PATH = (
+    VERSIONS_DIR / "20260726_000055_etf_authoritative_listing_date.py"
+)
+FOLLOWUP_MIGRATION_PATH = (
+    VERSIONS_DIR / "20260727_000056_etf_listing_observation_and_lane_scope.py"
+)
 
 
-def _migration():
-    spec = spec_from_file_location(
-        "etf_authoritative_listing_date",
-        MIGRATION_PATH,
-    )
+def _migration(path: Path, module_name: str):
+    spec = spec_from_file_location(module_name, path)
     assert spec is not None
     assert spec.loader is not None
     module = module_from_spec(spec)
@@ -83,9 +85,19 @@ def test_authoritative_listing_date_migration_is_nullable_and_reversible() -> No
     )
     metadata.create_all(engine)
     with engine.begin() as connection:
-        migration = _migration()
-        migration.op = Operations(MigrationContext.configure(connection))
-        migration.upgrade()
+        base_migration = _migration(
+            BASE_MIGRATION_PATH,
+            "etf_authoritative_listing_date",
+        )
+        followup_migration = _migration(
+            FOLLOWUP_MIGRATION_PATH,
+            "etf_listing_observation_and_lane_scope",
+        )
+        operations = Operations(MigrationContext.configure(connection))
+        base_migration.op = operations
+        followup_migration.op = operations
+        base_migration.upgrade()
+        followup_migration.upgrade()
         inspector = sa.inspect(connection)
         column_names = {
             column["name"] for column in inspector.get_columns("tradable_etfs")
@@ -112,7 +124,8 @@ def test_authoritative_listing_date_migration_is_nullable_and_reversible() -> No
             )["constrained_columns"]
         )
 
-        migration.downgrade()
+        followup_migration.downgrade()
+        base_migration.downgrade()
         inspector = sa.inspect(connection)
         assert "etf_listing_date_observations" not in inspector.get_table_names()
         assert {"etf_code", "provider_policy_version"} == set(
@@ -131,5 +144,10 @@ def test_authoritative_listing_date_migration_is_the_single_head() -> None:
     config.set_main_option("script_location", str(VERSIONS_DIR.parent))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["20260726_000055"]
-    assert script.get_revision("20260726_000055").down_revision == "20260725_000054"
+    assert script.get_heads() == ["20260727_000056"]
+    assert script.get_revision("20260727_000056").down_revision == (
+        "20260726_000055"
+    )
+    assert script.get_revision("20260726_000055").down_revision == (
+        "20260725_000054"
+    )
