@@ -80,7 +80,13 @@ def choose_publication_profile(
         elapsed = float(details.get("elapsed_seconds") or 0.0)
         rss = int(details.get("peak_rss_bytes") or 0)
         stop_reason = details.get("stop_reason")
-        checkpoint_healthy = bool(details.get("last_completed_code"))
+        # A factually unseasoned ETF is still durable progress once its exact
+        # availability/cooldown checkpoint has been committed. Requiring a
+        # fully completed code here unnecessarily throttles healthy slices
+        # that are walking past newly listed ETFs.
+        checkpoint_healthy = bool(
+            details.get("last_completed_code") or details.get("active_code")
+        )
         provider_health = details.get("provider_health")
         providers = (
             provider_health.get("providers")
@@ -583,6 +589,13 @@ async def run_post_close_etf_publication_readiness(
             **signal,
         }
         return result
+    except Exception:
+        # A provider or SQL failure can leave PostgreSQL's transaction in the
+        # aborted state. Roll it back before the lock finalizer performs its
+        # own SELECT/COMMIT, otherwise the finalizer masks the original error
+        # and leaves a stale "running" lock behind.
+        await session.rollback()
+        raise
     finally:
         final_status = "success" if "result" in locals() else "failed"
         await finish_etf_daily_workflow_lock(

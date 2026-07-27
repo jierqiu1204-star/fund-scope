@@ -162,6 +162,32 @@ def test_profile_promotes_only_after_three_healthy_slices_and_demotes_on_degrada
     )
 
 
+def test_profile_treats_durable_unseasoned_checkpoint_as_healthy_progress() -> None:
+    factual_exclusion = {
+        "elapsed_seconds": 10.0,
+        "peak_rss_bytes": 64 * 1024 * 1024,
+        "stop_reason": "continuation_required",
+        "last_completed_code": None,
+        "active_code": "159068",
+        "exclusions": [["159068", "insufficient_contiguous_adjusted_sessions"]],
+        "provider_health": {
+            "providers": {
+                "eastmoney": {
+                    "circuit_state": "closed",
+                    "last_error": None,
+                }
+            }
+        },
+    }
+
+    assert (
+        coordinator.choose_publication_profile(
+            [factual_exclusion, factual_exclusion, factual_exclusion]
+        ).name
+        == "maximum"
+    )
+
+
 def test_profile_cadence_is_five_or_two_minutes() -> None:
     now = datetime(2026, 7, 20, 15, 30)
     four_minutes_ago = SimpleNamespace(started_at=datetime(2026, 7, 20, 15, 26))
@@ -299,6 +325,44 @@ async def test_coordinator_waits_on_publication_validation_failure(
 
     assert result["status"] == "waiting"
     assert result["reason"].startswith("score_coverage_or_publication_gate_failed")
+
+
+@pytest.mark.asyncio
+async def test_coordinator_rolls_back_before_finalizing_failed_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    finishes = _patch_common(monkeypatch)
+
+    class _Session:
+        rolled_back = False
+
+        async def rollback(self) -> None:
+            self.rolled_back = True
+
+    async def fail_selection(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("provider transaction failed")
+
+    session = _Session()
+    monkeypatch.setattr(
+        coordinator,
+        "resolve_current_etf_ranking_surface_snapshot",
+        fail_selection,
+    )
+
+    with pytest.raises(RuntimeError, match="provider transaction failed"):
+        await coordinator.run_post_close_etf_publication_readiness(
+            session,  # type: ignore[arg-type]
+            trade_date=TRADE_DATE,
+            decision_cutoff=DECISION_CUTOFF,
+        )
+
+    assert session.rolled_back is True
+    assert finishes == [
+        {
+            "status": "failed",
+            "details": {"trade_date": TRADE_DATE.isoformat()},
+        }
+    ]
 
 
 @pytest.mark.asyncio

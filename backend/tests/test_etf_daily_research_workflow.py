@@ -100,8 +100,16 @@ async def test_etf_daily_research_workflow_skips_duplicate_running_trade_date(ap
 async def test_etf_daily_research_workflow_reclaims_expired_running_lock(app) -> None:
     trade_date = date(2026, 7, 10)
     first_started_at = datetime(2026, 7, 10, 8, 0)
-    within_lease = first_started_at + timedelta(minutes=29)
-    after_lease = first_started_at + timedelta(minutes=31)
+    within_lease = (
+        first_started_at
+        + etf_daily_research.ETF_DAILY_WORKFLOW_LOCK_LEASE
+        - timedelta(seconds=1)
+    )
+    after_lease = (
+        first_started_at
+        + etf_daily_research.ETF_DAILY_WORKFLOW_LOCK_LEASE
+        + timedelta(seconds=1)
+    )
 
     async with app.state.db.session() as first_session:
         assert await etf_daily_research.try_acquire_etf_daily_workflow_lock(

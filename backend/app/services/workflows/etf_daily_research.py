@@ -26,7 +26,10 @@ from app.services.workflows.short_research_data import (
 
 ETF_DAILY_WORKFLOW_RUNNING = "running"
 ETF_DAILY_WORKFLOW_MIN_COVERAGE = 0.95
-ETF_DAILY_WORKFLOW_LOCK_LEASE = timedelta(minutes=30)
+# Every production holder is bounded well below this window. Keep enough
+# headroom for a slow commit while allowing a restarted worker to recover
+# without blocking the remaining post-close catch-up window for half an hour.
+ETF_DAILY_WORKFLOW_LOCK_LEASE = timedelta(minutes=5)
 
 
 def etf_decision_cutoff(trade_date: date) -> datetime:
