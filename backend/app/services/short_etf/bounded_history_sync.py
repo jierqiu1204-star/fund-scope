@@ -66,8 +66,8 @@ def plan_publication_readiness_candidates(
         pending,
         key=lambda candidate: (
             1 if candidate.has_target_date else 0,
+            -candidate.warmup_depth,
             0 if candidate.priority else 1,
-            candidate.warmup_depth,
             candidate.code,
         ),
     )
