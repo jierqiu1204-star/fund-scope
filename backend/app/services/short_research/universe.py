@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import date, datetime
+from io import BytesIO
 from typing import Any
 
 import akshare as ak
 import httpx
+import pandas as pd
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,6 +45,7 @@ SSE_LISTING_PROVIDER_VERSION = "COMMON_JJZWZ_JJLB_L_v1"
 SSE_LISTING_URL = "https://query.sse.com.cn/commonQuery.do"
 SZSE_LISTING_SOURCE = "szse.fund.etf.list"
 SZSE_LISTING_PROVIDER_VERSION = "CATALOGID_1000_lf_v1"
+SZSE_LISTING_URL = "https://fund.szse.cn/api/report/ShowReport"
 
 
 @dataclass(frozen=True)
@@ -71,6 +75,7 @@ class OfficialListingMetadataSource:
     expected_total: int | None
     universe_snapshot_hash: str | None
     raw_payload_hash: str | None
+    missing_listing_date_count: int = 0
     error_summary: str | None = None
 
     @property
@@ -293,6 +298,55 @@ def _listing_source_failure(
     )
 
 
+def _normalize_official_listing_rows(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    code_keys: tuple[str, ...],
+    listing_date_keys: tuple[str, ...],
+) -> tuple[dict[str, date], list[dict[str, str | None]], int, int]:
+    dates_by_code: dict[str, date] = {}
+    normalized: list[dict[str, str | None]] = []
+    seen_codes: set[str] = set()
+    invalid_identity_count = 0
+    missing_listing_date_count = 0
+    for row in rows:
+        code = normalize_etf_code(_pick(row, *code_keys))
+        if not code or code in seen_codes:
+            invalid_identity_count += 1
+            continue
+        seen_codes.add(code)
+        listing_date = parse_provider_listing_date(
+            _pick(row, *listing_date_keys)
+        )
+        if listing_date is None:
+            missing_listing_date_count += 1
+        else:
+            dates_by_code[code] = listing_date
+        normalized.append(
+            {
+                "code": code,
+                "listing_date": (
+                    listing_date.isoformat() if listing_date is not None else None
+                ),
+            }
+        )
+    return (
+        dates_by_code,
+        normalized,
+        invalid_identity_count,
+        missing_listing_date_count,
+    )
+
+
+def _read_szse_listing_workbook(payload: bytes) -> list[dict[str, Any]]:
+    frame = pd.read_excel(
+        BytesIO(payload),
+        engine="openpyxl",
+        dtype={"基金代码": str},
+    )
+    return list(frame.to_dict(orient="records"))
+
+
 async def _discover_sse_official_listing_metadata() -> OfficialListingMetadataSource:
     params = {
         "isPagination": "true",
@@ -319,40 +373,34 @@ async def _discover_sse_official_listing_metadata() -> OfficialListingMetadataSo
             response.raise_for_status()
             payload = response.json()
         rows = payload.get("result")
-        if not isinstance(rows, list):
-            raise ValueError("SSE listing response has no result list")
+        if not isinstance(rows, list) or not all(
+            isinstance(row, Mapping) for row in rows
+        ):
+            raise ValueError("SSE listing response has invalid result rows")
         page_help = payload.get("pageHelp") or {}
         expected_total = int(page_help.get("total") or 0)
-        normalized: list[dict[str, str]] = []
-        dates_by_code: dict[str, date] = {}
-        invalid_count = 0
-        for row in rows:
-            if not isinstance(row, Mapping):
-                invalid_count += 1
-                continue
-            code = normalize_etf_code(row.get("FUND_CODE"))
-            listing_date = parse_provider_listing_date(row.get("LISTING_DATE"))
-            if not code or listing_date is None or code in dates_by_code:
-                invalid_count += 1
-                continue
-            dates_by_code[code] = listing_date
-            normalized.append(
-                {
-                    "code": code,
-                    "listing_date": listing_date.isoformat(),
-                }
-            )
+        (
+            dates_by_code,
+            normalized,
+            invalid_identity_count,
+            missing_listing_date_count,
+        ) = _normalize_official_listing_rows(
+            rows,
+            code_keys=("FUND_CODE",),
+            listing_date_keys=("LISTING_DATE",),
+        )
         complete = (
             expected_total > 0
             and len(rows) == expected_total
-            and invalid_count == 0
-            and len(dates_by_code) == expected_total
+            and invalid_identity_count == 0
+            and len(normalized) == expected_total
         )
-        errors = [] if complete else [
+        diagnostics = [
             f"expected={expected_total}",
             f"received={len(rows)}",
-            f"valid={len(dates_by_code)}",
-            f"invalid={invalid_count}",
+            f"identified={len(normalized)}",
+            f"invalid_identity={invalid_identity_count}",
+            f"missing_listing_dates={missing_listing_date_count}",
         ]
         return OfficialListingMetadataSource(
             exchange="SH",
@@ -362,9 +410,16 @@ async def _discover_sse_official_listing_metadata() -> OfficialListingMetadataSo
             dates_by_code=dates_by_code,
             source_row_count=len(rows),
             expected_total=expected_total,
-            universe_snapshot_hash=canonical_hash(sorted(normalized, key=lambda item: item["code"])),
+            universe_snapshot_hash=canonical_hash(
+                sorted(normalized, key=lambda item: str(item["code"]))
+            ),
             raw_payload_hash=canonical_hash(payload),
-            error_summary="; ".join(errors) or None,
+            missing_listing_date_count=missing_listing_date_count,
+            error_summary=(
+                f"missing_listing_dates={missing_listing_date_count}"
+                if complete and missing_listing_date_count
+                else (None if complete else "; ".join(diagnostics))
+            ),
         )
     except Exception as exc:  # noqa: BLE001
         return _listing_source_failure(
@@ -376,45 +431,68 @@ async def _discover_sse_official_listing_metadata() -> OfficialListingMetadataSo
 
 
 async def _discover_szse_official_listing_metadata() -> OfficialListingMetadataSource:
+    params = {
+        "SHOWTYPE": "xlsx",
+        "CATALOGID": "1000_lf",
+        "TABKEY": "tab1",
+    }
+    headers = {
+        "Referer": "https://fund.szse.cn/marketdata/fundslist/index.html",
+        "User-Agent": "Mozilla/5.0",
+    }
     try:
         async with asyncio.timeout(ETF_UNIVERSE_PROVIDER_TIMEOUT_SECONDS):
-            frame = await asyncio.to_thread(ak.fund_etf_scale_szse)
-        rows = frame.to_dict(orient="records")
-        dates_by_code: dict[str, date] = {}
-        normalized: list[dict[str, str]] = []
-        invalid_count = 0
-        raw_rows: list[dict[str, str]] = []
-        for row in rows:
-            raw_rows.append({str(key): str(value) for key, value in row.items()})
-            code = normalize_etf_code(_pick(row, "基金代码", "代码", "code"))
-            listing_date = parse_provider_listing_date(
-                _pick(row, "上市日期", "上市时间", "listing_date")
+            async with httpx.AsyncClient(
+                timeout=ETF_UNIVERSE_PROVIDER_TIMEOUT_SECONDS,
+                headers=headers,
+                limits=httpx.Limits(max_connections=1, max_keepalive_connections=1),
+            ) as client:
+                response = await client.get(SZSE_LISTING_URL, params=params)
+                response.raise_for_status()
+            response_content = response.content
+            rows = await asyncio.to_thread(
+                _read_szse_listing_workbook,
+                response_content,
             )
-            if not code or listing_date is None or code in dates_by_code:
-                invalid_count += 1
-                continue
-            dates_by_code[code] = listing_date
-            normalized.append(
-                {
-                    "code": code,
-                    "listing_date": listing_date.isoformat(),
-                }
-            )
-        complete = bool(rows) and invalid_count == 0 and len(dates_by_code) == len(rows)
+        (
+            dates_by_code,
+            normalized,
+            invalid_identity_count,
+            missing_listing_date_count,
+        ) = _normalize_official_listing_rows(
+            rows,
+            code_keys=("基金代码", "代码", "code"),
+            listing_date_keys=("上市日期", "上市时间", "listing_date"),
+        )
+        expected_total = len(rows)
+        complete = (
+            expected_total > 0
+            and invalid_identity_count == 0
+            and len(normalized) == expected_total
+        )
+        diagnostics = [
+            f"received={expected_total}",
+            f"identified={len(normalized)}",
+            f"invalid_identity={invalid_identity_count}",
+            f"missing_listing_dates={missing_listing_date_count}",
+        ]
         return OfficialListingMetadataSource(
             exchange="SZ",
             source=SZSE_LISTING_SOURCE,
             provider_version=SZSE_LISTING_PROVIDER_VERSION,
             status="authoritative" if complete else "partial",
             dates_by_code=dates_by_code,
-            source_row_count=len(rows),
-            expected_total=len(rows),
-            universe_snapshot_hash=canonical_hash(sorted(normalized, key=lambda item: item["code"])),
-            raw_payload_hash=canonical_hash(raw_rows),
+            source_row_count=expected_total,
+            expected_total=expected_total,
+            universe_snapshot_hash=canonical_hash(
+                sorted(normalized, key=lambda item: str(item["code"]))
+            ),
+            raw_payload_hash=hashlib.sha256(response_content).hexdigest(),
+            missing_listing_date_count=missing_listing_date_count,
             error_summary=(
-                None
-                if complete
-                else f"received={len(rows)}; valid={len(dates_by_code)}; invalid={invalid_count}"
+                f"missing_listing_dates={missing_listing_date_count}"
+                if complete and missing_listing_date_count
+                else (None if complete else "; ".join(diagnostics))
             ),
         )
     except Exception as exc:  # noqa: BLE001
@@ -483,6 +561,9 @@ async def enrich_with_official_listing_metadata(
                 "expected_total": snapshot.expected_total,
                 "universe_snapshot_hash": snapshot.universe_snapshot_hash,
                 "raw_payload_hash": snapshot.raw_payload_hash,
+                "missing_listing_date_count": (
+                    snapshot.missing_listing_date_count
+                ),
                 "error_summary": snapshot.error_summary,
             }
             for snapshot in (sse, szse)

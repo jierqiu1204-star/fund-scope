@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, time, timedelta
+from io import BytesIO
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pandas as pd
 import pytest
 from sqlalchemy import event, func, select, text
@@ -91,6 +93,65 @@ def test_provider_listing_date_parser_never_uses_partial_or_invalid_values() -> 
     assert parse_provider_listing_date(20200102) == date(2020, 1, 2)
     assert parse_provider_listing_date("--") is None
     assert parse_provider_listing_date("202001") is None
+
+
+@pytest.mark.asyncio
+async def test_sse_complete_snapshot_allows_out_of_scope_rows_without_listing_dates(
+    monkeypatch,
+) -> None:
+    payload = {
+        "pageHelp": {"total": 2},
+        "result": [
+            {"FUND_CODE": "510300", "LISTING_DATE": "2012-05-28"},
+            {"FUND_CODE": "519899", "LISTING_DATE": "-"},
+        ],
+    }
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(200, json=payload)
+    )
+    async_client = httpx.AsyncClient
+
+    def client_factory(*args: object, **kwargs: object) -> httpx.AsyncClient:
+        return async_client(*args, transport=transport, **kwargs)
+
+    monkeypatch.setattr(universe_module.httpx, "AsyncClient", client_factory)
+
+    result = await universe_module._discover_sse_official_listing_metadata()
+
+    assert result.authoritative is True
+    assert result.dates_by_code == {"510300": date(2012, 5, 28)}
+    assert result.missing_listing_date_count == 1
+    assert result.error_summary == "missing_listing_dates=1"
+
+
+@pytest.mark.asyncio
+async def test_szse_official_workbook_is_parsed_from_bytes(monkeypatch) -> None:
+    workbook = BytesIO()
+    pd.DataFrame(
+        [
+            {"基金代码": "159915", "上市日期": "2011-09-20"},
+            {"基金代码": "159919", "上市日期": "2012-04-06"},
+        ]
+    ).to_excel(workbook, index=False)
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(200, content=workbook.getvalue())
+    )
+    async_client = httpx.AsyncClient
+
+    def client_factory(*args: object, **kwargs: object) -> httpx.AsyncClient:
+        return async_client(*args, transport=transport, **kwargs)
+
+    monkeypatch.setattr(universe_module.httpx, "AsyncClient", client_factory)
+
+    result = await universe_module._discover_szse_official_listing_metadata()
+
+    assert result.authoritative is True
+    assert result.dates_by_code == {
+        "159915": date(2011, 9, 20),
+        "159919": date(2012, 4, 6),
+    }
+    assert result.missing_listing_date_count == 0
+    assert result.error_summary is None
 
 
 @pytest.mark.asyncio
