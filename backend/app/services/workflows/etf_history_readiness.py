@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import date
+from datetime import UTC, date, datetime, time
 from typing import Any
 
-from sqlalchemy import case, false, func, select
+from sqlalchemy import and_, case, false, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.entities import (
+    EtfListingDateObservation,
     EtfPriceHistory,
     JobRun,
     ShortResearchSignalRun,
-    TradableEtf,
+)
+from app.services.market_data import (
+    ASIA_SHANGHAI,
+    etf_decision_adjusted_provider_versions,
 )
 from app.services.short_research.coverage_policy import (
     ETF_COMPLETE_SCORE_COVERAGE,
@@ -167,24 +171,25 @@ def _research_lane_payload(
     required_sessions: int,
     authoritative: bool,
     full_universe_codes: tuple[str, ...],
-    listing_dates_by_code: dict[str, date | None],
+    listing_metadata_by_code: dict[str, dict[str, Any] | None],
+    universe_snapshot_hash: str,
     required_trade_dates: tuple[date, ...],
     depth_by_code: dict[str, int],
     attempted_codes: tuple[str, ...],
 ) -> dict[str, Any]:
     calendar_complete = len(required_trade_dates) == required_sessions
     first_required_session = required_trade_dates[0] if calendar_complete else None
-    unknown_listing_codes = tuple(
-        code for code in full_universe_codes if listing_dates_by_code.get(code) is None
-    )
     known_listing_codes = tuple(
-        code for code in full_universe_codes if listing_dates_by_code.get(code) is not None
+        code for code in full_universe_codes if listing_metadata_by_code.get(code) is not None
+    )
+    unknown_listing_codes = tuple(
+        code for code in full_universe_codes if listing_metadata_by_code.get(code) is None
     )
     seasoned_codes = (
         tuple(
             code
             for code in known_listing_codes
-            if listing_dates_by_code[code] <= first_required_session
+            if listing_metadata_by_code[code]["listing_date"] <= first_required_session
         )
         if first_required_session is not None
         else ()
@@ -193,7 +198,7 @@ def _research_lane_payload(
         tuple(
             code
             for code in known_listing_codes
-            if listing_dates_by_code[code] > first_required_session
+            if listing_metadata_by_code[code]["listing_date"] > first_required_session
         )
         if first_required_session is not None
         else ()
@@ -201,6 +206,34 @@ def _research_lane_payload(
     full_count = len(full_universe_codes)
     metadata_ratio = len(known_listing_codes) / full_count if full_count else 0.0
     metadata_gate_passed = metadata_ratio >= ETF_RESEARCH_DEPTH_MIN_COVERAGE
+    session_calendar_hash = canonical_hash(
+        [item.isoformat() for item in required_trade_dates]
+    )
+    cohort_evidence = [
+        {
+            "code": code,
+            **dict(listing_metadata_by_code[code] or {}),
+        }
+        for code in seasoned_codes
+    ]
+    exclusions = [
+        {"code": code, "reason": "unknown_listing_metadata"}
+        for code in unknown_listing_codes
+    ] + [
+        {
+            "code": code,
+            "reason": "structurally_unseasoned",
+            **dict(listing_metadata_by_code[code] or {}),
+        }
+        for code in structurally_unseasoned_codes
+    ]
+    cohort_hash = canonical_hash(
+        {
+            "universe_snapshot_hash": universe_snapshot_hash,
+            "session_calendar_hash": session_calendar_hash,
+            "members": cohort_evidence,
+        }
+    )
     payload = _lane_payload(
         scope=scope,
         required_sessions=required_sessions,
@@ -224,11 +257,14 @@ def _research_lane_payload(
         "denominator_kind": "authoritative_seasoned_listing_cohort",
         "full_universe_count": full_count,
         "cohort_codes": list(seasoned_codes),
-        "cohort_hash": canonical_hash(list(seasoned_codes)),
+        "cohort_hash": cohort_hash,
+        "cohort_evidence_hash": canonical_hash(cohort_evidence),
+        "exclusion_hash": canonical_hash(exclusions),
         "first_required_session": (
             first_required_session.isoformat() if first_required_session else None
         ),
         "required_trade_dates": [item.isoformat() for item in required_trade_dates],
+        "session_calendar_hash": session_calendar_hash,
         "session_calendar_complete": calendar_complete,
         "listing_metadata_coverage_ratio": metadata_ratio,
         "listing_metadata_gate_passed": metadata_gate_passed,
@@ -243,7 +279,11 @@ def _research_lane_payload(
     }
 
 
-async def _compatible_production_source_date_count(session: AsyncSession) -> int:
+async def _compatible_production_source_date_count(
+    session: AsyncSession,
+    *,
+    effective_date: date,
+) -> int:
     count = await session.scalar(
         select(func.count(func.distinct(ShortResearchSignalRun.as_of_trade_date))).where(
             ShortResearchSignalRun.status == "success",
@@ -253,6 +293,7 @@ async def _compatible_production_source_date_count(session: AsyncSession) -> int
             ShortResearchSignalRun.rule_version == "final_score_v3_rule_v2",
             ShortResearchSignalRun.score_field == "ranking_score",
             ShortResearchSignalRun.price_basis == "total_return_adjusted",
+            ShortResearchSignalRun.as_of_trade_date <= effective_date,
             ShortResearchSignalRun.ranking_contract_hash.is_not(None),
             ShortResearchSignalRun.universe_snapshot_hash.is_not(None),
             ShortResearchSignalRun.input_snapshot_hash.is_not(None),
@@ -265,13 +306,47 @@ async def _compatible_production_source_date_count(session: AsyncSession) -> int
     return int(count or 0)
 
 
+def _cutoff_utc_naive(
+    *,
+    effective_date: date,
+    data_cutoff: datetime | None,
+) -> datetime:
+    cutoff = data_cutoff or datetime.combine(
+        effective_date,
+        time.max,
+        tzinfo=ASIA_SHANGHAI,
+    )
+    if cutoff.tzinfo is None:
+        cutoff = cutoff.replace(tzinfo=ASIA_SHANGHAI)
+    return cutoff.astimezone(UTC).replace(tzinfo=None)
+
+
+def _accepted_adjusted_provider_filter() -> Any:
+    pairs = etf_decision_adjusted_provider_versions()
+    return or_(
+        *(
+            and_(
+                EtfPriceHistory.data_provider == provider,
+                EtfPriceHistory.provider_version == version,
+                EtfPriceHistory.adjustment_version == version,
+            )
+            for provider, version in pairs
+        )
+    )
+
+
 async def read_etf_history_readiness(
     session: AsyncSession,
     *,
     target_date: date | None = None,
     horizons: Sequence[int] = DEFAULT_HISTORY_HORIZONS,
+    data_cutoff: datetime | None = None,
 ) -> dict[str, Any]:
     effective_date = target_date or date.today()
+    cutoff_utc = _cutoff_utc_naive(
+        effective_date=effective_date,
+        data_cutoff=data_cutoff,
+    )
     frozen_horizons = tuple(sorted(set(horizons)))
     contract_hash = current_etf_history_contract_hash(horizons=frozen_horizons)
     contract_scope = history_depth_scope(contract_hash)
@@ -283,39 +358,69 @@ async def read_etf_history_readiness(
     )
     codes = tuple(str(member["asset_code"]) for member in universe.members)
 
+    ranked_listing_observations = (
+        select(
+            EtfListingDateObservation.etf_code.label("etf_code"),
+            EtfListingDateObservation.listing_date.label("listing_date"),
+            EtfListingDateObservation.source.label("source"),
+            EtfListingDateObservation.provider_version.label("provider_version"),
+            EtfListingDateObservation.observed_at.label("observed_at"),
+            EtfListingDateObservation.universe_snapshot_hash.label("snapshot_hash"),
+            EtfListingDateObservation.raw_payload_hash.label("raw_payload_hash"),
+            EtfListingDateObservation.evidence_hash.label("evidence_hash"),
+            func.row_number()
+            .over(
+                partition_by=EtfListingDateObservation.etf_code,
+                order_by=(
+                    EtfListingDateObservation.observed_at.desc(),
+                    EtfListingDateObservation.id.desc(),
+                ),
+            )
+            .label("rank"),
+        )
+        .where(
+            EtfListingDateObservation.etf_code.in_(codes) if codes else false(),
+            EtfListingDateObservation.observed_at <= cutoff_utc,
+        )
+        .subquery()
+    )
     listing_rows = (
         await session.execute(
-            select(
-                TradableEtf.code,
-                TradableEtf.listing_date,
-                TradableEtf.listing_date_source,
-                TradableEtf.listing_date_observed_at,
-            ).where(TradableEtf.code.in_(codes) if codes else false())
+            select(ranked_listing_observations).where(
+                ranked_listing_observations.c.rank == 1
+            )
         )
-    ).all()
-    listing_dates_by_code = {
-        str(code): (
-            listing_date
-            if listing_date is not None and source and observed_at is not None
-            else None
-        )
-        for code, listing_date, source, observed_at in listing_rows
+    ).mappings().all()
+    listing_metadata_by_code: dict[str, dict[str, Any] | None] = {
+        code: None for code in codes
     }
+    for row in listing_rows:
+        listing_metadata_by_code[str(row["etf_code"])] = {
+            "listing_date": row["listing_date"],
+            "source": str(row["source"]),
+            "provider_version": str(row["provider_version"]),
+            "observed_at": row["observed_at"],
+            "universe_snapshot_hash": str(row["snapshot_hash"]),
+            "raw_payload_hash": str(row["raw_payload_hash"]),
+            "evidence_hash": str(row["evidence_hash"]),
+        }
     known_listing_codes = tuple(
-        code for code in codes if listing_dates_by_code.get(code) is not None
+        code for code in codes if listing_metadata_by_code.get(code) is not None
     )
-    unknown_listing_codes = tuple(code for code in codes if listing_dates_by_code.get(code) is None)
+    unknown_listing_codes = tuple(
+        code for code in codes if listing_metadata_by_code.get(code) is None
+    )
     listing_sources = sorted(
         {
-            str(source)
-            for _code, listing_date, source, _observed_at in listing_rows
-            if listing_date is not None and source
+            str(item["source"])
+            for item in listing_metadata_by_code.values()
+            if item is not None
         }
     )
     observed_times = [
-        observed_at
-        for _code, listing_date, _source, observed_at in listing_rows
-        if listing_date is not None and observed_at is not None
+        item["observed_at"]
+        for item in listing_metadata_by_code.values()
+        if item is not None
     ]
 
     # Raw daily rows may prove an exchange session existed. Per-code coverage
@@ -325,6 +430,8 @@ async def read_etf_history_readiness(
         .where(
             EtfPriceHistory.etf_code.in_(codes) if codes else false(),
             EtfPriceHistory.trade_date <= effective_date,
+            EtfPriceHistory.source_timestamp.is_not(None),
+            EtfPriceHistory.source_timestamp <= cutoff_utc,
         )
         .distinct()
         .order_by(EtfPriceHistory.trade_date.desc())
@@ -374,6 +481,9 @@ async def read_etf_history_readiness(
                 EtfPriceHistory.trade_date.in_(deep_telemetry_dates),
                 EtfPriceHistory.decision_eligible.is_(True),
                 EtfPriceHistory.research_price_basis == "total_return_adjusted",
+                EtfPriceHistory.source_timestamp.is_not(None),
+                EtfPriceHistory.source_timestamp <= cutoff_utc,
+                _accepted_adjusted_provider_filter(),
             )
             .group_by(EtfPriceHistory.etf_code)
         )
@@ -415,7 +525,8 @@ async def read_etf_history_readiness(
         required_sessions=contract_required,
         authoritative=True,
         full_universe_codes=codes,
-        listing_dates_by_code=listing_dates_by_code,
+        listing_metadata_by_code=listing_metadata_by_code,
+        universe_snapshot_hash=universe.universe_snapshot_hash,
         required_trade_dates=contract_dates,
         depth_by_code=contract_by_code,
         attempted_codes=contract_attempted,
@@ -434,12 +545,16 @@ async def read_etf_history_readiness(
         required_sessions=DEEP_TELEMETRY_DEPTH_SESSIONS,
         authoritative=False,
         full_universe_codes=codes,
-        listing_dates_by_code=listing_dates_by_code,
+        listing_metadata_by_code=listing_metadata_by_code,
+        universe_snapshot_hash=universe.universe_snapshot_hash,
         required_trade_dates=deep_telemetry_dates,
         depth_by_code=deep_telemetry_by_code,
         attempted_codes=deep_telemetry_attempted,
     )
-    source_date_count = await _compatible_production_source_date_count(session)
+    source_date_count = await _compatible_production_source_date_count(
+        session,
+        effective_date=effective_date,
+    )
     continuation_health = await _continuation_health_by_scope(
         session,
         scopes=(
@@ -463,6 +578,7 @@ async def read_etf_history_readiness(
     listing_metadata_ratio = len(known_listing_codes) / len(codes) if codes else 0.0
     return {
         "target_date": effective_date.isoformat(),
+        "data_cutoff_utc": cutoff_utc.isoformat(),
         "contract_hash": contract_hash,
         "horizons": list(frozen_horizons),
         "universe": {

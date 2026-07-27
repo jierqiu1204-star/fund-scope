@@ -5,13 +5,13 @@ import hashlib
 import json
 import sys
 import time
-from collections.abc import Awaitable, Callable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from functools import partial
 from typing import Any, Literal
 
-from sqlalchemy import case, event, false, func, select
+from sqlalchemy import and_, case, event, false, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +23,7 @@ from app.models.entities import (
     JobRun,
     TradableEtf,
 )
+from app.services.market_data import etf_decision_adjusted_provider_versions
 from app.services.short_etf.data import (
     ProviderFetchResult,
     _research_price_fields,
@@ -199,6 +200,26 @@ class BoundedHistorySyncRequest:
             raise ValueError("adjustment_contract is required")
         if self.price_basis != "total_return_adjusted":
             raise ValueError("bounded history sync requires total_return_adjusted price basis")
+
+    @property
+    def required_calendar_hash(self) -> str:
+        payload = {
+            "scope": self.scope,
+            "selection_policy": self.selection_policy,
+            "required_sessions": self.required_sessions,
+            "from_date": self.from_date.isoformat(),
+            "to_date": self.to_date.isoformat(),
+            "required_trade_dates": [
+                trade_date.isoformat() for trade_date in self.required_trade_dates
+            ],
+        }
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
     @property
     def identity_hash(self) -> str:
@@ -382,6 +403,19 @@ def _chunks(
         yield rows[offset : offset + size]
 
 
+def _accepted_adjusted_provider_filter() -> Any:
+    return or_(
+        *(
+            and_(
+                EtfPriceHistory.data_provider == provider,
+                EtfPriceHistory.provider_version == version,
+                EtfPriceHistory.adjustment_version == version,
+            )
+            for provider, version in etf_decision_adjusted_provider_versions()
+        )
+    )
+
+
 async def _eligible_depths(
     session: AsyncSession,
     *,
@@ -398,6 +432,7 @@ async def _eligible_depths(
                     EtfPriceHistory.trade_date <= request.to_date,
                     EtfPriceHistory.decision_eligible.is_(True),
                     EtfPriceHistory.research_price_basis == request.price_basis,
+                    _accepted_adjusted_provider_filter(),
                 )
                 .distinct()
                 .order_by(EtfPriceHistory.trade_date.desc())
@@ -415,6 +450,7 @@ async def _eligible_depths(
                 EtfPriceHistory.trade_date.in_(target_sessions),
                 EtfPriceHistory.decision_eligible.is_(True),
                 EtfPriceHistory.research_price_basis == request.price_basis,
+                _accepted_adjusted_provider_filter(),
             )
             .group_by(EtfPriceHistory.etf_code)
         )
@@ -456,6 +492,7 @@ async def _missing_required_trade_dates(
                 EtfPriceHistory.trade_date.in_(request.required_trade_dates),
                 EtfPriceHistory.decision_eligible.is_(True),
                 EtfPriceHistory.research_price_basis == request.price_basis,
+                _accepted_adjusted_provider_filter(),
             )
         )
     )
@@ -510,7 +547,8 @@ async def _publication_readiness_candidates(
                 (EtfPriceHistory.etf_code == TradableEtf.code)
                 & (EtfPriceHistory.trade_date.in_(request.required_trade_dates))
                 & (EtfPriceHistory.decision_eligible.is_(True))
-                & (EtfPriceHistory.research_price_basis == request.price_basis),
+                & (EtfPriceHistory.research_price_basis == request.price_basis)
+                & _accepted_adjusted_provider_filter(),
             )
             .where(TradableEtf.code.in_(request.eligible_codes))
             .group_by(TradableEtf.code, TradableEtf.is_watchlist)
@@ -532,6 +570,26 @@ def _rotate_after(codes: list[str], last_code: str | None) -> list[str]:
         return codes
     position = codes.index(last_code) + 1
     return codes[position:] + codes[:position]
+
+
+def _rotate_within_depth_bucket(
+    codes: list[str],
+    *,
+    depths: Mapping[str, int],
+    last_code: str | None,
+) -> list[str]:
+    if not codes or last_code not in codes:
+        return codes
+    anchor_depth = depths.get(str(last_code), 0)
+    bucket_positions = [
+        index for index, code in enumerate(codes) if depths.get(code, 0) == anchor_depth
+    ]
+    if not bucket_positions:
+        return codes
+    start = bucket_positions[0]
+    stop = bucket_positions[-1] + 1
+    bucket = codes[start:stop]
+    return codes[:start] + _rotate_after(bucket, last_code) + codes[stop:]
 
 
 async def _active_lease(
@@ -620,6 +678,9 @@ async def _active_history_cooldowns(
                 ),
                 EtfAdjustedHistoryAvailability.provider_policy_version
                 == request.provider_policy_version,
+                EtfAdjustedHistoryAvailability.scope == request.scope,
+                EtfAdjustedHistoryAvailability.required_calendar_hash
+                == request.required_calendar_hash,
                 EtfAdjustedHistoryAvailability.status
                 == "source_history_shortfall",
                 EtfAdjustedHistoryAvailability.retry_after.is_not(None),
@@ -713,7 +774,12 @@ async def _record_history_availability(
         if provider_depth_sufficient
         else now + timedelta(days=HISTORY_AVAILABILITY_COOLDOWN_DAYS)
     )
-    key = (code, request.provider_policy_version)
+    key = (
+        code,
+        request.provider_policy_version,
+        request.scope,
+        request.required_calendar_hash,
+    )
     row = await session.get(EtfAdjustedHistoryAvailability, key)
     values = {
         "provider": provider_result.provider,
@@ -733,6 +799,8 @@ async def _record_history_availability(
             "returned_eligible_sessions": len(eligible_dates),
             "covered_required_sessions": covered_required_sessions,
             "post_persist_depth_complete": depth_complete,
+            "scope": request.scope,
+            "required_calendar_hash": request.required_calendar_hash,
             "price_basis": request.price_basis,
         },
     }
@@ -741,6 +809,8 @@ async def _record_history_availability(
             EtfAdjustedHistoryAvailability(
                 etf_code=code,
                 provider_policy_version=request.provider_policy_version,
+                scope=request.scope,
+                required_calendar_hash=request.required_calendar_hash,
                 **values,
             )
         )
@@ -801,6 +871,9 @@ async def _persist_pages(
     code: str,
     provider_result: ProviderFetchResult,
     request: BoundedHistorySyncRequest,
+    requested_from: date,
+    requested_to: date,
+    requested_trade_dates: tuple[date, ...],
     started: float,
     clock: Clock,
     rss_reader: RssReader,
@@ -813,6 +886,7 @@ async def _persist_pages(
     persisted_for_code = 0
     checkpoint: dict[str, Any] | None = None
     source_timestamp = _utcnow()
+    requested_date_set = set(requested_trade_dates)
 
     for page in _chunks(rows, request.page_size):
         elapsed = clock() - started
@@ -858,7 +932,14 @@ async def _persist_pages(
                     provider=provider_result.provider,
                     source_timestamp=source_timestamp,
                 )
-                if not request.from_date <= trade_date <= request.to_date:
+                if not requested_from <= trade_date <= requested_to:
+                    totals["excluded_rows"] += 1
+                    continue
+                if (
+                    request.selection_policy == RESEARCH_DEPTH_SELECTION_POLICY
+                    and trade_date not in requested_date_set
+                ):
+                    totals["excluded_rows"] += 1
                     continue
                 last_date = trade_date
                 previous = normalized_by_date.get(trade_date)
@@ -1002,6 +1083,7 @@ async def _depth_is_complete(
                 EtfPriceHistory.trade_date.in_(request.required_trade_dates),
                 EtfPriceHistory.decision_eligible.is_(True),
                 EtfPriceHistory.research_price_basis == request.price_basis,
+                _accepted_adjusted_provider_filter(),
             )
         )
         return int(covered_count or 0) == request.required_sessions
@@ -1029,6 +1111,7 @@ async def _depth_is_complete(
                 EtfPriceHistory.trade_date.in_(select(target_sessions.c.trade_date)),
                 EtfPriceHistory.decision_eligible.is_(True),
                 EtfPriceHistory.research_price_basis == request.price_basis,
+                _accepted_adjusted_provider_filter(),
             )
         )
     ).one()
@@ -1059,6 +1142,7 @@ async def _publication_readiness_state(
                 EtfPriceHistory.trade_date.in_(request.required_trade_dates),
                 EtfPriceHistory.decision_eligible.is_(True),
                 EtfPriceHistory.research_price_basis == request.price_basis,
+                _accepted_adjusted_provider_filter(),
             )
         )
     ).one()
@@ -1313,7 +1397,14 @@ async def run_bounded_history_sync_slice(
     else:
         pending = [code for code, depth in depths.items() if depth < request.required_sessions]
         rotation_anchor = previous_attempt_anchor if previous_attempt_anchor in pending else None
-        pending = _rotate_after(pending, rotation_anchor)
+        if request.selection_policy == RESEARCH_DEPTH_SELECTION_POLICY:
+            pending = _rotate_within_depth_bucket(
+                pending,
+                depths=depths,
+                last_code=rotation_anchor,
+            )
+        else:
+            pending = _rotate_after(pending, rotation_anchor)
     deferred_cooldowns = await _run_before(
         lambda: _active_history_cooldowns(session, request=request),
         deadline=hard_worker_deadline,
@@ -1496,6 +1587,9 @@ async def run_bounded_history_sync_slice(
                     code=code,
                     provider_result=provider_result,
                     request=request,
+                    requested_from=requested_from,
+                    requested_to=requested_to,
+                    requested_trade_dates=requested_trade_dates,
                     started=started,
                     clock=clock,
                     rss_reader=rss_reader,

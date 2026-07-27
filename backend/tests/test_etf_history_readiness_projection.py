@@ -1,16 +1,21 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 import pytest
+from sqlalchemy import text
 
 from app.models.entities import (
+    EtfListingDateObservation,
     EtfPriceHistory,
     EtfUniverseMembership,
     JobRun,
     TradableEtf,
 )
-from app.services.workflows.etf_history_readiness import read_etf_history_readiness
+from app.services.workflows.etf_history_readiness import (
+    _compatible_production_source_date_count,
+    read_etf_history_readiness,
+)
 
 
 def _etf(
@@ -48,6 +53,21 @@ def _membership(
     )
 
 
+def _listing(code: str, listing_date: date) -> EtfListingDateObservation:
+    evidence_hash = f"{int(code):064x}"[-64:]
+    return EtfListingDateObservation(
+        etf_code=code,
+        exchange="SH",
+        listing_date=listing_date,
+        source="sse.etf.fundlist",
+        provider_version="COMMON_JJZWZ_JJLB_L_v1",
+        observed_at=datetime(2026, 7, 1),
+        universe_snapshot_hash="a" * 64,
+        raw_payload_hash="b" * 64,
+        evidence_hash=evidence_hash,
+    )
+
+
 def _price(code: str, trade_date: date, *, eligible: bool) -> EtfPriceHistory:
     close = 1.0
     return EtfPriceHistory(
@@ -63,8 +83,9 @@ def _price(code: str, trade_date: date, *, eligible: bool) -> EtfPriceHistory:
         research_adjusted_value=close if eligible else None,
         research_price_basis="total_return_adjusted" if eligible else None,
         data_provider="eastmoney" if eligible else "sina",
-        provider_version="fixture-hfq-v1" if eligible else None,
-        adjustment_version="fixture-hfq-v1" if eligible else None,
+        provider_version=("eastmoney.push2his.kline.hfq_v1" if eligible else None),
+        source_timestamp=datetime.combine(trade_date, time(6, 0)),
+        adjustment_version=("eastmoney.push2his.kline.hfq_v1" if eligible else None),
         decision_eligible=eligible,
     )
 
@@ -75,6 +96,9 @@ async def test_readiness_separates_current_freshness_from_61_session_depth(app) 
     sessions = [target - timedelta(days=offset) for offset in reversed(range(61))]
     async with app.state.db.session() as session:
         session.add_all([_etf("510701"), _etf("510702")])
+        session.add_all(
+            [_listing("510701", date(2020, 1, 1)), _listing("510702", date(2020, 1, 1))]
+        )
         session.add_all(
             [
                 _membership("510701", effective_from=sessions[0]),
@@ -119,6 +143,9 @@ async def test_readiness_uses_ranking_point_in_time_universe_denominator(app) ->
                 _etf("510711"),
                 _etf("510712", eligible=False),
             ]
+        )
+        session.add_all(
+            [_listing("510710", date(2020, 1, 1)), _listing("510712", date(2020, 1, 1))]
         )
         session.add_all(
             [
@@ -180,6 +207,12 @@ async def test_research_depth_uses_a_seasoned_authoritative_cohort(app) -> None:
             ]
         )
         session.add_all(
+            [
+                _listing(old_code, sessions[0] - timedelta(days=1)),
+                _listing(new_code, sessions[0] + timedelta(days=10)),
+            ]
+        )
+        session.add_all(
             _membership(code, effective_from=sessions[0])
             for code in (old_code, new_code, unknown_code)
         )
@@ -226,6 +259,12 @@ async def test_raw_rows_extend_calendar_but_never_adjusted_coverage(app) -> None
             ]
         )
         session.add_all(
+            [
+                _listing(seasoned_code, sessions[0] - timedelta(days=1)),
+                _listing(calendar_only_code, sessions[0] + timedelta(days=1)),
+            ]
+        )
+        session.add_all(
             _membership(code, effective_from=sessions[0])
             for code in (seasoned_code, calendar_only_code)
         )
@@ -246,6 +285,105 @@ async def test_raw_rows_extend_calendar_but_never_adjusted_coverage(app) -> None
     assert contract["expected_count"] == 1
     assert contract["covered_count"] == 0
     assert contract["pending_codes"] == [seasoned_code]
+
+
+@pytest.mark.asyncio
+async def test_readiness_cutoff_and_central_provider_registry_fail_closed(app) -> None:
+    target = date(2026, 7, 17)
+    accepted_code = "510740"
+    forged_code = "510741"
+    async with app.state.db.session() as session:
+        session.add_all([_etf(accepted_code), _etf(forged_code)])
+        session.add_all(
+            [
+                _membership(accepted_code, effective_from=date(2020, 1, 1)),
+                _membership(forged_code, effective_from=date(2020, 1, 1)),
+            ]
+        )
+        session.add(_listing(accepted_code, date(2020, 1, 1)))
+        session.add(
+            EtfListingDateObservation(
+                etf_code=accepted_code,
+                exchange="SH",
+                listing_date=date(2026, 7, 18),
+                source="sse.etf.fundlist",
+                provider_version="COMMON_JJZWZ_JJLB_L_v1",
+                observed_at=datetime(2026, 7, 17, 8, 0),
+                universe_snapshot_hash="c" * 64,
+                raw_payload_hash="d" * 64,
+                evidence_hash="e" * 64,
+            )
+        )
+        accepted = _price(accepted_code, target, eligible=True)
+        accepted.data_provider = "tencent"
+        accepted.provider_version = "tencent.ifzq.fqkline.hfq_v1"
+        accepted.adjustment_version = "tencent.ifzq.fqkline.hfq_v1"
+        forged = _price(forged_code, target, eligible=True)
+        forged.data_provider = "tencent"
+        forged.provider_version = "tencent.forged_v9"
+        forged.adjustment_version = "tencent.forged_v9"
+        session.add_all([accepted, forged])
+        await session.commit()
+
+        report = await read_etf_history_readiness(
+            session,
+            target_date=target,
+            horizons=(5,),
+            data_cutoff=datetime(2026, 7, 17, 15, 0),
+        )
+
+    assert report["daily_freshness"]["covered_codes"] == [accepted_code]
+    assert report["listing_metadata"]["observed_count"] == 1
+    assert report["contract_depth"]["unknown_listing_samples"] == [forged_code]
+    assert report["data_cutoff_utc"] == "2026-07-17T07:00:00"
+
+
+@pytest.mark.asyncio
+async def test_production_source_count_excludes_snapshots_after_effective_date(app) -> None:
+    async with app.state.db.session() as session:
+        for suffix, as_of_date in (("current", "2026-07-17"), ("future", "2026-07-18")):
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO short_research_signal_runs (
+                        status, started_at, as_of_date, as_of_trade_date, scope_kind,
+                        universe_snapshot_hash, input_snapshot_hash, score_version,
+                        rule_version, ranking_contract_hash, score_field, price_basis,
+                        decision_data_coverage_ratio, coverage_ratio, publication_state,
+                        idempotency_key, config_json, summary_json
+                    ) VALUES (
+                        :status, :started_at, :as_of_date, :as_of_date, :scope_kind,
+                        :universe_hash, :input_hash, :score_version,
+                        :rule_version, :contract_hash, :score_field,
+                        :price_basis, 1.0, 1.0, :publication_state, :key, :empty_json, :empty_json
+                    )
+                    """
+                ),
+                {
+                    "status": "success",
+                    "started_at": "2026-07-17 15:00:00",
+                    "empty_json": "{}",
+                    "as_of_date": as_of_date,
+                    "scope_kind": "full",
+                    "score_version": "final_score_v3",
+                    "rule_version": "final_score_v3_rule_v2",
+                    "score_field": "ranking_score",
+                    "price_basis": "total_return_adjusted",
+                    "publication_state": "published",
+                    "universe_hash": suffix + "-universe",
+                    "input_hash": suffix + "-input",
+                    "contract_hash": suffix + "-contract",
+                    "key": suffix + "-published",
+                },
+            )
+        await session.commit()
+
+        count = await _compatible_production_source_date_count(
+            session,
+            effective_date=date(2026, 7, 17),
+        )
+
+    assert count == 1
 
 
 @pytest.mark.asyncio

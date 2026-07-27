@@ -297,6 +297,35 @@ class TradableEtf(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
+class EtfListingDateObservation(Base):
+    __tablename__ = "etf_listing_date_observations"
+    __table_args__ = (
+        UniqueConstraint(
+            "evidence_hash",
+            name="uq_etf_listing_date_observation_evidence",
+        ),
+        SaIndex(
+            "ix_etf_listing_date_observations_cutoff",
+            "etf_code",
+            "observed_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    etf_code: Mapped[str] = mapped_column(
+        ForeignKey("tradable_etfs.code", ondelete="CASCADE"),
+    )
+    exchange: Mapped[str] = mapped_column(String(16))
+    listing_date: Mapped[date] = mapped_column(Date)
+    source: Mapped[str] = mapped_column(String(64))
+    provider_version: Mapped[str] = mapped_column(String(128))
+    observed_at: Mapped[datetime] = mapped_column(DateTime)
+    universe_snapshot_hash: Mapped[str] = mapped_column(String(64))
+    raw_payload_hash: Mapped[str] = mapped_column(String(64))
+    evidence_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class EtfUniverseMembership(Base):
     __tablename__ = "etf_universe_memberships"
     __table_args__ = (
@@ -473,6 +502,8 @@ class EtfAdjustedHistoryAvailability(Base):
         SaIndex(
             "ix_etf_adjusted_history_availability_retry",
             "provider_policy_version",
+            "scope",
+            "required_calendar_hash",
             "retry_after",
         ),
     )
@@ -483,6 +514,14 @@ class EtfAdjustedHistoryAvailability(Base):
     )
     provider_policy_version: Mapped[str] = mapped_column(
         String(128),
+        primary_key=True,
+    )
+    scope: Mapped[str] = mapped_column(
+        String(128),
+        primary_key=True,
+    )
+    required_calendar_hash: Mapped[str] = mapped_column(
+        String(64),
         primary_key=True,
     )
     provider: Mapped[str] = mapped_column(String(64))

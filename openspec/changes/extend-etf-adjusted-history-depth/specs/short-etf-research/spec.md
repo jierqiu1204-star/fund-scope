@@ -50,4 +50,5 @@ bounded, resumable lanes.
   the first required 300-session or 500-session date
 - **THEN** it remains part of the publication universe
 - **AND** only the corresponding seasoned research cohort excludes it, with the
-  listing source, metadata coverage, cohort hash, and exclusion reason exposed
+  official listing source/version, observation cutoff, metadata coverage, cohort
+  evidence hash, session-calendar hash, and exclusion hash exposed

@@ -7,7 +7,14 @@ import pytest
 from sqlalchemy import select
 
 from app.models.entities import EtfDataHealth, EtfPriceHistory, TradableEtf
+from app.services.market_data import (
+    etf_adjusted_price_provenance_issue,
+    etf_decision_adjusted_provider_versions,
+)
 from app.services.short_etf import data
+from app.services.short_etf.publication_providers import (
+    ACCEPTED_ADJUSTED_PROVIDER_VERSIONS,
+)
 
 
 class _Frame:
@@ -223,6 +230,36 @@ async def test_tencent_history_pairs_raw_and_hfq_with_total_return_provenance() 
     assert rows[0]["research_price_basis"] == data.TOTAL_RETURN_PRICE_BASIS
     assert rows[0]["adjustment_version"] == data.TENCENT_HFQ_ADJUSTMENT_VERSION
     assert rows[0]["provider_version"] == data.TENCENT_HFQ_ADJUSTMENT_VERSION
+
+
+def test_publication_provider_contract_matches_central_decision_registry() -> None:
+    assert dict(etf_decision_adjusted_provider_versions()) == (
+        ACCEPTED_ADJUSTED_PROVIDER_VERSIONS
+    )
+
+
+def test_tencent_hfq_is_accepted_by_the_central_decision_registry() -> None:
+    issue = etf_adjusted_price_provenance_issue(
+        adjusted_value=2.0,
+        price_basis=data.TOTAL_RETURN_PRICE_BASIS,
+        data_provider="tencent",
+        provider_version=data.TENCENT_HFQ_ADJUSTMENT_VERSION,
+        source_timestamp=datetime(2026, 7, 10, 6, 0),
+        adjustment_version=data.TENCENT_HFQ_ADJUSTMENT_VERSION,
+        data_cutoff=datetime(2026, 7, 10, 15, 0),
+    )
+    forged = etf_adjusted_price_provenance_issue(
+        adjusted_value=2.0,
+        price_basis=data.TOTAL_RETURN_PRICE_BASIS,
+        data_provider="tencent",
+        provider_version="tencent.forged_v9",
+        source_timestamp=datetime(2026, 7, 10, 6, 0),
+        adjustment_version="tencent.forged_v9",
+        data_cutoff=datetime(2026, 7, 10, 15, 0),
+    )
+
+    assert issue is None
+    assert forged == "unsupported_adjusted_provider"
 
 
 def test_tencent_parser_rejects_incomplete_rows() -> None:

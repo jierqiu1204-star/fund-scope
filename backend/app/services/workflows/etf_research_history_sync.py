@@ -200,6 +200,13 @@ def _compact_lane(lane: Mapping[str, Any]) -> dict[str, Any]:
             int(full_universe_count) if full_universe_count is not None else None
         ),
         "cohort_hash": lane.get("cohort_hash"),
+        "cohort_evidence_hash": lane.get("cohort_evidence_hash"),
+        "exclusion_hash": lane.get("exclusion_hash"),
+        "session_calendar_hash": lane.get("session_calendar_hash"),
+        "unknown_listing_hash": lane.get("unknown_listing_hash"),
+        "structurally_unseasoned_hash": lane.get(
+            "structurally_unseasoned_hash"
+        ),
         "first_required_session": lane.get("first_required_session"),
         "listing_metadata_coverage_ratio": (
             float(listing_metadata_ratio)

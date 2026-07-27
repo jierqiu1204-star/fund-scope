@@ -178,8 +178,8 @@ def _history(code: str, trade_date: date) -> EtfPriceHistory:
         research_adjusted_value=1.0,
         research_price_basis="total_return_adjusted",
         data_provider="eastmoney",
-        provider_version="fixture-hfq-v1",
-        adjustment_version="fixture-hfq-v1",
+        provider_version="eastmoney.push2his.kline.hfq_v1",
+        adjustment_version="eastmoney.push2his.kline.hfq_v1",
         decision_eligible=True,
     )
 
@@ -239,8 +239,8 @@ async def test_publication_slice_fetches_full_bounded_window_and_advances_factua
                 "pct_change": 0.0,
                 "research_adjusted_value": 1.0,
                 "research_price_basis": "total_return_adjusted",
-                "provider_version": "fixture-hfq-v1",
-                "adjustment_version": "fixture-hfq-v1",
+                "provider_version": "eastmoney.push2his.kline.hfq_v1",
+                "adjustment_version": "eastmoney.push2his.kline.hfq_v1",
             }
             for item in request.required_trade_dates
         ]
@@ -303,8 +303,8 @@ async def test_publication_short_history_is_cooled_down_without_losing_denominat
                     "pct_change": 0.0,
                     "research_adjusted_value": 1.0,
                     "research_price_basis": "total_return_adjusted",
-                    "provider_version": "fixture-hfq-v1",
-                    "adjustment_version": "fixture-hfq-v1",
+                    "provider_version": "eastmoney.push2his.kline.hfq_v1",
+                    "adjustment_version": "eastmoney.push2his.kline.hfq_v1",
                 }
                 for item in returned_dates
             ],
@@ -323,7 +323,7 @@ async def test_publication_short_history_is_cooled_down_without_losing_denominat
         )
         observation = await session.get(
             EtfAdjustedHistoryAvailability,
-            (code, request.provider_policy_version),
+            (code, request.provider_policy_version, request.scope, request.required_calendar_hash),
         )
         cursor = await session.get(EtfSyncCursor, request.scope)
         second = await bounded_history_sync.run_bounded_history_sync_slice(
@@ -369,8 +369,8 @@ async def test_publication_page_interruption_resumes_idempotently(app) -> None:
                     "pct_change": 0.0,
                     "research_adjusted_value": 1.0,
                     "research_price_basis": "total_return_adjusted",
-                    "provider_version": "fixture-hfq-v1",
-                    "adjustment_version": "fixture-hfq-v1",
+                    "provider_version": "eastmoney.push2his.kline.hfq_v1",
+                    "adjustment_version": "eastmoney.push2his.kline.hfq_v1",
                 }
                 for item in request.required_trade_dates
             ],

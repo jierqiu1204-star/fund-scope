@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from typing import Any
 
 import akshare as ak
+import httpx
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.entities import EtfUniverseMembership, TradableEtf, utcnow
+from app.models.entities import (
+    EtfListingDateObservation,
+    EtfUniverseMembership,
+    TradableEtf,
+    utcnow,
+)
 from app.services.intraday_etf.service import fetch_eastmoney_etf_spot_rows
 from app.services.short_research.ranking_contract import canonical_hash
 
@@ -31,6 +37,11 @@ LIVE_DISCOVERY_MIN_RETENTION_RATIO = 0.8
 EASTMONEY_UNIVERSE_SOURCE = "eastmoney.push2.clist"
 AKSHARE_UNIVERSE_SOURCE = "akshare.fund_etf_spot_em"
 ETF_UNIVERSE_PROVIDER_TIMEOUT_SECONDS = 20.0
+SSE_LISTING_SOURCE = "sse.etf.fundlist"
+SSE_LISTING_PROVIDER_VERSION = "COMMON_JJZWZ_JJLB_L_v1"
+SSE_LISTING_URL = "https://query.sse.com.cn/commonQuery.do"
+SZSE_LISTING_SOURCE = "szse.fund.etf.list"
+SZSE_LISTING_PROVIDER_VERSION = "CATALOGID_1000_lf_v1"
 
 
 @dataclass(frozen=True)
@@ -44,6 +55,27 @@ class EtfUniverseRecord:
     source: str
     listing_date: date | None = None
     listing_date_source: str | None = None
+    listing_provider_version: str | None = None
+    listing_universe_snapshot_hash: str | None = None
+    listing_raw_payload_hash: str | None = None
+
+
+@dataclass(frozen=True)
+class OfficialListingMetadataSource:
+    exchange: str
+    source: str
+    provider_version: str
+    status: str
+    dates_by_code: Mapping[str, date]
+    source_row_count: int
+    expected_total: int | None
+    universe_snapshot_hash: str | None
+    raw_payload_hash: str | None
+    error_summary: str | None = None
+
+    @property
+    def authoritative(self) -> bool:
+        return self.status == "authoritative"
 
 
 @dataclass(frozen=True)
@@ -240,6 +272,224 @@ def parse_provider_listing_date(value: Any) -> date | None:
         return None
 
 
+def _listing_source_failure(
+    *,
+    exchange: str,
+    source: str,
+    provider_version: str,
+    exc: Exception,
+) -> OfficialListingMetadataSource:
+    return OfficialListingMetadataSource(
+        exchange=exchange,
+        source=source,
+        provider_version=provider_version,
+        status="failure",
+        dates_by_code={},
+        source_row_count=0,
+        expected_total=None,
+        universe_snapshot_hash=None,
+        raw_payload_hash=None,
+        error_summary=f"{type(exc).__name__}: {exc}"[:500],
+    )
+
+
+async def _discover_sse_official_listing_metadata() -> OfficialListingMetadataSource:
+    params = {
+        "isPagination": "true",
+        "sqlId": SSE_LISTING_PROVIDER_VERSION.removesuffix("_v1"),
+        "pageHelp.pageSize": "10000",
+        "pageHelp.pageNo": "1",
+        "pageHelp.beginPage": "1",
+        "pageHelp.endPage": "1",
+        "CATEGORY": "F000",
+        "CATEGORY_ASC": "1",
+        "type": "inParams",
+    }
+    headers = {
+        "Referer": "https://etf.sse.com.cn/fundlist/",
+        "User-Agent": "Mozilla/5.0",
+    }
+    try:
+        async with httpx.AsyncClient(
+            timeout=ETF_UNIVERSE_PROVIDER_TIMEOUT_SECONDS,
+            headers=headers,
+            limits=httpx.Limits(max_connections=1, max_keepalive_connections=1),
+        ) as client:
+            response = await client.get(SSE_LISTING_URL, params=params)
+            response.raise_for_status()
+            payload = response.json()
+        rows = payload.get("result")
+        if not isinstance(rows, list):
+            raise ValueError("SSE listing response has no result list")
+        page_help = payload.get("pageHelp") or {}
+        expected_total = int(page_help.get("total") or 0)
+        normalized: list[dict[str, str]] = []
+        dates_by_code: dict[str, date] = {}
+        invalid_count = 0
+        for row in rows:
+            if not isinstance(row, Mapping):
+                invalid_count += 1
+                continue
+            code = normalize_etf_code(row.get("FUND_CODE"))
+            listing_date = parse_provider_listing_date(row.get("LISTING_DATE"))
+            if not code or listing_date is None or code in dates_by_code:
+                invalid_count += 1
+                continue
+            dates_by_code[code] = listing_date
+            normalized.append(
+                {
+                    "code": code,
+                    "listing_date": listing_date.isoformat(),
+                }
+            )
+        complete = (
+            expected_total > 0
+            and len(rows) == expected_total
+            and invalid_count == 0
+            and len(dates_by_code) == expected_total
+        )
+        errors = [] if complete else [
+            f"expected={expected_total}",
+            f"received={len(rows)}",
+            f"valid={len(dates_by_code)}",
+            f"invalid={invalid_count}",
+        ]
+        return OfficialListingMetadataSource(
+            exchange="SH",
+            source=SSE_LISTING_SOURCE,
+            provider_version=SSE_LISTING_PROVIDER_VERSION,
+            status="authoritative" if complete else "partial",
+            dates_by_code=dates_by_code,
+            source_row_count=len(rows),
+            expected_total=expected_total,
+            universe_snapshot_hash=canonical_hash(sorted(normalized, key=lambda item: item["code"])),
+            raw_payload_hash=canonical_hash(payload),
+            error_summary="; ".join(errors) or None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _listing_source_failure(
+            exchange="SH",
+            source=SSE_LISTING_SOURCE,
+            provider_version=SSE_LISTING_PROVIDER_VERSION,
+            exc=exc,
+        )
+
+
+async def _discover_szse_official_listing_metadata() -> OfficialListingMetadataSource:
+    try:
+        async with asyncio.timeout(ETF_UNIVERSE_PROVIDER_TIMEOUT_SECONDS):
+            frame = await asyncio.to_thread(ak.fund_etf_scale_szse)
+        rows = frame.to_dict(orient="records")
+        dates_by_code: dict[str, date] = {}
+        normalized: list[dict[str, str]] = []
+        invalid_count = 0
+        raw_rows: list[dict[str, str]] = []
+        for row in rows:
+            raw_rows.append({str(key): str(value) for key, value in row.items()})
+            code = normalize_etf_code(_pick(row, "基金代码", "代码", "code"))
+            listing_date = parse_provider_listing_date(
+                _pick(row, "上市日期", "上市时间", "listing_date")
+            )
+            if not code or listing_date is None or code in dates_by_code:
+                invalid_count += 1
+                continue
+            dates_by_code[code] = listing_date
+            normalized.append(
+                {
+                    "code": code,
+                    "listing_date": listing_date.isoformat(),
+                }
+            )
+        complete = bool(rows) and invalid_count == 0 and len(dates_by_code) == len(rows)
+        return OfficialListingMetadataSource(
+            exchange="SZ",
+            source=SZSE_LISTING_SOURCE,
+            provider_version=SZSE_LISTING_PROVIDER_VERSION,
+            status="authoritative" if complete else "partial",
+            dates_by_code=dates_by_code,
+            source_row_count=len(rows),
+            expected_total=len(rows),
+            universe_snapshot_hash=canonical_hash(sorted(normalized, key=lambda item: item["code"])),
+            raw_payload_hash=canonical_hash(raw_rows),
+            error_summary=(
+                None
+                if complete
+                else f"received={len(rows)}; valid={len(dates_by_code)}; invalid={invalid_count}"
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _listing_source_failure(
+            exchange="SZ",
+            source=SZSE_LISTING_SOURCE,
+            provider_version=SZSE_LISTING_PROVIDER_VERSION,
+            exc=exc,
+        )
+
+
+async def enrich_with_official_listing_metadata(
+    records: Iterable[EtfUniverseRecord],
+) -> tuple[tuple[EtfUniverseRecord, ...], dict[str, Any]]:
+    frozen_records = tuple(records)
+    sse, szse = await asyncio.gather(
+        _discover_sse_official_listing_metadata(),
+        _discover_szse_official_listing_metadata(),
+    )
+    sources = {"SH": sse, "SZ": szse}
+    enriched: list[EtfUniverseRecord] = []
+    matched = 0
+    for record in frozen_records:
+        snapshot = sources.get(record.exchange)
+        listing_date = (
+            snapshot.dates_by_code.get(record.code)
+            if snapshot is not None and snapshot.authoritative
+            else None
+        )
+        if listing_date is not None and snapshot is not None:
+            matched += 1
+            enriched.append(
+                replace(
+                    record,
+                    listing_date=listing_date,
+                    listing_date_source=snapshot.source,
+                    listing_provider_version=snapshot.provider_version,
+                    listing_universe_snapshot_hash=snapshot.universe_snapshot_hash,
+                    listing_raw_payload_hash=snapshot.raw_payload_hash,
+                )
+            )
+        else:
+            enriched.append(
+                replace(
+                    record,
+                    listing_date=None,
+                    listing_date_source=None,
+                    listing_provider_version=None,
+                    listing_universe_snapshot_hash=None,
+                    listing_raw_payload_hash=None,
+                )
+            )
+    expected = len(frozen_records)
+    return tuple(enriched), {
+        "source_kind": "official_exchange_complete_snapshot",
+        "expected_count": expected,
+        "observed_count": matched,
+        "coverage_ratio": matched / expected if expected else 0.0,
+        "sources": [
+            {
+                "exchange": snapshot.exchange,
+                "source": snapshot.source,
+                "provider_version": snapshot.provider_version,
+                "status": snapshot.status,
+                "source_row_count": snapshot.source_row_count,
+                "expected_total": snapshot.expected_total,
+                "universe_snapshot_hash": snapshot.universe_snapshot_hash,
+                "raw_payload_hash": snapshot.raw_payload_hash,
+                "error_summary": snapshot.error_summary,
+            }
+            for snapshot in (sse, szse)
+        ],
+    }
+
+
 def normalize_source_row(record: Any, *, source: str) -> EtfUniverseRecord | None:
     code = normalize_etf_code(_pick(record, "代码", "基金代码", "symbol", "code"))
     name = str(_pick(record, "名称", "基金简称", "基金名称", "name") or "").strip()
@@ -408,6 +658,13 @@ async def refresh_etf_universe(
         )
     discovered = list(discovery.records)
     effective_date = as_of_date or date.today()
+    listing_metadata_evidence: dict[str, Any] = {
+        "source_kind": "not_observed",
+        "expected_count": len(discovered),
+        "observed_count": 0,
+        "coverage_ratio": 0.0,
+        "sources": [],
+    }
     inserted = 0
     updated = 0
     excluded = 0
@@ -441,6 +698,12 @@ async def refresh_etf_universe(
             "live discovery retained fewer than "
             f"{LIVE_DISCOVERY_MIN_RETENTION_RATIO:.0%} of active memberships"
         )
+    if authoritative and live_discovery:
+        enriched, listing_metadata_evidence = await enrich_with_official_listing_metadata(
+            discovered
+        )
+        discovered = list(enriched)
+
     if not authoritative:
         default_display = await session.scalar(
             select(func.count()).select_from(TradableEtf).where(
@@ -466,6 +729,7 @@ async def refresh_etf_universe(
             "source_row_count": discovery.source_row_count,
             "normalized_row_count": discovery.normalized_row_count,
             "stale_universe": True,
+            "listing_metadata": listing_metadata_evidence,
         }
     memberships_to_activate: list[EtfUniverseRecord] = []
     listing_observed_at = utcnow()
@@ -510,7 +774,14 @@ async def refresh_etf_universe(
                 existing.asset_class = record.category or existing.asset_class
                 existing.is_short_term_eligible = eligible
                 existing.is_watchlist = eligible
-                if record.listing_date is not None:
+                if record.listing_date is not None and (
+                    not live_discovery
+                    or (
+                        record.listing_provider_version
+                        and record.listing_universe_snapshot_hash
+                        and record.listing_raw_payload_hash
+                    )
+                ):
                     existing.listing_date = record.listing_date
                     existing.listing_date_source = record.listing_date_source or record.source
                     existing.listing_date_observed_at = listing_observed_at
@@ -538,6 +809,53 @@ async def refresh_etf_universe(
         deactivated += 1
 
     await session.flush()
+    observation_records = [
+        record
+        for record in discovered
+        if record.listing_date is not None
+        and record.listing_date_source
+        and record.listing_provider_version
+        and record.listing_universe_snapshot_hash
+        and record.listing_raw_payload_hash
+    ]
+    evidence_by_code = {
+        record.code: canonical_hash(
+            {
+                "code": record.code,
+                "exchange": record.exchange,
+                "listing_date": record.listing_date,
+                "source": record.listing_date_source,
+                "provider_version": record.listing_provider_version,
+                "universe_snapshot_hash": record.listing_universe_snapshot_hash,
+                "raw_payload_hash": record.listing_raw_payload_hash,
+            }
+        )
+        for record in observation_records
+    }
+    existing_evidence = set(
+        await session.scalars(
+            select(EtfListingDateObservation.evidence_hash).where(
+                EtfListingDateObservation.evidence_hash.in_(tuple(evidence_by_code.values()))
+            )
+        )
+    ) if evidence_by_code else set()
+    for record in observation_records:
+        evidence_hash = evidence_by_code[record.code]
+        if evidence_hash in existing_evidence:
+            continue
+        session.add(
+            EtfListingDateObservation(
+                etf_code=record.code,
+                exchange=record.exchange,
+                listing_date=record.listing_date,
+                source=str(record.listing_date_source),
+                provider_version=str(record.listing_provider_version),
+                observed_at=listing_observed_at,
+                universe_snapshot_hash=str(record.listing_universe_snapshot_hash),
+                raw_payload_hash=str(record.listing_raw_payload_hash),
+                evidence_hash=evidence_hash,
+            )
+        )
     for record in memberships_to_activate:
         session.add(
             EtfUniverseMembership(
@@ -572,4 +890,5 @@ async def refresh_etf_universe(
         "source_row_count": discovery.source_row_count,
         "normalized_row_count": discovery.normalized_row_count,
         "stale_universe": False,
+        "listing_metadata": listing_metadata_evidence,
     }

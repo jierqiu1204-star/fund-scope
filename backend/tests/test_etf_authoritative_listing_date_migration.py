@@ -9,7 +9,11 @@ from alembic.operations import Operations
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
 
-from app.models.entities import TradableEtf
+from app.models.entities import (
+    EtfAdjustedHistoryAvailability,
+    EtfListingDateObservation,
+    TradableEtf,
+)
 
 VERSIONS_DIR = Path(__file__).resolve().parents[1] / "alembic" / "versions"
 MIGRATION_PATH = VERSIONS_DIR / "20260726_000055_etf_authoritative_listing_date.py"
@@ -37,30 +41,87 @@ def test_authoritative_listing_date_migration_is_nullable_and_reversible() -> No
     assert columns.listing_date.nullable is True
     assert columns.listing_date_source.nullable is True
     assert columns.listing_date_observed_at.nullable is True
+    assert {
+        "scope",
+        "required_calendar_hash",
+    } <= {column.name for column in EtfAdjustedHistoryAvailability.__table__.c}
+    assert {
+        "etf_code",
+        "listing_date",
+        "source",
+        "provider_version",
+        "observed_at",
+        "universe_snapshot_hash",
+        "raw_payload_hash",
+        "evidence_hash",
+    } <= {column.name for column in EtfListingDateObservation.__table__.c}
 
     engine = sa.create_engine("sqlite:///:memory:")
     metadata = sa.MetaData()
-    sa.Table(
+    tradable = sa.Table(
         "tradable_etfs",
         metadata,
         sa.Column("code", sa.String(length=32), primary_key=True),
+    )
+    availability = sa.Table(
+        "etf_adjusted_history_availability",
+        metadata,
+        sa.Column("etf_code", sa.String(length=32), nullable=False),
+        sa.Column("provider_policy_version", sa.String(length=128), nullable=False),
+        sa.Column("retry_after", sa.DateTime(), nullable=True),
+        sa.PrimaryKeyConstraint(
+            "etf_code",
+            "provider_policy_version",
+            name="pk_etf_adjusted_history_availability",
+        ),
+        sa.ForeignKeyConstraint(["etf_code"], [tradable.c.code], ondelete="CASCADE"),
+    )
+    sa.Index(
+        "ix_etf_adjusted_history_availability_retry",
+        availability.c.provider_policy_version,
+        availability.c.retry_after,
     )
     metadata.create_all(engine)
     with engine.begin() as connection:
         migration = _migration()
         migration.op = Operations(MigrationContext.configure(connection))
         migration.upgrade()
+        inspector = sa.inspect(connection)
         column_names = {
-            column["name"] for column in sa.inspect(connection).get_columns("tradable_etfs")
+            column["name"] for column in inspector.get_columns("tradable_etfs")
         }
         assert {
             "listing_date",
             "listing_date_source",
             "listing_date_observed_at",
         } <= column_names
+        assert "etf_listing_date_observations" in inspector.get_table_names()
+        availability_columns = {
+            column["name"]
+            for column in inspector.get_columns("etf_adjusted_history_availability")
+        }
+        assert {"scope", "required_calendar_hash"} <= availability_columns
+        assert {
+            "etf_code",
+            "provider_policy_version",
+            "scope",
+            "required_calendar_hash",
+        } == set(
+            inspector.get_pk_constraint(
+                "etf_adjusted_history_availability"
+            )["constrained_columns"]
+        )
+
         migration.downgrade()
+        inspector = sa.inspect(connection)
+        assert "etf_listing_date_observations" not in inspector.get_table_names()
+        assert {"etf_code", "provider_policy_version"} == set(
+            inspector.get_pk_constraint(
+                "etf_adjusted_history_availability"
+            )["constrained_columns"]
+        )
         remaining = {
-            column["name"] for column in sa.inspect(connection).get_columns("tradable_etfs")
+            column["name"] for column in inspector.get_columns("tradable_etfs")
         }
         assert remaining == {"code"}
 

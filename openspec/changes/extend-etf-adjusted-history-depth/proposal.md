@@ -23,9 +23,9 @@ research, walk-forward validation, and market-regime evidence starved.
 - Persist provider-observed adjusted-history availability and cooldowns so a
   genuinely short or upstream-truncated history is not retried every slice.
   Provider observation is not treated as an inferred listing date.
-- Persist provider-observed listing dates from a complete authoritative ETF
-  universe snapshot with source and observation time. Keep the full
-  point-in-time universe as the publication denominator, but use only ETFs
+- Persist official SSE/SZSE listing dates from complete exchange snapshots as
+  append-only observations with source, provider version, observation time, and
+  evidence hashes. Keep the full point-in-time universe as the publication denominator, but use only ETFs
   factually listed on or before the first frozen required session as the
   300/500-session research denominator.
 - Freeze the 300/500 required-session calendars from observed exchange dates,
@@ -60,8 +60,8 @@ research, walk-forward validation, and market-regime evidence starved.
 
 - Backend bounded ETF history synchronization, post-close scheduling, readiness
   projection, and compact JobRun telemetry.
-- One additive table for per-ETF adjusted-history availability observations and
-  retry cooldown, plus additive authoritative-listing metadata on the ETF
+- Additive tables for lane-scoped adjusted-history availability and append-only
+  official listing observations, plus a current listing projection on the ETF
   master.
 - No ranking/API contract change, no new worker concurrency, and no production
   allocation, position, alert, or notification side effect.

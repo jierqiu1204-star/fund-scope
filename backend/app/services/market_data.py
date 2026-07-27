@@ -28,6 +28,7 @@ _DECISION_ADJUSTED_PROVIDER_VERSIONS = {
     "eastmoney": "eastmoney.push2his.kline.hfq_v1",
     "efinance": "efinance.stock.get_quote_history.fqt2_v1",
     "tickflow": "tickflow.free.klines.backward_v1",
+    "tencent": "tencent.ifzq.fqkline.hfq_v1",
 }
 
 

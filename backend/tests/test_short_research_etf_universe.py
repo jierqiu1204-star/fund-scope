@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import event, func, select, text
 
 from app.models.entities import (
+    EtfListingDateObservation,
     EtfPriceHistory,
     EtfUniverseMembership,
     ShortResearchSignalItem,
@@ -90,6 +91,73 @@ def test_provider_listing_date_parser_never_uses_partial_or_invalid_values() -> 
     assert parse_provider_listing_date(20200102) == date(2020, 1, 2)
     assert parse_provider_listing_date("--") is None
     assert parse_provider_listing_date("202001") is None
+
+
+@pytest.mark.asyncio
+async def test_official_listing_metadata_replaces_third_party_dates_only_from_complete_sources(
+    monkeypatch,
+) -> None:
+    records = (
+        EtfUniverseRecord(
+            code="510300",
+            name="沪深300ETF",
+            exchange="SH",
+            category="broad",
+            theme_tags=["宽基"],
+            trading_rule_label="证券账户 T+1 ETF",
+            source="eastmoney.push2.clist",
+            listing_date=date(2099, 1, 1),
+            listing_date_source="eastmoney.push2.clist",
+        ),
+        EtfUniverseRecord(
+            code="159915",
+            name="创业板ETF",
+            exchange="SZ",
+            category="broad",
+            theme_tags=["宽基"],
+            trading_rule_label="证券账户 T+1 ETF",
+            source="eastmoney.push2.clist",
+        ),
+    )
+
+    async def sse_source():
+        return universe_module.OfficialListingMetadataSource(
+            exchange="SH",
+            source=universe_module.SSE_LISTING_SOURCE,
+            provider_version=universe_module.SSE_LISTING_PROVIDER_VERSION,
+            status="authoritative",
+            dates_by_code={"510300": date(2012, 5, 28)},
+            source_row_count=1,
+            expected_total=1,
+            universe_snapshot_hash="1" * 64,
+            raw_payload_hash="2" * 64,
+        )
+
+    async def szse_source():
+        return universe_module.OfficialListingMetadataSource(
+            exchange="SZ",
+            source=universe_module.SZSE_LISTING_SOURCE,
+            provider_version=universe_module.SZSE_LISTING_PROVIDER_VERSION,
+            status="partial",
+            dates_by_code={"159915": date(2011, 9, 20)},
+            source_row_count=1,
+            expected_total=2,
+            universe_snapshot_hash="3" * 64,
+            raw_payload_hash="4" * 64,
+            error_summary="incomplete",
+        )
+
+    monkeypatch.setattr(universe_module, "_discover_sse_official_listing_metadata", sse_source)
+    monkeypatch.setattr(universe_module, "_discover_szse_official_listing_metadata", szse_source)
+
+    enriched, evidence = await universe_module.enrich_with_official_listing_metadata(records)
+
+    assert enriched[0].listing_date == date(2012, 5, 28)
+    assert enriched[0].listing_date_source == universe_module.SSE_LISTING_SOURCE
+    assert enriched[1].listing_date is None
+    assert enriched[1].listing_date_source is None
+    assert evidence["observed_count"] == 1
+    assert evidence["coverage_ratio"] == 0.5
 
 
 @pytest.mark.asyncio
@@ -602,6 +670,35 @@ async def test_etf_universe_refresh_is_idempotent_excludes_unsuitable_and_preser
         money = await session.scalar(select(TradableEtf).where(TradableEtf.code == "511990"))
         assert money is not None
         assert money.is_short_term_eligible is False
+
+
+@pytest.mark.asyncio
+async def test_universe_refresh_persists_listing_observation_idempotently(app) -> None:
+    record = EtfUniverseRecord(
+        code="588000",
+        name="科创50ETF",
+        exchange="SH",
+        category="broad",
+        theme_tags=["科创"],
+        trading_rule_label="证券账户 T+1 ETF",
+        source="eastmoney.push2.clist",
+        listing_date=date(2020, 11, 16),
+        listing_date_source=universe_module.SSE_LISTING_SOURCE,
+        listing_provider_version=universe_module.SSE_LISTING_PROVIDER_VERSION,
+        listing_universe_snapshot_hash="a" * 64,
+        listing_raw_payload_hash="b" * 64,
+    )
+    async with app.state.db.session() as session:
+        await refresh_etf_universe(session, records=[record])
+        await refresh_etf_universe(session, records=[record])
+        observations = (
+            await session.scalars(select(EtfListingDateObservation))
+        ).all()
+
+    assert len(observations) == 1
+    assert observations[0].listing_date == date(2020, 11, 16)
+    assert observations[0].source == universe_module.SSE_LISTING_SOURCE
+    assert len(observations[0].evidence_hash) == 64
 
 
 @pytest.mark.asyncio

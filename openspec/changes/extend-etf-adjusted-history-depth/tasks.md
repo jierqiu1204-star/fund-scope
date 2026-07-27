@@ -64,7 +64,7 @@
 
 - [x] 6.1 Run focused history sync, readiness, coordinator, scheduler, migration,
   provenance, and compact-response tests in separately bounded commands.
-- [ ] 6.2 Run backend domain-boundary and Ruff checks plus strict OpenSpec
+- [x] 6.2 Run backend domain-boundary and Ruff checks plus strict OpenSpec
   validation in separately bounded commands.
 - [x] 6.3 Record the deploy/rollback path and leave real production coverage
   tasks open until bounded VPS slices provide factual evidence.
@@ -114,18 +114,22 @@
 
 ## 9. Complete Seasoned Histories Efficiently
 
-- [x] 9.1 Persist authoritative provider-observed ETF listing dates with source
-  and observation time; never infer or backdate them from price history.
+- [x] 9.1 Persist complete official SSE/SZSE listing snapshots as append-only
+  observations with source/version, observation time, snapshot/raw/evidence
+  hashes; never infer or backdate them from price history.
 - [x] 9.2 Keep the full point-in-time publication denominator and project
-  independent seasoned 300/500 research cohorts, stable cohort/exclusion hashes,
-  and a 95 percent listing-metadata completion gate.
-- [x] 9.3 Freeze research dates from the observed ETF exchange-session calendar
-  while proving raw rows can identify dates but never increase adjusted
-  coverage.
-- [x] 9.4 Change research selection to completion-first and fetch only each
-  code's missing required-date span with dynamic provider minimums.
-- [x] 9.5 Add the reversible migration and focused normalization, cohort,
-  no-raw-substitution, queue, gap-window, idempotency, and coordinator tests.
+  independent seasoned 300/500 research cohorts from observations visible by
+  the PIT cutoff, with stable cohort/exclusion hashes and a 95 percent
+  listing-metadata completion gate.
+- [x] 9.3 Freeze research dates from the observed ETF exchange-session calendar,
+  centralize accepted adjusted provider/version pairs, and prove raw or forged
+  rows cannot increase adjusted coverage.
+- [x] 9.4 Select completion-first within equal-depth rotation buckets, key
+  cooldowns by lane and frozen calendar, fetch the exact missing span per code,
+  and persist only actually missing required sessions.
+- [x] 9.5 Add the reversible migration and focused normalization, PIT cutoff,
+  cohort, no-raw-substitution, provider-contract, queue, gap-window, cross-lane
+  cooldown, idempotency, and coordinator tests.
 - [ ] 9.6 Run bounded Ruff, domain-boundary, migration-head, focused test, and
   strict OpenSpec validation; deploy and record one factual production slice
   without starting a concurrent or unbounded sync.
@@ -145,6 +149,6 @@
 - The production coordinator returned in 3.8 seconds with
   `seasoned_research_cohort_empty`; no history provider work, concurrent worker,
   raw-price substitution, ranking publication, or unbounded sync was started.
-- Research completion remains blocked below the independent 95 percent listing
-  metadata gate. Strict OpenSpec validation is still unavailable on this Mac,
-  so task 9.6 remains open rather than overstating completion.
+- Research completion remained blocked below the independent 95 percent listing
+  metadata gate. The follow-up strict OpenSpec validation now passes; task 9.6
+  remains open for deployment and one factual post-deploy bounded slice.

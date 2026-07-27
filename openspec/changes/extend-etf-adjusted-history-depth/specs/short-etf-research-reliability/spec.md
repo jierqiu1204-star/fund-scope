@@ -59,3 +59,11 @@ version-incompatible rows without increasing decision coverage.
   inside their enclosing date span
 - **AND** extra raw, invalid, or non-required dates cannot falsely satisfy the
   missing-session minimum
+
+#### Scenario: A short-history observation belongs to one lane calendar
+
+- **WHEN** an accepted provider proves a shortfall for one scope and frozen
+  required-calendar hash
+- **THEN** its cooldown defers only that exact lane/calendar request
+- **AND** it cannot suppress a 61, 300, or 500-session request with a different
+  scope or frozen calendar

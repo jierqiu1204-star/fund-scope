@@ -31,8 +31,8 @@ operational adjusted-history lane rather than another backtest engine.
   gates, or historical visibility rules.
 - Inferring listing dates from first returned prices, backdating universe
   membership, or excluding new ETFs from the authoritative publication
-  denominator. A provider-observed listing date from the same complete
-  authoritative universe snapshot is permitted only with explicit provenance.
+  denominator. An official SSE/SZSE listing date from a complete exchange snapshot is
+  permitted only as an append-only observation with explicit provenance.
 - Using raw prices to synthesize adjusted history.
 - Running concurrent ETF fetches or an unbounded full-history job.
 
@@ -115,34 +115,36 @@ force raw-price substitution.
 
 The current authoritative point-in-time universe remains the exact denominator
 for target-date and 61-session publication coverage. A 300-session research
-cohort contains only current authoritative members whose provider-observed
-listing date is on or before the first frozen 300-session date. The 500-session
+cohort contains only current authoritative members whose official exchange
+listing observation was visible by the evaluation cutoff and whose listing date is on or before the first frozen 300-session date. The 500-session
 cohort applies the same rule against the first frozen 500-session date.
 
-Listing metadata is accepted only from a complete authoritative universe
-snapshot and is persisted with source and observation time. Missing listing
-metadata stays explicit and cannot be inferred from price history or membership
+Listing metadata is accepted only from complete SSE/SZSE exchange snapshots and
+is persisted append-only with source, provider version, observation time, source
+snapshot hash, raw payload hash, and evidence hash. Only observations visible by the PIT data cutoff may
+enter a historical cohort. Missing listing metadata stays explicit and cannot be inferred from price history or membership
 observation. A research lane cannot be declared complete unless listing metadata
 covers at least 95 percent of the full authoritative universe; unknown and
 structurally unseasoned ETFs are reported separately with stable hashes.
 
 The frozen session calendar is derived from observed ETF trade dates across all
 price bases because raw daily rows can prove that an exchange session existed.
-Only fully versioned decision-eligible `total_return_adjusted` rows count toward
+Only fully versioned decision-eligible `total_return_adjusted` rows from the
+central provider/version registry and visible by the PIT cutoff count toward
 per-ETF coverage.
 
 ### 8. Finish the nearest histories and request only missing spans
 
 Within a research cohort, pending ETFs are ordered by existing required-session
-depth descending, then watchlist priority and code. Durable rotation and
-cooldowns still prevent starvation, but do not make the queue start from the
-shallowest histories.
+depth descending, then watchlist priority and code. Durable rotation occurs only within the same depth bucket, and factual
+short-history cooldowns are keyed by lane scope and frozen-calendar hash so one
+lane cannot suppress another.
 
 Before provider work, the runner compares one ETF's accepted adjusted dates with
 the frozen required-session set. It requests from the earliest missing date to
 the latest missing date and asks the provider chain to satisfy the number and
-identity of missing required sessions. Persistence remains idempotent, and the
-same database comparison reconstructs the breakpoint after interruption or a
+identity of missing required sessions. Only rows for actually missing frozen sessions are persisted; persistence
+remains idempotent, and the same database comparison reconstructs the breakpoint after interruption or a
 batch-profile change.
 
 ## Risks / Trade-offs
@@ -173,7 +175,8 @@ batch-profile change.
 
 ## Migration Plan
 
-1. Add authoritative listing-date persistence and migration.
+1. Add append-only official exchange listing observations, a current projection,
+   lane-scoped availability keys, and a reversible migration.
 2. Project separate full-publication and seasoned 300/500 research denominators
    with a 95 percent metadata gate.
 3. Freeze observed session calendars, add completion-first selection and

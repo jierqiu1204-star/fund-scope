@@ -102,7 +102,7 @@ listing dates from returned price history.
 
 The system SHALL keep the complete authoritative point-in-time ETF universe as
 the publication denominator, SHALL derive 300/500-session research cohorts only
-from authoritative provider-observed listing metadata, and SHALL block research
+from official SSE/SZSE listing observations visible by the PIT cutoff, and SHALL block research
 completion when listing metadata coverage is below 95 percent.
 
 #### Scenario: An ETF is too new for a research horizon
@@ -115,7 +115,7 @@ completion when listing metadata coverage is below 95 percent.
 
 #### Scenario: Listing metadata is unavailable
 
-- **WHEN** an authoritative ETF has no provider-observed listing date
+- **WHEN** an authoritative ETF has no official exchange listing observation
 - **THEN** the system does not infer one from its earliest price or membership
   record
 - **AND** the ETF is reported as unknown listing metadata
@@ -129,6 +129,27 @@ completion when listing metadata coverage is below 95 percent.
 - **THEN** that date may enter the frozen shared session calendar
 - **BUT** the raw row does not increase any ETF's adjusted-session coverage
 
+### Requirement: Listing evidence and adjusted providers fail closed
+
+The system SHALL persist complete official exchange listing snapshots as
+append-only observations, SHALL evaluate them by observation cutoff, and SHALL
+use one central adjusted provider/version registry across ingestion, coverage,
+and decision readers.
+
+#### Scenario: A listing fact arrives after a historical cutoff
+
+- **WHEN** a valid official listing observation was recorded after the replay data
+  cutoff
+- **THEN** that replay reports the listing metadata as unavailable
+- **AND** it does not backdate the observation or change the historical cohort
+
+#### Scenario: A provider version is not centrally accepted
+
+- **WHEN** an adjusted row names an unknown or mismatched provider, provider
+  version, or adjustment version
+- **THEN** ingestion may retain it for audit only
+- **AND** it cannot increase publication or research coverage
+
 ### Requirement: Research backfill is completion-first and gap bounded
 
 The system SHALL prioritize pending seasoned ETFs nearest to the frozen depth
@@ -139,7 +160,7 @@ sessions.
 
 - **WHEN** pending ETFs have different accepted adjusted depths
 - **THEN** the runner orders greater depth first, then watchlist priority and
-  stable code order, while preserving durable rotation and cooldown behavior
+  stable code order, while rotating only within equal-depth buckets
 
 #### Scenario: Only an older segment is missing
 
@@ -148,6 +169,7 @@ sessions.
 - **THEN** the provider request begins at the earliest missing required date and
   ends at the latest missing required date instead of refetching the full
   research horizon
+- **AND** only rows matching actually missing frozen sessions are persisted
 
 #### Scenario: A slice is interrupted
 

@@ -61,8 +61,8 @@ def _rows(start: date, count: int, *, adjusted: bool = True) -> list[dict[str, f
                 {
                     "research_adjusted_value": close,
                     "research_price_basis": "total_return_adjusted",
-                    "adjustment_version": "fixture-hfq-v1",
-                    "provider_version": "fixture-hfq-v1",
+                    "adjustment_version": "eastmoney.push2his.kline.hfq_v1",
+                    "provider_version": "eastmoney.push2his.kline.hfq_v1",
                 }
             )
         rows.append(row)
@@ -167,9 +167,9 @@ async def test_research_depth_preflight_orders_materialized_depths_without_join(
                     research_adjusted_value=1.0,
                     research_price_basis="total_return_adjusted",
                     data_provider="eastmoney",
-                    provider_version="fixture-hfq-v1",
+                    provider_version="eastmoney.push2his.kline.hfq_v1",
                     source_timestamp=datetime(2026, 7, 1, 15, 0),
-                    adjustment_version="fixture-hfq-v1",
+                    adjustment_version="eastmoney.push2his.kline.hfq_v1",
                     decision_eligible=True,
                 )
             )
@@ -224,7 +224,7 @@ async def test_research_depth_fetches_only_the_missing_required_span(app) -> Non
                 )
             )
             return ProviderFetchResult(
-                rows=_rows(date(2026, 7, 1), 1),
+                rows=_rows(date(2026, 7, 1), 3),
                 provider="eastmoney",
                 fallback_used=False,
             )
@@ -246,9 +246,9 @@ async def test_research_depth_fetches_only_the_missing_required_span(app) -> Non
                     research_adjusted_value=1.0,
                     research_price_basis="total_return_adjusted",
                     data_provider="eastmoney",
-                    provider_version="fixture-hfq-v1",
+                    provider_version="eastmoney.push2his.kline.hfq_v1",
                     source_timestamp=datetime(2026, 7, 3, 15, 0),
-                    adjustment_version="fixture-hfq-v1",
+                    adjustment_version="eastmoney.push2his.kline.hfq_v1",
                     decision_eligible=True,
                 )
             )
@@ -264,8 +264,22 @@ async def test_research_depth_fetches_only_the_missing_required_span(app) -> Non
     assert calls == [(date(2026, 7, 1), date(2026, 7, 1), 1, (date(2026, 7, 1),))]
     assert result.status == "complete"
     assert result.completed_codes == (code,)
-    assert result.fetched_rows == 1
+    assert result.fetched_rows == 3
+    assert result.excluded_rows == 2
     assert row_count == 3
+
+
+def test_research_rotation_never_moves_a_shallower_bucket_ahead() -> None:
+    codes = ["510101", "510102", "510103"]
+    depths = {"510101": 2, "510102": 2, "510103": 1}
+
+    rotated = bounded_history_sync._rotate_within_depth_bucket(
+        codes,
+        depths=depths,
+        last_code="510101",
+    )
+
+    assert rotated == ["510102", "510101", "510103"]
 
 
 @pytest.mark.asyncio
@@ -299,7 +313,7 @@ async def test_research_depth_short_history_is_cooled_down_without_losing_denomi
         )
         observation = await session.get(
             EtfAdjustedHistoryAvailability,
-            (code, request.provider_policy_version),
+            (code, request.provider_policy_version, request.scope, request.required_calendar_hash),
         )
         second = await run_bounded_history_sync_slice(
             session,
@@ -309,7 +323,7 @@ async def test_research_depth_short_history_is_cooled_down_without_losing_denomi
         )
         observation = await session.get(
             EtfAdjustedHistoryAvailability,
-            (code, request.provider_policy_version),
+            (code, request.provider_policy_version, request.scope, request.required_calendar_hash),
         )
         assert observation is not None
         observation.retry_after = datetime.utcnow() - timedelta(seconds=1)
@@ -333,6 +347,52 @@ async def test_research_depth_short_history_is_cooled_down_without_losing_denomi
     assert second.attempted_codes == ()
     assert calls == [code, code]
     assert third.attempted_codes == (code,)
+
+
+@pytest.mark.asyncio
+async def test_history_cooldown_is_scoped_to_lane_and_calendar(app) -> None:
+    code = "510096"
+    calls: list[str] = []
+
+    async def fetch(
+        current_code: str,
+        from_date: date,
+        _to: date,
+    ) -> ProviderFetchResult:
+        calls.append(current_code)
+        return ProviderFetchResult(
+            rows=_rows(from_date, 1),
+            provider="eastmoney",
+            fallback_used=False,
+        )
+
+    first_request = _research_request(eligible_codes=(code,))
+    second_request = replace(
+        first_request,
+        scope="research_depth:" + "d" * 64,
+    )
+    async with app.state.db.session() as session:
+        session.add(_etf(code))
+        await session.commit()
+        await run_bounded_history_sync_slice(
+            session,
+            request=first_request,
+            fetcher=fetch,
+            rss_reader=lambda: 32 * 1024 * 1024,
+        )
+        second = await run_bounded_history_sync_slice(
+            session,
+            request=second_request,
+            fetcher=fetch,
+            rss_reader=lambda: 32 * 1024 * 1024,
+        )
+        observation_count = await session.scalar(
+            select(func.count()).select_from(EtfAdjustedHistoryAvailability)
+        )
+
+    assert second.attempted_codes == (code,)
+    assert calls == [code, code]
+    assert observation_count == 2
 
 
 @pytest.mark.asyncio
@@ -362,7 +422,7 @@ async def test_raw_history_cannot_create_research_depth_availability(app) -> Non
         )
         observation = await session.get(
             EtfAdjustedHistoryAvailability,
-            (code, request.provider_policy_version),
+            (code, request.provider_policy_version, request.scope, request.required_calendar_hash),
         )
 
     assert result.status == "partial"
@@ -542,8 +602,8 @@ async def test_depth_cursor_does_not_advance_for_same_day_raw_or_shallow_data(ap
                 research_adjusted_value=1.0,
                 research_price_basis="total_return_adjusted",
                 data_provider="eastmoney",
-                provider_version="fixture-hfq-v1",
-                adjustment_version="fixture-hfq-v1",
+                provider_version="eastmoney.push2his.kline.hfq_v1",
+                adjustment_version="eastmoney.push2his.kline.hfq_v1",
                 decision_eligible=True,
             )
         )
@@ -907,8 +967,8 @@ async def test_depth_requires_exact_recent_eligible_session_coverage(app) -> Non
                 research_adjusted_value=1.0,
                 research_price_basis="total_return_adjusted",
                 data_provider="eastmoney",
-                provider_version="fixture-hfq-v1",
-                adjustment_version="fixture-hfq-v1",
+                provider_version="eastmoney.push2his.kline.hfq_v1",
+                adjustment_version="eastmoney.push2his.kline.hfq_v1",
                 decision_eligible=True,
             )
             for trade_date in session_dates
@@ -927,8 +987,8 @@ async def test_depth_requires_exact_recent_eligible_session_coverage(app) -> Non
                 research_adjusted_value=1.0,
                 research_price_basis="total_return_adjusted",
                 data_provider="eastmoney",
-                provider_version="fixture-hfq-v1",
-                adjustment_version="fixture-hfq-v1",
+                provider_version="eastmoney.push2his.kline.hfq_v1",
+                adjustment_version="eastmoney.push2his.kline.hfq_v1",
                 decision_eligible=True,
             )
             for trade_date in session_dates[:3]
@@ -984,8 +1044,8 @@ async def test_selection_prioritizes_watchlist_then_shallowest_history(app) -> N
                 research_adjusted_value=1.0,
                 research_price_basis="total_return_adjusted",
                 data_provider="eastmoney",
-                provider_version="fixture-hfq-v1",
-                adjustment_version="fixture-hfq-v1",
+                provider_version="eastmoney.push2his.kline.hfq_v1",
+                adjustment_version="eastmoney.push2his.kline.hfq_v1",
                 decision_eligible=True,
             )
         )
@@ -1101,8 +1161,8 @@ async def test_page_batch_records_insert_update_unchanged_and_excluded_counts(ap
                 research_adjusted_value=0.9,
                 research_price_basis="total_return_adjusted",
                 data_provider="eastmoney",
-                provider_version="fixture-hfq-v1",
-                adjustment_version="fixture-hfq-v1",
+                provider_version="eastmoney.push2his.kline.hfq_v1",
+                adjustment_version="eastmoney.push2his.kline.hfq_v1",
                 decision_eligible=True,
             )
         )
