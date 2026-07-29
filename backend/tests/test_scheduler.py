@@ -25,6 +25,62 @@ async def test_scheduler_tracked_job_awaits_and_records_result(app) -> None:
     assert job_run.details_json == {"ok": True}
 
 
+@pytest.mark.asyncio
+async def test_due_aware_scheduler_skips_before_creating_tracked_run(app) -> None:
+    job_called = False
+
+    async def fake_job(_session: AsyncSession) -> dict[str, object]:
+        nonlocal job_called
+        job_called = True
+        return {"ok": True}
+
+    async def not_due(_session: AsyncSession) -> dict[str, object]:
+        return {"due": False, "reason": "catch_up_cadence_not_due"}
+
+    result = await scheduler_module._run_due_tracked_job(
+        app.state.db,
+        "scheduler_not_due_probe",
+        fake_job,
+        not_due,
+    )
+
+    async with app.state.db.session() as session:
+        job_run = await session.scalar(
+            select(JobRun).where(JobRun.job_name == "scheduler_not_due_probe")
+        )
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "catch_up_cadence_not_due"
+    assert job_called is False
+    assert job_run is None
+
+
+@pytest.mark.asyncio
+async def test_due_aware_scheduler_creates_exactly_one_run_when_due(app) -> None:
+    async def fake_job(_session: AsyncSession) -> dict[str, object]:
+        return {"ok": True}
+
+    async def due(_session: AsyncSession) -> dict[str, object]:
+        return {"due": True, "reason": "publication_readiness_due"}
+
+    result = await scheduler_module._run_due_tracked_job(
+        app.state.db,
+        "scheduler_due_probe",
+        fake_job,
+        due,
+    )
+
+    async with app.state.db.session() as session:
+        runs = (
+            await session.scalars(
+                select(JobRun).where(JobRun.job_name == "scheduler_due_probe")
+            )
+        ).all()
+
+    assert result == {"ok": True}
+    assert len(runs) == 1
+
+
 def test_scheduler_uses_configured_timezone() -> None:
     scheduler = scheduler_module.build_scheduler("Asia/Shanghai")
 
@@ -43,6 +99,7 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     daily_etf_theme_catalyst = scheduler.get_job("daily_etf_theme_catalyst")
     post_close_etf_signals = scheduler.get_job("post_close_etf_signals")
     post_close_etf_adjusted_sync = scheduler.get_job("post_close_etf_adjusted_sync")
+    production_etf_pit_capture = scheduler.get_job("production_etf_pit_capture")
     research_history = scheduler.get_job(
         "post_publication_etf_research_history"
     )
@@ -64,6 +121,7 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     assert "post_close_etf_data" in job_ids
     assert "post_close_etf_signals" in job_ids
     assert "post_close_etf_adjusted_sync" in job_ids
+    assert "production_etf_pit_capture" in job_ids
     assert "post_publication_etf_research_history" in job_ids
     assert "post_close_etf_label_outcome_review" in job_ids
     assert "post_close_etf_observation_portfolio" in job_ids
@@ -81,6 +139,7 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     assert daily_etf_theme_catalyst is not None
     assert post_close_etf_signals is not None
     assert post_close_etf_adjusted_sync is not None
+    assert production_etf_pit_capture is not None
     assert research_history is not None
     assert daily_short_research_data is not None
     assert post_close_etf_label_review is not None
@@ -101,6 +160,10 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     assert trigger_field(post_close_etf_adjusted_sync, "minute") == "*"
     assert post_close_etf_adjusted_sync.max_instances == 1
     assert post_close_etf_adjusted_sync.coalesce is True
+    assert trigger_field(production_etf_pit_capture, "hour") == "15-22"
+    assert trigger_field(production_etf_pit_capture, "minute") == "*/2"
+    assert production_etf_pit_capture.max_instances == 1
+    assert production_etf_pit_capture.coalesce is True
     assert trigger_field(research_history, "day_of_week") == "mon-fri"
     assert trigger_field(research_history, "hour") == "23"
     assert trigger_field(research_history, "minute") == "0-28/2"

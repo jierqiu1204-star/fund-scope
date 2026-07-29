@@ -25,6 +25,7 @@ import { api } from "@/lib/api";
 import { formatCurrency, formatDate, formatPercent } from "@/lib/format";
 import type {
   EtfOptimizedAllocation,
+  EtfRankingSnapshotMetadata,
   ShortResearchAsset,
   ShortResearchAssetDetail,
   ShortResearchAssetList,
@@ -655,7 +656,13 @@ function historyTierText(tier: string | null | undefined) {
   }
 }
 
-function actionableStateText(asset: ShortResearchAsset) {
+function actionableStateText(
+  asset: ShortResearchAsset,
+  snapshotState?: EtfRankingSnapshotMetadata["snapshot_state"]
+) {
+  if (snapshotState === "provisional") {
+    return "本期仅研究预览，不产生可行动名次";
+  }
   if (asset.actionable_eligible && asset.actionable_rank !== null && asset.actionable_rank !== undefined) {
     return `可行动榜 #${asset.actionable_rank}`;
   }
@@ -2970,6 +2977,10 @@ function ShortTermClient() {
                       ? "bg-ink text-white"
                       : "border border-ink/10 bg-white text-ink/65 hover:border-accent"
                   }`}
+                  disabled={
+                    surface === "actionable" &&
+                    shortAssetData?.snapshot?.snapshot_state === "provisional"
+                  }
                   onClick={() => {
                     setRankingSurface(surface);
                     setAssetOffset(0);
@@ -2986,19 +2997,33 @@ function ShortTermClient() {
                 : "可行动榜仅保留具备同日买卖价、IOPV、溢折价、健康 provider 与一致性证据的 ETF；缺失时不使用回退候选。"}
             </p>
             <p className="mt-1 text-xs text-ink/45">
-              覆盖率：
-              {shortAssetData?.snapshot?.coverage_ratio === null ||
-              shortAssetData?.snapshot?.coverage_ratio === undefined
+              当日复权覆盖：
+              {shortAssetData?.snapshot?.decision_data_coverage_ratio === null ||
+              shortAssetData?.snapshot?.decision_data_coverage_ratio === undefined
                 ? "暂无"
-                : `${(shortAssetData.snapshot.coverage_ratio * 100).toFixed(1)}%`}
+                : `${(shortAssetData.snapshot.decision_data_coverage_ratio * 100).toFixed(1)}%`}
+              {" · "}61 日预热覆盖：
+              {shortAssetData?.snapshot?.score_coverage_ratio === null ||
+              shortAssetData?.snapshot?.score_coverage_ratio === undefined
+                ? "暂无"
+                : `${(shortAssetData.snapshot.score_coverage_ratio * 100).toFixed(1)}%`}
               {" · "}截至 {formatDate(shortAssetData?.snapshot?.as_of_trade_date)}
               {" · "}生成于 {formatUtcDateTime(shortAssetData?.snapshot?.generated_at)}
+            </p>
+            <p className="mt-1 text-xs text-ink/45">
+              策略：{shortAssetData?.snapshot?.policy_version ?? "暂无"}
+              {" · "}数据接收截止：
+              {formatUtcDateTime(shortAssetData?.snapshot?.data_receipt_cutoff)}
+              {shortAssetData?.snapshot?.unavailable_reason
+                ? ` · 状态原因：${shortAssetData.snapshot.unavailable_reason}`
+                : ""}
             </p>
             {rankingSurface === "research" &&
             shortAssetData?.snapshot?.coverage_policy_mode === "degraded" ? (
               <p className="mt-2 rounded-md bg-amber-50 px-2.5 py-2 text-xs leading-5 text-amber-800">
-                当前为降级覆盖发布：61 日复权预热覆盖已达到 90% 但不足 95%；
-                历史不足的 ETF 已排除，不参与本期排名。
+                当前为临时研究预览，并非完整发布：61 日复权预热覆盖已达到 90%
+                但不足 95%；历史不足的 ETF 已排除，不参与本期排名。本期不产生组合、
+                邮件候选或可行动名次。
               </p>
             ) : null}
           </div>
@@ -3212,7 +3237,10 @@ function ShortTermClient() {
                             {historyTierText(item.history_confidence_tier)}
                           </span>
                           <span className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
-                            {actionableStateText(item)}
+                            {actionableStateText(
+                              item,
+                              shortAssetData?.snapshot?.snapshot_state
+                            )}
                           </span>
                           {item.sector_trend_score !== null && item.sector_trend_score !== undefined ? (
                             <span className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
@@ -3324,7 +3352,12 @@ function ShortTermClient() {
                   研究榜 #{selectedAsset.research_rank ?? "-"} · {formatOptionalScore(selectedAsset.research_score)} 分
                   {"；"}{historyTierText(selectedAsset.history_confidence_tier)}
                 </p>
-                <p className="mt-1 text-sm leading-6 text-ink/65">{actionableStateText(selectedAsset)}</p>
+                <p className="mt-1 text-sm leading-6 text-ink/65">
+                  {actionableStateText(
+                    selectedAsset,
+                    shortAssetData?.snapshot?.snapshot_state
+                  )}
+                </p>
                 <p className="mt-3 text-xs font-semibold uppercase tracking-[0.18em] text-accent">主题/板块辅助</p>
                 <p className="mt-2 text-base font-semibold text-ink">
                   {opportunityStatusText(selectedAsset)}
@@ -4879,7 +4912,12 @@ function ShortTermClient() {
                         研究榜 #{selectedAsset.research_rank ?? "-"} · {formatOptionalScore(selectedAsset.research_score)} 分
                         {"；"}{historyTierText(selectedAsset.history_confidence_tier)}
                       </p>
-                      <p className="mt-1 text-sm leading-6 text-ink/65">{actionableStateText(selectedAsset)}</p>
+                      <p className="mt-1 text-sm leading-6 text-ink/65">
+                        {actionableStateText(
+                          selectedAsset,
+                          shortAssetData?.snapshot?.snapshot_state
+                        )}
+                      </p>
                       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                         <p className="mt-4 text-xs font-semibold uppercase tracking-[0.18em] text-accent">主题/板块辅助</p>
                         <p className="text-sm font-semibold text-ink">

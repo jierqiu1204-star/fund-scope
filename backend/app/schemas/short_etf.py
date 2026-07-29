@@ -43,6 +43,7 @@ class EtfDataHealthOut(BaseModel):
 
 class EtfDataStatusOut(BaseModel):
     summary: dict[str, Any]
+    history_readiness: dict[str, Any] = Field(default_factory=dict)
     items: list[EtfDataHealthOut]
 
 

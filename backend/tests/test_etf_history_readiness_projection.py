@@ -128,7 +128,8 @@ async def test_readiness_separates_current_freshness_from_61_session_depth(app) 
     assert report["history_publication_gate_passed"] is False
     assert report["publication_coverage_thresholds"] == {
         "daily_freshness": 0.95,
-        "history_depth_61": 0.90,
+        "history_depth_61_preview": 0.90,
+        "history_depth_61_complete": 0.95,
     }
 
 
@@ -391,7 +392,9 @@ async def test_short_etf_data_status_exposes_independent_history_lanes(client) -
     response = await client.get("/api/short-etf/data-status")
 
     assert response.status_code == 200
-    readiness = response.json()["summary"]["history_readiness"]
+    body = response.json()
+    readiness = body["history_readiness"]
+    assert readiness == body["summary"]["history_readiness"]
     assert readiness["daily_freshness"]["scope"] == "daily_freshness"
     assert readiness["history_depth_61"]["scope"] == "history_depth_61"
     assert readiness["contract_depth"]["scope"].startswith("history_depth_required:")

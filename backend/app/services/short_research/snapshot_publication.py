@@ -17,8 +17,7 @@ from app.models.entities import (
 )
 from app.services.market_data import etf_adjusted_price_provenance_issue
 from app.services.short_research.coverage_policy import (
-    ETF_DAILY_DECISION_MIN_COVERAGE,
-    ETF_SCORE_PUBLICATION_MIN_COVERAGE,
+    evaluate_etf_readiness,
 )
 from app.services.short_research.ranking_contract import canonical_hash
 from app.services.short_research.universe import build_point_in_time_universe_snapshot
@@ -214,16 +213,18 @@ def _validate_publishable(
         raise SnapshotPublicationError(f"missing snapshot identity: {', '.join(missing)}")
     if run.as_of_date != run.as_of_trade_date:
         raise SnapshotPublicationError("snapshot as-of date must match trade date")
-    if (
-        run.decision_data_coverage_ratio is None
-        or run.decision_data_coverage_ratio < ETF_DAILY_DECISION_MIN_COVERAGE
-    ):
-        raise SnapshotPublicationError("decision-data coverage is below publication threshold")
-    if (
-        run.coverage_ratio is None
-        or run.coverage_ratio < ETF_SCORE_PUBLICATION_MIN_COVERAGE
-    ):
-        raise SnapshotPublicationError("score coverage is below publication threshold")
+    readiness = evaluate_etf_readiness(
+        daily_coverage_ratio=run.decision_data_coverage_ratio,
+        warmup_coverage_ratio=run.coverage_ratio,
+    )
+    if not readiness.complete_publication_allowed:
+        if "daily_freshness_coverage_below_95pct" in readiness.blocker_reasons:
+            raise SnapshotPublicationError(
+                "decision-data coverage is below publication threshold"
+            )
+        raise SnapshotPublicationError(
+            "score coverage is below complete publication threshold"
+        )
     if run.expected_item_count is None or run.expected_item_count <= 0:
         raise SnapshotPublicationError("expected item count must be positive")
     expected_score_ratio = len(items) / run.expected_item_count

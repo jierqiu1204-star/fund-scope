@@ -440,3 +440,68 @@ async def test_publication_profile_stops_before_fetch_on_rss_limit(app) -> None:
     assert result.status == "partial"
     assert result.stop_reason == "rss_limit"
     assert called is False
+
+
+@pytest.mark.asyncio
+async def test_lifetime_peak_above_limit_does_not_block_recovered_current_rss(app) -> None:
+    code = "510017"
+    called = False
+    request = replace(_request(), eligible_codes=(code,), max_codes=1)
+
+    async def fetch(*_args: object) -> ProviderFetchResult:
+        nonlocal called
+        called = True
+        return ProviderFetchResult(
+            rows=[],
+            provider="eastmoney",
+            fallback_used=False,
+        )
+
+    async with app.state.db.session() as session:
+        session.add(_etf(code))
+        await session.commit()
+        result = await bounded_history_sync.run_bounded_history_sync_slice(
+            session,
+            request=request,
+            fetcher=fetch,
+            rss_reader=lambda: 64 * 1024 * 1024,
+            lifetime_peak_rss_reader=lambda: 768 * 1024 * 1024,
+        )
+
+    assert called is True
+    assert result.stop_reason != "rss_limit"
+    assert result.current_rss_bytes == 64 * 1024 * 1024
+    assert result.slice_peak_current_rss_bytes == 64 * 1024 * 1024
+    assert result.lifetime_peak_rss_bytes == 768 * 1024 * 1024
+    assert result.rss_limit_bytes == 512 * 1024 * 1024
+
+
+@pytest.mark.asyncio
+async def test_publication_profile_fails_closed_when_current_rss_is_unavailable(
+    app,
+) -> None:
+    code = "510018"
+    called = False
+    request = replace(_request(), eligible_codes=(code,), max_codes=1)
+
+    async def fetch(*_args: object) -> ProviderFetchResult:
+        nonlocal called
+        called = True
+        raise AssertionError("unavailable current RSS must stop provider work")
+
+    async with app.state.db.session() as session:
+        session.add(_etf(code))
+        await session.commit()
+        result = await bounded_history_sync.run_bounded_history_sync_slice(
+            session,
+            request=request,
+            fetcher=fetch,
+            rss_reader=lambda: None,
+            lifetime_peak_rss_reader=lambda: 768 * 1024 * 1024,
+        )
+
+    assert called is False
+    assert result.status == "partial"
+    assert result.stop_reason == "current_rss_unavailable"
+    assert result.current_rss_bytes is None
+    assert result.lifetime_peak_rss_bytes == 768 * 1024 * 1024

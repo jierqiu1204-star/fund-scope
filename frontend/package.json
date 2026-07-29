@@ -15,6 +15,7 @@
     "test:dual-rankings": "node ./scripts/check-etf-dual-ranking-surfaces.mjs",
     "test:catalyst-shadow": "node ./scripts/check-etf-catalyst-shadow.mjs",
     "test:backtest-evidence": "node ./scripts/check-etf-backtest-evidence-dimensions.mjs",
+    "test:pit-evidence": "node ./scripts/check-etf-pit-evidence-surfaces.mjs",
     "format": "prettier --check ."
   },
   "dependencies": {

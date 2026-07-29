@@ -82,19 +82,35 @@ The system SHALL provide a detail view for each ranked asset with charts, key me
 - **THEN** the detail view explains why that label was assigned using concrete metrics and risk flags rather than only showing the label
 
 ### Requirement: Short-Term Data Sufficiency Gates Replace Long-Term Gates
-The system SHALL apply short-term data sufficiency gates suitable for 1-4 week and 2-3 month research, and SHALL not use the long-term 730-day strategy gate as the blocker for this homepage.
+The system SHALL apply explicit research and actionable data-sufficiency gates suitable for short-term ETF research and SHALL not use the long-term 730-day strategy gate as the blocker for this homepage.
 
 #### Scenario: Less than 20 trading days
 - **WHEN** an asset has fewer than 20 usable trading days
 - **THEN** it is marked `数据不足` and cannot appear as `短线观察`
 
 #### Scenario: Between 20 and 59 trading days
-- **WHEN** an asset has 20 to 59 usable trading days
-- **THEN** the system may display its trend data but marks the sample as very short and limits the conclusion strength
+- **WHEN** an ETF has 20 to 59 usable trading days
+- **THEN** the system may display limited trend data but cannot calculate or publish the 60-session research rank
+
+#### Scenario: Between 20 and 60 trading days
+- **WHEN** an ETF has 20 to 60 usable trading days
+- **THEN** the system may display limited trend data but cannot calculate or publish the 60-session research rank
+
+#### Scenario: Between 61 and 119 trading days
+- **WHEN** an ETF has 61 to 119 decision-eligible adjusted sessions
+- **THEN** it may appear in the daily research rank with `短样本` context and MUST NOT appear in the actionable rank
+
+#### Scenario: Between 120 and 249 trading days
+- **WHEN** an ETF has 120 to 249 decision-eligible adjusted sessions
+- **THEN** it may pass the actionable history gate if all other data and risk requirements are satisfied
+
+#### Scenario: At least 250 trading days
+- **WHEN** an ETF has at least 250 decision-eligible adjusted sessions
+- **THEN** the system marks its historical context as relatively complete without automatically increasing its score
 
 #### Scenario: At least 120 trading days
-- **WHEN** an asset has at least 120 usable trading days
-- **THEN** the system may assign normal observation labels if other scoring and risk conditions allow it
+- **WHEN** an ETF has at least 120 decision-eligible adjusted sessions
+- **THEN** the system may assign normal observation labels and pass the actionable history gate only when all other scoring, market-data, and risk conditions allow it
 
 ### Requirement: Frontend Prioritizes Simple Charts Over Tables
 The system SHALL make the short-term homepage chart-first and SHALL avoid exposing advanced backtest, strategy configuration, and paper trading controls as primary beginner content.
@@ -228,11 +244,15 @@ The system SHALL show trend strength, recent position risk, volatility, drawdown
 - **THEN** the detail view includes entry price or confirmed NAV, current estimated profit/loss, maximum profit, giveback, active threshold values, and latest holding action
 
 ### Requirement: ETF Ranking Uses The Unified Short-Term Research Source
-The system SHALL use `/api/short-research` as the canonical source for ETF ranking and explanation on the short-term page.
+The system SHALL use `/api/short-research` as the canonical source for both ETF ranking surfaces and their explanations on the short-term page.
 
 #### Scenario: Short-term ETF list is loaded
 - **WHEN** the `/short-term` page loads ETF mode
-- **THEN** ranked ETF cards, detail explanations, and observation portfolio are based on the latest `/api/short-research` signal run
+- **THEN** ranked ETF cards default to the latest cached daily research surface and expose actionable eligibility and action rank separately
+
+#### Scenario: User selects actionable filter
+- **WHEN** the user filters the ETF list to actionable items
+- **THEN** the page displays only eligible `actionable_rank_v1` rows without reinterpreting research ranks as action ranks
 
 #### Scenario: Legacy short ETF endpoint is called
 - **WHEN** a client calls the legacy `/api/short-etf` endpoints
@@ -588,4 +608,42 @@ The short-term research workbench SHALL distinguish current signal evidence, all
 #### Scenario: Evidence has limitations
 - **WHEN** evidence was produced using daily bars, limited samples, or missing intraday data
 - **THEN** the UI states those limitations near the evidence summary
+
+### Requirement: Short-Term Workbench Separates Research Rank From Action Eligibility
+The short-term research workbench SHALL clearly distinguish broad daily research ranking from strict actionable eligibility.
+
+#### Scenario: Research rank is available and action rank is unavailable
+- **WHEN** an ETF has a valid research row but lacks required intraday action evidence
+- **THEN** the card shows its research rank and score together with `暂不可行动` and the specific missing or stale evidence
+
+#### Scenario: Both ranks are available
+- **WHEN** an ETF is present on both surfaces
+- **THEN** the detail view labels each rank, contract version, as-of timestamp, and history-confidence tier without merging the scores
+
+#### Scenario: Actionable surface has no rows
+- **WHEN** provider or market-data health prevents every ETF from passing actionable gates
+- **THEN** the research list remains usable and the actionable filter shows a fail-closed unavailable state rather than fallback candidates
+
+### Requirement: Short-Term Workbench Displays Catalyst Shadow Separately
+The short-term research workbench SHALL display verified catalyst event facts, source coverage, receipt times, direct or proxy mappings, and limitations in a separate research-only section.
+
+#### Scenario: Selected ETF has an active direct event
+- **WHEN** the latest completed shadow snapshot contains a verified direct-theme event for the selected ETF
+- **THEN** the detail view shows event type, factual summary, source link, published time, received time, effective period, direction, and shadow-only explanation
+
+#### Scenario: Selected ETF uses a proxy mapping
+- **WHEN** catalyst context reaches the ETF through a proxy theme
+- **THEN** the detail view labels the proxy mapping and MUST NOT describe it as a direct ETF catalyst
+
+#### Scenario: No event was observed
+- **WHEN** catalyst coverage is `observed_none`
+- **THEN** the detail view says no qualifying event was observed in successfully checked sources
+
+#### Scenario: Catalyst sources are unavailable
+- **WHEN** catalyst coverage is `unavailable`
+- **THEN** the detail view shows a source-coverage limitation and MUST NOT describe the state as neutral or event-free
+
+#### Scenario: Catalyst shadow is displayed beside ranking
+- **WHEN** research or actionable ranks are visible
+- **THEN** the UI states that catalyst facts do not change either score, rank, allocation, tracked-position action, or email trigger
 

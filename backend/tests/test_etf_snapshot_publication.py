@@ -441,7 +441,7 @@ async def test_full_decision_data_coverage_does_not_hide_low_score_coverage(app)
             await publish_full_snapshot(session, run_id=run_id)
 
 
-def test_publication_accepts_ninety_percent_score_coverage_as_degraded() -> None:
+def test_complete_publication_rejects_ninety_percent_degraded_coverage() -> None:
     codes = [f"5100{index:02d}" for index in range(9)]
     trade_date = date(2026, 7, 24)
     items = [
@@ -487,11 +487,15 @@ def test_publication_accepts_ninety_percent_score_coverage_as_degraded() -> None
         },
     )
 
-    snapshot_publication._validate_publishable(
-        run,
-        items,
-        decision_data_codes={*codes, "510099"},
-    )
+    with pytest.raises(
+        SnapshotPublicationError,
+        match="score coverage is below complete publication threshold",
+    ):
+        snapshot_publication._validate_publishable(
+            run,
+            items,
+            decision_data_codes={*codes, "510099"},
+        )
 
 
 @pytest.mark.asyncio

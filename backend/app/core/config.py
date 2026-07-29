@@ -63,6 +63,18 @@ class Settings(BaseSettings):
         default="",
         alias="READINESS_ATTESTATION_SECRET",
     )
+    etf_pit_capture_enabled: bool = Field(
+        default=False,
+        alias="ETF_PIT_CAPTURE_ENABLED",
+    )
+    etf_pit_code_version: str = Field(
+        default="",
+        alias="ETF_PIT_CODE_VERSION",
+    )
+    etf_pit_artifact_dir: str = Field(
+        default="./data/etf-pit-artifacts",
+        alias="ETF_PIT_ARTIFACT_DIR",
+    )
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:3000"],
         alias="CORS_ORIGINS",

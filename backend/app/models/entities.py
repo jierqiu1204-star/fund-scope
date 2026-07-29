@@ -86,6 +86,10 @@ class EtfActionValidationImmutableError(ValueError):
     pass
 
 
+class PitCaptureSourceImmutableError(ValueError):
+    pass
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -2913,6 +2917,64 @@ class EtfFactorExperimentEvidence(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class EtfPitCaptureSource(Base):
+    """Append-only production provenance for one complete ETF PIT source."""
+
+    __tablename__ = "etf_pit_capture_sources"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_signal_run_id",
+            name="uq_etf_pit_capture_source_signal_run",
+        ),
+        UniqueConstraint(
+            "source_context_hash",
+            name="uq_etf_pit_capture_source_context_hash",
+        ),
+        CheckConstraint(
+            "readiness_state = 'complete'",
+            name="ck_etf_pit_capture_source_complete_readiness",
+        ),
+        CheckConstraint(
+            "target_date_coverage_ratio >= 0 AND target_date_coverage_ratio <= 1",
+            name="ck_etf_pit_capture_source_target_coverage",
+        ),
+        CheckConstraint(
+            "warmup_coverage_ratio >= 0 AND warmup_coverage_ratio <= 1",
+            name="ck_etf_pit_capture_source_warmup_coverage",
+        ),
+        SaIndex(
+            "ix_etf_pit_capture_sources_trade_date",
+            "as_of_trade_date",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_signal_run_id: Mapped[int] = mapped_column(
+        ForeignKey("short_research_signal_runs.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    as_of_trade_date: Mapped[date] = mapped_column(Date, nullable=False)
+    source_snapshot_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_context_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    universe_manifest_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    input_snapshot_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    ranking_contract_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    research_contract_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    actionable_contract_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    readiness_policy_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    readiness_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    target_date_coverage_ratio: Mapped[float] = mapped_column(Float, nullable=False)
+    warmup_coverage_ratio: Mapped[float] = mapped_column(Float, nullable=False)
+    market_decision_cutoff: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    data_receipt_cutoff: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    replay_visibility_cutoff: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    cutoff_timezone: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider_health_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_context_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class EtfFactorExperimentCheckpoint(Base):
     __tablename__ = "etf_factor_experiment_checkpoints"
     __table_args__ = (
@@ -3032,6 +3094,8 @@ def _prevent_published_snapshot_mutation(session: Session, _flush_context: objec
             raise ValidationEvidenceImmutableError(
                 "factor experiment evidence is immutable"
             )
+        if isinstance(instance, EtfPitCaptureSource):
+            raise PitCaptureSourceImmutableError("PIT capture source is immutable")
         if isinstance(
             instance,
             (
@@ -3107,6 +3171,10 @@ def _prevent_published_snapshot_mutation(session: Session, _flush_context: objec
         if isinstance(instance, ShortResearchSignalItem):
             item_run_ids.add(instance.run_id)
     for instance in session.deleted:
+        if isinstance(instance, EtfPitCaptureSource):
+            raise PitCaptureSourceImmutableError(
+                "PIT capture source cannot be deleted"
+            )
         if isinstance(instance, DatabaseInstanceIdentity):
             raise DatabaseInstanceIdentityImmutableError(
                 "database instance identity cannot be deleted"
@@ -3164,5 +3232,4 @@ def _prevent_published_snapshot_mutation(session: Session, _flush_context: objec
         )
     if published_run_ids & item_run_ids:
         raise PublishedSnapshotImmutableError("published ranking snapshot items are immutable")
-
 

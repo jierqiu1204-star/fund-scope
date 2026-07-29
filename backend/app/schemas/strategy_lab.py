@@ -178,6 +178,9 @@ class EtfFactorEvidenceOut(BaseModel):
     promotion_state: Literal[
         "eligible_for_v4_proposal",
         "retain_current_ranking",
+        "insufficient_data",
+        "promotion_ineligible",
+        "promotion_eligible",
     ]
     report: dict[str, Any]
     research_only: Literal[True]

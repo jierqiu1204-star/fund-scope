@@ -237,7 +237,7 @@ async def test_current_selector_rejects_wrong_rule_field_date_and_coverage(app) 
 
 
 @pytest.mark.asyncio
-async def test_current_selector_accepts_degraded_score_coverage_at_ninety_percent(
+async def test_complete_selector_rejects_degraded_score_coverage_at_ninety_percent(
     app,
 ) -> None:
     degraded_id = await _seed_run(
@@ -254,9 +254,15 @@ async def test_current_selector_accepts_degraded_score_coverage_at_ninety_percen
         run = await session.get(ShortResearchSignalRun, degraded_id)
         metadata = snapshot_metadata(run)
 
-    assert selected is not None
-    assert selected.id == degraded_id
+    assert selected is None
+    assert run is not None
     assert metadata["coverage_policy_mode"] == "degraded"
+    assert metadata["readiness_state"] == "degraded"
+    assert metadata["snapshot_state"] == "provisional"
+    assert metadata["unavailable_reason"] == (
+        "history_depth_61_coverage_below_95pct"
+    )
+    assert metadata["data_receipt_cutoff"] == run.data_cutoff
 
 
 def test_required_etf_snapshot_trade_date_uses_completed_exchange_session() -> None:
@@ -277,3 +283,6 @@ async def test_snapshot_metadata_exposes_decision_and_score_coverage(app) -> Non
     assert metadata["score_eligible_item_count"] == 1
     assert metadata["score_coverage_ratio"] == 1.0
     assert metadata["coverage_policy_mode"] == "complete"
+    assert metadata["readiness_state"] == "complete"
+    assert metadata["snapshot_state"] == "complete"
+    assert metadata["unavailable_reason"] is None

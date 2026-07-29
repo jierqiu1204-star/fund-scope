@@ -38,9 +38,17 @@ from app.services.short_research.jobs import (
     post_close_etf_observation_portfolio_job,
     post_close_etf_signals_job,
     post_publication_etf_research_history_job,
+    production_etf_pit_capture_job,
+    publication_readiness_decision_context,
 )
 from app.services.strategy_lab.jobs import daily_strategy_paper_job
 from app.services.tracked_positions.jobs import daily_tracked_position_alerts_job
+from app.services.workflows.etf_point_in_time_capture import (
+    preflight_production_pit_capture,
+)
+from app.services.workflows.etf_publish_readiness import (
+    preflight_post_close_etf_publication_readiness,
+)
 from app.services.workflows.intraday_etf import intraday_etf_watch_with_alerts_job
 
 
@@ -49,6 +57,23 @@ async def _run_tracked_job(
     job_name: str,
     job: Callable[[AsyncSession], Awaitable[dict[str, Any]]],
 ) -> dict[str, Any]:
+    return await run_job(db.session, job_name, job)
+
+
+async def _run_due_tracked_job(
+    db: DatabaseManager,
+    job_name: str,
+    job: Callable[[AsyncSession], Awaitable[dict[str, Any]]],
+    preflight: Callable[[AsyncSession], Awaitable[dict[str, Any]]],
+) -> dict[str, Any]:
+    async with db.session() as session:
+        decision = await preflight(session)
+    if decision.get("due") is not True:
+        return {
+            "status": "skipped",
+            "job_name": job_name,
+            **decision,
+        }
     return await run_job(db.session, job_name, job)
 
 
@@ -77,6 +102,50 @@ def register_default_jobs(
 
     async def intraday_etf_watch_tracked(session: AsyncSession) -> dict[str, Any]:
         return await intraday_etf_watch_with_alerts_job(session, settings=settings, run_type="scheduled")
+
+    async def post_close_etf_adjusted_sync_preflight(
+        session: AsyncSession,
+    ) -> dict[str, Any]:
+        context = publication_readiness_decision_context()
+        if context is None:
+            return {
+                "due": False,
+                "reason": "no_completed_trading_session",
+            }
+        trade_date, decision_cutoff = context
+        decision = await preflight_post_close_etf_publication_readiness(
+            session,
+            trade_date=trade_date,
+            decision_cutoff=decision_cutoff,
+        )
+        return decision.to_dict()
+
+    async def production_etf_pit_capture_tracked(
+        session: AsyncSession,
+    ) -> dict[str, Any]:
+        return await production_etf_pit_capture_job(session, settings)
+
+    async def production_etf_pit_capture_preflight(
+        session: AsyncSession,
+    ) -> dict[str, Any]:
+        context = publication_readiness_decision_context()
+        if context is None:
+            return {
+                "due": False,
+                "reason": "pit_no_completed_trading_session",
+            }
+        trade_date, _decision_cutoff = context
+        code_version = (
+            settings.etf_pit_code_version.strip()
+            or settings.readiness_deploy_artifact.strip()
+        )
+        decision = await preflight_production_pit_capture(
+            session,
+            trade_date=trade_date,
+            enabled=settings.etf_pit_capture_enabled,
+            code_version=code_version,
+        )
+        return decision.to_dict()
 
     scheduler.add_job(
         _run_tracked_job,
@@ -232,13 +301,35 @@ def register_default_jobs(
         replace_existing=True,
     )
     scheduler.add_job(
-        _run_tracked_job,
+        _run_due_tracked_job,
         "cron",
-        args=[db, "post_close_etf_adjusted_sync", post_close_etf_adjusted_sync_job],
+        args=[
+            db,
+            "post_close_etf_adjusted_sync",
+            post_close_etf_adjusted_sync_job,
+            post_close_etf_adjusted_sync_preflight,
+        ],
         day_of_week="mon-fri",
         hour="15-22",
         minute="*",
         id="post_close_etf_adjusted_sync",
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_due_tracked_job,
+        "cron",
+        args=[
+            db,
+            "production_etf_pit_capture",
+            production_etf_pit_capture_tracked,
+            production_etf_pit_capture_preflight,
+        ],
+        day_of_week="mon-fri",
+        hour="15-22",
+        minute="*/2",
+        id="production_etf_pit_capture",
         max_instances=1,
         coalesce=True,
         replace_existing=True,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -12,6 +13,17 @@ from app.services.strategy_lab.etf_factor_validation import (
     PromotionDecision,
     holm_bonferroni,
 )
+from app.services.strategy_lab.etf_point_in_time_research_loop import (
+    FrozenResearchLoopManifest,
+    ResearchPromotionDecision,
+    ResearchPromotionState,
+)
+from app.services.strategy_lab.etf_ranking_candidates import (
+    RANKING_COST_CONTRACT_HASH,
+)
+from app.services.strategy_lab.etf_ranking_validation import RankingEndpointResult
+
+OPERATIONAL_RESEARCH_EVIDENCE_SCHEMA = "etf_point_in_time_research_evidence_v1"
 
 
 class FactorEvidenceConflictError(ValueError):
@@ -35,7 +47,7 @@ class FactorEvidencePayload:
     costs: dict[str, Any]
     limitations: tuple[str, ...]
     report: dict[str, Any]
-    promotion: PromotionDecision
+    promotion: PromotionDecision | ResearchPromotionDecision
 
     def validate(self) -> None:
         multiplicity = self.intervals.get("multiplicity")
@@ -70,6 +82,7 @@ class FactorEvidencePayload:
             )
 
     def canonical_payload(self) -> dict[str, Any]:
+        promotion = _promotion_payload(self.promotion)
         return {
             "manifest_hash": self.manifest_hash,
             "ranking_contract_hash": self.ranking_contract_hash,
@@ -82,12 +95,7 @@ class FactorEvidencePayload:
             "costs": self.costs,
             "limitations": self.limitations,
             "report": self.report,
-            "promotion": {
-                "state": self.promotion.state,
-                "passed": self.promotion.passed,
-                "failed_gates": self.promotion.failed_gates,
-                "endpoint": self.promotion.endpoint,
-            },
+            "promotion": promotion,
         }
 
     @property
@@ -125,13 +133,189 @@ async def persist_factor_evidence(
         split_reports_json=payload.split_reports,
         costs_json=payload.costs,
         limitations_json=list(payload.limitations),
-        promotion_state=payload.promotion.state,
+        promotion_state=str(_promotion_payload(payload.promotion)["state"]),
         report_json=payload.report,
     )
     session.add(evidence)
     await session.commit()
     await session.refresh(evidence)
     return evidence
+
+
+def _promotion_payload(
+    promotion: PromotionDecision | ResearchPromotionDecision,
+) -> dict[str, Any]:
+    if isinstance(promotion, ResearchPromotionDecision):
+        return {
+            "state": promotion.state.value,
+            "passed": promotion.state is ResearchPromotionState.PROMOTION_ELIGIBLE,
+            "failed_gates": promotion.failed_gates,
+            "endpoint": promotion.primary_endpoint,
+            "production_mutation_allowed": promotion.production_mutation_allowed,
+        }
+    return {
+        "state": promotion.state,
+        "passed": promotion.passed,
+        "failed_gates": promotion.failed_gates,
+        "endpoint": promotion.endpoint,
+        "production_mutation_allowed": False,
+    }
+
+
+def _ranking_metric(
+    result: RankingEndpointResult,
+    *,
+    label: str,
+    primary: bool,
+) -> dict[str, Any]:
+    return {
+        "label": label,
+        "value": result.mean_paired_net_excess,
+        "sample_count": len(result.independent_dates),
+        "confidence_interval": list(result.bootstrap_confidence_interval),
+        "primary": primary,
+        "candidate_id": result.candidate_id,
+        "top_n": result.top_n,
+        "horizon_sessions": result.horizon_sessions,
+        "coverage_ratio": result.coverage_ratio,
+        "average_turnover": result.average_turnover,
+        "average_rank_churn": result.average_rank_churn,
+        "candidate_maximum_drawdown": result.candidate_maximum_drawdown,
+        "baseline_maximum_drawdown": result.baseline_maximum_drawdown,
+        "result_hash": result.result_hash,
+    }
+
+
+def build_operational_factor_evidence(
+    *,
+    manifest: FrozenResearchLoopManifest,
+    data_cutoff: datetime,
+    primary_result: RankingEndpointResult,
+    exploratory_results: tuple[RankingEndpointResult, ...],
+    factor_diagnostics: dict[str, Any],
+    coverage: dict[str, float | int | None],
+    exclusion_counts: dict[str, int],
+    split_reports: dict[str, Any],
+    raw_primary_p_values: tuple[float, ...],
+    promotion: ResearchPromotionDecision,
+    policy_shadow: dict[str, Any] | None = None,
+    limitations: tuple[str, ...] = (),
+) -> FactorEvidencePayload:
+    """Build current evidence from existing result objects without rescoring."""
+
+    manifest.validate()
+    if (
+        primary_result.endpoint_role != "primary"
+        or primary_result.top_n != 10
+        or primary_result.horizon_sessions != 5
+        or primary_result.candidate_registry_hash
+        != manifest.candidate_registry_hash
+        or primary_result.cost_contract_hash != RANKING_COST_CONTRACT_HASH
+    ):
+        raise FactorEvidenceContractError(
+            "operational primary result does not match the frozen ranking endpoint"
+        )
+    if any(result.endpoint_role != "exploratory" for result in exploratory_results):
+        raise FactorEvidenceContractError(
+            "auxiliary ranking results must remain exploratory"
+        )
+    if not 1 <= len(raw_primary_p_values) <= 3:
+        raise FactorEvidenceContractError(
+            "operational evidence permits one to three frozen comparisons"
+        )
+    if any(count < 0 for count in exclusion_counts.values()):
+        raise FactorEvidenceContractError(
+            "operational exclusion counts must be non-negative"
+        )
+    adjusted_p_values = holm_bonferroni(raw_primary_p_values)
+    primary_metric = _ranking_metric(
+        primary_result,
+        label=manifest.primary_ranking_endpoint,
+        primary=True,
+    )
+    exploratory_metrics = [
+        _ranking_metric(
+            result,
+            label=result.endpoint_name,
+            primary=False,
+        )
+        for result in exploratory_results
+    ]
+    promotion_payload = _promotion_payload(promotion)
+    report = {
+        "schema_version": OPERATIONAL_RESEARCH_EVIDENCE_SCHEMA,
+        "replay_run_key": manifest.replay_run_key,
+        "data_cutoff": data_cutoff.isoformat(),
+        "manifest_hash": manifest.manifest_hash,
+        "ranking_source_kind": "research_replay",
+        "policy_mode": "policy_shadow",
+        "coverage": dict(coverage),
+        "exclusion_counts": dict(exclusion_counts),
+        "primary_metric": primary_metric,
+        "exploratory_metrics": exploratory_metrics,
+        "factor_diagnostics": factor_diagnostics,
+        "policy_shadow": policy_shadow,
+        "promotion": promotion_payload,
+        "holdout": dict(split_reports.get("holdout") or {}),
+        "research_only": True,
+        "production_mutation_allowed": False,
+    }
+    return FactorEvidencePayload(
+        manifest_hash=manifest.manifest_hash,
+        ranking_contract_hash=manifest.research_contract_hash,
+        code_version=manifest.code_version,
+        samples=tuple(
+            {
+                "sample_hash": sample_hash,
+                "endpoint": manifest.primary_ranking_endpoint,
+            }
+            for sample_hash in primary_result.accepted_sample_hashes
+        ),
+        aggregates={
+            "primary_net_excess": primary_result.mean_paired_net_excess,
+            "candidate_net_return": primary_result.mean_candidate_net_return,
+            "baseline_net_return": primary_result.mean_baseline_net_return,
+            "average_turnover": primary_result.average_turnover,
+            "average_rank_churn": primary_result.average_rank_churn,
+            "candidate_maximum_drawdown": (
+                primary_result.candidate_maximum_drawdown
+            ),
+            "baseline_maximum_drawdown": primary_result.baseline_maximum_drawdown,
+            "coverage_ratio": primary_result.coverage_ratio,
+        },
+        exclusions=tuple(
+            {"reason": reason, "count": count}
+            for reason, count in sorted(exclusion_counts.items())
+        ),
+        intervals={
+            "primary": {
+                "lower": primary_result.bootstrap_confidence_interval[0],
+                "upper": primary_result.bootstrap_confidence_interval[1],
+                "method": "moving_block_bootstrap",
+                "block_length": primary_result.bootstrap_block_length,
+                "resamples": primary_result.bootstrap_resamples,
+            },
+            "multiplicity": {
+                "method": "holm_bonferroni",
+                "raw_primary_p_values": list(raw_primary_p_values),
+                "adjusted_primary_p_values": list(adjusted_p_values),
+                "comparison_count": len(raw_primary_p_values),
+            },
+        },
+        split_reports=split_reports,
+        costs={
+            "fee_bps_per_side": primary_result.fee_bps_per_side,
+            "slippage_bps_per_side": primary_result.slippage_bps_per_side,
+            "round_trip_cost_bps": primary_result.round_trip_cost_bps,
+            "cost_contract_hash": primary_result.cost_contract_hash,
+        },
+        limitations=(
+            *limitations,
+            "research evidence only; manual promotion required",
+        ),
+        report=report,
+        promotion=promotion,
+    )
 
 
 async def get_factor_evidence(

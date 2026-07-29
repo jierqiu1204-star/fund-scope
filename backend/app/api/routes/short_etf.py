@@ -284,9 +284,11 @@ async def sync_short_etf_data(
 async def get_short_etf_data_status(session: AsyncSession = Depends(get_db_session)) -> EtfDataStatusOut:
     rows = await list_etf_data_health(session)
     summary = await data_status_summary(session)
-    summary["history_readiness"] = await read_publication_readiness_status(session)
+    history_readiness = await read_publication_readiness_status(session)
+    summary["history_readiness"] = history_readiness
     return EtfDataStatusOut(
         summary=summary,
+        history_readiness=history_readiness,
         items=[_data_health_out(etf, health, stale) for etf, health, stale in rows],
     )
 

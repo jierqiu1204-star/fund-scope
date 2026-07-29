@@ -67,6 +67,30 @@ async def generate_and_publish_etf_snapshot(
     return await publish_dual_ranking_snapshot(session, run_id=generated.id)
 
 
+async def generate_provisional_etf_research_preview(
+    session: AsyncSession,
+    *,
+    trade_date: date,
+    decision_cutoff: datetime,
+    source_availability_cutoff: datetime | None = None,
+) -> ShortResearchSignalRun:
+    source_cutoff = source_availability_cutoff or etf_source_availability_cutoff(
+        trade_date
+    )
+    generated = await materialize_dual_ranking_snapshot(
+        session,
+        trade_date=trade_date,
+        decision_cutoff=decision_cutoff,
+        source_availability_cutoff=source_cutoff,
+    )
+    if (generated.summary_json or {}).get("readiness_state") != "degraded":
+        raise SnapshotPublicationError(
+            "provisional preview requires degraded ETF readiness"
+        )
+    await session.commit()
+    return generated
+
+
 async def try_acquire_etf_daily_workflow_lock(
     session: AsyncSession,
     trade_date: date,

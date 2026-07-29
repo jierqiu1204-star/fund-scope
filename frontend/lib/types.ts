@@ -321,6 +321,7 @@ export type EtfDataHealthItem = {
 
 export type EtfDataStatus = {
   summary: Record<string, unknown>;
+  history_readiness?: Record<string, unknown>;
   items: EtfDataHealthItem[];
 };
 
@@ -1615,6 +1616,15 @@ export type EtfRankingSnapshotMetadata = {
   score_coverage_ratio?: number | null;
   coverage_ratio?: number | null;
   coverage_policy_mode?: "blocked" | "degraded" | "complete" | null;
+  readiness_state?: "blocked" | "degraded" | "complete" | null;
+  policy_version?: string | null;
+  snapshot_state?: "unavailable" | "provisional" | "complete";
+  unavailable_reason?: string | null;
+  market_decision_cutoff?: string | null;
+  data_receipt_cutoff?: string | null;
+  replay_visibility_cutoff?: string | null;
+  resource_profile?: Record<string, unknown>;
+  provider_health_identity?: Record<string, unknown>;
   freshness_status?: string | null;
   limitations?: string[];
 };
@@ -1710,4 +1720,58 @@ export type DynamicExitThresholds = {
   explanation: string[];
   liquidity_warnings: string[];
   structure_warnings: string[];
+};
+export type EtfEvidenceAvailability =
+  | "available"
+  | "insufficient_data"
+  | "unavailable"
+  | "legacy";
+
+export type EtfEvidenceMetric = {
+  label: string;
+  value: number | null;
+  sample_count: number | null;
+  confidence_interval: [number, number] | null;
+  primary: boolean;
+};
+
+export type EtfEvidenceSurface = {
+  status: EtfEvidenceAvailability;
+  unavailable_reason: string | null;
+  ranking_source_kind: "production_published" | "research_replay" | null;
+  policy_mode: "production_live" | "policy_shadow" | null;
+  data_cutoff: string | null;
+  manifest_hash: string | null;
+  ranking_contract_hash: string | null;
+  run_reference: Record<string, unknown>;
+  coverage: Record<string, number | null>;
+  exclusions: {
+    count: number;
+    reason_counts: Record<string, number>;
+  };
+  primary_metric: EtfEvidenceMetric | null;
+  exploratory_metrics: Array<Record<string, unknown>>;
+  costs: Record<string, number | string | null>;
+  notification_provenance: string | null;
+  execution_provenance: string | null;
+  provider_receipt: Record<string, string> | null;
+  limitations: string[];
+};
+
+export type EtfEvidenceOverview = {
+  schema_version: "etf_evidence_overview_v1";
+  generated_at: string | null;
+  evidence_status: EtfEvidenceAvailability;
+  unavailable_reason: string | null;
+  surfaces: {
+    production_ranking: EtfEvidenceSurface;
+    research_replay: EtfEvidenceSurface;
+    policy_shadow: EtfEvidenceSurface;
+    live_notification: EtfEvidenceSurface;
+    provider_delivery: EtfEvidenceSurface;
+    confirmed_execution: EtfEvidenceSurface;
+  };
+  research_only: true;
+  production_mutation_allowed: false;
+  endpoint_contracts: Record<string, string>;
 };

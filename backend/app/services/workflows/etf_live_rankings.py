@@ -386,9 +386,10 @@ async def _build_research_watchlist(session: AsyncSession, *, now: datetime | No
     signal_run_id: int | None = None
     signal_as_of_date: date | None = None
     if run is not None:
-        signal_status = "ready"
+        signal_status = selection.state
         signal_run_id = run.id
         signal_as_of_date = run.as_of_date
+    if run is not None and selection.state == "ready":
         message = "使用全部可交易 ETF 盘中行情；实时榜单优先显示最新评分前 20、短线观察、高位观察和已追踪 ETF。"
         signal_items = (
             await session.scalars(
@@ -416,6 +417,11 @@ async def _build_research_watchlist(session: AsyncSession, *, now: datetime | No
                 watch_item.sources.add(SOURCE_SHORT_WATCH)
             if item.conclusion == CONCLUSION_HIGH_WATCH:
                 watch_item.sources.add(SOURCE_HIGH_WATCH)
+    elif run is not None and selection.state == "provisional":
+        message = (
+            "当前仅有临时研究预览，不生成可行动 Top20、组合或邮件候选；"
+            "盘中仅展示全部可交易 ETF 与独立持仓观察。"
+        )
 
     items = sorted(watch_map.values(), key=lambda item: (item.rank is None, item.rank or 9999, item.etf_code))
     return WatchlistResult(items, signal_run_id, signal_as_of_date, signal_status, message)

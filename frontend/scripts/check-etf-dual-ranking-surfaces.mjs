@@ -54,19 +54,24 @@ const checks = [
   {
     name: "shows coverage and timestamps on both responsive layouts",
     pass:
-      page.includes("shortAssetData?.snapshot?.coverage_ratio") &&
+      page.includes("shortAssetData?.snapshot?.decision_data_coverage_ratio") &&
+      page.includes("shortAssetData?.snapshot?.score_coverage_ratio") &&
       page.includes("shortAssetData?.snapshot?.as_of_trade_date") &&
       page.split("研究榜与行动资格").length - 1 >= 2
   },
   {
-    name: "labels ninety-to-ninety-five percent research coverage as degraded",
+    name: "labels degraded evidence as provisional and non-actionable",
     pass:
       types.includes(
         'coverage_policy_mode?: "blocked" | "degraded" | "complete" | null'
       ) &&
+      types.includes(
+        'snapshot_state?: "unavailable" | "provisional" | "complete"'
+      ) &&
       page.includes('coverage_policy_mode === "degraded"') &&
-      page.includes("当前为降级覆盖发布") &&
-      page.includes("历史不足的 ETF 已排除")
+      page.includes("当前为临时研究预览，并非完整发布") &&
+      page.includes("本期仅研究预览，不产生可行动名次") &&
+      page.includes('snapshot_state === "provisional"')
   }
 ];
 

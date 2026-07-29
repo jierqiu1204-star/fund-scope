@@ -94,8 +94,13 @@ def _asset(
     )
 
 
-def _install(monkeypatch: pytest.MonkeyPatch, assets: list[ComputedAsset]) -> None:
-    codes = [asset.metadata.code for asset in assets]
+def _install(
+    monkeypatch: pytest.MonkeyPatch,
+    assets: list[ComputedAsset],
+    *,
+    universe_codes: list[str] | None = None,
+) -> None:
+    codes = universe_codes or [asset.metadata.code for asset in assets]
 
     async def fake_universe(_session, *, as_of_date):
         return SimpleNamespace(
@@ -134,6 +139,69 @@ def _install(monkeypatch: pytest.MonkeyPatch, assets: list[ComputedAsset]) -> No
         "compute_etf_snapshot_assets",
         fake_compute,
     )
+
+
+@pytest.mark.asyncio
+async def test_degraded_materialization_is_provisional_and_has_no_actionable_identity(
+    app,
+    monkeypatch,
+) -> None:
+    universe_codes = [f"5100{index:02d}" for index in range(10)]
+    assets = [
+        _asset(code, research_score=80.0 - index, actionable_score=90.0 - index)
+        for index, code in enumerate(universe_codes[:9])
+    ]
+    _install(monkeypatch, assets, universe_codes=universe_codes)
+
+    async with app.state.db.session() as session:
+        run = await materialize_dual_ranking_snapshot(
+            session,
+            trade_date=TRADE_DATE,
+            decision_cutoff=CUTOFF,
+        )
+        await session.commit()
+        run_id = run.id
+        with pytest.raises(
+            ValueError,
+            match="complete dual 95 percent readiness",
+        ):
+            await publish_dual_ranking_snapshot(session, run_id=run_id)
+        await session.rollback()
+        persisted_run = await session.get(ShortResearchSignalRun, run_id)
+        items = (
+            await session.scalars(
+                select(ShortResearchSignalItem)
+                .where(ShortResearchSignalItem.run_id == run_id)
+                .order_by(ShortResearchSignalItem.global_rank)
+            )
+        ).all()
+        research = await resolve_current_etf_ranking_surface_snapshot(
+            session,
+            required_trade_date=TRADE_DATE,
+            ranking_surface="research",
+        )
+        actionable = await resolve_current_etf_ranking_surface_snapshot(
+            session,
+            required_trade_date=TRADE_DATE,
+            ranking_surface="actionable",
+        )
+
+    assert persisted_run is not None
+    assert persisted_run.publication_state == "unpublished"
+    assert persisted_run.summary_json["readiness_state"] == "degraded"
+    assert persisted_run.summary_json["snapshot_state"] == "provisional"
+    assert (
+        persisted_run.summary_json["ranking_surfaces"]["actionable"][
+            "eligible_count"
+        ]
+        == 0
+    )
+    assert all(item.metrics_json["actionable_rank"] is None for item in items)
+    assert all(item.metrics_json["actionable_score"] is None for item in items)
+    assert research.state == "provisional"
+    assert research.run is not None and research.run.id == run_id
+    assert actionable.state == "waiting"
+    assert actionable.run is None
 
 
 @pytest.mark.asyncio
@@ -368,6 +436,77 @@ async def test_cached_assets_api_defaults_to_research_and_filters_actionable(
     }
     assert "510002" not in portfolio_codes
     assert portfolio["source_ranking_snapshot"]["snapshot_id"] == run_id
+
+
+@pytest.mark.asyncio
+async def test_degraded_assets_api_exposes_only_provisional_research(
+    app,
+    client,
+    monkeypatch,
+) -> None:
+    universe_codes = [f"5101{index:02d}" for index in range(10)]
+    assets = [
+        _asset(code, research_score=80.0 - index, actionable_score=90.0 - index)
+        for index, code in enumerate(universe_codes[:9])
+    ]
+    _install(monkeypatch, assets, universe_codes=universe_codes)
+    monkeypatch.setattr(
+        short_research_service,
+        "required_etf_snapshot_trade_date",
+        lambda _now=None: TRADE_DATE,
+    )
+
+    async with app.state.db.session() as session:
+        session.add_all(
+            [
+                TradableEtf(
+                    code=code,
+                    name=f"ETF{code}",
+                    exchange="SH",
+                    theme_tags_json=["宽基"],
+                    trading_rule_label="证券账户 T+1 ETF",
+                    asset_class="broad_index",
+                    is_short_term_eligible=True,
+                    is_watchlist=True,
+                )
+                for code in universe_codes
+            ]
+        )
+        await materialize_dual_ranking_snapshot(
+            session,
+            trade_date=TRADE_DATE,
+            decision_cutoff=CUTOFF,
+        )
+        await session.commit()
+        watchlist = await _build_research_watchlist(session)
+
+    research_response = await client.get(
+        "/api/short-research/assets?asset_type=etf&universe=all"
+    )
+    actionable_response = await client.get(
+        "/api/short-research/assets"
+        "?asset_type=etf&universe=all&ranking_surface=actionable"
+    )
+
+    assert research_response.status_code == 200
+    research = research_response.json()
+    assert research["snapshot"]["snapshot_state"] == "provisional"
+    assert research["snapshot"]["readiness_state"] == "degraded"
+    assert research["snapshot"]["policy_version"] == "etf_readiness_policy_v1"
+    assert len(research["items"]) == 9
+    assert all(item["actionable_rank"] is None for item in research["items"])
+    assert all(item["actionable_score"] is None for item in research["items"])
+    assert all(
+        item["actionable_exclusion_reasons"] == ["provisional_research_only"]
+        for item in research["items"]
+    )
+
+    assert actionable_response.status_code == 200
+    actionable = actionable_response.json()
+    assert actionable["items"] == []
+    assert actionable["snapshot"]["snapshot_state"] == "unavailable"
+    assert watchlist.signal_status == "provisional"
+    assert all(SOURCE_TOP20_SIGNAL not in item.sources for item in watchlist.items)
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,7 @@ from app.models.entities import (
     authorize_snapshot_publication,
     utcnow,
 )
+from app.services.short_research.coverage_policy import evaluate_etf_readiness
 from app.services.short_research.daily_reconstructable import (
     daily_reconstructable_manifest,
 )
@@ -156,6 +157,25 @@ async def materialize_dual_ranking_snapshot(
 
     research.sort(key=lambda item: (-item[1], item[0].metadata.code))
     actionable.sort(key=lambda item: (-item[1], item[0].metadata.code))
+    expected_count = len(expected_codes)
+    research_ratio = len(research) / expected_count if expected_count else 0.0
+    readiness = evaluate_etf_readiness(
+        daily_coverage_ratio=barrier.coverage_ratio,
+        warmup_coverage_ratio=research_ratio,
+    )
+    if readiness.state == "blocked":
+        raise SnapshotMaterializationError(
+            "ETF readiness is blocked; no target-date ranking may materialize"
+        )
+    if readiness.state == "degraded":
+        actionable = []
+        actionable_excluded = [
+            {
+                "asset_code": code,
+                "reasons": ["provisional_research_only"],
+            }
+            for code in expected_codes
+        ]
     actionable_rank_by_code = {
         asset.metadata.code: rank
         for rank, (asset, _score) in enumerate(actionable, start=1)
@@ -164,6 +184,7 @@ async def materialize_dual_ranking_snapshot(
         "trade_date": trade_date,
         "decision_cutoff": market_cutoff,
         "source_availability_cutoff": data_cutoff,
+        "replay_visibility_cutoff": None,
         "assets": [
             {
                 "asset_code": code,
@@ -253,8 +274,6 @@ async def materialize_dual_ranking_snapshot(
             raise SnapshotMaterializationError("idempotent dual ranking snapshot is incomplete")
         return existing
 
-    expected_count = len(expected_codes)
-    research_ratio = len(research) / expected_count if expected_count else 0.0
     actionable_ratio = len(actionable) / expected_count if expected_count else 0.0
     now = utcnow()
     run = ShortResearchSignalRun(
@@ -268,12 +287,33 @@ async def materialize_dual_ranking_snapshot(
             "surface_group_hash": surface_group_hash,
             "market_decision_cutoff": market_cutoff.isoformat(),
             "source_availability_cutoff": data_cutoff.isoformat(),
+            "replay_visibility_cutoff": None,
+            "readiness_policy_version": readiness.policy_version,
+            "readiness_state": readiness.state,
         },
         summary_json={
             "item_count": len(research),
             "fund_count": 0,
             "etf_count": len(research),
             "research_only": True,
+            "readiness_policy": readiness.to_dict(),
+            "readiness_policy_version": readiness.policy_version,
+            "readiness_state": readiness.state,
+            "snapshot_state": (
+                "provisional"
+                if readiness.state == "degraded"
+                else "complete_candidate"
+            ),
+            "unavailable_reason": (
+                "history_depth_61_coverage_below_95pct"
+                if readiness.state == "degraded"
+                else None
+            ),
+            "cutoff_provenance": {
+                "market_decision_cutoff": market_cutoff.isoformat(),
+                "data_receipt_cutoff": data_cutoff.isoformat(),
+                "replay_visibility_cutoff": None,
+            },
             "surface_group_hash": surface_group_hash,
             "ranking_surfaces": {
                 "research": {
@@ -387,6 +427,15 @@ async def materialize_dual_ranking_snapshot(
                         "research_score": research_score,
                         "actionable_rank": actionable_rank,
                         "actionable_score": actionable_score,
+                        "actionable_eligible": actionable_rank is not None,
+                        "actionable_exclusion_reasons": (
+                            ["provisional_research_only"]
+                            if readiness.state == "degraded"
+                            else asset.metrics.get(
+                                "actionable_exclusion_reasons",
+                                [],
+                            )
+                        ),
                         "actionable_as_of_date": trade_date,
                         "latest_date": asset.latest_date,
                         "latest_value": asset.latest_value,
@@ -444,6 +493,14 @@ async def publish_dual_ranking_snapshot(
             or run.price_basis != research_manifest.price_basis
         ):
             raise SnapshotPublicationError("dual ranking snapshot identity mismatch")
+        readiness = evaluate_etf_readiness(
+            daily_coverage_ratio=run.decision_data_coverage_ratio,
+            warmup_coverage_ratio=run.coverage_ratio,
+        )
+        if not readiness.complete_publication_allowed:
+            raise SnapshotPublicationError(
+                "dual ranking publication requires complete dual 95 percent readiness"
+            )
         items = (
             await session.scalars(
                 select(ShortResearchSignalItem)

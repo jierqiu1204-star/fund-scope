@@ -6,6 +6,11 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from app.defaults.short_research import ASSET_TYPE_ETF
+from app.services.etf_research_evidence import (
+    OPERATIONAL_BUCKET_THRESHOLD_VERSION,
+    OPERATIONAL_EXIT_ACTION_VERSION,
+    OPERATIONAL_REENTRY_RULE_VERSION,
+)
 
 ALERT_EXIT_WATCH = "exit_watch"
 ALERT_RISK_WARNING = "risk_warning"
@@ -15,9 +20,9 @@ ALERT_TREND_WEAKENING = "trend_weakening"
 ALERT_CONFIRMED_TREND_WEAKENING = "confirmed_trend_weakening"
 ALERT_HARD_STOP = "hard_stop"
 
-EXIT_ACTION_VERSION = "etf_exit_action_v3"
-REENTRY_RULE_VERSION = "etf_reentry_rule_v1"
-BUCKET_THRESHOLD_VERSION = "etf_bucket_threshold_v1"
+EXIT_ACTION_VERSION = OPERATIONAL_EXIT_ACTION_VERSION
+REENTRY_RULE_VERSION = OPERATIONAL_REENTRY_RULE_VERSION
+BUCKET_THRESHOLD_VERSION = OPERATIONAL_BUCKET_THRESHOLD_VERSION
 EXIT_EVIDENCE_VERSION = "etf_exit_evidence_v2"
 
 ACTION_CLASS_NONE = "none"

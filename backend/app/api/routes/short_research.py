@@ -17,6 +17,7 @@ from app.models.entities import (
     ShortResearchSignalRun,
     User,
 )
+from app.schemas.etf_evidence import EtfEvidenceOverviewOut
 from app.schemas.short_research import (
     EtfExitCredibilityRequest,
     EtfExitCredibilityRunOut,
@@ -105,6 +106,9 @@ from app.services.short_research.service import (
     sync_short_research_data,
 )
 from app.services.short_research.snapshot_selector import snapshot_metadata
+from app.services.strategy_lab.etf_evidence_overview import (
+    build_etf_evidence_overview,
+)
 from app.services.strategy_lab.etf_ranking_validation import (
     RankingValidationContractError,
 )
@@ -120,6 +124,16 @@ from app.services.workflows.tracking_filters import (
 )
 
 router = APIRouter(prefix="/api/short-research", tags=["short-research"])
+
+
+@router.get("/evidence/etf/latest", response_model=EtfEvidenceOverviewOut)
+async def get_latest_etf_evidence_overview(
+    session: AsyncSession = Depends(get_db_session),
+) -> EtfEvidenceOverviewOut:
+    """Return provenance-separated ETF evidence without mutating research state."""
+
+    payload = await build_etf_evidence_overview(session)
+    return EtfEvidenceOverviewOut.model_validate(payload)
 
 
 def _csv_values(raw: str | None) -> set[str]:
@@ -241,8 +255,20 @@ def _asset_out(
     validation_evidence: dict[str, Any] | None = None,
     observation_portfolio: dict[str, Any] | None = None,
     catalyst_shadow: dict[str, Any] | None = None,
-    ) -> ShortResearchAssetOut:
+    provisional_research: bool = False,
+) -> ShortResearchAssetOut:
     metrics = dict(asset.metrics or {})
+    if provisional_research and asset.metadata.asset_type == "etf":
+        metrics.update(
+            {
+                "actionable_rank": None,
+                "actionable_score": None,
+                "actionable_eligible": False,
+                "actionable_exclusion_reasons": ["provisional_research_only"],
+                "actionable_field_statuses": {},
+                "actionable_source_times": {},
+            }
+        )
     catalyst_unavailable = asset.metadata.asset_type == "etf" and has_unavailable_theme_catalyst(metrics)
     opportunity_score = metrics.get("opportunity_score") if has_available_opportunity_score(metrics) else None
     opportunity_label = str(metrics.get("opportunity_label")) if metrics.get("opportunity_label") else None
@@ -882,6 +908,9 @@ async def list_short_research_assets(
                     item.metadata.code,
                     {},
                 ),
+                provisional_research=(
+                    selection is not None and selection.state == "provisional"
+                ),
             )
             for item in assets
         ],
@@ -893,6 +922,9 @@ async def list_short_research_assets(
             _ranking_surface_snapshot_metadata(
                 run,
                 ranking_surface=ranking_surface,
+                selection_state=(
+                    selection.state if selection is not None else None
+                ),
             )
             if asset_type == "etf"
             else snapshot_metadata(run)

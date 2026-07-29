@@ -18,6 +18,8 @@ import { api } from "@/lib/api";
 import { formatCurrency, formatDate, formatPercent } from "@/lib/format";
 import type {
   EtfExitCredibility,
+  EtfEvidenceOverview,
+  EtfEvidenceSurface,
   EtfExitHyperopt,
   EtfOptimizedAllocation,
   EtfPortfolioBacktestDetail,
@@ -310,6 +312,112 @@ function labelEvidenceConclusion(row: LabelEvidenceRow) {
   return "样本有限";
 }
 
+const ETF_EVIDENCE_SURFACES = [
+  ["production_ranking", "正式 V3 榜单"],
+  ["research_replay", "历史 research replay"],
+  ["policy_shadow", "Policy shadow"],
+  ["live_notification", "真实邮件结果"],
+  ["provider_delivery", "服务商送达"],
+  ["confirmed_execution", "用户确认成交"]
+] as const;
+
+function evidenceAvailabilityLabel(surface: EtfEvidenceSurface) {
+  if (surface.status === "available") {
+    return "证据可用";
+  }
+  if (surface.status === "legacy") {
+    return "版本不一致";
+  }
+  const reason = surface.unavailable_reason ?? "";
+  if (
+    reason.includes("independent_dates") ||
+    reason.includes("eligible_sessions") ||
+    reason.includes("walk_forward")
+  ) {
+    return "样本不足";
+  }
+  if (
+    reason.includes("coverage") ||
+    reason.includes("point_in_time_universe") ||
+    reason.includes("adjusted_price")
+  ) {
+    return "覆盖不足";
+  }
+  if (reason.includes("future_window") || reason.includes("entry_or_exit")) {
+    return "等待未来窗口";
+  }
+  if (reason.includes("incompatible") || reason.includes("legacy")) {
+    return "版本不一致";
+  }
+  return "暂无真实证据";
+}
+
+function evidenceMetricText(surface: EtfEvidenceSurface) {
+  const metric = surface.primary_metric;
+  if (!metric || typeof metric.value !== "number") {
+    return evidenceAvailabilityLabel(surface);
+  }
+  return `${formatPercent(metric.value * 100)} · 样本 ${metric.sample_count ?? 0}`;
+}
+
+function evidenceCoverageText(surface: EtfEvidenceSurface) {
+  const coverage = Object.entries(surface.coverage)
+    .filter(([, value]) => typeof value === "number" && Number.isFinite(value))
+    .slice(0, 3)
+    .map(([key, value]) => {
+      const number = value as number;
+      return key.endsWith("_ratio") || key === "coverage_ratio"
+        ? `${key} ${formatPercent(number * 100)}`
+        : `${key} ${number}`;
+    });
+  return coverage.length ? coverage.join(" · ") : "未提供可核验证覆盖";
+}
+
+function EtfEvidenceSurfaceCard({
+  title,
+  surface
+}: {
+  title: string;
+  surface: EtfEvidenceSurface;
+}) {
+  return (
+    <section
+      className="rounded-[10px] border border-border bg-white p-4"
+      data-evidence-surface={title}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-ink">{title}</p>
+          <p className="mt-1 text-xs text-ink/50">
+            {surface.ranking_source_kind ?? "非排名证据"} · {surface.policy_mode ?? "无 policy"}
+          </p>
+        </div>
+        <span className="rounded-full bg-paper px-2.5 py-1 text-[11px] font-semibold text-ink/60">
+          {evidenceAvailabilityLabel(surface)}
+        </span>
+      </div>
+      <p className="mt-3 text-lg font-semibold text-ink">{evidenceMetricText(surface)}</p>
+      <p className="mt-2 break-words text-xs leading-5 text-ink/55">
+        {evidenceCoverageText(surface)}
+      </p>
+      <div className="mt-3 space-y-1 border-t border-border pt-3 text-xs text-ink/50">
+        <p>数据截止：{formatDateTime(surface.data_cutoff)}</p>
+        <p>排除：{surface.exclusions.count}</p>
+        <p>
+          证据清单：
+          {surface.manifest_hash ? `${surface.manifest_hash.slice(0, 12)}…` : "暂无"}
+        </p>
+        {surface.notification_provenance ? (
+          <p>通知 provenance：{surface.notification_provenance}</p>
+        ) : null}
+        {surface.execution_provenance ? (
+          <p>执行 provenance：{surface.execution_provenance}</p>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
 type ExitV2BaselineRow = {
   key: string;
   label: string;
@@ -383,6 +491,15 @@ export default function EtfEvidencePage() {
       (
         await api.get<EtfExitCredibility | null>(
           "/api/short-research/etf-exit-credibility/latest?execution_model=intraday_alert"
+        )
+      ).data
+  });
+  const evidenceOverview = useQuery({
+    queryKey: ["short-research", "evidence", "etf", "latest"],
+    queryFn: async () =>
+      (
+        await api.get<EtfEvidenceOverview>(
+          "/api/short-research/evidence/etf/latest"
         )
       ).data
   });
@@ -541,6 +658,39 @@ export default function EtfEvidencePage() {
               {errorText(mutation.error)}
             </p>
           ) : null
+        )}
+      </Panel>
+
+      <Panel>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <p className="text-sm font-semibold text-ink">PIT 证据闭环</p>
+            <p className="mt-1 text-xs leading-5 text-ink/55">
+              正式策略、研究回放、policy shadow、SMTP、服务商送达和真实成交严格分层；模拟结果不会升级为生产业绩。
+            </p>
+          </div>
+          <span className="w-fit rounded-full bg-paper px-2.5 py-1 text-xs text-ink/60">
+            {evidenceOverview.data
+              ? `更新 ${formatDateTime(evidenceOverview.data.generated_at)}`
+              : evidenceOverview.isLoading
+                ? "加载证据"
+                : "证据接口不可用"}
+          </span>
+        </div>
+        {evidenceOverview.data ? (
+          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {ETF_EVIDENCE_SURFACES.map(([key, title]) => (
+              <EtfEvidenceSurfaceCard
+                key={key}
+                title={title}
+                surface={evidenceOverview.data.surfaces[key]}
+              />
+            ))}
+          </div>
+        ) : (
+          <p className="mt-4 rounded-[8px] border border-dashed border-border bg-paper px-3 py-4 text-sm text-ink/55">
+            暂无可验证的 PIT 证据；不会回退到旧榜单、原始价或模拟邮件结果。
+          </p>
         )}
       </Panel>
 

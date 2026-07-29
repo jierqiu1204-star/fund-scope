@@ -1,3 +1,4 @@
+from datetime import date, datetime, timedelta
 from typing import Literal
 
 import pytest
@@ -16,9 +17,20 @@ from app.services.strategy_lab.etf_factor_evidence import (
     FactorEvidenceConflictError,
     FactorEvidenceContractError,
     FactorEvidencePayload,
+    build_operational_factor_evidence,
     persist_factor_evidence,
 )
 from app.services.strategy_lab.etf_factor_validation import PromotionDecision
+from app.services.strategy_lab.etf_point_in_time_research_loop import (
+    PromotionGateEvidence,
+    build_frozen_research_loop_manifest,
+    evaluate_research_promotion,
+)
+from app.services.strategy_lab.etf_ranking_candidates import (
+    FROZEN_RANKING_CANDIDATES,
+    RANKING_COST_CONTRACT_HASH,
+)
+from app.services.strategy_lab.etf_ranking_validation import RankingEndpointResult
 
 
 def _payload(
@@ -60,6 +72,75 @@ def _payload(
             failed_gates=() if passed else ("adjusted_primary_lower_bound",),
             endpoint="paired_top10_5_session_net_excess_common_support",
         ),
+    )
+
+
+def _hash(label: str) -> str:
+    from app.services.etf_research_evidence import stable_contract_hash
+
+    return stable_contract_hash({"label": label})
+
+
+def _operational_manifest():
+    return build_frozen_research_loop_manifest(
+        replay_run_key="operational-factor-evidence",
+        code_version="test-code",
+        source_snapshot_hash=_hash("source"),
+        universe_manifest_hash=_hash("universe"),
+        split_contract_hash=_hash("split"),
+        holdout_identity_hash=_hash("holdout"),
+        bootstrap_seed=42,
+    )
+
+
+def _ranking_result(manifest) -> RankingEndpointResult:
+    candidate = FROZEN_RANKING_CANDIDATES[1]
+    independent_dates = tuple(
+        date(2025, 1, 1) + timedelta(days=index * 6) for index in range(40)
+    )
+    return RankingEndpointResult(
+        ranking_source_kind="research_replay",  # type: ignore[arg-type]
+        source_cohort_hash=_hash("cohort"),
+        candidate_registry_hash=manifest.candidate_registry_hash,
+        candidate_id=candidate.candidate_id,
+        candidate_manifest_hash=candidate.manifest_hash,
+        endpoint_contract_hash=_hash("endpoint-contract"),
+        top_n=10,
+        horizon_sessions=5,
+        endpoint_role="primary",
+        endpoint_name="top10_five_session_paired_net_excess",
+        coverage_numerator=40,
+        coverage_denominator=42,
+        coverage_ratio=40 / 42,
+        completed_outcome_count=40,
+        independent_dates=independent_dates,
+        overlapping_excluded_dates=(),
+        mean_candidate_gross_return=0.012,
+        mean_candidate_net_return=0.010,
+        mean_baseline_gross_return=0.009,
+        mean_baseline_net_return=0.007,
+        mean_paired_net_excess=0.003,
+        bootstrap_confidence_interval=(0.0002, 0.0058),
+        bootstrap_seed=42,
+        bootstrap_resamples=2_000,
+        bootstrap_block_length=5,
+        bootstrap_input_hash=_hash("bootstrap-input"),
+        average_turnover=0.12,
+        average_rank_churn=0.08,
+        mean_candidate_cost_drag=0.002,
+        mean_baseline_cost_drag=0.002,
+        fee_bps_per_side=5,
+        slippage_bps_per_side=5,
+        round_trip_cost_bps=20,
+        cost_contract_hash=RANKING_COST_CONTRACT_HASH,
+        candidate_maximum_drawdown=0.10,
+        baseline_maximum_drawdown=0.09,
+        maximum_drawdown_gate_passed=True,
+        sample_gate_passed=True,
+        accepted_sample_hashes=tuple(
+            _hash(f"sample-{index}") for index in range(40)
+        ),
+        result_hash=_hash("ranking-result"),
     )
 
 
@@ -174,3 +255,74 @@ async def test_missing_factor_evidence_returns_404(client) -> None:
 
     assert response.status_code == 404
     assert response.json()["detail"] == "ETF factor evidence not found"
+
+
+async def test_operational_factor_evidence_persists_explicit_promotion_state(
+    app,
+    client,
+) -> None:
+    manifest = _operational_manifest()
+    ranking_result = _ranking_result(manifest)
+    promotion = evaluate_research_promotion(
+        PromotionGateEvidence(
+            decision_data_coverage_ratio=0.96,
+            score_coverage_ratio=0.96,
+            eligible_point_in_time_sessions=252,
+            independent_primary_dates=40,
+            completed_walk_forward_folds=3,
+            adjusted_primary_interval_lower=0.0002,
+            fold_sign_stable=True,
+            regime_sign_stable=True,
+            candidate_maximum_drawdown=0.10,
+            baseline_maximum_drawdown=0.09,
+            holdout_consumed=True,
+        )
+    )
+    payload = build_operational_factor_evidence(
+        manifest=manifest,
+        data_cutoff=datetime(2026, 7, 24, 15, 0),
+        primary_result=ranking_result,
+        exploratory_results=(),
+        factor_diagnostics={
+            "trend": {
+                "incremental_ic": 0.02,
+                "residualized": True,
+            }
+        },
+        coverage={
+            "decision_data_coverage_ratio": 0.96,
+            "score_coverage_ratio": 0.96,
+            "eligible_point_in_time_sessions": 252,
+            "independent_primary_dates": 40,
+        },
+        exclusion_counts={"future_window_pending": 2},
+        split_reports={
+            "development": {"sessions": 160},
+            "validation": {"sessions": 92},
+            "holdout": {"consumed": True, "use_count": 1},
+        },
+        raw_primary_p_values=(0.01, 0.03),
+        promotion=promotion,
+        policy_shadow={
+            "status": "insufficient_data",
+            "unavailable_reason": "insufficient_independent_dates",
+            "ranking_source_kind": "research_replay",
+            "policy_mode": "policy_shadow",
+        },
+    )
+
+    async with app.state.db.session() as session:
+        evidence = await persist_factor_evidence(session, payload)
+
+    assert evidence.promotion_state == "promotion_eligible"
+    assert evidence.report_json["schema_version"] == (
+        "etf_point_in_time_research_evidence_v1"
+    )
+    assert evidence.report_json["primary_metric"]["primary"] is True
+    assert evidence.report_json["exploratory_metrics"] == []
+    assert evidence.report_json["production_mutation_allowed"] is False
+    response = await client.get(
+        f"/api/strategy-lab/etf-factor-evidence/{manifest.manifest_hash}"
+    )
+    assert response.status_code == 200
+    assert response.json()["promotion_state"] == "promotion_eligible"

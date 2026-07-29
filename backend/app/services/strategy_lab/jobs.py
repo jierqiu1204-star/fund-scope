@@ -8,6 +8,30 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.entities import PaperPortfolio, StrategyRun, utcnow
 from app.services.strategy_lab.engine import run_paper_update
+from app.services.strategy_lab.etf_point_in_time_research_loop import (
+    FrozenResearchLoopManifest,
+    ResearchLoopPhaseHandlers,
+    research_loop_checkpoint_view,
+    run_bounded_research_loop_continuation,
+)
+
+
+async def continue_etf_point_in_time_research_job(
+    session: AsyncSession,
+    *,
+    manifest: FrozenResearchLoopManifest,
+    handlers: ResearchLoopPhaseHandlers,
+    timeout_seconds: float = 50.0,
+) -> dict[str, Any]:
+    """Advance exactly one durable research page for one scheduler trigger."""
+
+    checkpoint = await run_bounded_research_loop_continuation(
+        session,
+        manifest=manifest,
+        execute_phase=handlers.execute,
+        timeout_seconds=timeout_seconds,
+    )
+    return research_loop_checkpoint_view(checkpoint)
 
 
 async def daily_strategy_paper_job(session: AsyncSession) -> dict[str, Any]:

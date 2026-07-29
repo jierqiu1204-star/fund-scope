@@ -19,23 +19,45 @@ The system SHALL maintain a dynamic short-term research universe containing trad
 - **THEN** the API returns ETF code, name, theme labels, exchange, trading rule label, universe membership, default-display eligibility, and latest data status for each included ETF
 
 ### Requirement: ETF Market Data Is Synchronizable
-The system SHALL synchronize ETF daily market data including date, open, high, low, close, volume, turnover, and percentage change for the dynamic short-term ETF universe.
+The system SHALL synchronize ETF daily market data including date, open, high, low, close, volume, turnover, percentage change, adjusted research value, price basis, provider version, adjustment version, source timestamp, and decision eligibility for the dynamic short-term ETF universe.
 
 #### Scenario: Data sync stores daily prices
-- **WHEN** the user runs ETF data sync from the web UI
-- **THEN** the system stores or updates daily ETF price rows without duplicating existing code/date records
+- **WHEN** the user or post-close coordinator runs ETF data sync
+- **THEN** the system stores or updates daily ETF price rows without duplicating existing code/date records and preserves stronger decision-eligible provenance over weaker raw-only data
 
 #### Scenario: Data source failure is reported
 - **WHEN** one ETF data source request fails during synchronization
-- **THEN** the task records the ETF code and readable error message while continuing with other ETFs
+- **THEN** the task records the ETF code and bounded readable error reason while continuing with other eligible candidates within the slice budget
 
 #### Scenario: Large universe sync is batched
 - **WHEN** the system synchronizes a large ETF universe
-- **THEN** the task processes ETFs in bounded batches and records progress counts for total, succeeded, updated, failed, and skipped ETFs
+- **THEN** one worker processes stable code/date pages under code, row, memory, SQL, provider, and 60-second time limits and records a durable resumable checkpoint
 
-#### Scenario: Higher priority ETFs update first
-- **WHEN** the daily ETF sync task runs
-- **THEN** tracked ETFs, default-display ETFs, and high-turnover ETFs are synchronized before low-priority ETF records
+#### Scenario: Publication data retains priority
+- **WHEN** target-date adjusted coverage is below 95 percent or 61-session adjusted coverage is below the configured publication threshold
+- **THEN** no 300-session or 500-session research-depth provider work starts
+
+#### Scenario: Research history accumulates after publication readiness
+- **WHEN** both publication gates pass
+- **THEN** scheduled serial slices advance 300 adjusted sessions first and only then advance non-authoritative 500-session telemetry
+- **AND** both research-depth completion gates remain 95 percent
+
+#### Scenario: Current-data request also covers warm-up
+- **WHEN** an ETF is missing target-date adjusted data
+- **THEN** the bounded request may include the recent 61-session date window so one provider round trip can persist current and warm-up data while the two readiness lanes remain independently measured
+
+#### Scenario: Continuation is resumed
+- **WHEN** a compatible bounded synchronization slice previously ended as partial
+- **THEN** the next slice resumes idempotently from persisted pages and rotation state instead of restarting an unbounded universe scan
+
+#### Scenario: Publication and research horizons have different eligibility
+
+- **WHEN** a current authoritative ETF is factually too new to have existed at
+  the first required 300-session or 500-session date
+- **THEN** it remains part of the publication universe
+- **AND** only the corresponding seasoned research cohort excludes it, with the
+  official listing source/version, observation cutoff, metadata coverage, cohort
+  evidence hash, session-calendar hash, and exclusion hash exposed
 
 ### Requirement: ETF Metrics Identify Trend And Risk
 The system SHALL compute deterministic ETF metrics for trend, liquidity, volatility, drawdown, short-term return, medium-term return, and overextension risk.
@@ -49,18 +71,22 @@ The system SHALL compute deterministic ETF metrics for trend, liquidity, volatil
 - **THEN** the ETF metric output includes a liquidity-risk flag
 
 ### Requirement: Short ETF Signals Use Research Language
-The system SHALL generate ranked short-term ETF signal items using deterministic trend, liquidity, and risk metrics, SHALL identify the top 20 ranked ETFs as the default intraday watch candidates, and SHALL frame every conclusion as research observation rather than trading instruction.
+The system SHALL generate separate daily research and actionable ranked ETF signal outputs using deterministic metrics, SHALL identify actionable Top 20 intraday watch candidates only from ETFs that pass the actionable contract, and SHALL frame every conclusion as research observation rather than trading instruction.
 
 #### Scenario: Latest signals are returned
 - **WHEN** the user runs short-term ETF signal generation
-- **THEN** the system persists a signal run with ranked items, score breakdowns, risk flags, theme labels, and observation-oriented conclusions
+- **THEN** the system persists one auditable run with independently ordered research and actionable items, score breakdowns, eligibility reasons, risk flags, theme labels, and observation-oriented conclusions
 
 #### Scenario: Top 20 watch candidates are identifiable
-- **WHEN** a successful ETF signal run is persisted
-- **THEN** the first 20 ranked ETF items are available to the intraday ETF watch service without recomputing the full ETF universe during market hours
+- **WHEN** a successful ETF signal run has at least one actionable item
+- **THEN** the first 20 actionable ETF items are available to the intraday ETF watch service without recomputing the full ETF universe during market hours
+
+#### Scenario: Research-only ETF is retained
+- **WHEN** an ETF passes adjusted-daily research eligibility but fails an actionable gate
+- **THEN** it remains in the research output and is absent from the actionable Top 20 with a readable exclusion reason
 
 #### Scenario: Prohibited trade language is absent
-- **WHEN** the API returns a short-term ETF signal item
+- **WHEN** the API returns a short-term ETF signal item from either surface
 - **THEN** it does not include buy, sell, target price, expected return, or guaranteed profit fields
 
 ### Requirement: Short ETF Paper Trading Simulates Conservative Daily Trades
@@ -112,15 +138,27 @@ The system SHALL provide a web-runnable job that refreshes the tradable ETF univ
 - **THEN** the result reports total discovered ETFs, inserted ETFs, updated ETFs, excluded ETFs, default-display ETFs, and failures
 
 ### Requirement: ETF Default Display Uses Quality Gates
-The system SHALL separate all stored ETFs from the default short-term display by applying deterministic quality gates.
+The system SHALL separate all stored ETFs, the default daily research display, and the actionable subset by applying deterministic, versioned quality gates.
 
 #### Scenario: Qualified ETF appears in default display
-- **WHEN** an ETF has sufficient history, current data, valid daily prices, and recent average turnover above the configured threshold
-- **THEN** it is eligible for the default ETF ranking view
+- **WHEN** an ETF has at least 61 point-in-time decision-eligible total-return-adjusted sessions ending on the ranking date
+- **THEN** it is eligible for the default daily research ranking even if intraday actionable fields are unavailable
+
+#### Scenario: Qualified ETF appears in default research display
+- **WHEN** an ETF has at least 61 point-in-time decision-eligible total-return-adjusted sessions ending on the ranking date
+- **THEN** it is eligible for the default daily research ranking even if intraday actionable fields are unavailable
+
+#### Scenario: Short-history ETF is visibly provisional
+- **WHEN** an ETF has 61 to 119 eligible adjusted sessions
+- **THEN** it remains in the research display with a short-history state and cannot appear as actionable
+
+#### Scenario: Qualified ETF appears in actionable display
+- **WHEN** an ETF has at least 120 eligible adjusted sessions and passes all current actionable market-data and risk gates
+- **THEN** it may appear in the actionable ranking
 
 #### Scenario: Unqualified ETF remains searchable
-- **WHEN** an ETF fails a default-display quality gate but still has analyzable data
-- **THEN** it remains available in the all-analyzable view with the failing quality reason shown to the user
+- **WHEN** an ETF fails a research or actionable quality gate but remains part of the stored ETF universe
+- **THEN** it remains searchable with the failing surface and reason shown to the user
 
 ### Requirement: ETF Observation Portfolio Produces Target Weights
 The system SHALL generate a rule-based ETF observation portfolio that expresses selected ETF exposure as target weights plus a cash weight for manual user reference, and SHALL exclude assets whose current observation or entry-timing labels indicate overextension, weak entry timing, stale data, or unsuitable short-term conditions from the primary weighted portfolio.
@@ -170,3 +208,21 @@ ETF observation portfolio results SHALL keep the single ETF max weight at 30%.
 - **WHEN** observation weights are generated
 - **THEN** no individual ETF weight exceeds 30%
 
+### Requirement: ETF ranking publication requires current and score-ready adjusted data
+The system SHALL publish a full ETF ranking only when at least 95 percent of the authoritative target-date universe have decision-eligible `total_return_adjusted` data for the target session and at least 95 percent are score-eligible with 61 exchange sessions, and SHALL otherwise return an explicit waiting state.
+
+#### Scenario: Decision-data coverage is insufficient
+- **WHEN** target-date decision-eligible adjusted coverage is below 95 percent
+- **THEN** the system publishes no ranking and reports the current coverage blocker
+
+#### Scenario: Score coverage is insufficient
+- **WHEN** decision-data coverage reaches 95 percent but 61-session score-eligible coverage remains below 95 percent
+- **THEN** the system publishes no degraded ranking and reports the warm-up blocker
+
+#### Scenario: Raw fallback rows exist
+- **WHEN** Sina, efinance, intraday snapshot, stale cache, estimated, or other raw-only rows exist without complete adjusted provenance
+- **THEN** those rows remain display-only or unavailable and MUST NOT increase either publication coverage ratio
+
+#### Scenario: Both gates pass
+- **WHEN** both registered 95 percent gates pass for the same target trade date and authoritative universe
+- **THEN** the system may materialize and publication-validate the full dual-ranking snapshot using only decision-eligible adjusted inputs

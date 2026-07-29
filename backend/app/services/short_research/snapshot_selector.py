@@ -15,10 +15,10 @@ from app.services.intraday_etf.exchange_calendar import (
     localize_exchange_time,
 )
 from app.services.short_research.coverage_policy import (
+    ETF_COMPLETE_SCORE_COVERAGE,
     ETF_DAILY_DECISION_MIN_COVERAGE,
-    ETF_SCORE_PUBLICATION_MIN_COVERAGE,
     EtfCoveragePolicyMode,
-    etf_score_coverage_policy_mode,
+    evaluate_etf_readiness,
 )
 from app.services.short_research.daily_reconstructable import (
     daily_reconstructable_manifest,
@@ -31,7 +31,14 @@ from app.services.short_research.ranking_surfaces import (
 
 @dataclass(frozen=True)
 class CanonicalSnapshotSelection:
-    state: Literal["ready", "waiting", "stale", "legacy", "version_mismatch"]
+    state: Literal[
+        "ready",
+        "provisional",
+        "waiting",
+        "stale",
+        "legacy",
+        "version_mismatch",
+    ]
     run: ShortResearchSignalRun | None
 
 
@@ -49,6 +56,15 @@ class SnapshotMetadata(TypedDict):
     score_coverage_ratio: float | None
     coverage_ratio: float | None
     coverage_policy_mode: EtfCoveragePolicyMode | None
+    readiness_state: EtfCoveragePolicyMode | None
+    policy_version: str | None
+    snapshot_state: Literal["unavailable", "provisional", "complete"]
+    unavailable_reason: str | None
+    market_decision_cutoff: datetime | str | None
+    data_receipt_cutoff: datetime | str | None
+    replay_visibility_cutoff: datetime | str | None
+    resource_profile: dict[str, Any]
+    provider_health_identity: dict[str, Any]
     freshness_status: str
     limitations: list[str]
 
@@ -74,6 +90,15 @@ def snapshot_metadata(
             "score_coverage_ratio": None,
             "coverage_ratio": None,
             "coverage_policy_mode": None,
+            "readiness_state": None,
+            "policy_version": None,
+            "snapshot_state": "unavailable",
+            "unavailable_reason": f"canonical_snapshot_{freshness_status}",
+            "market_decision_cutoff": None,
+            "data_receipt_cutoff": None,
+            "replay_visibility_cutoff": None,
+            "resource_profile": {},
+            "provider_health_identity": {},
             "freshness_status": freshness_status,
             "limitations": ["no_snapshot", f"canonical_snapshot_{freshness_status}"],
         }
@@ -96,13 +121,59 @@ def snapshot_metadata(
             limitations.append(f"missing_{field}")
     if run.scope_kind not in {None, "full"}:
         limitations.append("partial_scope")
-    if run.publication_state != "published":
+    readiness = evaluate_etf_readiness(
+        daily_coverage_ratio=run.decision_data_coverage_ratio,
+        warmup_coverage_ratio=run.coverage_ratio,
+    )
+    summary = run.summary_json or {}
+    config = run.config_json or {}
+    policy = summary.get("readiness_policy")
+    policy_version = (
+        policy.get("policy_version")
+        if isinstance(policy, dict)
+        else summary.get("readiness_policy_version")
+    )
+    if not isinstance(policy_version, str):
+        policy_version = readiness.policy_version
+    if readiness.state == "degraded":
+        snapshot_state: Literal["unavailable", "provisional", "complete"] = (
+            "provisional"
+        )
+        limitations.extend(
+            ["provisional_research_only", "actionable_surface_unavailable"]
+        )
+        freshness_status = "provisional"
+        unavailable_reason = str(
+            summary.get("unavailable_reason")
+            or "history_depth_61_coverage_below_95pct"
+        )
+    elif (
+        readiness.complete_publication_allowed
+        and run.publication_state == "published"
+        and not limitations
+    ):
+        snapshot_state = "complete"
+        unavailable_reason = None
+        freshness_status = selection_state or "ready"
+    elif run.publication_state != "published":
+        snapshot_state = "unavailable"
         limitations.append("not_published")
         freshness_status = "unpublished"
+        unavailable_reason = "complete_snapshot_not_published"
     elif limitations:
+        snapshot_state = "unavailable"
         freshness_status = "legacy"
+        unavailable_reason = "legacy_snapshot_missing_readiness_evidence"
     else:
+        snapshot_state = "unavailable"
         freshness_status = selection_state or "ready"
+        unavailable_reason = "snapshot_readiness_incompatible"
+    cutoff_provenance = summary.get("cutoff_provenance")
+    cutoff_payload = (
+        cutoff_provenance if isinstance(cutoff_provenance, dict) else {}
+    )
+    resource_profile = summary.get("resource_profile")
+    provider_health_identity = summary.get("provider_health_identity")
     return {
         "snapshot_id": run.id,
         "score_version": run.score_version,
@@ -116,8 +187,30 @@ def snapshot_metadata(
         "score_eligible_item_count": run.eligible_item_count,
         "score_coverage_ratio": run.coverage_ratio,
         "coverage_ratio": run.coverage_ratio,
-        "coverage_policy_mode": etf_score_coverage_policy_mode(
-            run.coverage_ratio
+        "coverage_policy_mode": readiness.state,
+        "readiness_state": readiness.state,
+        "policy_version": policy_version,
+        "snapshot_state": snapshot_state,
+        "unavailable_reason": unavailable_reason,
+        "market_decision_cutoff": cutoff_payload.get(
+            "market_decision_cutoff",
+            config.get("market_decision_cutoff"),
+        ),
+        "data_receipt_cutoff": cutoff_payload.get(
+            "data_receipt_cutoff",
+            config.get("source_availability_cutoff") or run.data_cutoff,
+        ),
+        "replay_visibility_cutoff": cutoff_payload.get(
+            "replay_visibility_cutoff",
+            config.get("replay_visibility_cutoff"),
+        ),
+        "resource_profile": (
+            dict(resource_profile) if isinstance(resource_profile, dict) else {}
+        ),
+        "provider_health_identity": (
+            dict(provider_health_identity)
+            if isinstance(provider_health_identity, dict)
+            else {}
         ),
         "freshness_status": freshness_status,
         "limitations": limitations,
@@ -191,7 +284,7 @@ def _current_contract_clauses() -> tuple[ColumnElement[bool], ...]:
         >= ETF_DAILY_DECISION_MIN_COVERAGE,
         ShortResearchSignalRun.eligible_item_count.is_not(None),
         ShortResearchSignalRun.coverage_ratio
-        >= ETF_SCORE_PUBLICATION_MIN_COVERAGE,
+        >= ETF_COMPLETE_SCORE_COVERAGE,
         ShortResearchSignalRun.idempotency_key.is_not(None),
     )
 
@@ -279,13 +372,14 @@ async def resolve_current_etf_ranking_surface_snapshot(
     has_etf_item, has_non_etf_item = _etf_item_clauses()
     base = (
         ShortResearchSignalRun.status == "success",
-        ShortResearchSignalRun.publication_state == "published",
         ShortResearchSignalRun.scope_kind == "full",
         ShortResearchSignalRun.score_version == research.contract_id,
         ShortResearchSignalRun.rule_version == DUAL_RANKING_RULE_VERSION,
         ShortResearchSignalRun.score_field == research.score_field,
         ShortResearchSignalRun.price_basis == research.price_basis,
         ShortResearchSignalRun.ranking_contract_hash.is_not(None),
+        ShortResearchSignalRun.decision_data_coverage_ratio.is_not(None),
+        ShortResearchSignalRun.coverage_ratio.is_not(None),
         has_etf_item,
         ~has_non_etf_item,
     )
@@ -303,16 +397,30 @@ async def resolve_current_etf_ranking_surface_snapshot(
         )
     ).all()
     for run in runs:
-        if ranking_surface == "research":
-            return CanonicalSnapshotSelection("ready", run)
-        surfaces = (run.summary_json or {}).get("ranking_surfaces")
-        actionable = (
-            surfaces.get("actionable")
-            if isinstance(surfaces, dict)
-            else None
+        readiness = evaluate_etf_readiness(
+            daily_coverage_ratio=run.decision_data_coverage_ratio,
+            warmup_coverage_ratio=run.coverage_ratio,
         )
-        if isinstance(actionable, dict) and int(actionable.get("eligible_count") or 0) > 0:
-            return CanonicalSnapshotSelection("ready", run)
+        if (
+            readiness.complete_publication_allowed
+            and run.publication_state == "published"
+        ):
+            if ranking_surface == "research":
+                return CanonicalSnapshotSelection("ready", run)
+            surfaces = (run.summary_json or {}).get("ranking_surfaces")
+            actionable = (
+                surfaces.get("actionable")
+                if isinstance(surfaces, dict)
+                else None
+            )
+            if (
+                isinstance(actionable, dict)
+                and int(actionable.get("eligible_count") or 0) > 0
+            ):
+                return CanonicalSnapshotSelection("ready", run)
+        if ranking_surface != "research" or readiness.state != "degraded":
+            continue
+        return CanonicalSnapshotSelection("provisional", run)
     if runs:
         return CanonicalSnapshotSelection("waiting", None)
     stale = await session.scalar(
@@ -345,6 +453,10 @@ async def select_canonical_etf_snapshot(
             ShortResearchSignalRun.ranking_contract_hash == ranking_contract_hash,
             ShortResearchSignalRun.price_basis == price_basis,
             ShortResearchSignalRun.as_of_trade_date == required_trade_date,
+            ShortResearchSignalRun.decision_data_coverage_ratio
+            >= ETF_DAILY_DECISION_MIN_COVERAGE,
+            ShortResearchSignalRun.coverage_ratio
+            >= ETF_COMPLETE_SCORE_COVERAGE,
             has_etf_item,
             ~has_non_etf_item,
         )

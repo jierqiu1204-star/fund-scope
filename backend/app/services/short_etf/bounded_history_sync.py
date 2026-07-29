@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import sys
 import time
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
@@ -33,7 +34,7 @@ from app.services.short_etf.data import (
 
 HistoryFetcher = Callable[[str, date, date], Awaitable[ProviderFetchResult]]
 Clock = Callable[[], float]
-RssReader = Callable[[], int]
+RssReader = Callable[[], int | None]
 PageCommitHook = Callable[[], None]
 MAX_SQL_STATEMENTS_PER_PAGE = 8
 HISTORY_SELECTION_POLICY: Literal["history_depth"] = "history_depth"
@@ -281,6 +282,13 @@ class BoundedHistorySyncResult:
     max_page_sql_statements: int
     retries: int
     last_durable_checkpoint: dict[str, Any] | None
+    rss_limit_bytes: int = 0
+    configured_rss_limit_bytes: int = 0
+    baseline_rss_bytes: int | None = None
+    current_rss_bytes: int | None = None
+    slice_peak_current_rss_bytes: int | None = None
+    lifetime_peak_rss_bytes: int | None = None
+    rss_delta_bytes: int | None = None
 
 
 def _require_sha256(name: str, value: str) -> None:
@@ -340,59 +348,170 @@ async def _run_before(
         raise TimeoutError(timeout_message) from exc
 
 
-def _default_rss_reader() -> int:
-    if sys.platform == "win32":
-        try:
-            import ctypes
-            from ctypes import wintypes
+def _windows_process_memory_bytes() -> tuple[int, int] | None:
+    try:
+        import ctypes
+        from ctypes import wintypes
 
-            class ProcessMemoryCounters(ctypes.Structure):
-                _fields_ = [
-                    ("cb", wintypes.DWORD),
-                    ("PageFaultCount", wintypes.DWORD),
-                    ("PeakWorkingSetSize", ctypes.c_size_t),
-                    ("WorkingSetSize", ctypes.c_size_t),
-                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
-                    ("PagefileUsage", ctypes.c_size_t),
-                    ("PeakPagefileUsage", ctypes.c_size_t),
-                ]
-
-            counters = ProcessMemoryCounters()
-            counters.cb = ctypes.sizeof(counters)
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            psapi = ctypes.WinDLL("psapi", use_last_error=True)
-            kernel32.GetCurrentProcess.argtypes = []
-            kernel32.GetCurrentProcess.restype = wintypes.HANDLE
-            psapi.GetProcessMemoryInfo.argtypes = [
-                wintypes.HANDLE,
-                ctypes.POINTER(ProcessMemoryCounters),
-                wintypes.DWORD,
+        class ProcessMemoryCounters(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
             ]
-            psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
-            handle = kernel32.GetCurrentProcess()
-            if psapi.GetProcessMemoryInfo(
-                handle,
-                ctypes.byref(counters),
-                counters.cb,
-            ):
-                return int(counters.WorkingSetSize)
-        except (AttributeError, OSError):
-            return 0
-        return 0
+
+        counters = ProcessMemoryCounters()
+        counters.cb = ctypes.sizeof(counters)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+        kernel32.GetCurrentProcess.argtypes = []
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        psapi.GetProcessMemoryInfo.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(ProcessMemoryCounters),
+            wintypes.DWORD,
+        ]
+        psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+        handle = kernel32.GetCurrentProcess()
+        if psapi.GetProcessMemoryInfo(
+            handle,
+            ctypes.byref(counters),
+            counters.cb,
+        ):
+            return int(counters.WorkingSetSize), int(counters.PeakWorkingSetSize)
+    except (AttributeError, OSError):
+        return None
+    return None
+
+
+def _darwin_current_rss_bytes() -> int | None:
+    try:
+        import ctypes
+
+        class ProcTaskInfo(ctypes.Structure):
+            _fields_ = [
+                ("virtual_size", ctypes.c_uint64),
+                ("resident_size", ctypes.c_uint64),
+                ("total_user", ctypes.c_uint64),
+                ("total_system", ctypes.c_uint64),
+                ("threads_user", ctypes.c_uint64),
+                ("threads_system", ctypes.c_uint64),
+                ("policy", ctypes.c_int32),
+                ("faults", ctypes.c_int32),
+                ("pageins", ctypes.c_int32),
+                ("cow_faults", ctypes.c_int32),
+                ("messages_sent", ctypes.c_int32),
+                ("messages_received", ctypes.c_int32),
+                ("syscalls_mach", ctypes.c_int32),
+                ("syscalls_unix", ctypes.c_int32),
+                ("csw", ctypes.c_int32),
+                ("threadnum", ctypes.c_int32),
+                ("numrunning", ctypes.c_int32),
+                ("priority", ctypes.c_int32),
+            ]
+
+        info = ProcTaskInfo()
+        libproc = ctypes.CDLL("libproc.dylib", use_errno=True)
+        libproc.proc_pidinfo.argtypes = [
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_uint64,
+            ctypes.c_void_p,
+            ctypes.c_int,
+        ]
+        libproc.proc_pidinfo.restype = ctypes.c_int
+        size = ctypes.sizeof(info)
+        read_size = libproc.proc_pidinfo(
+            os.getpid(),
+            4,  # PROC_PIDTASKINFO
+            0,
+            ctypes.byref(info),
+            size,
+        )
+        if read_size == size and info.resident_size > 0:
+            return int(info.resident_size)
+    except (AttributeError, OSError):
+        return None
+    return None
+
+
+def _default_current_rss_reader() -> int | None:
+    if sys.platform == "win32":
+        memory = _windows_process_memory_bytes()
+        return memory[0] if memory is not None else None
+    if sys.platform.startswith("linux"):
+        try:
+            with open("/proc/self/statm", encoding="ascii") as statm:
+                fields = statm.read(128).split()
+            if len(fields) < 2:
+                return None
+            resident_pages = int(fields[1])
+            page_size = int(os.sysconf("SC_PAGE_SIZE"))
+            rss = resident_pages * page_size
+            return rss if rss > 0 else None
+        except (OSError, TypeError, ValueError):
+            return None
+    if sys.platform == "darwin":
+        return _darwin_current_rss_bytes()
+    return None
+
+
+def _default_lifetime_peak_rss_reader() -> int | None:
+    if sys.platform == "win32":
+        memory = _windows_process_memory_bytes()
+        return memory[1] if memory is not None else None
     try:
         import resource
 
         rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        return int(rss if sys.platform == "darwin" else rss * 1024)
+        peak = int(rss if sys.platform == "darwin" else rss * 1024)
+        return peak if peak > 0 else None
     except (ImportError, OSError):
-        return 0
+        return None
 
 
 def read_process_rss_bytes() -> int:
-    return _default_rss_reader()
+    return int(_default_current_rss_reader() or 0)
+
+
+def read_process_lifetime_peak_rss_bytes() -> int:
+    return int(_default_lifetime_peak_rss_reader() or 0)
+
+
+def _read_positive_rss(reader: RssReader) -> int | None:
+    try:
+        value = reader()
+        rss = int(value) if value is not None else 0
+    except (OSError, TypeError, ValueError):
+        return None
+    return rss if rss > 0 else None
+
+
+def _sample_current_rss(
+    totals: dict[str, Any],
+    reader: RssReader,
+) -> int | None:
+    rss = _read_positive_rss(reader)
+    totals["current_rss_bytes"] = rss
+    if rss is not None:
+        peak = totals.get("slice_peak_current_rss_bytes")
+        totals["slice_peak_current_rss_bytes"] = max(int(peak or 0), rss)
+        totals["peak_rss_bytes"] = totals["slice_peak_current_rss_bytes"]
+    baseline = totals.get("baseline_rss_bytes")
+    slice_peak = totals.get("slice_peak_current_rss_bytes")
+    totals["rss_delta_bytes"] = (
+        max(0, int(slice_peak) - int(baseline))
+        if baseline is not None and slice_peak is not None
+        else None
+    )
+    return rss
 
 
 def _chunks(
@@ -877,7 +996,7 @@ async def _persist_pages(
     started: float,
     clock: Clock,
     rss_reader: RssReader,
-    totals: dict[str, int],
+    totals: dict[str, Any],
     before_page_commit: PageCommitHook | None,
     hard_process_deadline: float,
 ) -> tuple[int, dict[str, Any] | None, str | None]:
@@ -890,12 +1009,13 @@ async def _persist_pages(
 
     for page in _chunks(rows, request.page_size):
         elapsed = clock() - started
-        rss = max(0, int(rss_reader()))
-        totals["peak_rss_bytes"] = max(totals["peak_rss_bytes"], rss)
+        rss = _sample_current_rss(totals, rss_reader)
         if elapsed >= request.worker_deadline_seconds:
             return persisted_for_code, checkpoint, "worker_deadline"
         if elapsed >= request.process_deadline_seconds:
             return persisted_for_code, checkpoint, "process_deadline"
+        if rss is None:
+            return persisted_for_code, checkpoint, "current_rss_unavailable"
         if rss > request.rss_limit_bytes:
             return persisted_for_code, checkpoint, "rss_limit"
 
@@ -1044,6 +1164,15 @@ async def _persist_pages(
                 "excluded_rows": totals["excluded_rows"],
                 "elapsed_seconds": round(clock() - started, 6),
                 "peak_rss_bytes": totals["peak_rss_bytes"],
+                "rss_limit_bytes": request.rss_limit_bytes,
+                "configured_rss_limit_bytes": request.rss_limit_bytes,
+                "baseline_rss_bytes": totals["baseline_rss_bytes"],
+                "current_rss_bytes": totals["current_rss_bytes"],
+                "slice_peak_current_rss_bytes": totals[
+                    "slice_peak_current_rss_bytes"
+                ],
+                "lifetime_peak_rss_bytes": totals["lifetime_peak_rss_bytes"],
+                "rss_delta_bytes": totals["rss_delta_bytes"],
                 "sql_statements": totals["sql_statements"],
                 "provider_health": provider_result.provider_health,
             }
@@ -1193,7 +1322,7 @@ def _result(
     attempted_codes: list[str],
     completed_codes: list[str],
     exclusions: list[tuple[str, str]],
-    totals: dict[str, int],
+    totals: dict[str, Any],
     elapsed_seconds: float,
     checkpoint: dict[str, Any] | None,
 ) -> BoundedHistorySyncResult:
@@ -1216,6 +1345,13 @@ def _result(
         max_page_sql_statements=totals["max_page_sql_statements"],
         retries=totals["retries"],
         last_durable_checkpoint=checkpoint,
+        rss_limit_bytes=totals["rss_limit_bytes"],
+        configured_rss_limit_bytes=totals["configured_rss_limit_bytes"],
+        baseline_rss_bytes=totals["baseline_rss_bytes"],
+        current_rss_bytes=totals["current_rss_bytes"],
+        slice_peak_current_rss_bytes=totals["slice_peak_current_rss_bytes"],
+        lifetime_peak_rss_bytes=totals["lifetime_peak_rss_bytes"],
+        rss_delta_bytes=totals["rss_delta_bytes"],
     )
 
 
@@ -1230,7 +1366,7 @@ async def _finalize_interrupted_job(
     completed_codes: Sequence[str],
     exclusions: Sequence[tuple[str, str]],
     checkpoint: dict[str, Any] | None,
-    totals: dict[str, int],
+    totals: dict[str, Any],
     started: float,
     clock: Clock,
     hard_process_deadline: float,
@@ -1266,6 +1402,13 @@ async def _finalize_interrupted_job(
         "fetched_rows": totals["fetched_rows"],
         "persisted_rows": totals["persisted_rows"],
         "max_page_sql_statements": totals["max_page_sql_statements"],
+        "rss_limit_bytes": totals["rss_limit_bytes"],
+        "configured_rss_limit_bytes": totals["configured_rss_limit_bytes"],
+        "baseline_rss_bytes": totals["baseline_rss_bytes"],
+        "current_rss_bytes": totals["current_rss_bytes"],
+        "slice_peak_current_rss_bytes": totals["slice_peak_current_rss_bytes"],
+        "lifetime_peak_rss_bytes": totals["lifetime_peak_rss_bytes"],
+        "rss_delta_bytes": totals["rss_delta_bytes"],
     }
     remaining = _remaining_hard_seconds(hard_process_deadline)
     if remaining <= 0:
@@ -1285,14 +1428,17 @@ async def run_bounded_history_sync_slice(
     request: BoundedHistorySyncRequest,
     fetcher: HistoryFetcher = fetch_etf_price_history_with_provider,
     clock: Clock = time.monotonic,
-    rss_reader: RssReader = _default_rss_reader,
+    rss_reader: RssReader = _default_current_rss_reader,
+    lifetime_peak_rss_reader: RssReader = _default_lifetime_peak_rss_reader,
     before_page_commit: PageCommitHook | None = None,
 ) -> BoundedHistorySyncResult:
     started = clock()
     loop = asyncio.get_running_loop()
     hard_worker_deadline = loop.time() + request.worker_deadline_seconds
     hard_process_deadline = loop.time() + request.process_deadline_seconds
-    totals = {
+    baseline_rss = _read_positive_rss(rss_reader)
+    lifetime_peak_rss = _read_positive_rss(lifetime_peak_rss_reader)
+    totals: dict[str, Any] = {
         "fetched_rows": 0,
         "persisted_rows": 0,
         "inserted_rows": 0,
@@ -1300,7 +1446,14 @@ async def run_bounded_history_sync_slice(
         "unchanged_rows": 0,
         "excluded_rows": 0,
         "max_page_rows": 0,
-        "peak_rss_bytes": max(0, int(rss_reader())),
+        "rss_limit_bytes": request.rss_limit_bytes,
+        "configured_rss_limit_bytes": request.rss_limit_bytes,
+        "baseline_rss_bytes": baseline_rss,
+        "current_rss_bytes": baseline_rss,
+        "slice_peak_current_rss_bytes": baseline_rss,
+        "lifetime_peak_rss_bytes": lifetime_peak_rss,
+        "rss_delta_bytes": 0 if baseline_rss is not None else None,
+        "peak_rss_bytes": int(baseline_rss or 0),
         "sql_statements": 0,
         "max_page_sql_statements": 0,
         "retries": 0,
@@ -1426,10 +1579,12 @@ async def run_bounded_history_sync_slice(
 
     for code in selected:
         elapsed = clock() - started
-        rss = max(0, int(rss_reader()))
-        totals["peak_rss_bytes"] = max(totals["peak_rss_bytes"], rss)
+        rss = _sample_current_rss(totals, rss_reader)
         if elapsed >= request.admission_deadline_seconds:
             stop_reason = "admission_deadline"
+            break
+        if rss is None:
+            stop_reason = "current_rss_unavailable"
             break
         if rss > request.rss_limit_bytes:
             stop_reason = "rss_limit"
@@ -1832,6 +1987,12 @@ async def run_bounded_history_sync_slice(
     job.status = status
     job.finished_at = _utcnow()
     job.error_message = None
+    latest_lifetime_peak = _read_positive_rss(lifetime_peak_rss_reader)
+    if latest_lifetime_peak is not None:
+        totals["lifetime_peak_rss_bytes"] = max(
+            int(totals["lifetime_peak_rss_bytes"] or 0),
+            latest_lifetime_peak,
+        )
     final_details = {
         **(checkpoint or job.details_json or {}),
         "identity_hash": request.identity_hash,
@@ -1850,6 +2011,13 @@ async def run_bounded_history_sync_slice(
         "exclusions": exclusions,
         "elapsed_seconds": round(clock() - started, 6),
         "peak_rss_bytes": totals["peak_rss_bytes"],
+        "rss_limit_bytes": totals["rss_limit_bytes"],
+        "configured_rss_limit_bytes": totals["configured_rss_limit_bytes"],
+        "baseline_rss_bytes": totals["baseline_rss_bytes"],
+        "current_rss_bytes": totals["current_rss_bytes"],
+        "slice_peak_current_rss_bytes": totals["slice_peak_current_rss_bytes"],
+        "lifetime_peak_rss_bytes": totals["lifetime_peak_rss_bytes"],
+        "rss_delta_bytes": totals["rss_delta_bytes"],
         "fetched_rows": totals["fetched_rows"],
         "persisted_rows": totals["persisted_rows"],
         "inserted_rows": totals["inserted_rows"],
@@ -1919,7 +2087,8 @@ __all__ = [
     "BoundedHistorySyncRequest",
     "BoundedHistorySyncResult",
     "RESEARCH_DEPTH_SELECTION_POLICY",
-    "read_process_rss_bytes",
     "read_latest_compatible_provider_health",
+    "read_process_lifetime_peak_rss_bytes",
+    "read_process_rss_bytes",
     "run_bounded_history_sync_slice",
 ]

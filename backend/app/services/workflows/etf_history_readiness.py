@@ -22,7 +22,7 @@ from app.services.short_research.coverage_policy import (
     ETF_DAILY_DECISION_MIN_COVERAGE,
     ETF_RESEARCH_DEPTH_MIN_COVERAGE,
     ETF_SCORE_PUBLICATION_MIN_COVERAGE,
-    etf_score_coverage_policy_mode,
+    evaluate_etf_readiness,
 )
 from app.services.short_research.history_readiness import (
     DAILY_FRESHNESS_SCOPE,
@@ -102,6 +102,13 @@ async def _continuation_health_by_scope(
                 "remaining_candidate_count": None,
                 "elapsed_seconds": None,
                 "peak_rss_bytes": None,
+                "rss_limit_bytes": None,
+                "configured_rss_limit_bytes": None,
+                "baseline_rss_bytes": None,
+                "current_rss_bytes": None,
+                "slice_peak_current_rss_bytes": None,
+                "lifetime_peak_rss_bytes": None,
+                "rss_delta_bytes": None,
                 "rows_per_second": None,
                 "sql_statements": None,
                 "retries": None,
@@ -120,6 +127,17 @@ async def _continuation_health_by_scope(
             "remaining_candidate_count": details.get("remaining_candidate_count"),
             "elapsed_seconds": details.get("elapsed_seconds"),
             "peak_rss_bytes": details.get("peak_rss_bytes"),
+            "rss_limit_bytes": details.get("rss_limit_bytes"),
+            "configured_rss_limit_bytes": details.get(
+                "configured_rss_limit_bytes"
+            ),
+            "baseline_rss_bytes": details.get("baseline_rss_bytes"),
+            "current_rss_bytes": details.get("current_rss_bytes"),
+            "slice_peak_current_rss_bytes": details.get(
+                "slice_peak_current_rss_bytes"
+            ),
+            "lifetime_peak_rss_bytes": details.get("lifetime_peak_rss_bytes"),
+            "rss_delta_bytes": details.get("rss_delta_bytes"),
             "rows_per_second": details.get("rows_per_second"),
             "sql_statements": details.get("sql_statements"),
             "retries": details.get("retries"),
@@ -564,15 +582,11 @@ async def read_etf_history_readiness(
             DEEP_TELEMETRY_DEPTH_SCOPE,
         ),
     )
-    history_publication_gate_passed = (
-        daily["coverage_ratio"] >= ETF_DAILY_DECISION_MIN_COVERAGE
-        and warmup["coverage_ratio"] >= ETF_SCORE_PUBLICATION_MIN_COVERAGE
+    readiness_policy = evaluate_etf_readiness(
+        daily_coverage_ratio=daily["coverage_ratio"],
+        warmup_coverage_ratio=warmup["coverage_ratio"],
     )
-    blockers: list[str] = []
-    if daily["coverage_ratio"] < ETF_DAILY_DECISION_MIN_COVERAGE:
-        blockers.append("daily_freshness_coverage_below_95pct")
-    if warmup["coverage_ratio"] < ETF_SCORE_PUBLICATION_MIN_COVERAGE:
-        blockers.append("history_depth_61_coverage_below_90pct")
+    blockers = list(readiness_policy.blocker_reasons)
     if source_date_count < 20:
         blockers.append("compatible_production_source_dates_below_20")
     listing_metadata_ratio = len(known_listing_codes) / len(codes) if codes else 0.0
@@ -627,15 +641,19 @@ async def read_etf_history_readiness(
                 DEEP_TELEMETRY_DEPTH_SCOPE
             ],
         },
-        "history_publication_gate_passed": history_publication_gate_passed,
+        "history_publication_gate_passed": readiness_policy.preview_allowed,
+        "complete_publication_gate_passed": (
+            readiness_policy.complete_publication_allowed
+        ),
         "publication_coverage_threshold": ETF_SCORE_PUBLICATION_MIN_COVERAGE,
         "publication_coverage_thresholds": {
             "daily_freshness": ETF_DAILY_DECISION_MIN_COVERAGE,
-            "history_depth_61": ETF_SCORE_PUBLICATION_MIN_COVERAGE,
+            "history_depth_61_preview": ETF_SCORE_PUBLICATION_MIN_COVERAGE,
+            "history_depth_61_complete": ETF_COMPLETE_SCORE_COVERAGE,
         },
-        "coverage_policy_mode": etf_score_coverage_policy_mode(
-            warmup["coverage_ratio"]
-        ),
+        "readiness_policy": readiness_policy.to_dict(),
+        "readiness_policy_version": readiness_policy.policy_version,
+        "coverage_policy_mode": readiness_policy.state,
         "blockers": blockers,
         "research_depth_gate_passed": contract["completion_gate_passed"],
         "research_depth_blockers": contract["completion_blockers"],

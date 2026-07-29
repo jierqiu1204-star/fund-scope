@@ -62,6 +62,9 @@ from app.services.workflows.etf_history_readiness import (
     current_etf_history_contract_hash,
     read_etf_history_readiness,
 )
+from app.services.workflows.etf_point_in_time_capture import (
+    run_scheduled_production_pit_capture,
+)
 from app.services.workflows.etf_publish_readiness import (
     run_post_close_etf_publication_readiness,
 )
@@ -504,7 +507,7 @@ async def post_close_etf_signals_job(session: AsyncSession) -> dict[str, Any]:
         required_trade_date=trade_date,
         ranking_surface="research",
     )
-    if current.run is not None:
+    if current.state == "ready" and current.run is not None:
         result = _signal_result(current.run)
         return {
             "asset_type": ASSET_TYPE_ETF,
@@ -549,6 +552,32 @@ async def post_close_etf_adjusted_sync_job(session: AsyncSession) -> dict[str, A
         session,
         trade_date=trade_date,
         decision_cutoff=decision_cutoff,
+    )
+
+
+async def production_etf_pit_capture_job(
+    session: AsyncSession,
+    settings: Settings,
+) -> dict[str, Any]:
+    context = publication_readiness_decision_context()
+    if context is None:
+        return {
+            "status": "skipped",
+            "reason": "pit_no_completed_trading_session",
+            "research_only": True,
+            "production_mutation_allowed": False,
+        }
+    trade_date, _decision_cutoff = context
+    code_version = (
+        settings.etf_pit_code_version.strip()
+        or settings.readiness_deploy_artifact.strip()
+    )
+    return await run_scheduled_production_pit_capture(
+        session,
+        trade_date=trade_date,
+        enabled=settings.etf_pit_capture_enabled,
+        code_version=code_version,
+        artifact_dir=settings.etf_pit_artifact_dir,
     )
 
 

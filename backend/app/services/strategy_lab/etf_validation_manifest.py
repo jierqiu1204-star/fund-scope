@@ -18,13 +18,106 @@ from app.models.entities import (
 from app.services.etf_research_evidence import RankingSourceKind
 from app.services.tracked_positions.lifecycle import stable_contract_hash
 
+from .etf_ranking_stage_b import StageBDateManifest, StageBRankingEvent
 from .etf_ranking_validation import (
+    RESEARCH_RULE_VERSION,
+    RESEARCH_SCORE_FIELD,
+    RESEARCH_SCORE_VERSION,
+    TOTAL_RETURN_ADJUSTED,
     RankingValidationContractError,
     RankingValidationSourceCohort,
     RankingValidationSourceEvent,
     freeze_ranking_validation_source_cohort,
     freeze_ranking_validation_source_event,
 )
+
+
+def build_research_replay_validation_source_event(
+    *,
+    ranking_event: StageBRankingEvent,
+    date_manifest: StageBDateManifest,
+    replay_contract_hash: str,
+) -> RankingValidationSourceEvent:
+    """Adapt one immutable Stage-B date without production publication fields."""
+
+    if (
+        ranking_event.replay_run_key != date_manifest.replay_run_key
+        or ranking_event.replay_date != date_manifest.replay_date
+        or ranking_event.date_manifest_hash != date_manifest.manifest_hash
+        or ranking_event.source_date_manifest_hash
+        != date_manifest.source_date_manifest_hash
+        or ranking_event.score_contract_id != RESEARCH_SCORE_VERSION
+        or ranking_event.score_field != RESEARCH_SCORE_FIELD
+        or ranking_event.score_manifest_hash != date_manifest.score_manifest_hash
+        or ranking_event.universe_hash != date_manifest.universe_hash
+        or ranking_event.input_hash != date_manifest.input_hash
+    ):
+        raise RankingValidationContractError(
+            "Stage-B ranking event does not match its immutable date manifest"
+        )
+    if len(replay_contract_hash) != 64:
+        raise RankingValidationContractError(
+            "research replay contract hash is required"
+        )
+    draft = RankingValidationSourceEvent(
+        ranking_source_kind=RankingSourceKind.RESEARCH_REPLAY,
+        signal_date=ranking_event.replay_date,
+        source_signal_run_id=None,
+        source_replay_run_key=ranking_event.replay_run_key,
+        source_replay_contract_hash=replay_contract_hash,
+        source_event_hash=ranking_event.event_hash,
+        ranking_contract_hash=ranking_event.score_manifest_hash,
+        scope_hash=stable_contract_hash(
+            {
+                "scope_kind": "research_replay",
+                "replay_run_key": ranking_event.replay_run_key,
+                "source_snapshot_hash": date_manifest.source_snapshot_hash,
+                "universe_manifest_hash": date_manifest.universe_manifest_hash,
+            }
+        ),
+        universe_snapshot_hash=ranking_event.universe_hash,
+        input_snapshot_hash=ranking_event.input_hash,
+        score_version=RESEARCH_SCORE_VERSION,
+        score_field=RESEARCH_SCORE_FIELD,
+        rule_version=RESEARCH_RULE_VERSION,
+        price_basis=TOTAL_RETURN_ADJUSTED,
+        publication_state=None,
+        scope_kind="research_replay",
+        availability_cutoff=date_manifest.decision_cutoff,
+        immutable_hash="pending",
+    )
+    return freeze_ranking_validation_source_event(draft)
+
+
+def build_research_replay_validation_source_cohort(
+    *,
+    ranking_events: Sequence[StageBRankingEvent],
+    date_manifests: Sequence[StageBDateManifest],
+    replay_contract_hash: str,
+) -> RankingValidationSourceCohort:
+    """Build a research-only cohort from exact Stage-B event/manifest pairs."""
+
+    manifests_by_date = {item.replay_date: item for item in date_manifests}
+    if len(manifests_by_date) != len(date_manifests):
+        raise RankingValidationContractError(
+            "research replay contains duplicate date manifests"
+        )
+    events = tuple(
+        build_research_replay_validation_source_event(
+            ranking_event=event,
+            date_manifest=manifests_by_date[event.replay_date],
+            replay_contract_hash=replay_contract_hash,
+        )
+        for event in ranking_events
+    )
+    if len(events) != len(manifests_by_date):
+        raise RankingValidationContractError(
+            "research replay event and manifest dates must match exactly"
+        )
+    return freeze_ranking_validation_source_cohort(
+        ranking_source_kind=RankingSourceKind.RESEARCH_REPLAY,
+        events=events,
+    )
 
 
 def _source_event_content_hash(

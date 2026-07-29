@@ -62,14 +62,7 @@ def test_scope_kind_is_explicit_for_new_runs() -> None:
 
 
 def test_final_score_v3_manifest_has_typed_score_inputs_and_missing_policy() -> None:
-    contract_path = (
-        Path(__file__).resolve().parents[2]
-        / "openspec"
-        / "changes"
-        / "harden-etf-comprehensive-ranking"
-        / "final-score-v3-contract.json"
-    )
-    manifest = parse_ranking_manifest(json.loads(contract_path.read_text(encoding="utf-8")))
+    manifest = final_score_v3_manifest()
 
     momentum = manifest.components["technical_momentum_cross_section"]
     assert momentum.score_bearing is True
@@ -99,16 +92,9 @@ def test_runtime_v3_manifest_uses_the_frozen_contract() -> None:
 
 def test_runtime_v3_contract_is_bundled_with_the_backend_package() -> None:
     runtime_path = _final_score_v3_contract_path()
-    openspec_path = (
-        Path(__file__).resolve().parents[2]
-        / "openspec"
-        / "changes"
-        / "harden-etf-comprehensive-ranking"
-        / "final-score-v3-contract.json"
-    )
 
     assert runtime_path.parent == Path(__file__).resolve().parents[1] / "app/services/short_research"
-    assert json.loads(runtime_path.read_text(encoding="utf-8")) == json.loads(openspec_path.read_text(encoding="utf-8"))
+    assert json.loads(runtime_path.read_text(encoding="utf-8")) == final_score_v3_contract()
 
 
 def test_final_score_v3_contract_exposes_rule_and_premium_consensus() -> None:
@@ -133,14 +119,7 @@ def test_dual_coverage_columns_are_nullable() -> None:
 
 
 def test_ranking_input_fails_closed_when_a_required_v3_input_is_missing() -> None:
-    contract_path = (
-        Path(__file__).resolve().parents[2]
-        / "openspec"
-        / "changes"
-        / "harden-etf-comprehensive-ranking"
-        / "final-score-v3-contract.json"
-    )
-    manifest = parse_ranking_manifest(json.loads(contract_path.read_text(encoding="utf-8")))
+    manifest = final_score_v3_manifest()
     values = {
         required
         for component in manifest.components.values()
@@ -171,14 +150,7 @@ def test_ranking_input_fails_closed_when_a_required_v3_input_is_missing() -> Non
 
 
 def test_ranking_manifest_rejects_double_counted_score_bearing_primitive() -> None:
-    contract_path = (
-        Path(__file__).resolve().parents[2]
-        / "openspec"
-        / "changes"
-        / "harden-etf-comprehensive-ranking"
-        / "final-score-v3-contract.json"
-    )
-    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    contract = json.loads(json.dumps(final_score_v3_contract()))
     contract["calculation"]["components"][1]["primitive_lineage"].append("return_5d")
 
     with pytest.raises(ValueError, match="double-counted primitive"):

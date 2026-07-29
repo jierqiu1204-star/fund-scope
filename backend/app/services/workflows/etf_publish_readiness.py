@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.defaults.short_research import ASSET_TYPE_ETF
-from app.models.entities import JobRun
+from app.models.entities import EtfDailyWorkflowLock, JobRun
 from app.services.market_data import is_etf_exchange_trading_day
 from app.services.short_etf.bounded_history_sync import (
     BoundedHistorySyncRequest,
@@ -23,7 +23,11 @@ from app.services.short_etf.publication_providers import (
 )
 from app.services.short_research.coverage_policy import (
     ETF_DAILY_DECISION_MIN_COVERAGE,
-    ETF_SCORE_PUBLICATION_MIN_COVERAGE,
+    EtfReadinessPolicyResult,
+    evaluate_etf_readiness,
+)
+from app.services.short_research.dual_snapshot_materialization import (
+    SnapshotMaterializationError,
 )
 from app.services.short_research.history_readiness import SCORE_WARMUP_SESSIONS
 from app.services.short_research.snapshot_publication import (
@@ -35,9 +39,12 @@ from app.services.short_research.snapshot_selector import (
 )
 from app.services.tracked_positions.service import active_tracked_etf_codes
 from app.services.workflows.etf_daily_research import (
+    ETF_DAILY_WORKFLOW_LOCK_LEASE,
+    ETF_DAILY_WORKFLOW_RUNNING,
     etf_source_availability_cutoff,
     finish_etf_daily_workflow_lock,
     generate_and_publish_etf_snapshot,
+    generate_provisional_etf_research_preview,
     try_acquire_etf_daily_workflow_lock,
 )
 from app.services.workflows.etf_history_readiness import (
@@ -55,6 +62,26 @@ class PublicationReadinessProfile:
     name: str
     max_codes: int
     cadence_minutes: int
+
+
+@dataclass(frozen=True)
+class PublicationReadinessPreflight:
+    due: bool
+    reason: str
+    trade_date: date
+    decision_cutoff: datetime
+    profile: str | None = None
+    cadence_minutes: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "due": self.due,
+            "reason": self.reason,
+            "trade_date": self.trade_date.isoformat(),
+            "decision_cutoff": self.decision_cutoff.isoformat(),
+            "profile": self.profile,
+            "cadence_minutes": self.cadence_minutes,
+        }
 
 
 CONSERVATIVE_PUBLICATION_PROFILE = PublicationReadinessProfile(
@@ -78,7 +105,11 @@ def choose_publication_profile(
     elapsed_values: list[float] = []
     for details in recent:
         elapsed = float(details.get("elapsed_seconds") or 0.0)
-        rss = int(details.get("peak_rss_bytes") or 0)
+        rss = int(
+            details.get("slice_peak_current_rss_bytes")
+            or details.get("peak_rss_bytes")
+            or 0
+        )
         stop_reason = details.get("stop_reason")
         # A factually unseasoned ETF is still durable progress once its exact
         # availability/cooldown checkpoint has been committed. Requiring a
@@ -109,6 +140,7 @@ def choose_publication_profile(
             or stop_reason
             in {
                 "rss_limit",
+                "current_rss_unavailable",
                 "worker_deadline",
                 "process_deadline",
                 "provider_circuit_open",
@@ -263,9 +295,14 @@ def compact_readiness_payload(readiness: Mapping[str, Any]) -> dict[str, Any]:
         "history_publication_gate_passed": bool(
             readiness.get("history_publication_gate_passed")
         ),
+        "complete_publication_gate_passed": bool(
+            readiness.get("complete_publication_gate_passed")
+        ),
         "publication_coverage_thresholds": dict(
             readiness.get("publication_coverage_thresholds") or {}
         ),
+        "readiness_policy": dict(readiness.get("readiness_policy") or {}),
+        "readiness_policy_version": readiness.get("readiness_policy_version"),
         "coverage_policy_mode": readiness.get("coverage_policy_mode"),
         "blockers": list(readiness.get("blockers") or ()),
     }
@@ -297,6 +334,13 @@ def compact_sync_result(
         "persisted_rows": result.persisted_rows,
         "elapsed_seconds": result.elapsed_seconds,
         "peak_rss_bytes": result.peak_rss_bytes,
+        "rss_limit_bytes": result.rss_limit_bytes,
+        "configured_rss_limit_bytes": result.configured_rss_limit_bytes,
+        "baseline_rss_bytes": result.baseline_rss_bytes,
+        "current_rss_bytes": result.current_rss_bytes,
+        "slice_peak_current_rss_bytes": result.slice_peak_current_rss_bytes,
+        "lifetime_peak_rss_bytes": result.lifetime_peak_rss_bytes,
+        "rss_delta_bytes": result.rss_delta_bytes,
         "rows_per_second": round(
             result.persisted_rows / max(result.elapsed_seconds, 0.000001),
             3,
@@ -335,10 +379,23 @@ async def read_publication_readiness_status(
         if latest is not None
         else None
     )
+    remaining_candidate_count = details.get("remaining_candidate_count")
+    remaining_count = (
+        int(remaining_candidate_count)
+        if isinstance(remaining_candidate_count, int | float)
+        and remaining_candidate_count >= 0
+        else None
+    )
+    estimated_remaining_slices = (
+        (remaining_count + profile.max_codes - 1) // profile.max_codes
+        if remaining_count is not None
+        else None
+    )
     return {
         **compact_readiness_payload(readiness),
         "synchronization": {
             "profile": profile.name,
+            "max_codes": profile.max_codes,
             "cadence_minutes": profile.cadence_minutes,
             "identity_hash": details.get("identity_hash"),
             "status": latest.status if latest is not None else "not_started",
@@ -346,10 +403,36 @@ async def read_publication_readiness_status(
             "attempted_count": len(attempted) if isinstance(attempted, list) else 0,
             "completed_count": len(completed) if isinstance(completed, list) else 0,
             "failed_count": len(exclusions) if isinstance(exclusions, list) else 0,
-            "remaining_candidate_count": details.get("remaining_candidate_count"),
+            "remaining_candidate_count": remaining_count,
+            "estimated_remaining_slices": estimated_remaining_slices,
+            "estimated_eta_minutes": (
+                estimated_remaining_slices * profile.cadence_minutes
+                if estimated_remaining_slices is not None
+                else None
+            ),
+            "lease": {
+                "active": latest is not None and latest.status == "running",
+                "checkpoint_age_seconds": checkpoint_age_seconds,
+            },
+            "checkpoint": {
+                "active_code": details.get("active_code"),
+                "last_completed_code": details.get("last_completed_code"),
+                "last_trade_date": details.get("last_trade_date"),
+            },
             "provider_health": details.get("provider_health"),
             "elapsed_seconds": details.get("elapsed_seconds"),
             "peak_rss_bytes": details.get("peak_rss_bytes"),
+            "rss_limit_bytes": details.get("rss_limit_bytes"),
+            "configured_rss_limit_bytes": details.get(
+                "configured_rss_limit_bytes"
+            ),
+            "baseline_rss_bytes": details.get("baseline_rss_bytes"),
+            "current_rss_bytes": details.get("current_rss_bytes"),
+            "slice_peak_current_rss_bytes": details.get(
+                "slice_peak_current_rss_bytes"
+            ),
+            "lifetime_peak_rss_bytes": details.get("lifetime_peak_rss_bytes"),
+            "rss_delta_bytes": details.get("rss_delta_bytes"),
             "rows_per_second": details.get("rows_per_second"),
             "checkpoint_age_seconds": checkpoint_age_seconds,
         },
@@ -413,14 +496,92 @@ async def _latest_authoritative_universe(
     return True, None
 
 
-def _both_gates_pass(readiness: Mapping[str, Any]) -> bool:
+def _readiness_policy(
+    readiness: Mapping[str, Any],
+) -> EtfReadinessPolicyResult:
     daily = readiness.get("daily_freshness") or {}
     warmup = readiness.get("history_depth_61") or {}
-    return (
-        float(daily.get("coverage_ratio") or 0.0)
-        >= ETF_DAILY_DECISION_MIN_COVERAGE
-        and float(warmup.get("coverage_ratio") or 0.0)
-        >= ETF_SCORE_PUBLICATION_MIN_COVERAGE
+    return evaluate_etf_readiness(
+        daily_coverage_ratio=float(daily.get("coverage_ratio") or 0.0),
+        warmup_coverage_ratio=float(warmup.get("coverage_ratio") or 0.0),
+    )
+
+
+def _both_gates_pass(readiness: Mapping[str, Any]) -> bool:
+    return _readiness_policy(readiness).complete_publication_allowed
+
+
+async def preflight_post_close_etf_publication_readiness(
+    session: AsyncSession,
+    *,
+    trade_date: date,
+    decision_cutoff: datetime,
+    now: datetime | None = None,
+) -> PublicationReadinessPreflight:
+    authoritative, _universe_error = await _latest_authoritative_universe(
+        session,
+        trade_date=trade_date,
+    )
+    if not authoritative:
+        return PublicationReadinessPreflight(
+            due=False,
+            reason="universe_not_authoritative",
+            trade_date=trade_date,
+            decision_cutoff=decision_cutoff,
+        )
+    current = await resolve_current_etf_ranking_surface_snapshot(
+        session,
+        required_trade_date=trade_date,
+        ranking_surface="research",
+    )
+    if current.state == "ready":
+        return PublicationReadinessPreflight(
+            due=False,
+            reason="complete_snapshot_already_published",
+            trade_date=trade_date,
+            decision_cutoff=decision_cutoff,
+        )
+    effective_now = now or datetime.utcnow()
+    lock = await session.get(EtfDailyWorkflowLock, trade_date)
+    if (
+        lock is not None
+        and lock.status == ETF_DAILY_WORKFLOW_RUNNING
+        and lock.started_at is not None
+        and lock.started_at >= effective_now - ETF_DAILY_WORKFLOW_LOCK_LEASE
+    ):
+        return PublicationReadinessPreflight(
+            due=False,
+            reason="publication_readiness_worker_locked",
+            trade_date=trade_date,
+            decision_cutoff=decision_cutoff,
+        )
+    recent_slices = await _recent_publication_slices(
+        session,
+        trade_date=trade_date,
+    )
+    profile = choose_publication_profile(
+        [dict(run.details_json or {}) for run in recent_slices]
+    )
+    if not _profile_cadence_due(
+        recent_slices,
+        profile=profile,
+        now=effective_now,
+    ):
+        return PublicationReadinessPreflight(
+            due=False,
+            reason="catch_up_cadence_not_due",
+            trade_date=trade_date,
+            decision_cutoff=decision_cutoff,
+            profile=profile.name,
+            cadence_minutes=profile.cadence_minutes,
+        )
+    return PublicationReadinessPreflight(
+        due=True,
+        reason="publication_readiness_due",
+        trade_date=trade_date,
+        decision_cutoff=decision_cutoff,
+        profile=profile.name,
+        cadence_minutes=profile.cadence_minutes,
     )
 
 
@@ -450,7 +611,7 @@ async def run_post_close_etf_publication_readiness(
             required_trade_date=trade_date,
             ranking_surface="research",
         )
-        if current.run is not None:
+        if current.state == "ready" and current.run is not None:
             signal = _signal_result(current.run)
             result = {
                 "asset_type": ASSET_TYPE_ETF,
@@ -537,7 +698,8 @@ async def run_post_close_etf_publication_readiness(
             )
 
         compact_after = compact_readiness_payload(readiness)
-        if not _both_gates_pass(readiness):
+        readiness_policy = _readiness_policy(readiness)
+        if readiness_policy.state == "blocked":
             result = _waiting(
                 trade_date,
                 "adjusted_price_or_warmup_coverage_below_publication_gate",
@@ -547,6 +709,38 @@ async def run_post_close_etf_publication_readiness(
             return result
 
         source_cutoff = etf_source_availability_cutoff(trade_date)
+        if readiness_policy.state == "degraded":
+            try:
+                preview = await generate_provisional_etf_research_preview(
+                    session,
+                    trade_date=trade_date,
+                    decision_cutoff=decision_cutoff,
+                    source_availability_cutoff=source_cutoff,
+                )
+            except (SnapshotMaterializationError, SnapshotPublicationError) as exc:
+                await session.rollback()
+                result = _waiting(
+                    trade_date,
+                    f"provisional_research_materialization_failed: {exc}",
+                    readiness=compact_after,
+                    sync=sync_payload,
+                )
+                return result
+            signal = _signal_result(preview)
+            result = {
+                "asset_type": ASSET_TYPE_ETF,
+                "status": "success",
+                "publication_state": "provisional",
+                "snapshot_state": "provisional",
+                "readiness_state": readiness_policy.state,
+                "readiness_policy_version": readiness_policy.policy_version,
+                "coverage": compact_after,
+                **({"sync": sync_payload} if sync_payload is not None else {}),
+                "etf": signal,
+                **signal,
+            }
+            return result
+
         coverage = await build_etf_coverage_barrier(
             session,
             as_of_trade_date=trade_date,
@@ -614,6 +808,7 @@ __all__ = [
     "compact_sync_result",
     "choose_publication_profile",
     "publication_window_start",
+    "preflight_post_close_etf_publication_readiness",
     "read_publication_readiness_status",
     "run_post_close_etf_publication_readiness",
 ]

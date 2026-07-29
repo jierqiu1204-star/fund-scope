@@ -185,7 +185,7 @@ async def test_research_depth_yields_to_either_publication_gate(monkeypatch) -> 
         return None
 
     async def fake_readiness(_session: object, **_kwargs: Any) -> dict[str, Any]:
-        return _readiness(daily=1.0, warmup=0.89)
+        return _readiness(daily=1.0, warmup=0.94)
 
     async def forbidden(*_args: object, **_kwargs: Any) -> None:
         raise AssertionError("provider work must not start below publication gates")
@@ -203,7 +203,8 @@ async def test_research_depth_yields_to_either_publication_gate(monkeypatch) -> 
     assert result["reason"] == "publication_priority_active"
     assert result["publication_gates"]["thresholds"] == {
         "daily_freshness": 0.95,
-        "history_depth_61": 0.90,
+        "history_depth_61_preview": 0.90,
+        "history_depth_61_complete": 0.95,
     }
 
 
@@ -311,7 +312,7 @@ async def test_coordinator_runs_300_before_500_with_safe_bounded_profile(
 
     async def fake_readiness(_session: object, **_kwargs: Any) -> dict[str, Any]:
         return _readiness(
-            warmup=0.90,
+            warmup=0.95,
             contract=contract_ratio,
             telemetry=0.0,
         )

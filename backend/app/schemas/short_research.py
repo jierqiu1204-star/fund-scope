@@ -69,6 +69,15 @@ class EtfRankingSnapshotMetadataOut(BaseModel):
     score_coverage_ratio: float | None = None
     coverage_ratio: float | None = None
     coverage_policy_mode: Literal["blocked", "degraded", "complete"] | None = None
+    readiness_state: Literal["blocked", "degraded", "complete"] | None = None
+    policy_version: str | None = None
+    snapshot_state: Literal["unavailable", "provisional", "complete"] = "unavailable"
+    unavailable_reason: str | None = None
+    market_decision_cutoff: datetime | None = None
+    data_receipt_cutoff: datetime | None = None
+    replay_visibility_cutoff: datetime | None = None
+    resource_profile: dict[str, Any] = Field(default_factory=dict)
+    provider_health_identity: dict[str, Any] = Field(default_factory=dict)
     freshness_status: str = "waiting"
     limitations: list[str] = Field(default_factory=list)
 

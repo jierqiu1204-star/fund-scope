@@ -21,9 +21,11 @@ from app.services.short_etf.publication_providers import (
     PublicationAdjustedHistoryFetcher,
 )
 from app.services.short_research.coverage_policy import (
+    ETF_COMPLETE_SCORE_COVERAGE,
     ETF_DAILY_DECISION_MIN_COVERAGE,
     ETF_RESEARCH_DEPTH_MIN_COVERAGE,
     ETF_SCORE_PUBLICATION_MIN_COVERAGE,
+    evaluate_etf_readiness,
 )
 from app.services.short_research.history_readiness import (
     DEEP_TELEMETRY_DEPTH_SCOPE,
@@ -318,21 +320,22 @@ async def run_post_publication_etf_research_history_slice(
         "history_depth_61": _compact_lane(warmup),
         "thresholds": {
             "daily_freshness": ETF_DAILY_DECISION_MIN_COVERAGE,
-            "history_depth_61": ETF_SCORE_PUBLICATION_MIN_COVERAGE,
+            "history_depth_61_preview": ETF_SCORE_PUBLICATION_MIN_COVERAGE,
+            "history_depth_61_complete": ETF_COMPLETE_SCORE_COVERAGE,
         },
     }
-    if (
-        float(daily.get("coverage_ratio") or 0.0)
-        < ETF_DAILY_DECISION_MIN_COVERAGE
-        or float(warmup.get("coverage_ratio") or 0.0)
-        < ETF_SCORE_PUBLICATION_MIN_COVERAGE
-    ):
+    readiness_policy = evaluate_etf_readiness(
+        daily_coverage_ratio=float(daily.get("coverage_ratio") or 0.0),
+        warmup_coverage_ratio=float(warmup.get("coverage_ratio") or 0.0),
+    )
+    if not readiness_policy.complete_publication_allowed:
         return {
             "asset_type": ASSET_TYPE_ETF,
             "status": "skipped",
             "reason": "publication_priority_active",
             "target_date": effective_date.isoformat(),
             "publication_gates": compact_gates,
+            "readiness_policy": readiness_policy.to_dict(),
         }
 
     contract_lane = readiness.get("contract_depth") or {}
