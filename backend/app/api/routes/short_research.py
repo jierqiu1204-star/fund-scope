@@ -17,7 +17,10 @@ from app.models.entities import (
     ShortResearchSignalRun,
     User,
 )
-from app.schemas.etf_evidence import EtfEvidenceOverviewOut
+from app.schemas.etf_evidence import (
+    EtfEvidenceOverviewOut,
+    EtfLeaderTacticsEvidenceOut,
+)
 from app.schemas.short_research import (
     EtfExitCredibilityRequest,
     EtfExitCredibilityRunOut,
@@ -109,6 +112,9 @@ from app.services.short_research.snapshot_selector import snapshot_metadata
 from app.services.strategy_lab.etf_evidence_overview import (
     build_etf_evidence_overview,
 )
+from app.services.strategy_lab.etf_leader_tactics_evidence_view import (
+    build_latest_leader_evidence_view,
+)
 from app.services.strategy_lab.etf_ranking_validation import (
     RankingValidationContractError,
 )
@@ -134,6 +140,23 @@ async def get_latest_etf_evidence_overview(
 
     payload = await build_etf_evidence_overview(session)
     return EtfEvidenceOverviewOut.model_validate(payload)
+
+
+@router.get(
+    "/evidence/etf/leader-tactics/latest",
+    response_model=EtfLeaderTacticsEvidenceOut,
+)
+async def get_latest_etf_leader_tactics_evidence(
+    request: Request,
+    session: AsyncSession = Depends(get_db_session),
+) -> EtfLeaderTacticsEvidenceOut:
+    """Read persisted proxy evidence without scoring or production mutation."""
+
+    payload = await build_latest_leader_evidence_view(
+        session,
+        enabled=request.app.state.settings.etf_leader_tactics_evidence_api_enabled,
+    )
+    return EtfLeaderTacticsEvidenceOut.model_validate(payload)
 
 
 def _csv_values(raw: str | None) -> set[str]:

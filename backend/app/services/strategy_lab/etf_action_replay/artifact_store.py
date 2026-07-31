@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from app.services.tracked_positions.lifecycle import stable_contract_hash, stable_contract_json
 
@@ -53,6 +54,13 @@ class StoredReplayPage:
     manifests: tuple[CrossSectionCompletionManifest, ...]
     feature_rows: tuple[FeatureRow, ...]
     has_more: bool
+
+
+@dataclass(frozen=True)
+class StoredResearchArtifact:
+    item_key: str
+    artifact_hash: str
+    payload: dict[str, Any]
 
 
 def feature_artifact_identity(
@@ -281,6 +289,17 @@ class ReplayArtifactStore:
                     input_snapshot_hash TEXT NOT NULL,
                     evidence_bundle_hash TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS research_artifacts (
+                    run_id TEXT NOT NULL,
+                    phase TEXT NOT NULL,
+                    item_key TEXT NOT NULL,
+                    artifact_hash TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    PRIMARY KEY (run_id, phase, item_key)
+                );
+                CREATE INDEX IF NOT EXISTS ix_research_artifacts_page
+                    ON research_artifacts (run_id, phase, item_key);
                 """
             )
 
@@ -1362,6 +1381,173 @@ class ReplayArtifactStore:
             )
         return checkpoint
 
+    def write_research_artifacts(
+        self,
+        *,
+        run_id: str,
+        phase: str,
+        artifacts: Sequence[tuple[str, Mapping[str, Any]]],
+        max_seconds: float = 5.0,
+    ) -> tuple[StoredResearchArtifact, ...]:
+        """Persist one immutable research page without coupling its payload shape."""
+
+        if not run_id.strip() or not phase.strip():
+            raise ArtifactConflictError("research artifact identity is incomplete")
+        if not 1 <= len(artifacts) <= 20:
+            raise BoundedWorkLimitError(
+                "research artifact page must contain between 1 and 20 rows"
+            )
+        deadline = self._deadline(max_seconds, "research artifact write")
+        normalized: list[StoredResearchArtifact] = []
+        seen: set[str] = set()
+        for item_key, payload in artifacts:
+            self._check_deadline(deadline, "research artifact write")
+            key = item_key.strip()
+            if not key or key in seen:
+                raise ArtifactConflictError(
+                    "research artifact keys must be non-empty and unique per page"
+                )
+            seen.add(key)
+            normalized_payload = dict(payload)
+            artifact_hash = stable_contract_hash(
+                {
+                    "schema_version": "generic_research_artifact_v1",
+                    "run_id": run_id,
+                    "phase": phase,
+                    "item_key": key,
+                    "payload": normalized_payload,
+                }
+            )
+            normalized.append(
+                StoredResearchArtifact(
+                    item_key=key,
+                    artifact_hash=artifact_hash,
+                    payload=normalized_payload,
+                )
+            )
+
+        with self._connect() as connection:
+            self._execute(connection, "BEGIN IMMEDIATE")
+            try:
+                for item in normalized:
+                    self._check_deadline(deadline, "research artifact write")
+                    existing = self._execute(
+                        connection,
+                        """
+                        SELECT artifact_hash FROM research_artifacts
+                        WHERE run_id=? AND phase=? AND item_key=?
+                        """,
+                        (run_id, phase, item.item_key),
+                    ).fetchone()
+                    if existing is not None:
+                        if str(existing[0]) != item.artifact_hash:
+                            raise ArtifactConflictError(
+                                "research artifact identity already has a different payload"
+                            )
+                        continue
+                    self._execute(
+                        connection,
+                        """
+                        INSERT INTO research_artifacts
+                            (run_id, phase, item_key, artifact_hash, payload_json)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            run_id,
+                            phase,
+                            item.item_key,
+                            item.artifact_hash,
+                            stable_contract_json(item.payload),
+                        ),
+                    )
+                self._execute(connection, "COMMIT")
+            except Exception:
+                self._execute(connection, "ROLLBACK")
+                raise
+        return tuple(normalized)
+
+    def read_research_artifact_page(
+        self,
+        *,
+        run_id: str,
+        phase: str,
+        after_item_key: str | None = None,
+        max_rows: int = 20,
+        max_seconds: float = 5.0,
+    ) -> tuple[StoredResearchArtifact, ...]:
+        if not 1 <= max_rows <= 20:
+            raise BoundedWorkLimitError("research artifact page must be within 1..20")
+        deadline = self._deadline(max_seconds, "research artifact read")
+        with self._connect() as connection:
+            rows = self._execute(
+                connection,
+                """
+                SELECT item_key, artifact_hash, payload_json
+                FROM research_artifacts
+                WHERE run_id=? AND phase=? AND item_key>?
+                ORDER BY item_key ASC
+                LIMIT ?
+                """,
+                (run_id, phase, after_item_key or "", max_rows),
+            ).fetchall()
+        self._check_deadline(deadline, "research artifact read")
+        return tuple(
+            StoredResearchArtifact(
+                item_key=str(row[0]),
+                artifact_hash=str(row[1]),
+                payload=dict(json.loads(str(row[2]))),
+            )
+            for row in rows
+        )
+
+    def research_phase_digest(
+        self,
+        *,
+        run_id: str,
+        phase: str,
+        max_seconds: float = 5.0,
+    ) -> tuple[str, int]:
+        """Return a page-size-independent digest without loading payloads in memory."""
+
+        deadline = self._deadline(max_seconds, "research artifact digest")
+        digest = hashlib.sha256()
+        digest.update(
+            stable_contract_json(
+                {
+                    "schema_version": "research_phase_digest_v1",
+                    "run_id": run_id,
+                    "phase": phase,
+                }
+            ).encode("utf-8")
+        )
+        count = 0
+        with self._connect() as connection:
+            cursor = self._execute(
+                connection,
+                """
+                SELECT item_key, artifact_hash FROM research_artifacts
+                WHERE run_id=? AND phase=? ORDER BY item_key ASC
+                """,
+                (run_id, phase),
+            )
+            while True:
+                self._check_deadline(deadline, "research artifact digest")
+                rows = cursor.fetchmany(256)
+                if not rows:
+                    break
+                for item_key, artifact_hash in rows:
+                    digest.update(b"\n")
+                    digest.update(
+                        stable_contract_json(
+                            {
+                                "item_key": str(item_key),
+                                "artifact_hash": str(artifact_hash),
+                            }
+                        ).encode("utf-8")
+                    )
+                    count += 1
+        return digest.hexdigest(), count
+
     def artifact_counts(self, run_id: str) -> dict[str, int]:
         tables = {
             "policies": "policy_outputs",
@@ -1371,6 +1557,7 @@ class ReplayArtifactStore:
             "events": "replay_events",
             "equity": "replay_equity",
             "checkpoints": "pipeline_checkpoints",
+            "research": "research_artifacts",
         }
         counts: dict[str, int] = {}
         with self._connect() as connection:

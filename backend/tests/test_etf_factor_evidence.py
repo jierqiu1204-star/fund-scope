@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from typing import Literal
 
@@ -13,6 +14,7 @@ from app.models.entities import (
     TrackedPositionAlert,
     ValidationEvidenceImmutableError,
 )
+from app.services.strategy_lab.etf_evidence_overview import _latest_factor_evidence
 from app.services.strategy_lab.etf_factor_evidence import (
     FactorEvidenceConflictError,
     FactorEvidenceContractError,
@@ -21,6 +23,10 @@ from app.services.strategy_lab.etf_factor_evidence import (
     persist_factor_evidence,
 )
 from app.services.strategy_lab.etf_factor_validation import PromotionDecision
+from app.services.strategy_lab.etf_leader_tactics_shadow import (
+    LEADER_EXPERIMENT_FAMILY,
+    LEADER_HYPOTHESIS_REGISTRY,
+)
 from app.services.strategy_lab.etf_point_in_time_research_loop import (
     PromotionGateEvidence,
     build_frozen_research_loop_manifest,
@@ -180,6 +186,40 @@ async def test_evidence_is_idempotent_immutable_and_conflict_safe(app) -> None:
             await session.rollback()
         else:
             raise AssertionError("persisted evidence must be immutable")
+
+
+async def test_optional_family_identity_preserves_legacy_hash_and_isolates_overview(
+    app,
+) -> None:
+    legacy_payload = _payload(manifest_hash="legacy-familyless")
+    assert "experiment_family" not in legacy_payload.canonical_payload()
+    leader_payload = replace(
+        _payload(manifest_hash="leader-family"),
+        experiment_family=LEADER_EXPERIMENT_FAMILY,
+        hypothesis_registry_hash=LEADER_HYPOTHESIS_REGISTRY.registry_hash,
+    )
+    async with app.state.db.session() as session:
+        legacy = await persist_factor_evidence(session, legacy_payload)
+        leader = await persist_factor_evidence(session, leader_payload)
+        selected = await _latest_factor_evidence(session)
+
+    assert leader.experiment_family == LEADER_EXPERIMENT_FAMILY
+    assert (
+        leader.hypothesis_registry_hash
+        == LEADER_HYPOTHESIS_REGISTRY.registry_hash
+    )
+    assert selected is not None
+    assert selected.id == legacy.id
+
+
+def test_factor_evidence_rejects_half_present_family_identity() -> None:
+    payload = replace(
+        _payload(),
+        experiment_family=LEADER_EXPERIMENT_FAMILY,
+    )
+
+    with pytest.raises(FactorEvidenceContractError, match="must be paired"):
+        payload.validate()
 
 
 async def test_read_only_evidence_endpoint_separates_splits_and_costs(

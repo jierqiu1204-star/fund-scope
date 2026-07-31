@@ -55,6 +55,9 @@ from app.services.short_research.jobs import (
 )
 from app.services.strategy_lab.jobs import daily_strategy_paper_job
 from app.services.tracked_positions.jobs import daily_tracked_position_alerts_job
+from app.services.workflows.etf_leader_tactics_shadow import (
+    continue_etf_leader_tactics_shadow_job,
+)
 from app.services.workflows.etf_readiness_attestation import (
     ReadinessQueryLimitError,
     build_bounded_attested_etf_readiness_report,
@@ -174,6 +177,20 @@ async def read_etf_readiness(
     finally:
         await session.rollback()
     return report
+
+
+@router.post("/etf-leader-tactics-shadow/continue")
+async def continue_etf_leader_tactics_shadow(
+    request: Request,
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, object]:
+    """Advance at most one research page; live provider work is prohibited."""
+
+    return await continue_etf_leader_tactics_shadow_job(
+        session,
+        settings=request.app.state.settings,
+        timeout_seconds=50.0,
+    )
 
 
 @router.post("/{job_name}/run")

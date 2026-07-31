@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime
 
 from app.services.strategy_lab.etf_factor_experiment import ExecutionCostPolicy
 from app.services.strategy_lab.etf_factor_panel import (
     AdjustedOutcomePrice,
+    CandidateFactorObservation,
     PointInTimeFactorInput,
+    build_candidate_common_support_panels,
     build_common_support_panel,
 )
 
@@ -177,3 +180,159 @@ def test_panel_does_not_shift_t_plus_one_or_declared_exit_when_rows_are_missing(
     assert exit_missing.gross_returns[3] is None
     assert exit_missing.gross_returns[5] is not None
     assert exit_missing.pending_horizons == (3,)
+
+
+def _candidate_observation(
+    candidate_id: str,
+    *,
+    qualifies: bool,
+    score: float | None = None,
+    unavailable_reason: str | None = None,
+) -> CandidateFactorObservation:
+    if unavailable_reason is not None:
+        return CandidateFactorObservation(
+            candidate_id=candidate_id,
+            availability="unavailable",
+            qualifies=False,
+            score=None,
+            unavailable_reasons=(unavailable_reason,),
+        )
+    return CandidateFactorObservation(
+        candidate_id=candidate_id,
+        availability="available",
+        qualifies=qualifies,
+        score=score if qualifies else None,
+        gate_reasons=() if qualifies else ("observed_gate_failed",),
+    )
+
+
+def test_candidate_panels_do_not_intersect_mutually_exclusive_candidates() -> None:
+    rows: list[PointInTimeFactorInput] = []
+    outcomes: dict[str, list[AdjustedOutcomePrice]] = {}
+    for index in range(12):
+        code = f"51{index:04d}"
+        breakout = index < 10
+        repair = index >= 2
+        rows.append(
+            replace(
+                _input(code),
+                baseline_score=100 - index,
+                candidate_scores={
+                    "breakout": 100 - index if breakout else None,
+                    "repair": index if repair else None,
+                },
+                candidate_observations={
+                    "breakout": _candidate_observation(
+                        "breakout",
+                        qualifies=breakout,
+                        score=100 - index,
+                    ),
+                    "repair": _candidate_observation(
+                        "repair",
+                        qualifies=repair,
+                        score=index,
+                    ),
+                },
+            )
+        )
+        outcomes[code] = _outcomes(code)
+
+    joint = build_common_support_panel(
+        rows,
+        outcomes,
+        exchange_session_dates=_exchange_sessions(),
+        candidate_ids=("breakout", "repair"),
+        horizons=(1, 3, 5, 10),
+        cost_policy=_costs(),
+    )
+    panels = build_candidate_common_support_panels(
+        rows,
+        outcomes,
+        exchange_session_dates=_exchange_sessions(),
+        candidate_ids=("breakout", "repair"),
+        horizons=(1, 3, 5, 10),
+        cost_policy=_costs(),
+    )
+
+    assert len(joint.samples) == 8
+    assert len(panels["breakout"].candidate_samples) == 10
+    assert len(panels["repair"].candidate_samples) == 10
+    assert panels["breakout"].cohorts[0].complete is True
+    assert panels["repair"].cohorts[0].complete is True
+    assert len(panels["breakout"].baseline_samples) == 12
+    assert len(panels["repair"].baseline_samples) == 12
+
+
+def test_gate_failure_stays_in_baseline_and_sparse_candidate_is_not_padded() -> None:
+    rows: list[PointInTimeFactorInput] = []
+    outcomes: dict[str, list[AdjustedOutcomePrice]] = {}
+    for index in range(10):
+        code = f"52{index:04d}"
+        qualifies = index < 9
+        rows.append(
+            replace(
+                _input(code),
+                baseline_score=100 - index,
+                candidate_scores={"candidate": None},
+                candidate_observations={
+                    "candidate": _candidate_observation(
+                        "candidate",
+                        qualifies=qualifies,
+                        score=100 - index,
+                    )
+                },
+            )
+        )
+        outcomes[code] = _outcomes(code)
+
+    panel = build_candidate_common_support_panels(
+        rows,
+        outcomes,
+        exchange_session_dates=_exchange_sessions(),
+        candidate_ids=("candidate",),
+        horizons=(1, 3, 5, 10),
+        cost_policy=_costs(),
+    )["candidate"]
+
+    assert len(panel.baseline_samples) == 10
+    assert len(panel.candidate_samples) == 9
+    assert panel.cohorts[0].candidate_asset_codes == tuple(
+        f"52{index:04d}" for index in range(9)
+    )
+    assert panel.cohorts[0].complete is False
+    assert panel.cohorts[0].exclusion_reason == "insufficient_candidate_cohort"
+    assert panel.exclusions["2026-07-01:520009"] == ("observed_gate_failed",)
+
+
+def test_missing_candidate_fact_is_excluded_only_from_that_candidate() -> None:
+    row = replace(
+        _input(),
+        candidate_scores={"breakout": None, "repair": 1.0},
+        candidate_observations={
+            "breakout": _candidate_observation(
+                "breakout",
+                qualifies=False,
+                unavailable_reason="missing_historical_peer_mapping",
+            ),
+            "repair": _candidate_observation(
+                "repair",
+                qualifies=True,
+                score=1.0,
+            ),
+        },
+    )
+    panels = build_candidate_common_support_panels(
+        [row],
+        {row.asset_code: _outcomes()},
+        exchange_session_dates=_exchange_sessions(),
+        candidate_ids=("breakout", "repair"),
+        horizons=(1, 3, 5, 10),
+        cost_policy=_costs(),
+    )
+
+    assert panels["breakout"].exclusions["2026-07-01:510001"] == (
+        "missing_historical_peer_mapping",
+    )
+    assert len(panels["breakout"].baseline_samples) == 1
+    assert panels["breakout"].candidate_samples == ()
+    assert len(panels["repair"].candidate_samples) == 1

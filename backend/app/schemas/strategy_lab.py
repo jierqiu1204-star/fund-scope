@@ -165,6 +165,8 @@ class EtfFactorEvidenceOut(BaseModel):
     manifest_hash: str
     ranking_contract_hash: str
     code_version: str
+    experiment_family: str | None = None
+    hypothesis_registry_hash: str | None = None
     evidence_hash: str
     development: dict[str, Any]
     validation: dict[str, Any]
@@ -181,6 +183,8 @@ class EtfFactorEvidenceOut(BaseModel):
         "insufficient_data",
         "promotion_ineligible",
         "promotion_eligible",
+        "unconfirmed",
+        "rejected",
     ]
     report: dict[str, Any]
     research_only: Literal[True]

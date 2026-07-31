@@ -2898,12 +2898,27 @@ class EtfFactorExperimentEvidence(Base):
     __table_args__ = (
         UniqueConstraint("manifest_hash", name="uq_etf_factor_evidence_manifest"),
         UniqueConstraint("evidence_hash", name="uq_etf_factor_evidence_hash"),
+        SaIndex(
+            "ix_etf_factor_evidence_family_latest",
+            "experiment_family",
+            "created_at",
+        ),
+        SaIndex(
+            "ix_etf_factor_evidence_hypothesis_registry",
+            "hypothesis_registry_hash",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     manifest_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     ranking_contract_hash: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     code_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    experiment_family: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )
+    hypothesis_registry_hash: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )
     evidence_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     samples_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     aggregates_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -3232,4 +3247,3 @@ def _prevent_published_snapshot_mutation(session: Session, _flush_context: objec
         )
     if published_run_ids & item_run_ids:
         raise PublishedSnapshotImmutableError("published ranking snapshot items are immutable")
-

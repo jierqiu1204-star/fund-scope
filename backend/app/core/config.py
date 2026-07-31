@@ -75,6 +75,22 @@ class Settings(BaseSettings):
         default="./data/etf-pit-artifacts",
         alias="ETF_PIT_ARTIFACT_DIR",
     )
+    etf_leader_tactics_continuation_enabled: bool = Field(
+        default=False,
+        alias="ETF_LEADER_TACTICS_CONTINUATION_ENABLED",
+    )
+    etf_leader_tactics_evidence_api_enabled: bool = Field(
+        default=False,
+        alias="ETF_LEADER_TACTICS_EVIDENCE_API_ENABLED",
+    )
+    etf_leader_tactics_code_version: str = Field(
+        default="",
+        alias="ETF_LEADER_TACTICS_CODE_VERSION",
+    )
+    etf_leader_tactics_artifact_dir: str = Field(
+        default="./data/etf-leader-tactics-artifacts",
+        alias="ETF_LEADER_TACTICS_ARTIFACT_DIR",
+    )
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:3000"],
         alias="CORS_ORIGINS",

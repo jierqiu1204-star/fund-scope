@@ -58,6 +58,7 @@ class AdjustedOhlcvBar:
     adjusted_low: float
     adjusted_close: float
     volume: float
+    turnover: float | None = None
 
 
 @dataclass(frozen=True)

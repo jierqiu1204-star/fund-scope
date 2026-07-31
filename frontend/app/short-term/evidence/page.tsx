@@ -20,6 +20,7 @@ import type {
   EtfExitCredibility,
   EtfEvidenceOverview,
   EtfEvidenceSurface,
+  EtfLeaderTacticsEvidence,
   EtfExitHyperopt,
   EtfOptimizedAllocation,
   EtfPortfolioBacktestDetail,
@@ -33,7 +34,8 @@ import type {
 
 function errorText(error: unknown) {
   if (typeof error === "object" && error !== null && "response" in error) {
-    const response = (error as { response?: { data?: { detail?: string } } }).response;
+    const response = (error as { response?: { data?: { detail?: string } } })
+      .response;
     if (response?.data?.detail) {
       return response.data.detail;
     }
@@ -41,17 +43,26 @@ function errorText(error: unknown) {
   return error instanceof Error ? error.message : "操作失败";
 }
 
-function metricNumber(metrics: Record<string, unknown> | undefined, key: string) {
+function metricNumber(
+  metrics: Record<string, unknown> | undefined,
+  key: string
+) {
   const value = metrics?.[key];
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-function metricPercent(metrics: Record<string, unknown> | undefined, key: string) {
+function metricPercent(
+  metrics: Record<string, unknown> | undefined,
+  key: string
+) {
   const value = metricNumber(metrics, key);
   return value === null ? "暂无" : formatPercent(value * 100);
 }
 
-function metricInteger(metrics: Record<string, unknown> | undefined, key: string) {
+function metricInteger(
+  metrics: Record<string, unknown> | undefined,
+  key: string
+) {
   const value = metricNumber(metrics, key);
   return value === null ? "暂无" : String(Math.round(value));
 }
@@ -62,8 +73,19 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+function asRecordArray(value: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(value)
+    ? value.flatMap((item) => {
+        const record = asRecord(item);
+        return record ? [record] : [];
+      })
+    : [];
+}
+
 function formatNullableRate(value: number | null | undefined) {
-  return value === null || value === undefined ? "暂无" : formatPercent(value * 100);
+  return value === null || value === undefined
+    ? "暂无"
+    : formatPercent(value * 100);
 }
 
 function signalLabel(value: string) {
@@ -116,7 +138,9 @@ function policyGroupDescription(value: string | null | undefined) {
     portfolio_exit: "退出观察主要检验组合或标签退化后的降暴露效果。",
     research_only: "旧口径或候选证据，只能作为研究参考。"
   };
-  return descriptions[value ?? ""] ?? "候选证据仅供研究，不自动影响实时邮件规则。";
+  return (
+    descriptions[value ?? ""] ?? "候选证据仅供研究，不自动影响实时邮件规则。"
+  );
 }
 
 type KpiMetric = {
@@ -135,7 +159,9 @@ function kpiText(metric: KpiMetric) {
   if (typeof metric.value !== "number" || !Number.isFinite(metric.value)) {
     return "暂无";
   }
-  return metric.format === "percent" ? formatPercent(metric.value * 100) : String(metric.value);
+  return metric.format === "percent"
+    ? formatPercent(metric.value * 100)
+    : String(metric.value);
 }
 
 function groupedCredibilityItems(items: EtfExitCredibility["items"]) {
@@ -178,14 +204,21 @@ function backtestExecutionModel(data: EtfPortfolioBacktestDetail | undefined) {
 }
 
 function backtestExecutionLabel(data: EtfPortfolioBacktestDetail | undefined) {
-  return backtestExecutionModel(data) === "intraday_alert_v1" ? "盘中提醒执行回测" : "日线收盘模拟";
+  return backtestExecutionModel(data) === "intraday_alert_v1"
+    ? "盘中提醒执行回测"
+    : "日线收盘模拟";
 }
 
-function backtestEvidenceSampleText(status: string | undefined, sampleCount: number | null | undefined) {
+function backtestEvidenceSampleText(
+  status: string | undefined,
+  sampleCount: number | null | undefined
+) {
   if (status === "legacy_diagnostic") {
     return "旧口径诊断样本，不计入当前结论";
   }
-  return status === "available" && sampleCount !== null && sampleCount !== undefined
+  return status === "available" &&
+    sampleCount !== null &&
+    sampleCount !== undefined
     ? `独立样本 ${sampleCount}`
     : "尚未生成独立样本";
 }
@@ -199,7 +232,10 @@ function backtestFillFieldLabel(value: string | undefined) {
   return labels[value ?? ""] ?? value ?? "暂无";
 }
 
-function evidenceContractText(status: string | undefined, summary: Record<string, unknown> | undefined) {
+function evidenceContractText(
+  status: string | undefined,
+  summary: Record<string, unknown> | undefined
+) {
   if (!summary) {
     return "等待生成证据契约。";
   }
@@ -215,14 +251,18 @@ function evidenceContractText(status: string | undefined, summary: Record<string
 
 const CURRENT_EVIDENCE_STATUS = "同源已验证";
 
-function visibleHealthcheckItems(data: EtfStrategyHealthcheck | null | undefined) {
+function visibleHealthcheckItems(
+  data: EtfStrategyHealthcheck | null | undefined
+) {
   if (!data || data.evidence_status !== CURRENT_EVIDENCE_STATUS) {
     return [];
   }
   return data.items.filter((item) => item.sample_count > 0);
 }
 
-function healthcheckEvidenceIssue(data: EtfStrategyHealthcheck | null | undefined) {
+function healthcheckEvidenceIssue(
+  data: EtfStrategyHealthcheck | null | undefined
+) {
   if (!data) {
     return null;
   }
@@ -253,7 +293,9 @@ type LabelEvidenceRow = {
 };
 
 function formatEvidencePercent(value: number | null | undefined) {
-  return value === null || value === undefined ? "暂无" : formatPercent(value * 100);
+  return value === null || value === undefined
+    ? "暂无"
+    : formatPercent(value * 100);
 }
 
 function buildLabelEvidenceRows(summaries: EtfPortfolioBacktestLabelSummary[]) {
@@ -272,21 +314,32 @@ function buildLabelEvidenceRows(summaries: EtfPortfolioBacktestLabelSummary[]) {
       medianReturn: item.median_return,
       winRate: item.win_rate
     };
-    if (item.horizon_days === 5 && (!row.fiveDay || item.sample_count > row.fiveDay.sampleCount)) {
+    if (
+      item.horizon_days === 5 &&
+      (!row.fiveDay || item.sample_count > row.fiveDay.sampleCount)
+    ) {
       row.fiveDay = point;
     }
-    if (item.horizon_days === 10 && (!row.tenDay || item.sample_count > row.tenDay.sampleCount)) {
+    if (
+      item.horizon_days === 10 &&
+      (!row.tenDay || item.sample_count > row.tenDay.sampleCount)
+    ) {
       row.tenDay = point;
     }
     rows.set(key, row);
   }
   return Array.from(rows.values()).sort((left, right) => {
-    const rightSamples = right.tenDay?.sampleCount ?? right.fiveDay?.sampleCount ?? 0;
-    const leftSamples = left.tenDay?.sampleCount ?? left.fiveDay?.sampleCount ?? 0;
+    const rightSamples =
+      right.tenDay?.sampleCount ?? right.fiveDay?.sampleCount ?? 0;
+    const leftSamples =
+      left.tenDay?.sampleCount ?? left.fiveDay?.sampleCount ?? 0;
     if (rightSamples !== leftSamples) {
       return rightSamples - leftSamples;
     }
-    return `${left.label}${left.entryTimingLabel}`.localeCompare(`${right.label}${right.entryTimingLabel}`, "zh-CN");
+    return `${left.label}${left.entryTimingLabel}`.localeCompare(
+      `${right.label}${right.entryTimingLabel}`,
+      "zh-CN"
+    );
   });
 }
 
@@ -297,16 +350,38 @@ function labelEvidenceConclusion(row: LabelEvidenceRow) {
   }
   const median = tenDay.medianReturn;
   const winRate = tenDay.winRate;
-  if (row.entryTimingLabel === "跌破等待" && median !== null && median !== undefined && median > 0) {
+  if (
+    row.entryTimingLabel === "跌破等待" &&
+    median !== null &&
+    median !== undefined &&
+    median > 0
+  ) {
     return "历史反弹较多，风险也高";
   }
-  if (median !== null && median !== undefined && winRate !== null && winRate !== undefined && median > 0 && winRate >= 0.55) {
+  if (
+    median !== null &&
+    median !== undefined &&
+    winRate !== null &&
+    winRate !== undefined &&
+    median > 0 &&
+    winRate >= 0.55
+  ) {
     return "历史表现较好";
   }
-  if ((median !== null && median !== undefined && median > 0) || (winRate !== null && winRate !== undefined && winRate >= 0.5)) {
+  if (
+    (median !== null && median !== undefined && median > 0) ||
+    (winRate !== null && winRate !== undefined && winRate >= 0.5)
+  ) {
     return "勉强可看";
   }
-  if (median !== null && median !== undefined && winRate !== null && winRate !== undefined && median < 0 && winRate < 0.45) {
+  if (
+    median !== null &&
+    median !== undefined &&
+    winRate !== null &&
+    winRate !== undefined &&
+    median < 0 &&
+    winRate < 0.45
+  ) {
     return "不理想";
   }
   return "样本有限";
@@ -389,14 +464,17 @@ function EtfEvidenceSurfaceCard({
         <div>
           <p className="text-sm font-semibold text-ink">{title}</p>
           <p className="mt-1 text-xs text-ink/50">
-            {surface.ranking_source_kind ?? "非排名证据"} · {surface.policy_mode ?? "无 policy"}
+            {surface.ranking_source_kind ?? "非排名证据"} ·{" "}
+            {surface.policy_mode ?? "无 policy"}
           </p>
         </div>
         <span className="rounded-full bg-paper px-2.5 py-1 text-[11px] font-semibold text-ink/60">
           {evidenceAvailabilityLabel(surface)}
         </span>
       </div>
-      <p className="mt-3 text-lg font-semibold text-ink">{evidenceMetricText(surface)}</p>
+      <p className="mt-3 text-lg font-semibold text-ink">
+        {evidenceMetricText(surface)}
+      </p>
       <p className="mt-2 break-words text-xs leading-5 text-ink/55">
         {evidenceCoverageText(surface)}
       </p>
@@ -405,7 +483,9 @@ function EtfEvidenceSurfaceCard({
         <p>排除：{surface.exclusions.count}</p>
         <p>
           证据清单：
-          {surface.manifest_hash ? `${surface.manifest_hash.slice(0, 12)}…` : "暂无"}
+          {surface.manifest_hash
+            ? `${surface.manifest_hash.slice(0, 12)}…`
+            : "暂无"}
         </p>
         {surface.notification_provenance ? (
           <p>通知 provenance：{surface.notification_provenance}</p>
@@ -415,6 +495,339 @@ function EtfEvidenceSurfaceCard({
         ) : null}
       </div>
     </section>
+  );
+}
+
+function leaderStatusLabel(status: EtfLeaderTacticsEvidence["status"]) {
+  const labels: Record<EtfLeaderTacticsEvidence["status"], string> = {
+    insufficient_data: "证据不足",
+    unconfirmed: "未确认",
+    rejected: "已否决",
+    eligible_for_v4_proposal: "可提出 V4 变更"
+  };
+  return labels[status];
+}
+
+function leaderEvidenceValue(key: string, value: unknown): string {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return key.includes("ratio") ||
+      key.includes("coverage") ||
+      key.includes("return") ||
+      key.includes("excess")
+      ? formatPercent(value * 100)
+      : String(Math.round(value * 1000) / 1000);
+  }
+  if (typeof value === "boolean") {
+    return value ? "是" : "否";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.length ? value.slice(0, 5).map(String).join("、") : "暂无";
+  }
+  const record = asRecord(value);
+  if (record) {
+    const text = Object.entries(record)
+      .slice(0, 5)
+      .map(
+        ([nestedKey, nestedValue]) =>
+          `${nestedKey}=${leaderEvidenceValue(nestedKey, nestedValue)}`
+      )
+      .join(" · ");
+    return text || "暂无";
+  }
+  return "暂无";
+}
+
+function LeaderTacticsEvidencePanel({
+  evidence
+}: {
+  evidence: EtfLeaderTacticsEvidence;
+}) {
+  const articles = asRecordArray(evidence.hypothesis_registry.articles);
+  const statements = asRecordArray(evidence.hypothesis_registry.statements);
+  const candidates = asRecordArray(evidence.candidate_registry.candidates);
+  const diagnostics = [
+    [
+      "残差重叠",
+      evidence.diagnostics.residual_overlap ??
+        evidence.diagnostics.factor_overlap
+    ],
+    [
+      "集中度",
+      evidence.diagnostics.concentration ??
+        evidence.diagnostics.maximum_concentration
+    ],
+    [
+      "市场状态稳定性",
+      evidence.diagnostics.regime_stability ??
+        evidence.diagnostics.regime_slices
+    ]
+  ] as const;
+  const coverageRows = Object.entries(evidence.coverage).slice(0, 8);
+  const exclusionRows = Object.entries(evidence.exclusion_counts)
+    .filter(([, count]) => count > 0)
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 8);
+
+  return (
+    <Panel>
+      <section
+        data-evidence-family="leader-tactics-shadow"
+        data-research-only="true"
+      >
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <p className="text-sm font-semibold text-ink">
+              龙头战术透明代理（研究）
+            </p>
+            <p className="mt-1 max-w-4xl text-xs leading-5 text-ink/55">
+              这是面向 ETF
+              的可复现透明代理，不等于原作者专有信号，也不代表作者背书、正式榜单或收益保证。
+            </p>
+          </div>
+          <span className="w-fit rounded-full bg-paper px-2.5 py-1 text-xs font-semibold text-ink/60">
+            {leaderStatusLabel(evidence.status)}
+          </span>
+        </div>
+
+        <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <EvidenceStat label="排名来源" value={evidence.ranking_source_kind} />
+          <EvidenceStat label="Policy" value={evidence.policy_mode} />
+          <EvidenceStat
+            label="通知 provenance"
+            value={evidence.notification_provenance}
+          />
+          <EvidenceStat
+            label="执行 provenance"
+            value={evidence.execution_provenance}
+          />
+        </div>
+        <p className="mt-3 rounded-[8px] border border-border bg-paper px-3 py-2 text-xs leading-5 text-ink/60">
+          数据截止：{formatDateTime(evidence.data_cutoff)} · manifest：
+          {evidence.manifest_hash
+            ? `${evidence.manifest_hash.slice(0, 12)}…`
+            : "暂无"}
+          。真实邮件、服务商送达和用户确认成交均不会由研究回放推断。
+        </p>
+
+        {evidence.unavailable_reason ? (
+          <p className="mt-3 rounded-[8px] border border-dashed border-border bg-white px-3 py-3 text-sm text-ink/60">
+            当前不可用原因：{evidence.unavailable_reason}
+          </p>
+        ) : null}
+
+        <div className="mt-5 grid gap-4 xl:grid-cols-2">
+          <div className="rounded-[10px] border border-border bg-white p-4">
+            <p className="text-sm font-semibold text-ink">来源与非等价说明</p>
+            <div className="mt-3 space-y-2 text-xs leading-5 text-ink/60">
+              {articles.length ? (
+                articles.map((article) => (
+                  <p key={String(article.article_id ?? article.source_url)}>
+                    <a
+                      className="font-semibold text-accent underline decoration-accent/30 underline-offset-2"
+                      href={String(article.source_url ?? "#")}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      {String(
+                        article.title ?? article.article_id ?? "来源文章"
+                      )}
+                    </a>
+                    {article.captured_content_hash
+                      ? ` · 内容哈希 ${String(article.captured_content_hash).slice(0, 10)}…`
+                      : ""}
+                  </p>
+                ))
+              ) : (
+                <p>来源 registry 尚未可用。</p>
+              )}
+              {statements.slice(0, 6).map((statement) => (
+                <div
+                  key={String(statement.statement_id)}
+                  className="rounded-[8px] bg-paper px-3 py-2"
+                >
+                  <p className="font-semibold text-ink/70">
+                    {String(statement.statement_id)} ·{" "}
+                    {String(statement.disclosure_state ?? "未知披露状态")}
+                  </p>
+                  <p>
+                    {String(statement.interpretation ?? "暂无 ETF 代理解释")}
+                  </p>
+                  <p className="text-ink/45">
+                    限制：{String(statement.limitation ?? "未声明")}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="rounded-[10px] border border-border bg-white p-4">
+            <p className="text-sm font-semibold text-ink">冻结代理公式</p>
+            <div className="mt-3 space-y-2">
+              {candidates.map((candidate) => (
+                <div
+                  key={String(candidate.candidate_id)}
+                  className="rounded-[8px] bg-paper px-3 py-2 text-xs leading-5 text-ink/60"
+                >
+                  <p className="font-semibold text-ink/75">
+                    {String(candidate.candidate_id)}
+                  </p>
+                  <p className="mt-1 break-words font-mono text-[11px]">
+                    {String(candidate.formula ?? "公式不可用")}
+                  </p>
+                  <p className="mt-1 text-ink/45">
+                    预热 {String(candidate.required_history_sessions ?? "?")} 日
+                    · 缺失规则{" "}
+                    {String(candidate.missing_value_rule ?? "fail_closed")}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-4 xl:grid-cols-2">
+          <div className="rounded-[10px] border border-border bg-white p-4">
+            <p className="text-sm font-semibold text-ink">
+              主指标：Top10 / 5 日配对净超额
+            </p>
+            <p className="mt-1 text-xs text-ink/50">
+              唯一晋升主指标；已扣声明的双边费用与滑点。
+            </p>
+            <div className="mt-3 space-y-2">
+              {evidence.primary_metrics.length ? (
+                evidence.primary_metrics.map((metric, index) => (
+                  <div
+                    key={`${String(metric.candidate_id)}-${index}`}
+                    className="rounded-[8px] bg-paper px-3 py-2 text-xs text-ink/60"
+                  >
+                    <p className="font-semibold text-ink/75">
+                      {String(metric.candidate_id ?? "候选")}
+                    </p>
+                    <p className="mt-1">
+                      净超额：
+                      {leaderEvidenceValue(
+                        "mean_paired_net_excess",
+                        metric.mean_paired_net_excess
+                      )}{" "}
+                      · 独立样本 {String(metric.independent_date_count ?? 0)}
+                    </p>
+                    <p className="mt-1 text-ink/45">
+                      不确定性：
+                      {leaderEvidenceValue("inference", metric.inference)}
+                    </p>
+                  </div>
+                ))
+              ) : (
+                <p className="rounded-[8px] bg-paper px-3 py-3 text-xs text-ink/50">
+                  尚无完整主指标，不展示历史赢家。
+                </p>
+              )}
+            </div>
+          </div>
+
+          <div className="rounded-[10px] border border-border bg-white p-4">
+            <p className="text-sm font-semibold text-ink">
+              辅助诊断（不得替代主指标）
+            </p>
+            <p className="mt-1 text-xs text-ink/50">
+              Top5/20、1/3/10 日与 MA5 生命周期均为 exploratory。
+            </p>
+            <div className="mt-3 grid gap-2 sm:grid-cols-2">
+              <EvidenceStat
+                label="探索性结果"
+                value={`${evidence.exploratory_metrics.length} 项`}
+              />
+              <EvidenceStat
+                label="MA5 policy shadow"
+                value={`${evidence.ma5_policy_shadow.length} 项`}
+              />
+              <EvidenceStat
+                label="费用/滑点"
+                value={leaderEvidenceValue("costs", evidence.costs)}
+              />
+              <EvidenceStat
+                label="Holdout"
+                value={leaderEvidenceValue("holdout", evidence.holdout)}
+              />
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-4 lg:grid-cols-3">
+          <div className="rounded-[10px] border border-border bg-white p-4">
+            <p className="text-sm font-semibold text-ink">覆盖</p>
+            <div className="mt-2 space-y-1 text-xs text-ink/55">
+              {coverageRows.length ? (
+                coverageRows.map(([key, value]) => (
+                  <p key={key}>
+                    {key}：{leaderEvidenceValue(key, value)}
+                  </p>
+                ))
+              ) : (
+                <p>尚无 PIT 覆盖。</p>
+              )}
+            </div>
+          </div>
+          <div className="rounded-[10px] border border-border bg-white p-4">
+            <p className="text-sm font-semibold text-ink">排除项</p>
+            <div className="mt-2 space-y-1 text-xs text-ink/55">
+              {exclusionRows.length ? (
+                exclusionRows.map(([key, count]) => (
+                  <p key={key}>
+                    {key}：{count}
+                  </p>
+                ))
+              ) : (
+                <p>未记录排除项。</p>
+              )}
+            </div>
+          </div>
+          <div className="rounded-[10px] border border-border bg-white p-4">
+            <p className="text-sm font-semibold text-ink">增量与稳定性</p>
+            <div className="mt-2 space-y-2 text-xs text-ink/55">
+              {diagnostics.map(([label, value]) => (
+                <p key={label}>
+                  <span className="font-semibold text-ink/70">{label}：</span>
+                  {leaderEvidenceValue(label, value)}
+                </p>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {evidence.candidate_decisions.length ? (
+          <div className="mt-4 rounded-[10px] border border-border bg-white p-4">
+            <p className="text-sm font-semibold text-ink">候选门槛结论</p>
+            <div className="mt-2 grid gap-2 md:grid-cols-3">
+              {evidence.candidate_decisions.map((decision) => (
+                <div
+                  key={String(decision.candidate_id)}
+                  className="rounded-[8px] bg-paper px-3 py-2 text-xs text-ink/60"
+                >
+                  <p className="font-semibold text-ink/75">
+                    {String(decision.candidate_id)}
+                  </p>
+                  <p className="mt-1">状态：{String(decision.status)}</p>
+                  <p className="mt-1 text-ink/45">
+                    失败门槛：
+                    {leaderEvidenceValue("failed_gates", decision.failed_gates)}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        <div className="mt-4 rounded-[8px] border border-dashed border-border bg-paper px-3 py-3 text-xs leading-5 text-ink/55">
+          {evidence.limitations.length
+            ? evidence.limitations.join("；")
+            : "仅供研究，正式排名和邮件行为保持不变。"}
+        </div>
+      </section>
+    </Panel>
   );
 }
 
@@ -447,24 +860,41 @@ export default function EtfEvidencePage() {
 
   const backtests = useQuery({
     queryKey: ["short-research", "etf-backtests"],
-    queryFn: async () => (await api.get<EtfPortfolioBacktestList>("/api/short-research/etf-backtests?limit=1")).data
+    queryFn: async () =>
+      (
+        await api.get<EtfPortfolioBacktestList>(
+          "/api/short-research/etf-backtests?limit=1"
+        )
+      ).data
   });
   const latestBacktestId = backtests.data?.items[0]?.id ?? null;
   const backtestDetail = useQuery({
     queryKey: ["short-research", "etf-backtests", latestBacktestId],
     enabled: latestBacktestId !== null,
     queryFn: async () =>
-      (await api.get<EtfPortfolioBacktestDetail>(`/api/short-research/etf-backtests/${latestBacktestId}`)).data
+      (
+        await api.get<EtfPortfolioBacktestDetail>(
+          `/api/short-research/etf-backtests/${latestBacktestId}`
+        )
+      ).data
   });
   const strategyComparison = useQuery({
     queryKey: ["short-research", "etf-strategy-comparison", "latest"],
     queryFn: async () =>
-      (await api.get<EtfStrategyComparison | null>("/api/short-research/etf-strategy-comparisons/latest")).data
+      (
+        await api.get<EtfStrategyComparison | null>(
+          "/api/short-research/etf-strategy-comparisons/latest"
+        )
+      ).data
   });
   const strategyHealthcheck = useQuery({
     queryKey: ["short-research", "etf-strategy-healthcheck", "latest"],
     queryFn: async () =>
-      (await api.get<EtfStrategyHealthcheck | null>("/api/short-research/etf-strategy-healthcheck/latest")).data
+      (
+        await api.get<EtfStrategyHealthcheck | null>(
+          "/api/short-research/etf-strategy-healthcheck/latest"
+        )
+      ).data
   });
   const observationPortfolio = useQuery({
     queryKey: ["short-research", "observation-portfolio", "default"],
@@ -478,12 +908,20 @@ export default function EtfEvidencePage() {
   const optimizedAllocation = useQuery({
     queryKey: ["short-research", "etf-optimized-allocation", "latest"],
     queryFn: async () =>
-      (await api.get<EtfOptimizedAllocation | null>("/api/short-research/etf-optimized-allocation/latest")).data
+      (
+        await api.get<EtfOptimizedAllocation | null>(
+          "/api/short-research/etf-optimized-allocation/latest"
+        )
+      ).data
   });
   const exitHyperopt = useQuery({
     queryKey: ["short-research", "etf-exit-hyperopt", "latest"],
     queryFn: async () =>
-      (await api.get<EtfExitHyperopt | null>("/api/short-research/etf-exit-hyperopt/latest")).data
+      (
+        await api.get<EtfExitHyperopt | null>(
+          "/api/short-research/etf-exit-hyperopt/latest"
+        )
+      ).data
   });
   const exitCredibility = useQuery({
     queryKey: ["short-research", "etf-exit-credibility", "latest"],
@@ -503,59 +941,93 @@ export default function EtfEvidencePage() {
         )
       ).data
   });
+  const leaderTacticsEvidence = useQuery({
+    queryKey: ["short-research", "evidence", "etf", "leader-tactics", "latest"],
+    queryFn: async () =>
+      (
+        await api.get<EtfLeaderTacticsEvidence>(
+          "/api/short-research/evidence/etf/leader-tactics/latest"
+        )
+      ).data
+  });
 
   const runBacktest = useMutation({
     mutationFn: async (executionModel: "daily_close" | "intraday_alert") =>
       (
-        await api.post<EtfPortfolioBacktestDetail>("/api/short-research/etf-backtests", {
-          days: 730,
-          fee_rate: 0.001,
-          max_assets: 500,
-          execution_model: executionModel
-        })
+        await api.post<EtfPortfolioBacktestDetail>(
+          "/api/short-research/etf-backtests",
+          {
+            days: 730,
+            fee_rate: 0.001,
+            max_assets: 500,
+            execution_model: executionModel
+          }
+        )
       ).data,
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["short-research", "etf-backtests"] });
+      await queryClient.invalidateQueries({
+        queryKey: ["short-research", "etf-backtests"]
+      });
     }
   });
   const runComparison = useMutation({
     mutationFn: async () =>
       (
-        await api.post<EtfStrategyComparison>("/api/short-research/etf-strategy-comparisons", {
-          days: 730,
-          fee_rate: 0.001,
-          max_assets: 500
-        })
+        await api.post<EtfStrategyComparison>(
+          "/api/short-research/etf-strategy-comparisons",
+          {
+            days: 730,
+            fee_rate: 0.001,
+            max_assets: 500
+          }
+        )
       ).data,
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["short-research", "etf-strategy-comparison"] });
+      await queryClient.invalidateQueries({
+        queryKey: ["short-research", "etf-strategy-comparison"]
+      });
     }
   });
   const runHealthcheck = useMutation({
     mutationFn: async () =>
-      (await api.post<EtfStrategyHealthcheck>("/api/short-research/etf-strategy-healthcheck/run")).data,
+      (
+        await api.post<EtfStrategyHealthcheck>(
+          "/api/short-research/etf-strategy-healthcheck/run"
+        )
+      ).data,
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["short-research", "etf-strategy-healthcheck"] });
+      await queryClient.invalidateQueries({
+        queryKey: ["short-research", "etf-strategy-healthcheck"]
+      });
     }
   });
   const runOptimizedAllocation = useMutation({
     mutationFn: async () =>
-      (await api.post<EtfOptimizedAllocation>("/api/short-research/etf-optimized-allocation/run")).data,
+      (
+        await api.post<EtfOptimizedAllocation>(
+          "/api/short-research/etf-optimized-allocation/run"
+        )
+      ).data,
     onSuccess: async () => {
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["short-research", "etf-optimized-allocation"] }),
-        queryClient.invalidateQueries({ queryKey: ["short-research", "observation-portfolio"] })
+        queryClient.invalidateQueries({
+          queryKey: ["short-research", "etf-optimized-allocation"]
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["short-research", "observation-portfolio"]
+        })
       ]);
     }
   });
   const runExitHyperopt = useMutation({
     mutationFn: async () =>
-      (
-        await api.post<JobRun>("/api/admin/jobs/etf_exit_hyperopt/run?days=730")
-      ).data,
+      (await api.post<JobRun>("/api/admin/jobs/etf_exit_hyperopt/run?days=730"))
+        .data,
     onSuccess: async () => {
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["short-research", "etf-exit-hyperopt"] }),
+        queryClient.invalidateQueries({
+          queryKey: ["short-research", "etf-exit-hyperopt"]
+        }),
         queryClient.invalidateQueries({ queryKey: ["admin", "jobs"] })
       ]);
     }
@@ -569,28 +1041,45 @@ export default function EtfEvidencePage() {
       ).data,
     onSuccess: async () => {
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["short-research", "etf-exit-credibility"] }),
+        queryClient.invalidateQueries({
+          queryKey: ["short-research", "etf-exit-credibility"]
+        }),
         queryClient.invalidateQueries({ queryKey: ["admin", "jobs"] })
       ]);
     }
   });
 
   const detail = backtestDetail.data;
-  const isIntradayBacktest = backtestExecutionModel(detail) === "intraday_alert_v1";
+  const isIntradayBacktest =
+    backtestExecutionModel(detail) === "intraday_alert_v1";
   const coverageEvidence = detail?.coverage_evidence;
   const timeLimitations = detail?.time_resolution_limitations;
-  const optimized = observationPortfolio.data?.optimized_allocation ?? optimizedAllocation.data ?? null;
-  const labelEvidenceRows = useMemo(() => buildLabelEvidenceRows(detail?.label_summaries ?? []), [detail?.label_summaries]);
-  const exitV2Rows = useMemo(() => exitV2BaselineRows(strategyComparison.data), [strategyComparison.data]);
-  const exitV2Comparison = asRecord(strategyComparison.data?.exit_v2_baseline_comparison);
-  const exitV2Conclusion = metadataString(exitV2Comparison ?? {}, "conclusion") ?? "等待 V2 对照";
+  const optimized =
+    observationPortfolio.data?.optimized_allocation ??
+    optimizedAllocation.data ??
+    null;
+  const labelEvidenceRows = useMemo(
+    () => buildLabelEvidenceRows(detail?.label_summaries ?? []),
+    [detail?.label_summaries]
+  );
+  const exitV2Rows = useMemo(
+    () => exitV2BaselineRows(strategyComparison.data),
+    [strategyComparison.data]
+  );
+  const exitV2Comparison = asRecord(
+    strategyComparison.data?.exit_v2_baseline_comparison
+  );
+  const exitV2Conclusion =
+    metadataString(exitV2Comparison ?? {}, "conclusion") ?? "等待 V2 对照";
   const healthcheckIssue = healthcheckEvidenceIssue(strategyHealthcheck.data);
   const healthcheckItems = visibleHealthcheckItems(strategyHealthcheck.data);
   const exitCredibilityGroups = useMemo(
     () => groupedCredibilityItems(exitCredibility.data?.items ?? []),
     [exitCredibility.data?.items]
   );
-  const hyperoptCoverageRaw = exitHyperopt.data?.summary.coverage ?? exitHyperopt.data?.summary.coverage_funnel;
+  const hyperoptCoverageRaw =
+    exitHyperopt.data?.summary.coverage ??
+    exitHyperopt.data?.summary.coverage_funnel;
   const hyperoptCoverage =
     typeof hyperoptCoverageRaw === "object" && hyperoptCoverageRaw !== null
       ? (hyperoptCoverageRaw as Record<string, unknown>)
@@ -601,8 +1090,12 @@ export default function EtfEvidencePage() {
       <Panel>
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">策略证据</p>
-            <h2 className="mt-1 text-2xl font-semibold tracking-[-0.02em] text-ink">ETF 工作台策略证据</h2>
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">
+              策略证据
+            </p>
+            <h2 className="mt-1 text-2xl font-semibold tracking-[-0.02em] text-ink">
+              ETF 工作台策略证据
+            </h2>
             <p className="mt-2 text-sm leading-6 text-ink/60">
               集中查看回测、标签事后表现、策略对照、体检和组合优化证据。
             </p>
@@ -652,9 +1145,19 @@ export default function EtfEvidencePage() {
             </button>
           </div>
         </div>
-        {[runBacktest, runComparison, runHealthcheck, runOptimizedAllocation, runExitHyperopt, runExitCredibility].map((mutation, index) =>
+        {[
+          runBacktest,
+          runComparison,
+          runHealthcheck,
+          runOptimizedAllocation,
+          runExitHyperopt,
+          runExitCredibility
+        ].map((mutation, index) =>
           mutation.isError ? (
-            <p key={index} className="mt-3 rounded-[8px] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+            <p
+              key={index}
+              className="mt-3 rounded-[8px] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700"
+            >
               {errorText(mutation.error)}
             </p>
           ) : null
@@ -666,7 +1169,8 @@ export default function EtfEvidencePage() {
           <div>
             <p className="text-sm font-semibold text-ink">PIT 证据闭环</p>
             <p className="mt-1 text-xs leading-5 text-ink/55">
-              正式策略、研究回放、policy shadow、SMTP、服务商送达和真实成交严格分层；模拟结果不会升级为生产业绩。
+              正式策略、研究回放、policy
+              shadow、SMTP、服务商送达和真实成交严格分层；模拟结果不会升级为生产业绩。
             </p>
           </div>
           <span className="w-fit rounded-full bg-paper px-2.5 py-1 text-xs text-ink/60">
@@ -694,6 +1198,26 @@ export default function EtfEvidencePage() {
         )}
       </Panel>
 
+      {leaderTacticsEvidence.data ? (
+        <LeaderTacticsEvidencePanel evidence={leaderTacticsEvidence.data} />
+      ) : (
+        <Panel>
+          <section
+            data-evidence-family="leader-tactics-shadow"
+            data-research-only="true"
+          >
+            <p className="text-sm font-semibold text-ink">
+              龙头战术透明代理（研究）
+            </p>
+            <p className="mt-3 rounded-[8px] border border-dashed border-border bg-paper px-3 py-4 text-sm text-ink/55">
+              {leaderTacticsEvidence.isLoading
+                ? "正在读取独立研究证据。"
+                : "龙头代理证据接口不可用；不会回退到当前榜单、原始价或模拟实盘结果。"}
+            </p>
+          </section>
+        </Panel>
+      )}
+
       <Panel>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
@@ -713,10 +1237,31 @@ export default function EtfEvidencePage() {
         {exitCredibility.data ? (
           <>
             <div className="mt-4 grid gap-3 md:grid-cols-4">
-              <EvidenceStat label="覆盖 ETF" value={metricInteger(exitCredibility.data.summary, "asset_count")} />
-              <EvidenceStat label="理论事件" value={metricInteger(exitCredibility.data.summary, "event_count")} />
-              <EvidenceStat label="已验证信号" value={metricInteger(exitCredibility.data.summary, "verified_signal_count")} />
-              <EvidenceStat label="数据截止" value={formatDateTime(exitCredibility.data.data_cutoff)} />
+              <EvidenceStat
+                label="覆盖 ETF"
+                value={metricInteger(
+                  exitCredibility.data.summary,
+                  "asset_count"
+                )}
+              />
+              <EvidenceStat
+                label="理论事件"
+                value={metricInteger(
+                  exitCredibility.data.summary,
+                  "event_count"
+                )}
+              />
+              <EvidenceStat
+                label="已验证信号"
+                value={metricInteger(
+                  exitCredibility.data.summary,
+                  "verified_signal_count"
+                )}
+              />
+              <EvidenceStat
+                label="数据截止"
+                value={formatDateTime(exitCredibility.data.data_cutoff)}
+              />
             </div>
             {exitCredibility.data.insufficiency_reasons.length ? (
               <div className="mt-4 rounded-[8px] border border-dashed border-border bg-paper px-3 py-3 text-sm text-ink/60">
@@ -725,11 +1270,18 @@ export default function EtfEvidencePage() {
             ) : null}
             <div className="mt-4 space-y-4">
               {exitCredibilityGroups.map((group) => (
-                <div key={group.policyClass} className="rounded-[8px] border border-border bg-paper/40 p-3">
+                <div
+                  key={group.policyClass}
+                  className="rounded-[8px] border border-border bg-paper/40 p-3"
+                >
                   <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
                     <div>
-                      <p className="text-sm font-semibold text-ink">{group.label}</p>
-                      <p className="mt-1 text-xs text-ink/55">{policyGroupDescription(group.policyClass)}</p>
+                      <p className="text-sm font-semibold text-ink">
+                        {group.label}
+                      </p>
+                      <p className="mt-1 text-xs text-ink/55">
+                        {policyGroupDescription(group.policyClass)}
+                      </p>
                     </div>
                     <span className="w-fit rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-ink/55">
                       {group.items.length} 类信号
@@ -737,22 +1289,30 @@ export default function EtfEvidencePage() {
                   </div>
                   <div className="mt-3 grid gap-3 lg:grid-cols-2">
                     {group.items.map((item) => (
-                      <div key={item.id} className="rounded-[8px] border border-border bg-white p-3">
+                      <div
+                        key={item.id}
+                        className="rounded-[8px] border border-border bg-white p-3"
+                      >
                         <div className="flex items-start justify-between gap-3">
                           <div>
-                            <p className="text-sm font-semibold text-ink">{signalLabel(item.signal_type)}</p>
+                            <p className="text-sm font-semibold text-ink">
+                              {signalLabel(item.signal_type)}
+                            </p>
                             <p className="mt-1 text-xs text-ink/55">
-                              {item.evidence_level} · 样本 {item.sample_count} · {policyStatusLabel(item.evidence_status)}
+                              {item.evidence_level} · 样本 {item.sample_count} ·{" "}
+                              {policyStatusLabel(item.evidence_status)}
                             </p>
                           </div>
                           <span className="rounded-full bg-paper px-2.5 py-1 text-[11px] font-semibold text-ink/60">
-                            {item.strong_conclusion_allowed ? "可参考" : "弱证据"}
+                            {item.strong_conclusion_allowed
+                              ? "可参考"
+                              : "弱证据"}
                           </span>
                         </div>
                         <p className="mt-2 text-xs text-ink/55">
                           {typeof item.kpi_summary?.focus === "string"
                             ? item.kpi_summary.focus
-                            : item.recommended_usage ?? "仅供研究参考。"}
+                            : (item.recommended_usage ?? "仅供研究参考。")}
                         </p>
                         <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-ink/60">
                           {kpiMetrics(item.kpi_summary).map((metric) => (
@@ -765,7 +1325,9 @@ export default function EtfEvidencePage() {
                           <div className="mt-3 space-y-1 border-t border-border pt-3 text-xs text-ink/50">
                             {item.events.slice(0, 2).map((event) => (
                               <p key={event.id}>
-                                {event.etf_name ?? event.etf_code} · {formatDate(event.signal_date)} · {event.outcome}
+                                {event.etf_name ?? event.etf_code} ·{" "}
+                                {formatDate(event.signal_date)} ·{" "}
+                                {event.outcome}
                               </p>
                             ))}
                           </div>
@@ -789,24 +1351,33 @@ export default function EtfEvidencePage() {
           <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <p className="text-sm font-semibold text-ink">回测证据</p>
-              <p className="mt-1 text-xs text-ink/55">{backtestExecutionLabel(detail)}</p>
+              <p className="mt-1 text-xs text-ink/55">
+                {backtestExecutionLabel(detail)}
+              </p>
             </div>
             <div className="flex flex-wrap gap-2 text-xs text-ink/55">
               <span className="rounded-full bg-paper px-2.5 py-1">
                 {detail?.evidence_status ?? "等待验证"}
               </span>
               <span className="rounded-full bg-paper px-2.5 py-1">
-                {detail ? `${formatDate(detail.start_date)} - ${formatDate(detail.end_date)}` : "暂无区间"}
+                {detail
+                  ? `${formatDate(detail.start_date)} - ${formatDate(detail.end_date)}`
+                  : "暂无区间"}
               </span>
             </div>
           </div>
           <p className="mt-3 rounded-[8px] border border-border bg-paper px-3 py-2 text-xs leading-5 text-ink/60">
-            {evidenceContractText(detail?.evidence_status, detail?.evidence_summary)}
+            {evidenceContractText(
+              detail?.evidence_status,
+              detail?.evidence_summary
+            )}
           </p>
           <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
             <EvidenceDimension
               label="动作"
-              value={detail?.action_evidence.scenario_label ?? "动作建议完全执行情景"}
+              value={
+                detail?.action_evidence.scenario_label ?? "动作建议完全执行情景"
+              }
               detail={backtestEvidenceSampleText(
                 detail?.action_evidence.status,
                 detail?.action_evidence.sample_count
@@ -814,7 +1385,10 @@ export default function EtfEvidencePage() {
             />
             <EvidenceDimension
               label="通知"
-              value={detail?.notification_evidence.scenario_label ?? "仅 SMTP 已接受邮件被执行敏感性"}
+              value={
+                detail?.notification_evidence.scenario_label ??
+                "仅 SMTP 已接受邮件被执行敏感性"
+              }
               detail={`${backtestEvidenceSampleText(
                 detail?.notification_evidence.status,
                 detail?.notification_evidence.sample_count
@@ -823,7 +1397,9 @@ export default function EtfEvidencePage() {
             <EvidenceDimension
               label="执行模型"
               value={detail?.execution_evidence.label ?? "等待回测"}
-              detail={backtestFillFieldLabel(detail?.execution_evidence.base_fill_field)}
+              detail={backtestFillFieldLabel(
+                detail?.execution_evidence.base_fill_field
+              )}
             />
             <EvidenceDimension
               label="数据覆盖"
@@ -856,10 +1432,22 @@ export default function EtfEvidencePage() {
             />
           </div>
           <div className="mt-4 grid gap-3 md:grid-cols-4">
-            <EvidenceStat label="历史收益" value={metricPercent(detail?.metrics, "cumulative_return")} />
-            <EvidenceStat label="最大回撤" value={metricPercent(detail?.metrics, "max_drawdown")} />
-            <EvidenceStat label="胜率" value={metricPercent(detail?.metrics, "win_rate")} />
-            <EvidenceStat label="交易次数" value={metricInteger(detail?.metrics, "trade_count")} />
+            <EvidenceStat
+              label="历史收益"
+              value={metricPercent(detail?.metrics, "cumulative_return")}
+            />
+            <EvidenceStat
+              label="最大回撤"
+              value={metricPercent(detail?.metrics, "max_drawdown")}
+            />
+            <EvidenceStat
+              label="胜率"
+              value={metricPercent(detail?.metrics, "win_rate")}
+            />
+            <EvidenceStat
+              label="交易次数"
+              value={metricInteger(detail?.metrics, "trade_count")}
+            />
           </div>
           <div className="mt-5 h-72 rounded-[10px] border border-border bg-white p-3">
             {detail?.equity_curve.length ? (
@@ -872,15 +1460,38 @@ export default function EtfEvidencePage() {
                   }))}
                 >
                   <CartesianGrid stroke="#e6e6e6" vertical={false} />
-                  <XAxis dataKey="label" tickLine={false} axisLine={false} minTickGap={28} />
+                  <XAxis
+                    dataKey="label"
+                    tickLine={false}
+                    axisLine={false}
+                    minTickGap={28}
+                  />
                   <YAxis tickLine={false} axisLine={false} width={64} />
-                  <Tooltip formatter={(value) => formatCurrency(Number(value))} />
-                  <Line type="monotone" dataKey="equity" name="策略权益" stroke="#111" dot={false} strokeWidth={2} />
-                  <Line type="monotone" dataKey="benchmark" name="宽基对照" stroke="#777" dot={false} strokeWidth={2} />
+                  <Tooltip
+                    formatter={(value) => formatCurrency(Number(value))}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="equity"
+                    name="策略权益"
+                    stroke="#111"
+                    dot={false}
+                    strokeWidth={2}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="benchmark"
+                    name="宽基对照"
+                    stroke="#777"
+                    dot={false}
+                    strokeWidth={2}
+                  />
                 </LineChart>
               </ResponsiveContainer>
             ) : (
-              <div className="flex h-full items-center justify-center text-sm text-ink/45">暂无回测曲线。</div>
+              <div className="flex h-full items-center justify-center text-sm text-ink/45">
+                暂无回测曲线。
+              </div>
             )}
           </div>
         </Panel>
@@ -889,9 +1500,14 @@ export default function EtfEvidencePage() {
           <div className="flex items-start justify-between gap-3">
             <div>
               <p className="text-sm font-semibold text-ink">标签组合有效性</p>
-              <p className="mt-1 text-xs text-ink/55">按买入观察和今日买点分组，展示历史前瞻表现。</p>
+              <p className="mt-1 text-xs text-ink/55">
+                按买入观察和今日买点分组，展示历史前瞻表现。
+              </p>
             </div>
-            <Link href="/short-term" className="rounded-[6px] border border-border px-3 py-2 text-xs font-semibold text-ink/70">
+            <Link
+              href="/short-term"
+              className="rounded-[6px] border border-border px-3 py-2 text-xs font-semibold text-ink/70"
+            >
               回到短线研究
             </Link>
           </div>
@@ -911,18 +1527,32 @@ export default function EtfEvidencePage() {
                 </thead>
                 <tbody>
                   {labelEvidenceRows.map((row) => (
-                    <tr key={`${row.label}-${row.entryTimingLabel}`} className="border-t border-border align-top">
+                    <tr
+                      key={`${row.label}-${row.entryTimingLabel}`}
+                      className="border-t border-border align-top"
+                    >
                       <td className="px-3 py-2 font-semibold text-ink">
                         {row.label} + {row.entryTimingLabel}
                       </td>
-                      <td className="px-3 py-2 text-ink/65">{formatEvidencePercent(row.fiveDay?.medianReturn)}</td>
-                      <td className="px-3 py-2 text-ink/65">{formatEvidencePercent(row.fiveDay?.winRate)}</td>
-                      <td className="px-3 py-2 text-ink/65">{formatEvidencePercent(row.tenDay?.medianReturn)}</td>
-                      <td className="px-3 py-2 text-ink/65">{formatEvidencePercent(row.tenDay?.winRate)}</td>
                       <td className="px-3 py-2 text-ink/65">
-                        5日 {row.fiveDay?.sampleCount ?? 0} / 10日 {row.tenDay?.sampleCount ?? 0}
+                        {formatEvidencePercent(row.fiveDay?.medianReturn)}
                       </td>
-                      <td className="px-3 py-2 text-ink/75">{labelEvidenceConclusion(row)}</td>
+                      <td className="px-3 py-2 text-ink/65">
+                        {formatEvidencePercent(row.fiveDay?.winRate)}
+                      </td>
+                      <td className="px-3 py-2 text-ink/65">
+                        {formatEvidencePercent(row.tenDay?.medianReturn)}
+                      </td>
+                      <td className="px-3 py-2 text-ink/65">
+                        {formatEvidencePercent(row.tenDay?.winRate)}
+                      </td>
+                      <td className="px-3 py-2 text-ink/65">
+                        5日 {row.fiveDay?.sampleCount ?? 0} / 10日{" "}
+                        {row.tenDay?.sampleCount ?? 0}
+                      </td>
+                      <td className="px-3 py-2 text-ink/75">
+                        {labelEvidenceConclusion(row)}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -930,7 +1560,7 @@ export default function EtfEvidencePage() {
             </div>
           ) : (
             <p className="mt-4 rounded-[8px] border border-dashed border-border bg-paper px-3 py-4 text-sm text-ink/55">
-                暂无标签样本。先运行回测或等待标签事后验证完成。
+              暂无标签样本。先运行回测或等待标签事后验证完成。
             </p>
           )}
           {labelEvidenceRows.length ? (
@@ -960,7 +1590,9 @@ export default function EtfEvidencePage() {
             {exitV2Rows.length ? (
               <div className="overflow-x-auto rounded-[10px] border border-border">
                 <div className="flex flex-col gap-1 border-b border-border bg-paper px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
-                  <p className="text-xs font-semibold text-ink">Exit V2 对照基准</p>
+                  <p className="text-xs font-semibold text-ink">
+                    Exit V2 对照基准
+                  </p>
                   <p className="text-xs text-ink/55">{exitV2Conclusion}</p>
                 </div>
                 <table className="min-w-[820px] w-full border-collapse text-left text-xs">
@@ -978,15 +1610,37 @@ export default function EtfEvidencePage() {
                   </thead>
                   <tbody>
                     {exitV2Rows.map((row) => (
-                      <tr key={row.key} className="border-t border-border align-top">
-                        <td className="px-3 py-2 font-semibold text-ink">{row.label}</td>
-                        <td className="px-3 py-2 text-ink/65">{metricPercent(row.metrics, "cumulative_return")}</td>
-                        <td className="px-3 py-2 text-ink/65">{metricPercent(row.metrics, "max_drawdown")}</td>
-                        <td className="px-3 py-2 text-ink/65">{metricPercent(row.metrics, "missed_upside_rate")}</td>
-                        <td className="px-3 py-2 text-ink/65">{metricPercent(row.metrics, "protection_success_rate")}</td>
-                        <td className="px-3 py-2 text-ink/65">{metricInteger(row.metrics, "false_exit_count")}</td>
-                        <td className="px-3 py-2 text-ink/65">{metricInteger(row.metrics, "reentry_count")}</td>
-                        <td className="px-3 py-2 text-ink/65">{metricInteger(row.metrics, "alert_count")}</td>
+                      <tr
+                        key={row.key}
+                        className="border-t border-border align-top"
+                      >
+                        <td className="px-3 py-2 font-semibold text-ink">
+                          {row.label}
+                        </td>
+                        <td className="px-3 py-2 text-ink/65">
+                          {metricPercent(row.metrics, "cumulative_return")}
+                        </td>
+                        <td className="px-3 py-2 text-ink/65">
+                          {metricPercent(row.metrics, "max_drawdown")}
+                        </td>
+                        <td className="px-3 py-2 text-ink/65">
+                          {metricPercent(row.metrics, "missed_upside_rate")}
+                        </td>
+                        <td className="px-3 py-2 text-ink/65">
+                          {metricPercent(
+                            row.metrics,
+                            "protection_success_rate"
+                          )}
+                        </td>
+                        <td className="px-3 py-2 text-ink/65">
+                          {metricInteger(row.metrics, "false_exit_count")}
+                        </td>
+                        <td className="px-3 py-2 text-ink/65">
+                          {metricInteger(row.metrics, "reentry_count")}
+                        </td>
+                        <td className="px-3 py-2 text-ink/65">
+                          {metricInteger(row.metrics, "alert_count")}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -994,18 +1648,32 @@ export default function EtfEvidencePage() {
               </div>
             ) : null}
             {strategyComparison.data?.strategies.map((strategy) => (
-              <div key={strategy.strategy_key} className="rounded-[8px] border border-border bg-paper/40 p-3">
+              <div
+                key={strategy.strategy_key}
+                className="rounded-[8px] border border-border bg-paper/40 p-3"
+              >
                 <div className="flex items-start justify-between gap-3">
-                  <p className="text-sm font-semibold text-ink">{strategy.strategy_label}</p>
+                  <p className="text-sm font-semibold text-ink">
+                    {strategy.strategy_label}
+                  </p>
                   <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-ink/55">
                     {strategy.strategy_key}
                   </span>
                 </div>
                 <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-ink/60">
-                  <span>累计收益：{metricPercent(strategy.metrics, "cumulative_return")}</span>
-                  <span>最大回撤：{metricPercent(strategy.metrics, "max_drawdown")}</span>
-                  <span>波动率：{metricPercent(strategy.metrics, "volatility")}</span>
-                  <span>交易次数：{metricInteger(strategy.metrics, "trade_count")}</span>
+                  <span>
+                    累计收益：
+                    {metricPercent(strategy.metrics, "cumulative_return")}
+                  </span>
+                  <span>
+                    最大回撤：{metricPercent(strategy.metrics, "max_drawdown")}
+                  </span>
+                  <span>
+                    波动率：{metricPercent(strategy.metrics, "volatility")}
+                  </span>
+                  <span>
+                    交易次数：{metricInteger(strategy.metrics, "trade_count")}
+                  </span>
                 </div>
               </div>
             ))}
@@ -1021,7 +1689,9 @@ export default function EtfEvidencePage() {
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div>
               <p className="text-sm font-semibold text-ink">策略体检</p>
-              <p className="mt-1 text-xs text-ink/55">体检日：{formatDate(strategyHealthcheck.data?.as_of_date)}</p>
+              <p className="mt-1 text-xs text-ink/55">
+                体检日：{formatDate(strategyHealthcheck.data?.as_of_date)}
+              </p>
             </div>
             <span className="w-fit rounded-full bg-paper px-2.5 py-1 text-xs text-ink/60">
               {strategyHealthcheck.data?.evidence_status ?? "等待验证"}
@@ -1034,7 +1704,9 @@ export default function EtfEvidencePage() {
               </p>
               {healthcheckIssue ? (
                 <div className="mt-3 rounded-[8px] border border-dashed border-border bg-paper/60 p-3 text-sm leading-6 text-ink/65">
-                  <p className="font-semibold text-ink">当前体检不能作为当前策略证据</p>
+                  <p className="font-semibold text-ink">
+                    当前体检不能作为当前策略证据
+                  </p>
                   <p className="mt-1">{healthcheckIssue}</p>
                   <p className="mt-1 text-xs text-ink/50">
                     建议先运行日线/盘中回测和标签历史回放，再重新生成策略体检。
@@ -1043,11 +1715,21 @@ export default function EtfEvidencePage() {
               ) : (
                 <div className="mt-3 grid gap-2 sm:grid-cols-2">
                   {healthcheckItems.slice(0, 6).map((item) => (
-                    <div key={`${item.item_type}-${item.item_key}`} className="rounded-[8px] border border-border bg-paper/40 p-3 text-xs leading-5 text-ink/60">
-                      <p className="text-sm font-semibold text-ink">{item.item_key}</p>
+                    <div
+                      key={`${item.item_type}-${item.item_key}`}
+                      className="rounded-[8px] border border-border bg-paper/40 p-3 text-xs leading-5 text-ink/60"
+                    >
+                      <p className="text-sm font-semibold text-ink">
+                        {item.item_key}
+                      </p>
                       <p>结论：{item.conclusion}</p>
                       <p>样本：{item.sample_count}</p>
-                      <p>胜率：{item.win_rate === null ? "暂无" : formatPercent(item.win_rate * 100)}</p>
+                      <p>
+                        胜率：
+                        {item.win_rate === null
+                          ? "暂无"
+                          : formatPercent(item.win_rate * 100)}
+                      </p>
                     </div>
                   ))}
                 </div>
@@ -1070,59 +1752,131 @@ export default function EtfEvidencePage() {
             </p>
           </div>
           <span className="w-fit rounded-full bg-paper px-2.5 py-1 text-xs text-ink/60">
-            {exitHyperopt.data ? `${formatDate(exitHyperopt.data.as_of_date)} · ${exitHyperopt.data.objective}` : "暂无结果"}
+            {exitHyperopt.data
+              ? `${formatDate(exitHyperopt.data.as_of_date)} · ${exitHyperopt.data.objective}`
+              : "暂无结果"}
           </span>
         </div>
         {exitHyperopt.data ? (
           <>
             <div className="mt-4 grid gap-3 md:grid-cols-4">
-              <EvidenceStat label="分桶数量" value={metricInteger(exitHyperopt.data.summary, "bucket_count")} />
-              <EvidenceStat label="候选数量" value={metricInteger(exitHyperopt.data.summary, "candidate_count")} />
-              <EvidenceStat label="证据不足" value={metricInteger(exitHyperopt.data.summary, "evidence_insufficient_count")} />
-              <EvidenceStat label="数据截止" value={formatDateTime(exitHyperopt.data.data_cutoff)} />
+              <EvidenceStat
+                label="分桶数量"
+                value={metricInteger(exitHyperopt.data.summary, "bucket_count")}
+              />
+              <EvidenceStat
+                label="候选数量"
+                value={metricInteger(
+                  exitHyperopt.data.summary,
+                  "candidate_count"
+                )}
+              />
+              <EvidenceStat
+                label="证据不足"
+                value={metricInteger(
+                  exitHyperopt.data.summary,
+                  "evidence_insufficient_count"
+                )}
+              />
+              <EvidenceStat
+                label="数据截止"
+                value={formatDateTime(exitHyperopt.data.data_cutoff)}
+              />
             </div>
             <div className="mt-3 grid gap-3 md:grid-cols-3">
-              <EvidenceStat label="执行模型" value={exitHyperopt.data.execution_model ?? "日线收盘"} />
+              <EvidenceStat
+                label="执行模型"
+                value={exitHyperopt.data.execution_model ?? "日线收盘"}
+              />
               <EvidenceStat
                 label="覆盖口径"
-                value={exitHyperopt.data.summary.sampled === true ? "抽样结果" : "全量候选"}
+                value={
+                  exitHyperopt.data.summary.sampled === true
+                    ? "抽样结果"
+                    : "全量候选"
+                }
               />
-              <EvidenceStat label="手动延迟" value={`${metricInteger(exitHyperopt.data.summary, "manual_delay_minutes")} 分钟`} />
+              <EvidenceStat
+                label="手动延迟"
+                value={`${metricInteger(exitHyperopt.data.summary, "manual_delay_minutes")} 分钟`}
+              />
             </div>
             <div className="mt-3 grid gap-3 md:grid-cols-4">
-              <EvidenceStat label="全市场 ETF" value={metricInteger(hyperoptCoverage, "all_etf_count")} />
-              <EvidenceStat label="可优化候选" value={metricInteger(hyperoptCoverage, "eligible_count")} />
-              <EvidenceStat label="盘中样本足够" value={metricInteger(hyperoptCoverage, "enough_intraday_history_count")} />
-              <EvidenceStat label="完成优化" value={metricInteger(hyperoptCoverage, "final_optimized_count")} />
+              <EvidenceStat
+                label="全市场 ETF"
+                value={metricInteger(hyperoptCoverage, "all_etf_count")}
+              />
+              <EvidenceStat
+                label="可优化候选"
+                value={metricInteger(hyperoptCoverage, "eligible_count")}
+              />
+              <EvidenceStat
+                label="盘中样本足够"
+                value={metricInteger(
+                  hyperoptCoverage,
+                  "enough_intraday_history_count"
+                )}
+              />
+              <EvidenceStat
+                label="完成优化"
+                value={metricInteger(hyperoptCoverage, "final_optimized_count")}
+              />
             </div>
             <div className="mt-3 grid gap-3 md:grid-cols-2">
-              <EvidenceStat label="校准版本" value={exitHyperopt.data.calibration_rule_version ?? "旧口径"} />
+              <EvidenceStat
+                label="校准版本"
+                value={exitHyperopt.data.calibration_rule_version ?? "旧口径"}
+              />
               <EvidenceStat
                 label="证据版本"
-                value={metadataString(exitHyperopt.data.summary, "policy_validation_version") ?? "旧口径"}
+                value={
+                  metadataString(
+                    exitHyperopt.data.summary,
+                    "policy_validation_version"
+                  ) ?? "旧口径"
+                }
               />
               <EvidenceStat
                 label="保护层版本"
-                value={metadataString(exitHyperopt.data.summary, "protection_guard_version") ?? "暂无"}
+                value={
+                  metadataString(
+                    exitHyperopt.data.summary,
+                    "protection_guard_version"
+                  ) ?? "暂无"
+                }
               />
               <EvidenceStat
                 label="生效状态"
-                value={exitHyperopt.data.summary.approved_for_live === true ? "已批准生效" : "研究候选，未生效"}
+                value={
+                  exitHyperopt.data.summary.approved_for_live === true
+                    ? "已批准生效"
+                    : "研究候选，未生效"
+                }
               />
             </div>
             <div className="mt-3 grid gap-3 md:grid-cols-2">
               <EvidenceStat
                 label="合同 hash"
-                value={exitHyperopt.data.contract_hash ? exitHyperopt.data.contract_hash.slice(0, 10) : "暂无"}
+                value={
+                  exitHyperopt.data.contract_hash
+                    ? exitHyperopt.data.contract_hash.slice(0, 10)
+                    : "暂无"
+                }
               />
               <EvidenceStat
                 label="样本口径"
-                value={metadataString(exitHyperopt.data.summary, "universe_scope") ?? "旧口径"}
+                value={
+                  metadataString(exitHyperopt.data.summary, "universe_scope") ??
+                  "旧口径"
+                }
               />
             </div>
             <div className="mt-4 grid gap-3 lg:grid-cols-2">
               {exitHyperopt.data.items.slice(0, 6).map((item) => (
-                <div key={item.id} className="rounded-[8px] border border-border bg-paper/40 p-3">
+                <div
+                  key={item.id}
+                  className="rounded-[8px] border border-border bg-paper/40 p-3"
+                >
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <p className="text-sm font-semibold text-ink">
@@ -1137,32 +1891,109 @@ export default function EtfEvidencePage() {
                     </span>
                   </div>
                   <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-ink/60">
-                    <span>样本外收益：{metricPercent(item.out_of_sample_metrics, "total_return")}</span>
-                    <span>样本外回撤：{metricPercent(item.out_of_sample_metrics, "max_drawdown")}</span>
-                    <span>胜率：{metricPercent(item.out_of_sample_metrics, "win_rate")}</span>
-                    <span>提醒次数：{metricInteger(item.out_of_sample_metrics, "alert_count")}</span>
+                    <span>
+                      样本外收益：
+                      {metricPercent(
+                        item.out_of_sample_metrics,
+                        "total_return"
+                      )}
+                    </span>
+                    <span>
+                      样本外回撤：
+                      {metricPercent(
+                        item.out_of_sample_metrics,
+                        "max_drawdown"
+                      )}
+                    </span>
+                    <span>
+                      胜率：
+                      {metricPercent(item.out_of_sample_metrics, "win_rate")}
+                    </span>
+                    <span>
+                      提醒次数：
+                      {metricInteger(item.out_of_sample_metrics, "alert_count")}
+                    </span>
                     <span>交易次数：{item.trade_count}</span>
                     <span>样本：{item.sample_count}</span>
-                    <span>滚动稳定率：{metricPercent(item.rolling_metrics, "stable_window_rate")}</span>
-                    <span>最差窗口收益：{metricPercent(item.rolling_metrics, "worst_window_return")}</span>
-                    <span>错杀率：{metricPercent(item.out_of_sample_metrics, "missed_upside_rate")}</span>
-                    <span>保护率：{metricPercent(item.out_of_sample_metrics, "protected_exit_rate")}</span>
-                    <span>对默认规则：{item.baseline_comparison.beats_baseline === true ? "更好" : "未胜出"}</span>
-                    <span>覆盖：{item.coverage_status ?? "旧口径"}</span>
-                    <span>未成交：{metricInteger(item.out_of_sample_metrics, "unfilled_count")}</span>
-                    <span>延迟：{item.manual_delay_minutes ?? "暂无"} 分钟</span>
                     <span>
-                      证据等级：{policyLevelLabel(metadataString(item.confidence, "policy_evidence_level"))}
+                      滚动稳定率：
+                      {metricPercent(
+                        item.rolling_metrics,
+                        "stable_window_rate"
+                      )}
                     </span>
-                    <span>策略类型：{item.policy_class_label ?? item.policy_class ?? "旧口径"}</span>
-                    <span>证据状态：{policyStatusLabel(item.evidence_status)}</span>
-                    <span>批准状态：{item.approved_for_live ? "已批准生效" : item.approval_status ?? "研究候选"}</span>
-                    <span>保护层：{item.protection_guard_version ?? "暂无"}</span>
-                    <span>Guard 压制：{metricInteger(item.guard_enabled_metrics, "guard_suppressed_alert_count")}</span>
+                    <span>
+                      最差窗口收益：
+                      {metricPercent(
+                        item.rolling_metrics,
+                        "worst_window_return"
+                      )}
+                    </span>
+                    <span>
+                      错杀率：
+                      {metricPercent(
+                        item.out_of_sample_metrics,
+                        "missed_upside_rate"
+                      )}
+                    </span>
+                    <span>
+                      保护率：
+                      {metricPercent(
+                        item.out_of_sample_metrics,
+                        "protected_exit_rate"
+                      )}
+                    </span>
+                    <span>
+                      对默认规则：
+                      {item.baseline_comparison.beats_baseline === true
+                        ? "更好"
+                        : "未胜出"}
+                    </span>
+                    <span>覆盖：{item.coverage_status ?? "旧口径"}</span>
+                    <span>
+                      未成交：
+                      {metricInteger(
+                        item.out_of_sample_metrics,
+                        "unfilled_count"
+                      )}
+                    </span>
+                    <span>
+                      延迟：{item.manual_delay_minutes ?? "暂无"} 分钟
+                    </span>
+                    <span>
+                      证据等级：
+                      {policyLevelLabel(
+                        metadataString(item.confidence, "policy_evidence_level")
+                      )}
+                    </span>
+                    <span>
+                      策略类型：
+                      {item.policy_class_label ?? item.policy_class ?? "旧口径"}
+                    </span>
+                    <span>
+                      证据状态：{policyStatusLabel(item.evidence_status)}
+                    </span>
+                    <span>
+                      批准状态：
+                      {item.approved_for_live
+                        ? "已批准生效"
+                        : (item.approval_status ?? "研究候选")}
+                    </span>
+                    <span>
+                      保护层：{item.protection_guard_version ?? "暂无"}
+                    </span>
+                    <span>
+                      Guard 压制：
+                      {metricInteger(
+                        item.guard_enabled_metrics,
+                        "guard_suppressed_alert_count"
+                      )}
+                    </span>
                     <span>数据源：{item.source_reliability ?? "旧口径"}</span>
                   </div>
                   <p className="mt-2 rounded-[6px] bg-white px-2 py-1 text-xs text-ink/55">
-                    {item.recommended_usage ?? "候选参数只作为研究证据，不自动改变邮件规则。"}
+                    {item.recommended_usage ??
+                      "候选参数只作为研究证据，不自动改变邮件规则。"}
                   </p>
                   {item.rejection_reason ? (
                     <p className="mt-2 rounded-[6px] bg-white px-2 py-1 text-xs text-ink/55">
@@ -1185,8 +2016,13 @@ export default function EtfEvidencePage() {
           <div>
             <p className="text-sm font-semibold text-ink">组合配置证据</p>
             <p className="mt-1 text-xs text-ink/55">
-              模式：{observationPortfolio.data?.portfolio_mode ?? "暂无"} · 权重合计{" "}
-              {observationPortfolio.data ? formatPercent((observationPortfolio.data.weight_sum ?? 0) * 100) : "暂无"}
+              模式：{observationPortfolio.data?.portfolio_mode ?? "暂无"} ·
+              权重合计{" "}
+              {observationPortfolio.data
+                ? formatPercent(
+                    (observationPortfolio.data.weight_sum ?? 0) * 100
+                  )
+                : "暂无"}
             </p>
           </div>
           <button
@@ -1201,18 +2037,28 @@ export default function EtfEvidencePage() {
         <div className="mt-4 grid gap-3 lg:grid-cols-3">
           {optimized?.methods.length ? (
             optimized.methods.map((method) => (
-              <div key={method.method} className="rounded-[8px] border border-border bg-paper/40 p-3">
+              <div
+                key={method.method}
+                className="rounded-[8px] border border-border bg-paper/40 p-3"
+              >
                 <div className="flex items-start justify-between gap-3">
-                  <p className="text-sm font-semibold text-ink">{method.label}</p>
+                  <p className="text-sm font-semibold text-ink">
+                    {method.label}
+                  </p>
                   <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-ink/55">
                     {formatPercent(method.weight_sum * 100)}
                   </span>
                 </div>
                 <div className="mt-3 space-y-2">
                   {method.items.slice(0, 5).map((item) => (
-                    <div key={item.code} className="flex items-center justify-between gap-3 text-xs text-ink/60">
+                    <div
+                      key={item.code}
+                      className="flex items-center justify-between gap-3 text-xs text-ink/60"
+                    >
                       <span className="truncate">{item.name}</span>
-                      <span className="font-semibold text-ink">{formatPercent(item.target_weight * 100)}</span>
+                      <span className="font-semibold text-ink">
+                        {formatPercent(item.target_weight * 100)}
+                      </span>
                     </div>
                   ))}
                 </div>
@@ -1232,23 +2078,43 @@ export default function EtfEvidencePage() {
           <div className="mt-3 grid gap-2 text-xs text-ink/60">
             {detail.trades.slice(0, 8).map((trade) => {
               const signalTime = metadataString(trade.metadata, "signal_time");
-              const executionTime = metadataString(trade.metadata, "execution_time");
-              const signalPrice = metadataNumber(trade.metadata, "signal_price");
-              const executionPrice = metadataNumber(trade.metadata, "execution_price");
-              const delay = metadataNumber(trade.metadata, "execution_delay_minutes");
+              const executionTime = metadataString(
+                trade.metadata,
+                "execution_time"
+              );
+              const signalPrice = metadataNumber(
+                trade.metadata,
+                "signal_price"
+              );
+              const executionPrice = metadataNumber(
+                trade.metadata,
+                "execution_price"
+              );
+              const delay = metadataNumber(
+                trade.metadata,
+                "execution_delay_minutes"
+              );
               return (
-                <div key={trade.id} className="rounded-[8px] bg-paper px-3 py-2">
+                <div
+                  key={trade.id}
+                  className="rounded-[8px] bg-paper px-3 py-2"
+                >
                   <p>
-                    {formatDate(trade.trade_date)} · {trade.side === "buy" ? "买入" : "卖出"} {trade.etf_name}
-                    {" "}{formatCurrency(trade.amount)} · {trade.reason}
+                    {formatDate(trade.trade_date)} ·{" "}
+                    {trade.side === "buy" ? "买入" : "卖出"} {trade.etf_name}{" "}
+                    {formatCurrency(trade.amount)} · {trade.reason}
                   </p>
                   {isIntradayBacktest && signalTime ? (
                     <p className="mt-1 text-ink/45">
                       提醒 {formatDateTime(signalTime)}
-                      {signalPrice === null ? "" : ` @ ${signalPrice.toFixed(4)}`}
+                      {signalPrice === null
+                        ? ""
+                        : ` @ ${signalPrice.toFixed(4)}`}
                       {" → "}
                       成交 {formatDateTime(executionTime)}
-                      {executionPrice === null ? "" : ` @ ${executionPrice.toFixed(4)}`}
+                      {executionPrice === null
+                        ? ""
+                        : ` @ ${executionPrice.toFixed(4)}`}
                       {delay === null ? "" : `，延迟 ${delay} 分钟`}
                     </p>
                   ) : null}
@@ -1271,10 +2137,20 @@ function EvidenceStat({ label, value }: { label: string; value: string }) {
   );
 }
 
-function EvidenceDimension({ label, value, detail }: { label: string; value: string; detail: string }) {
+function EvidenceDimension({
+  label,
+  value,
+  detail
+}: {
+  label: string;
+  value: string;
+  detail: string;
+}) {
   return (
     <div className="rounded-[10px] border border-border bg-paper/45 px-3 py-3">
-      <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-ink/45">{label}</p>
+      <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-ink/45">
+        {label}
+      </p>
       <p className="mt-1 text-sm font-semibold leading-5 text-ink">{value}</p>
       <p className="mt-1 text-xs leading-5 text-ink/55">{detail}</p>
     </div>

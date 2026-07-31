@@ -28,7 +28,6 @@ _DECISION_ADJUSTED_PROVIDER_VERSIONS = {
     "eastmoney": "eastmoney.push2his.kline.hfq_v1",
     "efinance": "efinance.stock.get_quote_history.fqt2_v1",
     "tickflow": "tickflow.free.klines.backward_v1",
-    "tencent": "tencent.ifzq.fqkline.hfq_v1",
 }
 
 
@@ -121,6 +120,7 @@ class EtfAdjustedDailyFact:
     adjustment_version: str | None
     decision_eligible: bool | None
     decision_ineligibility_reason: str | None
+    turnover: float | None = None
 
 
 @dataclass(frozen=True)
@@ -206,6 +206,7 @@ async def etf_adjusted_daily_facts_on_or_before(
         EtfPriceHistory.low.label("raw_low"),
         EtfPriceHistory.close.label("raw_close"),
         EtfPriceHistory.volume.label("volume"),
+        EtfPriceHistory.turnover.label("turnover"),
         EtfPriceHistory.raw_price_basis.label("raw_price_basis"),
         EtfPriceHistory.research_adjusted_value.label("adjusted_close"),
         EtfPriceHistory.research_price_basis.label("research_price_basis"),
@@ -248,6 +249,7 @@ async def etf_adjusted_daily_facts_on_or_before(
             adjustment_version=row["adjustment_version"],
             decision_eligible=row["decision_eligible"],
             decision_ineligibility_reason=row["decision_ineligibility_reason"],
+            turnover=row["turnover"],
         )
         for row in rows
     )

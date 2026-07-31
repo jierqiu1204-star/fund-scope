@@ -30,6 +30,7 @@ _RAW_OR_FALLBACK_PROVIDER_MARKERS = ("sina", "efinance", "raw", "fallback")
 _ASIA_SHANGHAI = ZoneInfo("Asia/Shanghai")
 _DAILY_BAR_AVAILABLE_AT = time(15, 0)
 MAX_CODES_PER_REPLAY_INPUT_PAGE = 16
+MAX_REPLAY_HISTORY_SESSIONS = 180
 
 
 class ReplayInputExclusionReason(StrEnum):
@@ -137,6 +138,7 @@ def _bar_payload(item: AdjustedOhlcvBar) -> dict[str, Any]:
         "adjusted_low": item.adjusted_low,
         "adjusted_close": item.adjusted_close,
         "volume": item.volume,
+        "turnover": item.turnover,
     }
 
 
@@ -145,13 +147,17 @@ def _series_from_rows(
     metadata: PointInTimeEtfMetadata,
     rows: list[market_data.EtfAdjustedDailyFact],
     decision_cutoff: datetime,
+    required_history_sessions: int,
 ) -> PointInTimeAdjustedSeries | ReplayInputExclusion:
-    window = rows[-REQUIRED_BAR_COUNT:]
-    if len(window) != REQUIRED_BAR_COUNT or window[-1].trade_date != metadata.eligible_at:
+    window = rows[-required_history_sessions:]
+    if (
+        len(window) != required_history_sessions
+        or window[-1].trade_date != metadata.eligible_at
+    ):
         return ReplayInputExclusion(
             metadata.asset_code,
             ReplayInputExclusionReason.STALE_OR_INELIGIBLE_ADJUSTED_INPUT,
-            f"requires {REQUIRED_BAR_COUNT} rows ending at replay_date",
+            f"requires {required_history_sessions} rows ending at replay_date",
         )
     provider_names = {str(row.data_provider or "").strip().lower() for row in window}
     if any(
@@ -257,6 +263,14 @@ def _series_from_rows(
                 adjusted_low=float(row.raw_low) * factor,
                 adjusted_close=float(row.adjusted_close),
                 volume=float(row.volume),
+                turnover=(
+                    float(row.turnover)
+                    if isinstance(row.turnover, int | float)
+                    and not isinstance(row.turnover, bool)
+                    and math.isfinite(float(row.turnover))
+                    and float(row.turnover) >= 0.0
+                    else None
+                ),
             )
         )
         timestamps.append(row_source_timestamp)
@@ -302,6 +316,7 @@ async def load_point_in_time_ranking_inputs(
     max_source_rows: int,
     code_after: str | None = None,
     max_codes: int = MAX_CODES_PER_REPLAY_INPUT_PAGE,
+    required_history_sessions: int = REQUIRED_BAR_COUNT,
 ) -> PointInTimeRankingInputSnapshot:
     """Load only factual membership and proven adjusted inputs available for replay."""
 
@@ -319,6 +334,11 @@ async def load_point_in_time_ranking_inputs(
     if max_codes < 1 or max_codes > MAX_CODES_PER_REPLAY_INPUT_PAGE:
         raise ValueError(
             f"max_codes must be between 1 and {MAX_CODES_PER_REPLAY_INPUT_PAGE}"
+        )
+    if not REQUIRED_BAR_COUNT <= required_history_sessions <= MAX_REPLAY_HISTORY_SESSIONS:
+        raise ValueError(
+            "required_history_sessions must be between "
+            f"{REQUIRED_BAR_COUNT} and {MAX_REPLAY_HISTORY_SESSIONS}"
         )
     cutoff = _utc(decision_cutoff)
     facts = await market_data.etf_membership_facts_covering(
@@ -412,7 +432,7 @@ async def load_point_in_time_ranking_inputs(
         session,
         etf_codes=page_asset_codes,
         replay_date=replay_date,
-        rows_per_code=REQUIRED_BAR_COUNT,
+        rows_per_code=required_history_sessions,
         max_source_rows=max_source_rows,
     )
     prices_by_code: dict[str, list[market_data.EtfAdjustedDailyFact]] = defaultdict(list)
@@ -425,6 +445,7 @@ async def load_point_in_time_ranking_inputs(
             metadata=metadata,
             rows=prices_by_code[metadata.asset_code],
             decision_cutoff=cutoff,
+            required_history_sessions=required_history_sessions,
         )
         if isinstance(result, ReplayInputExclusion):
             exclusions.append(result)
@@ -445,6 +466,7 @@ async def load_point_in_time_ranking_inputs(
             "decision_cutoff": cutoff.isoformat(),
             "universe_hash": universe_hash,
             "adjustment_registry": sorted(_PROVEN_MULTIPLICATIVE_ADJUSTMENTS),
+            "required_history_sessions": required_history_sessions,
             "price_source_watermark": {
                 "row_count": watermark.row_count,
                 "max_row_id": watermark.max_row_id,
@@ -460,6 +482,7 @@ async def load_point_in_time_ranking_inputs(
         {
             "universe_hash": universe_hash,
             "page_asset_codes": page_asset_codes,
+            "required_history_sessions": required_history_sessions,
             "eligible_asset_codes": [item.asset_code for item in eligible_tuple],
             "exclusions": [
                 {
@@ -477,6 +500,7 @@ async def load_point_in_time_ranking_inputs(
             "decision_cutoff": cutoff.isoformat(),
             "universe_hash": universe_hash,
             "page_asset_codes": page_asset_codes,
+            "required_history_sessions": required_history_sessions,
             "eligible_series_hashes": [item.series_hash for item in eligible_tuple],
         }
     )

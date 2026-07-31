@@ -125,7 +125,15 @@ export type RecommendationItem = {
   asset_type: "fund" | "stock";
   rank: number;
   total_score: number;
-  score_breakdown: Record<string, { score?: number; weight?: number; weighted_score?: number; metrics?: Record<string, unknown> }>;
+  score_breakdown: Record<
+    string,
+    {
+      score?: number;
+      weight?: number;
+      weighted_score?: number;
+      metrics?: Record<string, unknown>;
+    }
+  >;
   rationale: Record<string, unknown>;
   risk_flags: string[];
   data_freshness: Record<string, unknown>;
@@ -160,9 +168,10 @@ export type RecommendationReview = {
   items: RecommendationReviewItem[];
 };
 
-export type LatestRecommendationsWithReviewResponse = LatestRecommendationsResponse & {
-  review: RecommendationReview | null;
-};
+export type LatestRecommendationsWithReviewResponse =
+  LatestRecommendationsResponse & {
+    review: RecommendationReview | null;
+  };
 
 export type StrategyType = "momentum_rotation" | "dca_baseline" | "screening";
 
@@ -517,20 +526,23 @@ export type ValidationEvidence = {
   sample_quality_warnings?: string[];
   degraded_recently?: boolean;
   degradation_reason?: string | null;
-  horizons?: Record<string, {
-    sample_count?: number;
-    excluded_count?: number;
-    pending_count?: number;
-    coverage?: number | null;
-    exclusion_reasons?: string[];
-    avg_return?: number | null;
-    median_return?: number | null;
-    win_rate?: number | null;
-    worst_forward_drawdown?: number | null;
-    favorable_excursion_median?: number | null;
-    confidence?: string;
-    confidence_label?: string;
-  }>;
+  horizons?: Record<
+    string,
+    {
+      sample_count?: number;
+      excluded_count?: number;
+      pending_count?: number;
+      coverage?: number | null;
+      exclusion_reasons?: string[];
+      avg_return?: number | null;
+      median_return?: number | null;
+      win_rate?: number | null;
+      worst_forward_drawdown?: number | null;
+      favorable_excursion_median?: number | null;
+      confidence?: string;
+      confidence_label?: string;
+    }
+  >;
   historical_replay?: ValidationEvidence | null;
   forward_live?: ValidationEvidence | null;
   evidence_tracks?: Record<string, ValidationEvidence>;
@@ -611,7 +623,11 @@ export type EtfCatalystShadowTheme = {
     theme_id: string;
     session_date: string;
     cutoff_at: string;
-    coverage_state: "active" | "observed_none" | "unavailable" | "not_applicable";
+    coverage_state:
+      | "active"
+      | "observed_none"
+      | "unavailable"
+      | "not_applicable";
     snapshot_hash: string;
   };
   coverage: Array<Record<string, unknown>>;
@@ -1119,24 +1135,24 @@ export type EtfExitHyperoptItem = {
   status: string;
   conclusion: string;
   parameters: Record<string, unknown>;
-    train_metrics: Record<string, unknown>;
-    out_of_sample_metrics: Record<string, unknown>;
-    rolling_metrics: Record<string, unknown>;
-    baseline_metrics: Record<string, unknown>;
-    baseline_comparison: Record<string, unknown>;
-    rejection_reason: string | null;
-    coverage_status: string | null;
-    manual_delay_minutes: number | null;
-    policy_class: string | null;
-    policy_class_label?: string | null;
-    evidence_status?: string | null;
-    recommended_usage?: string | null;
-    approval_status: string | null;
-    approved_for_live: boolean;
-    is_live_rule_evidence?: boolean;
-    protection_guard_version: string | null;
-    guard_enabled_metrics: Record<string, unknown>;
-    confidence: Record<string, unknown>;
+  train_metrics: Record<string, unknown>;
+  out_of_sample_metrics: Record<string, unknown>;
+  rolling_metrics: Record<string, unknown>;
+  baseline_metrics: Record<string, unknown>;
+  baseline_comparison: Record<string, unknown>;
+  rejection_reason: string | null;
+  coverage_status: string | null;
+  manual_delay_minutes: number | null;
+  policy_class: string | null;
+  policy_class_label?: string | null;
+  evidence_status?: string | null;
+  recommended_usage?: string | null;
+  approval_status: string | null;
+  approved_for_live: boolean;
+  is_live_rule_evidence?: boolean;
+  protection_guard_version: string | null;
+  guard_enabled_metrics: Record<string, unknown>;
+  confidence: Record<string, unknown>;
   source_reliability: string | null;
   score: number;
   sample_count: number;
@@ -1250,7 +1266,13 @@ export type TrackedPositionExitSignal = {
   alert_type: string | null;
   label: string;
   level: "none" | "watch" | "warning" | "urgent";
-  action_class: "none" | "actionable_exit" | "soft_watch" | "guard_only" | "data_waiting" | "research_only";
+  action_class:
+    | "none"
+    | "actionable_exit"
+    | "soft_watch"
+    | "guard_only"
+    | "data_waiting"
+    | "research_only";
   position_action: string | null;
   action_version: string | null;
   reentry_rule_version: string | null;
@@ -1774,4 +1796,43 @@ export type EtfEvidenceOverview = {
   research_only: true;
   production_mutation_allowed: false;
   endpoint_contracts: Record<string, string>;
+};
+
+export type EtfLeaderTacticsEvidenceStatus =
+  | "insufficient_data"
+  | "unconfirmed"
+  | "rejected"
+  | "eligible_for_v4_proposal";
+
+export type EtfLeaderTacticsEvidence = {
+  schema_version: "etf_leader_tactics_evidence_view_v1";
+  experiment_family: "leader_tactics_shadow_v1";
+  status: EtfLeaderTacticsEvidenceStatus;
+  unavailable_reason: string | null;
+  generated_at: string | null;
+  data_cutoff: string | null;
+  manifest_hash: string | null;
+  factor_manifest_hash: string | null;
+  source_snapshot_hash: string | null;
+  universe_manifest_hash: string | null;
+  input_snapshot_hash: string | null;
+  feature_panel_hashes: string[];
+  hypothesis_registry: Record<string, unknown>;
+  candidate_registry: Record<string, unknown>;
+  ranking_source_kind: "research_replay";
+  policy_mode: "none" | "policy_shadow";
+  notification_provenance: "none" | "simulated";
+  execution_provenance: "none" | "simulated_execution";
+  coverage: Record<string, unknown>;
+  exclusion_counts: Record<string, number>;
+  primary_metrics: Array<Record<string, unknown>>;
+  exploratory_metrics: Array<Record<string, unknown>>;
+  diagnostics: Record<string, unknown>;
+  holdout: Record<string, unknown>;
+  ma5_policy_shadow: Array<Record<string, unknown>>;
+  candidate_decisions: Array<Record<string, unknown>>;
+  costs: Record<string, unknown>;
+  limitations: string[];
+  research_only: true;
+  production_mutation_allowed: false;
 };

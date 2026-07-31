@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.entities import (
@@ -134,6 +134,13 @@ async def _latest_factor_evidence(
 ) -> EtfFactorExperimentEvidence | None:
     return await session.scalar(
         select(EtfFactorExperimentEvidence)
+        .where(
+            or_(
+                EtfFactorExperimentEvidence.experiment_family.is_(None),
+                EtfFactorExperimentEvidence.experiment_family
+                == "ranking_promotion_v1",
+            )
+        )
         .order_by(
             EtfFactorExperimentEvidence.created_at.desc(),
             EtfFactorExperimentEvidence.id.desc(),

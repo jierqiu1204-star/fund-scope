@@ -35,6 +35,15 @@ class FactorEvidenceContractError(ValueError):
 
 
 @dataclass(frozen=True)
+class FactorEvidencePromotion:
+    state: str
+    passed: bool
+    failed_gates: tuple[str, ...]
+    endpoint: str
+    production_mutation_allowed: bool = False
+
+
+@dataclass(frozen=True)
 class FactorEvidencePayload:
     manifest_hash: str
     ranking_contract_hash: str
@@ -47,9 +56,24 @@ class FactorEvidencePayload:
     costs: dict[str, Any]
     limitations: tuple[str, ...]
     report: dict[str, Any]
-    promotion: PromotionDecision | ResearchPromotionDecision
+    promotion: PromotionDecision | ResearchPromotionDecision | FactorEvidencePromotion
+    experiment_family: str | None = None
+    hypothesis_registry_hash: str | None = None
 
     def validate(self) -> None:
+        if (self.experiment_family is None) != (
+            self.hypothesis_registry_hash is None
+        ):
+            raise FactorEvidenceContractError(
+                "factor evidence family and hypothesis identity must be paired"
+            )
+        if self.experiment_family is not None:
+            if not self.experiment_family.strip() or not _is_sha256(
+                self.hypothesis_registry_hash
+            ):
+                raise FactorEvidenceContractError(
+                    "factor evidence family identity is invalid"
+                )
         multiplicity = self.intervals.get("multiplicity")
         if not isinstance(multiplicity, dict):
             raise FactorEvidenceContractError(
@@ -83,7 +107,7 @@ class FactorEvidencePayload:
 
     def canonical_payload(self) -> dict[str, Any]:
         promotion = _promotion_payload(self.promotion)
-        return {
+        payload = {
             "manifest_hash": self.manifest_hash,
             "ranking_contract_hash": self.ranking_contract_hash,
             "code_version": self.code_version,
@@ -97,6 +121,10 @@ class FactorEvidencePayload:
             "report": self.report,
             "promotion": promotion,
         }
+        if self.experiment_family is not None:
+            payload["experiment_family"] = self.experiment_family
+            payload["hypothesis_registry_hash"] = self.hypothesis_registry_hash
+        return payload
 
     @property
     def evidence_hash(self) -> str:
@@ -125,6 +153,8 @@ async def persist_factor_evidence(
         manifest_hash=payload.manifest_hash,
         ranking_contract_hash=payload.ranking_contract_hash,
         code_version=payload.code_version,
+        experiment_family=payload.experiment_family,
+        hypothesis_registry_hash=payload.hypothesis_registry_hash,
         evidence_hash=payload.evidence_hash,
         samples_json=list(payload.samples),
         aggregates_json=payload.aggregates,
@@ -143,8 +173,16 @@ async def persist_factor_evidence(
 
 
 def _promotion_payload(
-    promotion: PromotionDecision | ResearchPromotionDecision,
+    promotion: PromotionDecision | ResearchPromotionDecision | FactorEvidencePromotion,
 ) -> dict[str, Any]:
+    if isinstance(promotion, FactorEvidencePromotion):
+        return {
+            "state": promotion.state,
+            "passed": promotion.passed,
+            "failed_gates": promotion.failed_gates,
+            "endpoint": promotion.endpoint,
+            "production_mutation_allowed": False,
+        }
     if isinstance(promotion, ResearchPromotionDecision):
         return {
             "state": promotion.state.value,
@@ -160,6 +198,16 @@ def _promotion_payload(
         "endpoint": promotion.endpoint,
         "production_mutation_allowed": False,
     }
+
+
+def _is_sha256(value: object) -> bool:
+    if not isinstance(value, str) or len(value) != 64:
+        return False
+    try:
+        int(value, 16)
+    except ValueError:
+        return False
+    return True
 
 
 def _ranking_metric(
@@ -335,6 +383,8 @@ def factor_evidence_view(evidence: EtfFactorExperimentEvidence) -> dict[str, Any
         "manifest_hash": evidence.manifest_hash,
         "ranking_contract_hash": evidence.ranking_contract_hash,
         "code_version": evidence.code_version,
+        "experiment_family": evidence.experiment_family,
+        "hypothesis_registry_hash": evidence.hypothesis_registry_hash,
         "evidence_hash": evidence.evidence_hash,
         "development": split_reports.get("development", {}),
         "validation": split_reports.get("validation", {}),

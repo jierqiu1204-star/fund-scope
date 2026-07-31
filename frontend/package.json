@@ -16,6 +16,7 @@
     "test:catalyst-shadow": "node ./scripts/check-etf-catalyst-shadow.mjs",
     "test:backtest-evidence": "node ./scripts/check-etf-backtest-evidence-dimensions.mjs",
     "test:pit-evidence": "node ./scripts/check-etf-pit-evidence-surfaces.mjs",
+    "test:leader-tactics": "node ./scripts/check-etf-leader-tactics-shadow.mjs",
     "format": "prettier --check ."
   },
   "dependencies": {

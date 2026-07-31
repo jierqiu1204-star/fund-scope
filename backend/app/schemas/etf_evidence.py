@@ -66,3 +66,44 @@ class EtfEvidenceOverviewOut(BaseModel):
     research_only: Literal[True]
     production_mutation_allowed: Literal[False]
     endpoint_contracts: dict[str, str]
+
+
+LeaderEvidenceStatus = Literal[
+    "insufficient_data",
+    "unconfirmed",
+    "rejected",
+    "eligible_for_v4_proposal",
+]
+
+
+class EtfLeaderTacticsEvidenceOut(BaseModel):
+    schema_version: Literal["etf_leader_tactics_evidence_view_v1"]
+    experiment_family: Literal["leader_tactics_shadow_v1"]
+    status: LeaderEvidenceStatus
+    unavailable_reason: str | None = None
+    generated_at: datetime | None = None
+    data_cutoff: datetime | None = None
+    manifest_hash: str | None = None
+    factor_manifest_hash: str | None = None
+    source_snapshot_hash: str | None = None
+    universe_manifest_hash: str | None = None
+    input_snapshot_hash: str | None = None
+    feature_panel_hashes: list[str] = Field(default_factory=list)
+    hypothesis_registry: dict[str, Any]
+    candidate_registry: dict[str, Any]
+    ranking_source_kind: Literal["research_replay"]
+    policy_mode: Literal["none", "policy_shadow"]
+    notification_provenance: Literal["none", "simulated"]
+    execution_provenance: Literal["none", "simulated_execution"]
+    coverage: dict[str, Any] = Field(default_factory=dict)
+    exclusion_counts: dict[str, int] = Field(default_factory=dict)
+    primary_metrics: list[dict[str, Any]] = Field(default_factory=list)
+    exploratory_metrics: list[dict[str, Any]] = Field(default_factory=list)
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
+    holdout: dict[str, Any] = Field(default_factory=dict)
+    ma5_policy_shadow: list[dict[str, Any]] = Field(default_factory=list)
+    candidate_decisions: list[dict[str, Any]] = Field(default_factory=list)
+    costs: dict[str, Any] = Field(default_factory=dict)
+    limitations: list[str] = Field(default_factory=list)
+    research_only: Literal[True]
+    production_mutation_allowed: Literal[False]

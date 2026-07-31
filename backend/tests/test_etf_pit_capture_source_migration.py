@@ -85,9 +85,9 @@ def test_pit_capture_source_migration_is_additive_constrained_and_reversible() -
         ).get_table_names()
 
 
-def test_pit_capture_source_is_the_single_alembic_head() -> None:
+def test_pit_capture_source_chain_has_one_current_alembic_head() -> None:
     config = Config()
     config.set_main_option("script_location", str(VERSIONS_DIR.parent))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["20260729_000057"]
+    assert script.get_heads() == ["20260731_000058"]
