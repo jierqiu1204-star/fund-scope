@@ -141,7 +141,8 @@ jobs:
             "$GITHUB_WORKSPACE"/ "$deploy_dir"/
 
           cd "$deploy_dir/deploy"
-          sudo docker compose -f "$COMPOSE_FILE" build backend frontend-static-builder
+          sudo docker compose -f "$COMPOSE_FILE" build backend
+          sudo docker compose -f "$COMPOSE_FILE" build frontend-static-builder
 
           sudo docker compose -f "$COMPOSE_FILE" down --remove-orphans
           sudo docker compose -f "$COMPOSE_FILE" rm -f -s frontend-static-builder 2>/dev/null || true
