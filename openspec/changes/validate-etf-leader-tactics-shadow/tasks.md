@@ -68,7 +68,7 @@
 - [x] 8.3 Run `uv run pytest tests/test_backend_domain_boundaries.py` with a hard timeout below 60 seconds and fix any dependency-direction violation.
 - [x] 8.4 Run Ruff on changed backend and test files in bounded groups, then run repository Ruff only with explicit timeout and process-status handling.
 - [x] 8.5 Run strict OpenSpec validation for this change and the modified canonical specifications.
-- [ ] 8.6 Deploy nullable persistence and read-only code with continuation and scheduling disabled, recording artifact version, migration state, feature flags, and rollback commands.
-- [ ] 8.7 Run at most one bounded development continuation from real immutable production PIT artifacts when prerequisites exist; otherwise record the stable factual `insufficient_data` reason.
-- [ ] 8.8 Verify production ranking, allocation, tracked positions, risk alerts, notification logs, SMTP state, current candidate registry, and holdout state are unchanged.
-- [ ] 8.9 Leave automatic scheduling and holdout consumption disabled until non-holdout evidence is complete and manually reviewed; require a separate OpenSpec change for any V4 promotion.
+- [x] 8.6 Deploy nullable persistence and read-only code with continuation and scheduling disabled, recording artifact version, migration state, feature flags, and rollback commands.
+- [x] 8.7 Run at most one bounded development continuation from real immutable production PIT artifacts when prerequisites exist; otherwise record the stable factual `insufficient_data` reason.
+- [x] 8.8 Verify production ranking, allocation, tracked positions, risk alerts, notification logs, SMTP state, current candidate registry, and holdout state are unchanged.
+- [x] 8.9 Leave automatic scheduling and holdout consumption disabled until non-holdout evidence is complete and manually reviewed; require a separate OpenSpec change for any V4 promotion.
