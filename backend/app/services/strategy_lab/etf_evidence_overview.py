@@ -14,6 +14,11 @@ from app.models.entities import (
     ShortResearchSignalRun,
 )
 from app.services.etf_research_evidence import stable_contract_hash
+from app.services.short_research.coverage_policy import (
+    ETF_COMPLETE_SCORE_COVERAGE,
+    ETF_DAILY_DECISION_MIN_COVERAGE,
+    persisted_etf_complete_coverage_allowed,
+)
 from app.services.short_research.daily_reconstructable import (
     PRICE_BASIS,
     daily_reconstructable_manifest,
@@ -21,7 +26,6 @@ from app.services.short_research.daily_reconstructable import (
 from app.services.short_research.ranking_surfaces import DUAL_RANKING_RULE_VERSION
 from app.services.strategy_lab.etf_point_in_time_research_loop import (
     MIN_PRIMARY_INDEPENDENT_DATES,
-    MIN_PRODUCTION_COVERAGE,
     MIN_PROMOTION_SESSIONS,
     PRIMARY_POLICY_ENDPOINT,
     PRIMARY_RANKING_ENDPOINT,
@@ -323,10 +327,17 @@ async def build_etf_evidence_overview(
     else:
         decision_coverage = production.decision_data_coverage_ratio
         score_coverage = production.coverage_ratio
-        coverage_ready = all(
-            isinstance(value, int | float)
-            and float(value) >= MIN_PRODUCTION_COVERAGE
-            for value in (decision_coverage, score_coverage)
+        summary = production.summary_json or {}
+        policy_payload = summary.get("readiness_policy")
+        policy_version = (
+            policy_payload.get("policy_version")
+            if isinstance(policy_payload, dict)
+            else summary.get("readiness_policy_version")
+        )
+        coverage_ready = persisted_etf_complete_coverage_allowed(
+            policy_version=policy_version if isinstance(policy_version, str) else None,
+            daily_coverage_ratio=decision_coverage,
+            warmup_coverage_ratio=score_coverage,
         )
         production_surface = _surface(
             status="available" if coverage_ready else "insufficient_data",
@@ -340,14 +351,19 @@ async def build_etf_evidence_overview(
             data_cutoff=production.data_cutoff,
             manifest_hash=_production_manifest_hash(production),
             ranking_contract_hash=production.ranking_contract_hash,
-            run_reference={"signal_run_id": production.id},
+            run_reference={
+                "signal_run_id": production.id,
+                "readiness_policy_version": policy_version,
+            },
             coverage={
                 "expected_asset_count": production.expected_item_count,
                 "decision_data_covered_count": production.decision_data_item_count,
                 "decision_data_coverage_ratio": decision_coverage,
                 "score_eligible_count": production.eligible_item_count,
                 "score_coverage_ratio": score_coverage,
-                "minimum_required_ratio": MIN_PRODUCTION_COVERAGE,
+                "minimum_required_ratio": ETF_COMPLETE_SCORE_COVERAGE,
+                "minimum_decision_data_ratio": ETF_DAILY_DECISION_MIN_COVERAGE,
+                "minimum_score_ratio": ETF_COMPLETE_SCORE_COVERAGE,
             },
         )
 

@@ -18,12 +18,12 @@ score-warmup coverage before publication or research-depth work, SHALL keep
 - **THEN** research-depth provider work does not start and the existing
   publication continuation retains priority
 
-#### Scenario: Warmup coverage is degraded but publishable
+#### Scenario: Warmup coverage reaches the publication gate
 
 - **WHEN** target-date coverage is at least 95 percent and 61-session score
   coverage is at least 90 percent but below 95 percent
-- **THEN** the eligible ETF subset may publish and research-depth work may start
-- **AND** the snapshot is marked `degraded` while ETFs lacking 61 sessions
+- **THEN** the eligible ETF subset may publish as `complete` under policy v2 and research-depth work may start
+- **AND** the snapshot records the 90 percent warm-up threshold while ETFs lacking 61 sessions
   remain excluded from ranking
 
 #### Scenario: Research depth is incomplete

@@ -43,17 +43,15 @@ def _readiness(daily: float, warmup: float) -> dict[str, Any]:
             "pending_codes": codes,
         },
         "history_publication_gate_passed": daily >= 0.95 and warmup >= 0.90,
-        "complete_publication_gate_passed": daily >= 0.95 and warmup >= 0.95,
+        "complete_publication_gate_passed": daily >= 0.95 and warmup >= 0.90,
         "publication_coverage_thresholds": {
             "daily_freshness": 0.95,
             "history_depth_61_preview": 0.90,
-            "history_depth_61_complete": 0.95,
+            "history_depth_61_complete": 0.90,
         },
         "coverage_policy_mode": (
             "blocked"
             if daily < 0.95 or warmup < 0.90
-            else "degraded"
-            if warmup < 0.95
             else "complete"
         ),
         "blockers": [],
@@ -297,39 +295,39 @@ async def test_coordinator_remeasures_then_publishes_once_both_gates_pass(
 
 
 @pytest.mark.asyncio
-async def test_coordinator_materializes_degraded_research_without_publishing(
+async def test_coordinator_publishes_at_ninety_percent_warmup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_common(monkeypatch)
     readings = iter([_readiness(0.94, 0.92), _readiness(0.95, 0.92)])
-    preview_calls: list[dict[str, Any]] = []
+    publish_calls: list[dict[str, Any]] = []
 
     async def read(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         return next(readings)
 
-    async def preview(*_args: Any, **kwargs: Any) -> SimpleNamespace:
-        preview_calls.append(kwargs)
+    async def barrier(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            expected_codes=("510050", "159915"),
+            coverage_ratio=0.95,
+        )
+
+    async def publish(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+        publish_calls.append(kwargs)
         return SimpleNamespace(
             id=11,
             status="success",
             as_of_date=TRADE_DATE,
-            publication_state="unpublished",
+            publication_state="published",
             summary_json={"item_count": 2, "fund_count": 0, "etf_count": 2},
         )
 
-    async def unexpected_publish(*_args: Any, **_kwargs: Any) -> None:
-        raise AssertionError("degraded readiness must not publish a dual snapshot")
-
     monkeypatch.setattr(coordinator, "read_etf_history_readiness", read)
+    monkeypatch.setattr(coordinator, "build_etf_coverage_barrier", barrier)
+    monkeypatch.setattr(coordinator, "generate_and_publish_etf_snapshot", publish)
     monkeypatch.setattr(
         coordinator,
-        "generate_provisional_etf_research_preview",
-        preview,
-    )
-    monkeypatch.setattr(
-        coordinator,
-        "generate_and_publish_etf_snapshot",
-        unexpected_publish,
+        "etf_source_availability_cutoff",
+        lambda _date: datetime(2026, 7, 20, 15, 10),
     )
 
     result = await coordinator.run_post_close_etf_publication_readiness(
@@ -338,11 +336,9 @@ async def test_coordinator_materializes_degraded_research_without_publishing(
         decision_cutoff=DECISION_CUTOFF,
     )
 
-    assert result["publication_state"] == "provisional"
-    assert result["snapshot_state"] == "provisional"
-    assert result["readiness_state"] == "degraded"
+    assert result["publication_state"] == "published"
     assert result["run_id"] == 11
-    assert len(preview_calls) == 1
+    assert len(publish_calls) == 1
 
 
 @pytest.mark.asyncio

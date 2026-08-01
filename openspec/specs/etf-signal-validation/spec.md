@@ -174,7 +174,7 @@ ETF ranking validation SHALL use expanding chronological walk-forward folds, pur
 - **THEN** promotion uses the Holm-adjusted 95 percent interval and cannot use an unadjusted or secondary interval
 
 ### Requirement: ETF ranking promotion has hard sample and risk gates
-ETF ranking validation SHALL report `insufficient_data` unless dual production coverage is at least 95 percent, at least 252 factual point-in-time sessions and 40 non-overlapping primary dates exist, and at least three chronological folds complete.
+ETF ranking validation SHALL report `insufficient_data` unless production decision-data coverage is at least 95 percent, 61-session score-warmup coverage is at least 90 percent, at least 252 factual point-in-time sessions and 40 non-overlapping primary dates exist, and at least three chronological folds complete.
 
 #### Scenario: Warm-up exists but promotion sample is short
 - **WHEN** 61 adjusted sessions are available but any formal sample gate is missing
@@ -190,4 +190,3 @@ ETF ranking validation SHALL freeze the manifest and non-holdout evidence before
 #### Scenario: Holdout was already consumed
 - **WHEN** a caller retries, retunes, or changes a candidate under the same holdout identity
 - **THEN** the validator rejects the operation and requires a new pre-registered experiment
-

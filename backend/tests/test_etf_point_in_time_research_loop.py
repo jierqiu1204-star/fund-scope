@@ -8,6 +8,7 @@ import pytest
 from app.services.etf_research_evidence import stable_contract_hash
 from app.services.strategy_lab.etf_point_in_time_research_loop import (
     MAX_DRAWDOWN_DETERIORATION,
+    MIN_DECISION_DATA_COVERAGE,
     MIN_PRIMARY_INDEPENDENT_DATES,
     MIN_PRODUCTION_COVERAGE,
     MIN_PROMOTION_SESSIONS,
@@ -67,7 +68,7 @@ def test_manifest_freezes_current_contracts_and_three_candidates() -> None:
     assert manifest.minimum_promotion_sessions == 252
     assert manifest.minimum_independent_dates == 40
     assert manifest.minimum_walk_forward_folds == 3
-    assert manifest.minimum_production_coverage == 0.95
+    assert manifest.minimum_production_coverage == 0.90
     assert manifest.maximum_drawdown_deterioration == 0.02
     assert len(manifest.manifest_hash) == 64
 
@@ -81,7 +82,7 @@ def test_manifest_freezes_current_contracts_and_three_candidates() -> None:
 def test_promotion_is_insufficient_before_all_real_sample_gates() -> None:
     decision = evaluate_research_promotion(
         PromotionGateEvidence(
-            decision_data_coverage_ratio=MIN_PRODUCTION_COVERAGE,
+            decision_data_coverage_ratio=MIN_DECISION_DATA_COVERAGE,
             score_coverage_ratio=MIN_PRODUCTION_COVERAGE,
             eligible_point_in_time_sessions=MIN_PROMOTION_SESSIONS - 1,
             independent_primary_dates=MIN_PRIMARY_INDEPENDENT_DATES - 1,
@@ -108,7 +109,7 @@ def test_promotion_is_insufficient_before_all_real_sample_gates() -> None:
 
 def test_promotion_requires_positive_adjusted_interval_and_drawdown_gate() -> None:
     base = PromotionGateEvidence(
-        decision_data_coverage_ratio=MIN_PRODUCTION_COVERAGE,
+        decision_data_coverage_ratio=MIN_DECISION_DATA_COVERAGE,
         score_coverage_ratio=MIN_PRODUCTION_COVERAGE,
         eligible_point_in_time_sessions=MIN_PROMOTION_SESSIONS,
         independent_primary_dates=MIN_PRIMARY_INDEPENDENT_DATES,

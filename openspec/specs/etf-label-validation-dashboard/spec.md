@@ -92,7 +92,7 @@ The ETF evidence API and workbench SHALL expose stable reasons for absent produc
 - **THEN** the UI shows `样本不足` with exact counts and MUST NOT describe the candidate as validated
 
 #### Scenario: Coverage gate fails
-- **WHEN** either production decision-data or score coverage is below 95 percent
+- **WHEN** production decision-data coverage is below 95 percent or score-warmup coverage is below 90 percent
 - **THEN** the UI shows `覆盖不足`, preserves the current production ranking state, and does not imply that fallback data can repair the result
 
 ### Requirement: ETF evidence presentation identifies primary and exploratory results

@@ -11,12 +11,12 @@ The system SHALL measure target-session decision-data freshness and 61-session s
 - **WHEN** target-date adjusted coverage is at least 95 percent but fewer than 90 percent of the universe have 61 eligible exchange sessions
 - **THEN** readiness is `blocked`, the coordinator prioritizes warm-up gaps, and no ranking preview or complete publication is produced
 
-#### Scenario: Warm-up supports only a provisional research preview
+#### Scenario: Warm-up reaches policy-v2 completion
 - **WHEN** target-date adjusted coverage is at least 95 percent and 61-session score-eligible coverage is at least 90 percent but below 95 percent
-- **THEN** readiness is `degraded`, only score-eligible ETFs may appear in a provisional research preview, and no complete dual publication or PIT capture is allowed
+- **THEN** readiness is `complete`, only score-eligible ETFs appear, and complete dual publication plus PIT capture are allowed
 
 #### Scenario: Both complete coverage gates pass
-- **WHEN** target-date adjusted coverage and 61-session score-eligible coverage are both at least 95 percent
+- **WHEN** target-date adjusted coverage is at least 95 percent and 61-session score-eligible coverage is at least 90 percent
 - **THEN** readiness is `complete` and the coordinator generates and publication-validates one complete dual-ranking snapshot without running another synchronization slice
 
 #### Scenario: Authoritative universe is unavailable

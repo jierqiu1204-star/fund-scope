@@ -18,6 +18,9 @@ from app.models.entities import (
     ShortResearchSignalItem,
 )
 from app.services.etf_research_evidence import stable_contract_hash
+from app.services.short_research.coverage_policy import (
+    persisted_etf_complete_coverage_allowed,
+)
 from app.services.strategy_lab.etf_leader_tactics_shadow import (
     PRICE_BASIS,
     LeaderAdjustedBar,
@@ -454,8 +457,11 @@ def _validate_capture_source(
     context = source.source_context_json if isinstance(source.source_context_json, dict) else {}
     if (
         source.readiness_state != "complete"
-        or source.target_date_coverage_ratio < 0.95
-        or source.warmup_coverage_ratio < 0.95
+        or not persisted_etf_complete_coverage_allowed(
+            policy_version=source.readiness_policy_version,
+            daily_coverage_ratio=source.target_date_coverage_ratio,
+            warmup_coverage_ratio=source.warmup_coverage_ratio,
+        )
         or source.cutoff_timezone != "Asia/Shanghai"
         or not all(_is_sha256(value) for value in hashes)
         or stable_contract_hash(context) != source.source_context_hash

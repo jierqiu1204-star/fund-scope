@@ -8,7 +8,7 @@ ETF research evidence SHALL record readiness state and policy version, target-da
 - **THEN** evidence records `degraded`, the two factual coverage ratios, exclusions, decision and receipt cutoffs, provisional snapshot identity, and the absence of complete or actionable publication
 
 #### Scenario: Complete production snapshot is recorded
-- **WHEN** a complete dual snapshot passes both 95 percent gates
+- **WHEN** a complete policy-v2 dual snapshot passes the 95 percent decision-data gate and 90 percent score-warmup gate
 - **THEN** evidence records `complete`, the immutable dual-snapshot identity, decision and receipt cutoffs, provider provenance, and resource telemetry
 
 #### Scenario: Historical PIT sample is built

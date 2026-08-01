@@ -142,7 +142,7 @@ def _install(
 
 
 @pytest.mark.asyncio
-async def test_degraded_materialization_is_provisional_and_has_no_actionable_identity(
+async def test_ninety_percent_materialization_is_complete_and_publishable(
     app,
     monkeypatch,
 ) -> None:
@@ -161,12 +161,7 @@ async def test_degraded_materialization_is_provisional_and_has_no_actionable_ide
         )
         await session.commit()
         run_id = run.id
-        with pytest.raises(
-            ValueError,
-            match="complete dual 95 percent readiness",
-        ):
-            await publish_dual_ranking_snapshot(session, run_id=run_id)
-        await session.rollback()
+        await publish_dual_ranking_snapshot(session, run_id=run_id)
         persisted_run = await session.get(ShortResearchSignalRun, run_id)
         items = (
             await session.scalars(
@@ -187,21 +182,59 @@ async def test_degraded_materialization_is_provisional_and_has_no_actionable_ide
         )
 
     assert persisted_run is not None
-    assert persisted_run.publication_state == "unpublished"
-    assert persisted_run.summary_json["readiness_state"] == "degraded"
-    assert persisted_run.summary_json["snapshot_state"] == "provisional"
+    assert persisted_run.publication_state == "published"
+    assert persisted_run.summary_json["readiness_state"] == "complete"
+    assert persisted_run.summary_json["snapshot_state"] == "complete_candidate"
+    assert persisted_run.summary_json["readiness_policy_version"] == (
+        "etf_readiness_policy_v2"
+    )
     assert (
         persisted_run.summary_json["ranking_surfaces"]["actionable"][
             "eligible_count"
         ]
-        == 0
+        == 9
     )
-    assert all(item.metrics_json["actionable_rank"] is None for item in items)
-    assert all(item.metrics_json["actionable_score"] is None for item in items)
-    assert research.state == "provisional"
+    assert all(item.metrics_json["actionable_rank"] is not None for item in items)
+    assert all(item.metrics_json["actionable_score"] is not None for item in items)
+    assert research.state == "ready"
     assert research.run is not None and research.run.id == run_id
-    assert actionable.state == "waiting"
-    assert actionable.run is None
+    assert actionable.state == "ready"
+    assert actionable.run is not None and actionable.run.id == run_id
+
+
+@pytest.mark.asyncio
+async def test_legacy_ninety_percent_snapshot_is_not_promoted_by_v2(
+    app,
+    monkeypatch,
+) -> None:
+    universe_codes = [f"5100{index:02d}" for index in range(10)]
+    assets = [
+        _asset(code, research_score=80.0 - index, actionable_score=90.0 - index)
+        for index, code in enumerate(universe_codes[:9])
+    ]
+    _install(monkeypatch, assets, universe_codes=universe_codes)
+
+    async with app.state.db.session() as session:
+        run = await materialize_dual_ranking_snapshot(
+            session,
+            trade_date=TRADE_DATE,
+            decision_cutoff=CUTOFF,
+        )
+        summary = dict(run.summary_json)
+        readiness = dict(summary["readiness_policy"])
+        readiness["policy_version"] = "etf_readiness_policy_v1"
+        readiness["state"] = "degraded"
+        summary["readiness_policy"] = readiness
+        summary["readiness_policy_version"] = "etf_readiness_policy_v1"
+        summary["readiness_state"] = "degraded"
+        run.summary_json = summary
+        await session.commit()
+
+        with pytest.raises(
+            ValueError,
+            match="95 percent daily and 90 percent warmup readiness",
+        ):
+            await publish_dual_ranking_snapshot(session, run_id=run.id)
 
 
 @pytest.mark.asyncio
@@ -439,7 +472,7 @@ async def test_cached_assets_api_defaults_to_research_and_filters_actionable(
 
 
 @pytest.mark.asyncio
-async def test_degraded_assets_api_exposes_only_provisional_research(
+async def test_ninety_percent_assets_api_exposes_complete_dual_ranking(
     app,
     client,
     monkeypatch,
@@ -472,12 +505,13 @@ async def test_degraded_assets_api_exposes_only_provisional_research(
                 for code in universe_codes
             ]
         )
-        await materialize_dual_ranking_snapshot(
+        run = await materialize_dual_ranking_snapshot(
             session,
             trade_date=TRADE_DATE,
             decision_cutoff=CUTOFF,
         )
         await session.commit()
+        await publish_dual_ranking_snapshot(session, run_id=run.id)
         watchlist = await _build_research_watchlist(session)
 
     research_response = await client.get(
@@ -490,23 +524,19 @@ async def test_degraded_assets_api_exposes_only_provisional_research(
 
     assert research_response.status_code == 200
     research = research_response.json()
-    assert research["snapshot"]["snapshot_state"] == "provisional"
-    assert research["snapshot"]["readiness_state"] == "degraded"
-    assert research["snapshot"]["policy_version"] == "etf_readiness_policy_v1"
+    assert research["snapshot"]["snapshot_state"] == "complete"
+    assert research["snapshot"]["readiness_state"] == "complete"
+    assert research["snapshot"]["policy_version"] == "etf_readiness_policy_v2"
     assert len(research["items"]) == 9
-    assert all(item["actionable_rank"] is None for item in research["items"])
-    assert all(item["actionable_score"] is None for item in research["items"])
-    assert all(
-        item["actionable_exclusion_reasons"] == ["provisional_research_only"]
-        for item in research["items"]
-    )
+    assert all(item["actionable_rank"] is not None for item in research["items"])
+    assert all(item["actionable_score"] is not None for item in research["items"])
 
     assert actionable_response.status_code == 200
     actionable = actionable_response.json()
-    assert actionable["items"] == []
-    assert actionable["snapshot"]["snapshot_state"] == "unavailable"
-    assert watchlist.signal_status == "provisional"
-    assert all(SOURCE_TOP20_SIGNAL not in item.sources for item in watchlist.items)
+    assert len(actionable["items"]) == 9
+    assert actionable["snapshot"]["snapshot_state"] == "complete"
+    assert watchlist.signal_status == "ready"
+    assert all(SOURCE_TOP20_SIGNAL in item.sources for item in watchlist.items)
 
 
 @pytest.mark.asyncio

@@ -129,7 +129,7 @@ async def test_readiness_separates_current_freshness_from_61_session_depth(app) 
     assert report["publication_coverage_thresholds"] == {
         "daily_freshness": 0.95,
         "history_depth_61_preview": 0.90,
-        "history_depth_61_complete": 0.95,
+        "history_depth_61_complete": 0.90,
     }
 
 

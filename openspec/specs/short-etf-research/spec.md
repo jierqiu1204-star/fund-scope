@@ -209,14 +209,14 @@ ETF observation portfolio results SHALL keep the single ETF max weight at 30%.
 - **THEN** no individual ETF weight exceeds 30%
 
 ### Requirement: ETF ranking publication requires current and score-ready adjusted data
-The system SHALL publish a full ETF ranking only when at least 95 percent of the authoritative target-date universe have decision-eligible `total_return_adjusted` data for the target session and at least 95 percent are score-eligible with 61 exchange sessions, and SHALL otherwise return an explicit waiting state.
+The system SHALL publish a full ETF ranking only when at least 95 percent of the authoritative target-date universe have decision-eligible `total_return_adjusted` data for the target session and at least 90 percent are score-eligible with 61 exchange sessions, and SHALL otherwise return an explicit waiting state.
 
 #### Scenario: Decision-data coverage is insufficient
 - **WHEN** target-date decision-eligible adjusted coverage is below 95 percent
 - **THEN** the system publishes no ranking and reports the current coverage blocker
 
 #### Scenario: Score coverage is insufficient
-- **WHEN** decision-data coverage reaches 95 percent but 61-session score-eligible coverage remains below 95 percent
+- **WHEN** decision-data coverage reaches 95 percent but 61-session score-eligible coverage remains below 90 percent
 - **THEN** the system publishes no degraded ranking and reports the warm-up blocker
 
 #### Scenario: Raw fallback rows exist
@@ -224,5 +224,5 @@ The system SHALL publish a full ETF ranking only when at least 95 percent of the
 - **THEN** those rows remain display-only or unavailable and MUST NOT increase either publication coverage ratio
 
 #### Scenario: Both gates pass
-- **WHEN** both registered 95 percent gates pass for the same target trade date and authoritative universe
+- **WHEN** the registered 95 percent decision-data gate and 90 percent score-warmup gate pass for the same target trade date and authoritative universe
 - **THEN** the system may materialize and publication-validate the full dual-ranking snapshot using only decision-eligible adjusted inputs

@@ -68,10 +68,10 @@ def _source() -> EtfPitCaptureSource:
         ranking_contract_hash=HASH_D,
         research_contract_hash=HASH_A,
         actionable_contract_hash=HASH_B,
-        readiness_policy_version="dual_95_v1",
+        readiness_policy_version="etf_readiness_policy_v2",
         readiness_state="complete",
-        target_date_coverage_ratio=0.99,
-        warmup_coverage_ratio=0.98,
+        target_date_coverage_ratio=0.95,
+        warmup_coverage_ratio=0.90,
         market_decision_cutoff=cutoff,
         data_receipt_cutoff=cutoff + timedelta(minutes=5),
         replay_visibility_cutoff=cutoff + timedelta(minutes=2),
@@ -361,6 +361,22 @@ def test_adapter_rejects_missing_turnover_without_estimation() -> None:
 
     assert result.inputs[0].bars == ()
     assert result.exclusions["510001"] == ("adjusted_turnover_unavailable",)
+
+
+def test_adapter_does_not_promote_legacy_ninety_four_percent_source() -> None:
+    source = _source()
+    source.readiness_policy_version = "etf_readiness_policy_v1"
+    source.warmup_coverage_ratio = 0.94
+
+    with pytest.raises(LeaderPitAdapterError, match="incomplete or incompatible"):
+        adapt_leader_pit_inputs(
+            capture_source=source,
+            replay_snapshot=_snapshot(_series("510001")),
+            taxonomy_facts={},
+            sector_trend_facts={},
+            baseline_score_facts={},
+            regime_fact=None,
+        )
 
 
 def test_adapter_rejects_mismatched_capture_cutoff() -> None:

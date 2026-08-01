@@ -20,7 +20,7 @@
 - [x] 3.1 Add materialization tests for blocked, degraded, and complete readiness, including exact eligible and excluded code sets.
 - [x] 3.2 Persist policy version and readiness state in additive snapshot summary/evidence metadata.
 - [x] 3.3 Materialize a degraded run only as a provisional research preview with no complete dual-publication or actionable identity.
-- [x] 3.4 Require dual 95-percent readiness for complete canonical publication and preserve one complete snapshot per trade date and contract.
+- [x] 3.4 Require policy-v2 daily 95-percent and 61-session 90-percent readiness for complete canonical publication, preserve legacy-v1 semantics, and preserve one complete snapshot per trade date and contract.
 - [x] 3.5 Update research, complete, and actionable selectors so each rejects incompatible readiness and surface identities.
 - [x] 3.6 Keep raw Sina/efinance, stale, estimated, intraday-only, and non-total-return-adjusted rows outside every decision, preview, complete, and PIT coverage numerator.
 - [x] 3.7 Return stable unavailable reasons instead of selecting an old or incompatible target-date snapshot.
@@ -68,7 +68,7 @@
 - [ ] 8.2 Deploy the readiness policy and RSS correction with production PIT scheduling disabled, recording artifact version and rollback switches.
 - [ ] 8.3 On one real trading day, record authoritative universe, daily and warm-up coverage, provider health, raw-price violations, non-finite violations, baseline/current/slice/lifetime RSS, checkpoint, and server resources.
 - [ ] 8.4 If readiness is degraded, verify the provisional research preview is honest, complete/actionable selectors reject it, and one bounded continuation makes monotonic progress.
-- [ ] 8.5 After dual 95-percent coverage factually passes, verify exactly one complete dual snapshot publishes and the comprehensive research API returns that snapshot.
+- [ ] 8.5 After policy-v2 daily 95-percent and 61-session 90-percent coverage factually pass, verify exactly one complete dual snapshot publishes and the comprehensive research API returns that snapshot.
 - [ ] 8.6 Verify subsequent publication-readiness triggers for the same trade date perform no provider work and remain within the 2-core/4-GB resource profile.
 - [ ] 8.7 Enable production PIT scheduling only after complete publication and record monotonic one-page checkpoints across at least three different real trading dates without counting repeats.
 - [ ] 8.8 Record final cutoff, coverage, provider, resource, publication, PIT, isolation, and rollback evidence; do not substitute simulated, stale, raw-price, or same-day duplicate evidence.

@@ -155,7 +155,7 @@ async def test_pit_capture_requires_complete_dual_readiness_and_all_cutoffs(app)
         degraded = await _seed_complete_snapshot(
             session,
             daily_coverage=1.0,
-            warmup_coverage=0.94,
+            warmup_coverage=0.8999,
         )
         rejected = await capture_complete_pit_source(
             session,
@@ -179,7 +179,36 @@ async def test_pit_capture_requires_complete_dual_readiness_and_all_cutoffs(app)
         assert missing.unavailable_reason == PIT_UNAVAILABLE_COMPLETE_PUBLICATION
         assert await session.scalar(select(func.count(EtfPitCaptureSource.id))) == 0
 
-        complete = await _seed_complete_snapshot(session)
+        legacy = await _seed_complete_snapshot(
+            session,
+            daily_coverage=0.95,
+            warmup_coverage=0.94,
+        )
+        legacy_summary = dict(legacy.summary_json)
+        legacy_policy = dict(legacy_summary["readiness_policy"])
+        legacy_policy["policy_version"] = "etf_readiness_policy_v1"
+        legacy_policy["state"] = "degraded"
+        legacy_summary["readiness_policy"] = legacy_policy
+        legacy_summary["readiness_policy_version"] = "etf_readiness_policy_v1"
+        legacy_summary["readiness_state"] = "degraded"
+        legacy.summary_json = legacy_summary
+        await session.commit()
+        legacy_rejected = await capture_complete_pit_source(
+            session,
+            source_signal_run_id=legacy.id,
+            provider_health_hash=stable_contract_hash(PROVIDER_HEALTH),
+            provider_health_identity=PROVIDER_HEALTH,
+            replay_visibility_cutoff=RECEIPT_CUTOFF,
+        )
+        assert legacy_rejected.unavailable_reason == (
+            PIT_UNAVAILABLE_COMPLETE_PUBLICATION
+        )
+
+        complete = await _seed_complete_snapshot(
+            session,
+            daily_coverage=0.95,
+            warmup_coverage=0.90,
+        )
         missing = await capture_complete_pit_source(
             session,
             source_signal_run_id=complete.id,

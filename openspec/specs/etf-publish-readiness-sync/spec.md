@@ -4,18 +4,18 @@
 TBD - created by archiving change accelerate-etf-publish-readiness-sync. Update Purpose after archive.
 ## Requirements
 ### Requirement: Post-close ETF publication readiness is coordinated by bounded continuations
-The system SHALL coordinate post-close ETF publication by measuring target-session decision-data freshness and 61-session score warm-up coverage separately, running at most one bounded continuation when either coverage is below its gate, and generating a ranking snapshot only after both coverage ratios meet 95 percent.
+The system SHALL coordinate post-close ETF publication by measuring target-session decision-data freshness and 61-session score warm-up coverage separately, running at most one bounded continuation when either coverage is below its gate, and generating a ranking snapshot only after target-session coverage reaches 95 percent and 61-session warm-up coverage reaches 90 percent.
 
 #### Scenario: Daily freshness is below the gate
 - **WHEN** fewer than 95 percent of the authoritative ETF universe have decision-eligible `total_return_adjusted` data for the target trade date
 - **THEN** the coordinator runs one bounded publication-readiness slice and leaves publication in an explicit waiting state
 
 #### Scenario: Daily freshness passes but warm-up does not
-- **WHEN** target-date adjusted coverage is at least 95 percent but fewer than 95 percent of the universe have 61 eligible exchange sessions
+- **WHEN** target-date adjusted coverage is at least 95 percent but fewer than 90 percent of the universe have 61 eligible exchange sessions
 - **THEN** the coordinator prioritizes warm-up gaps and MUST NOT generate degraded scores for incomplete ETFs
 
 #### Scenario: Both coverage gates pass
-- **WHEN** target-date adjusted coverage and 61-session score-eligible coverage are both at least 95 percent
+- **WHEN** target-date adjusted coverage is at least 95 percent and 61-session score-eligible coverage is at least 90 percent
 - **THEN** the coordinator generates and publication-validates one full dual-ranking snapshot without running another synchronization slice
 
 #### Scenario: Authoritative universe is unavailable

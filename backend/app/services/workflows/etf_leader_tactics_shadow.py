@@ -11,13 +11,19 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import distinct, func, select
+from sqlalchemy import and_, distinct, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.models.entities import EtfFactorExperimentEvidence, EtfPitCaptureSource
 from app.services import market_data
 from app.services.etf_research_evidence import stable_contract_hash
+from app.services.short_research.coverage_policy import (
+    ETF_COMPLETE_SCORE_COVERAGE,
+    ETF_DAILY_DECISION_MIN_COVERAGE,
+    ETF_LEGACY_COMPLETE_SCORE_COVERAGE,
+    ETF_READINESS_POLICY_VERSION,
+)
 from app.services.strategy_lab.etf_action_replay.artifact_store import (
     ReplayArtifactStore,
 )
@@ -98,12 +104,32 @@ _MATURITY_PRICE_CONTRACT_HASH = stable_contract_hash(
 )
 
 
+def _complete_pit_source_coverage_clause():
+    current_policy = and_(
+        EtfPitCaptureSource.readiness_policy_version
+        == ETF_READINESS_POLICY_VERSION,
+        EtfPitCaptureSource.warmup_coverage_ratio
+        >= ETF_COMPLETE_SCORE_COVERAGE,
+    )
+    legacy_policy = and_(
+        or_(
+            EtfPitCaptureSource.readiness_policy_version
+            != ETF_READINESS_POLICY_VERSION,
+            EtfPitCaptureSource.readiness_policy_version.is_(None),
+        ),
+        EtfPitCaptureSource.warmup_coverage_ratio
+        >= ETF_LEGACY_COMPLETE_SCORE_COVERAGE,
+    )
+    return or_(current_policy, legacy_policy)
+
+
 async def _pit_session_count(session: AsyncSession) -> int:
     value = await session.scalar(
         select(func.count(distinct(EtfPitCaptureSource.as_of_trade_date))).where(
             EtfPitCaptureSource.readiness_state == "complete",
-            EtfPitCaptureSource.target_date_coverage_ratio >= 0.95,
-            EtfPitCaptureSource.warmup_coverage_ratio >= 0.95,
+            EtfPitCaptureSource.target_date_coverage_ratio
+            >= ETF_DAILY_DECISION_MIN_COVERAGE,
+            _complete_pit_source_coverage_clause(),
         )
     )
     return int(value or 0)
@@ -192,8 +218,9 @@ async def _oldest_due_source(
             select(EtfPitCaptureSource)
             .where(
                 EtfPitCaptureSource.readiness_state == "complete",
-                EtfPitCaptureSource.target_date_coverage_ratio >= 0.95,
-                EtfPitCaptureSource.warmup_coverage_ratio >= 0.95,
+                EtfPitCaptureSource.target_date_coverage_ratio
+                >= ETF_DAILY_DECISION_MIN_COVERAGE,
+                _complete_pit_source_coverage_clause(),
             )
             .order_by(
                 EtfPitCaptureSource.as_of_trade_date.asc(),
@@ -240,8 +267,9 @@ async def _latest_maturity_source(
         select(EtfPitCaptureSource)
         .where(
             EtfPitCaptureSource.readiness_state == "complete",
-            EtfPitCaptureSource.target_date_coverage_ratio >= 0.95,
-            EtfPitCaptureSource.warmup_coverage_ratio >= 0.95,
+            EtfPitCaptureSource.target_date_coverage_ratio
+            >= ETF_DAILY_DECISION_MIN_COVERAGE,
+            _complete_pit_source_coverage_clause(),
             EtfPitCaptureSource.as_of_trade_date > after_date,
         )
         .order_by(

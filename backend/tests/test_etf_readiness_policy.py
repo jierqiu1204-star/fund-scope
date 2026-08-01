@@ -3,8 +3,10 @@ from __future__ import annotations
 import pytest
 
 from app.services.short_research.coverage_policy import (
+    ETF_LEGACY_READINESS_POLICY_VERSION,
     ETF_READINESS_POLICY_VERSION,
     evaluate_etf_readiness,
+    evaluate_persisted_etf_readiness,
 )
 
 
@@ -18,6 +20,12 @@ from app.services.short_research.coverage_policy import (
             ("daily_freshness_coverage_below_95pct",),
         ),
         (
+            0.9499,
+            0.90,
+            "blocked",
+            ("daily_freshness_coverage_below_95pct",),
+        ),
+        (
             0.95,
             0.8999,
             "blocked",
@@ -26,14 +34,14 @@ from app.services.short_research.coverage_policy import (
         (
             0.95,
             0.90,
-            "degraded",
-            ("history_depth_61_coverage_below_95pct",),
+            "complete",
+            (),
         ),
         (
             0.95,
             0.9499,
-            "degraded",
-            ("history_depth_61_coverage_below_95pct",),
+            "complete",
+            (),
         ),
         (0.95, 0.95, "complete", ()),
     ],
@@ -56,6 +64,24 @@ def test_readiness_policy_threshold_boundaries(
     assert result.blocker_reasons == expected_blockers
     assert result.preview_allowed is (expected_state != "blocked")
     assert result.complete_publication_allowed is (expected_state == "complete")
+
+
+def test_persisted_legacy_policy_is_not_reinterpreted_by_v2() -> None:
+    legacy = evaluate_persisted_etf_readiness(
+        policy_version=ETF_LEGACY_READINESS_POLICY_VERSION,
+        daily_coverage_ratio=0.95,
+        warmup_coverage_ratio=0.94,
+    )
+    current = evaluate_persisted_etf_readiness(
+        policy_version=ETF_READINESS_POLICY_VERSION,
+        daily_coverage_ratio=0.95,
+        warmup_coverage_ratio=0.94,
+    )
+
+    assert legacy.state == "degraded"
+    assert legacy.complete_publication_allowed is False
+    assert current.state == "complete"
+    assert current.complete_publication_allowed is True
 
 
 def test_readiness_policy_reports_all_factual_blockers() -> None:

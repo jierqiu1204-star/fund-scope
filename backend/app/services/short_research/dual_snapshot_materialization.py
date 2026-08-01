@@ -14,7 +14,12 @@ from app.models.entities import (
     authorize_snapshot_publication,
     utcnow,
 )
-from app.services.short_research.coverage_policy import evaluate_etf_readiness
+from app.services.short_research.coverage_policy import (
+    ETF_COMPLETE_SCORE_COVERAGE,
+    ETF_DAILY_DECISION_MIN_COVERAGE,
+    evaluate_etf_readiness,
+    evaluate_persisted_etf_readiness,
+)
 from app.services.short_research.daily_reconstructable import (
     daily_reconstructable_manifest,
 )
@@ -222,6 +227,11 @@ async def materialize_dual_ranking_snapshot(
         "research_hash": research_manifest.manifest_hash,
         "actionable": actionable_manifest.canonical_payload(),
         "actionable_hash": actionable_manifest.manifest_hash,
+        "readiness_policy": {
+            "policy_version": readiness.policy_version,
+            "daily_coverage_threshold": ETF_DAILY_DECISION_MIN_COVERAGE,
+            "warmup_coverage_threshold": ETF_COMPLETE_SCORE_COVERAGE,
+        },
     }
     identity = build_ranking_contract(
         score_version=research_manifest.contract_id,
@@ -493,13 +503,25 @@ async def publish_dual_ranking_snapshot(
             or run.price_basis != research_manifest.price_basis
         ):
             raise SnapshotPublicationError("dual ranking snapshot identity mismatch")
-        readiness = evaluate_etf_readiness(
+        summary = run.summary_json or {}
+        policy_payload = summary.get("readiness_policy")
+        policy_version = (
+            policy_payload.get("policy_version")
+            if isinstance(policy_payload, dict)
+            else summary.get("readiness_policy_version")
+        )
+        readiness = evaluate_persisted_etf_readiness(
+            policy_version=policy_version if isinstance(policy_version, str) else None,
             daily_coverage_ratio=run.decision_data_coverage_ratio,
             warmup_coverage_ratio=run.coverage_ratio,
         )
-        if not readiness.complete_publication_allowed:
+        if (
+            not readiness.complete_publication_allowed
+            or summary.get("readiness_state") != "complete"
+        ):
             raise SnapshotPublicationError(
-                "dual ranking publication requires complete dual 95 percent readiness"
+                "dual ranking publication requires 95 percent daily and "
+                "90 percent warmup readiness"
             )
         items = (
             await session.scalars(

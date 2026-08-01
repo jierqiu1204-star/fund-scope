@@ -180,58 +180,6 @@ def test_adaptive_research_profile_grows_and_backs_off() -> None:
 
 
 @pytest.mark.asyncio
-async def test_degraded_publication_continues_bounded_warmup_repair(
-    monkeypatch,
-) -> None:
-    captured: dict[str, Any] = {}
-
-    async def fake_lease(_session: object) -> None:
-        return None
-
-    async def fake_recent(_session: object, **_kwargs: Any) -> list[object]:
-        return []
-
-    async def fake_readiness(_session: object, **_kwargs: Any) -> dict[str, Any]:
-        return _readiness(daily=1.0, warmup=0.94)
-
-    async def fake_run(
-        _session: object,
-        *,
-        request: Any,
-        fetcher: object,
-    ) -> SimpleNamespace:
-        captured["request"] = request
-        captured["fetcher"] = fetcher
-        return _sync_result()
-
-    monkeypatch.setattr(coordinator, "_active_history_lease", fake_lease)
-    monkeypatch.setattr(coordinator, "_recent_lane_slices", fake_recent)
-    monkeypatch.setattr(coordinator, "read_etf_history_readiness", fake_readiness)
-    monkeypatch.setattr(coordinator, "PublicationAdjustedHistoryFetcher", _Fetcher)
-    monkeypatch.setattr(coordinator, "run_bounded_history_sync_slice", fake_run)
-
-    result = await coordinator.run_post_publication_etf_research_history_slice(
-        object(),  # type: ignore[arg-type]
-        target_date=date(2026, 7, 24),
-    )
-
-    request = captured["request"]
-    assert request.scope == "history_depth_61"
-    assert request.required_sessions == 61
-    assert request.selection_policy == "history_depth"
-    assert request.target_trade_date is None
-    assert request.from_date == date(2026, 7, 24) - timedelta(days=730)
-    assert request.to_date == date(2026, 7, 24)
-    assert request.max_codes == 10
-    assert result["status"] == "partial"
-    assert result["publication_gates"]["thresholds"] == {
-        "daily_freshness": 0.95,
-        "history_depth_61_preview": 0.90,
-        "history_depth_61_complete": 0.95,
-    }
-
-
-@pytest.mark.asyncio
 async def test_research_depth_yields_while_preview_gate_is_blocked(
     monkeypatch,
 ) -> None:
@@ -361,7 +309,7 @@ async def test_coordinator_runs_300_before_500_with_safe_bounded_profile(
 
     async def fake_readiness(_session: object, **_kwargs: Any) -> dict[str, Any]:
         return _readiness(
-            warmup=0.95,
+            warmup=0.90,
             contract=contract_ratio,
             telemetry=0.0,
         )
@@ -398,4 +346,9 @@ async def test_coordinator_runs_300_before_500_with_safe_bounded_profile(
     assert request.provider_timeout_seconds == 6.0
     assert request.process_deadline_seconds == 60.0
     assert result["sync"]["attempted_count"] == 1
+    assert result["publication_gates"]["thresholds"] == {
+        "daily_freshness": 0.95,
+        "history_depth_61_preview": 0.90,
+        "history_depth_61_complete": 0.90,
+    }
     assert "attempted_codes" not in result["sync"]

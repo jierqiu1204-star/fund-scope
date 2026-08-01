@@ -16,7 +16,7 @@ The implementation must run on 2 cores and 4 GB, keep every command or continuat
 
 **Non-Goals:**
 
-- Lowering dual 95-percent readiness, 252-session, 40-independent-date, fold, uncertainty, holdout, or promotion gates.
+- Lowering daily 95-percent readiness, policy-v2 61-session 90-percent readiness, 252-session, 40-independent-date, fold, uncertainty, holdout, or promotion gates.
 - Reconstructing historical taxonomy, membership, receipt timestamps, or provider facts from current metadata.
 - Changing `final_score_v3`, production ranking, allocation, tracking, alerts, SMTP, or real execution.
 - Adding parameter search, machine learning, proprietary-signal claims, or intraday fill simulation.
@@ -67,7 +67,7 @@ Core feature and evaluation logic remains in `strategy_lab`; database loading an
 
 1. Add observation report schemas, checkpoint handler composition, and tests with all production flags disabled.
 2. Deploy the read-only evidence projection and verify existing disabled or not-materialized states remain compatible.
-3. Finish the shared readiness rollout and obtain one complete dual-95-percent PIT source.
+3. Finish the shared readiness rollout and obtain one complete policy-v2 PIT source at daily 95-percent and 61-session 90-percent coverage.
 4. Enable the evidence API, then enable one bounded leader continuation with a frozen code version.
 5. Verify one source progresses monotonically, produces either a complete zero-match observation or a complete research match list, and leaves production tables unchanged.
 6. Enable due-aware scheduling and record at least three different factual sessions before closing rollout tasks.

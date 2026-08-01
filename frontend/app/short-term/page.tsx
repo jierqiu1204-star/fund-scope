@@ -3012,6 +3012,7 @@ function ShortTermClient() {
             </p>
             <p className="mt-1 text-xs text-ink/45">
               策略：{shortAssetData?.snapshot?.policy_version ?? "暂无"}
+              {" · "}完整门槛：当日复权 95% / 61 日预热 90%
               {" · "}数据接收截止：
               {formatUtcDateTime(shortAssetData?.snapshot?.data_receipt_cutoff)}
               {shortAssetData?.snapshot?.unavailable_reason
@@ -3021,8 +3022,8 @@ function ShortTermClient() {
             {rankingSurface === "research" &&
             shortAssetData?.snapshot?.coverage_policy_mode === "degraded" ? (
               <p className="mt-2 rounded-md bg-amber-50 px-2.5 py-2 text-xs leading-5 text-amber-800">
-                当前为临时研究预览，并非完整发布：61 日复权预热覆盖已达到 90%
-                但不足 95%；历史不足的 ETF 已排除，不参与本期排名。本期不产生组合、
+                当前是旧策略生成的临时研究预览，并非完整发布；系统不会用新门槛
+                追认旧快照。历史不足的 ETF 已排除，不参与本期排名。本期不产生组合、
                 邮件候选或可行动名次。
               </p>
             ) : null}

@@ -103,9 +103,13 @@ async def test_latest_etf_evidence_exposes_only_qualified_production_snapshot(
                 expected_item_count=1_400,
                 decision_data_item_count=1_360,
                 decision_data_coverage_ratio=1_360 / 1_400,
-                eligible_item_count=1_340,
-                coverage_ratio=1_340 / 1_400,
+                eligible_item_count=1_260,
+                coverage_ratio=1_260 / 1_400,
                 idempotency_key="published-dual-ranking-2026-07-24",
+                summary_json={
+                    "readiness_policy_version": "etf_readiness_policy_v2",
+                    "readiness_state": "complete",
+                },
             )
         )
         await session.commit()
@@ -119,7 +123,9 @@ async def test_latest_etf_evidence_exposes_only_qualified_production_snapshot(
     assert production["ranking_source_kind"] == "production_published"
     assert production["manifest_hash"]
     assert production["coverage"]["decision_data_coverage_ratio"] >= 0.95
-    assert production["coverage"]["score_coverage_ratio"] >= 0.95
+    assert production["coverage"]["score_coverage_ratio"] == 0.90
+    assert production["coverage"]["minimum_decision_data_ratio"] == 0.95
+    assert production["coverage"]["minimum_score_ratio"] == 0.90
 
 
 @pytest.mark.anyio

@@ -33,6 +33,7 @@ async def _seed_run(
     status: str = "success",
     decision_data_coverage_ratio: float = 1.0,
     score_coverage_ratio: float = 1.0,
+    readiness_policy_version: str | None = None,
     published_at: datetime = datetime(2026, 1, 2, 16, 0),
 ) -> int:
     async with app.state.db.session() as session:
@@ -55,6 +56,19 @@ async def _seed_run(
             decision_data_coverage_ratio=decision_data_coverage_ratio,
             eligible_item_count=1,
             coverage_ratio=score_coverage_ratio,
+            config_json=(
+                {"readiness_policy_version": readiness_policy_version}
+                if readiness_policy_version
+                else {}
+            ),
+            summary_json=(
+                {
+                    "readiness_policy_version": readiness_policy_version,
+                    "readiness_state": "complete",
+                }
+                if readiness_policy_version
+                else {}
+            ),
             idempotency_key=(
                 f"seed-{scope_kind}-{score_version}-{contract_hash}-{published_at.isoformat()}-{asset_type}-{trade_date}"
             ),
@@ -237,13 +251,14 @@ async def test_current_selector_rejects_wrong_rule_field_date_and_coverage(app) 
 
 
 @pytest.mark.asyncio
-async def test_complete_selector_rejects_degraded_score_coverage_at_ninety_percent(
+async def test_complete_selector_accepts_v2_score_coverage_at_ninety_percent(
     app,
 ) -> None:
-    degraded_id = await _seed_run(
+    complete_id = await _seed_run(
         app,
         scope_kind="full",
         score_coverage_ratio=0.90,
+        readiness_policy_version="etf_readiness_policy_v2",
     )
 
     async with app.state.db.session() as session:
@@ -251,18 +266,41 @@ async def test_complete_selector_rejects_degraded_score_coverage_at_ninety_perce
             session,
             required_trade_date=date(2026, 1, 2),
         )
-        run = await session.get(ShortResearchSignalRun, degraded_id)
+        run = await session.get(ShortResearchSignalRun, complete_id)
+        metadata = snapshot_metadata(run)
+
+    assert selected is not None
+    assert selected.id == complete_id
+    assert run is not None
+    assert metadata["coverage_policy_mode"] == "complete"
+    assert metadata["readiness_state"] == "complete"
+    assert metadata["snapshot_state"] == "complete"
+    assert metadata["unavailable_reason"] is None
+    assert metadata["data_receipt_cutoff"] == run.data_cutoff
+
+
+@pytest.mark.asyncio
+async def test_complete_selector_does_not_promote_legacy_ninety_percent_snapshot(
+    app,
+) -> None:
+    legacy_id = await _seed_run(
+        app,
+        scope_kind="full",
+        score_coverage_ratio=0.90,
+        readiness_policy_version="etf_readiness_policy_v1",
+    )
+
+    async with app.state.db.session() as session:
+        selected = await select_current_canonical_etf_snapshot(
+            session,
+            required_trade_date=date(2026, 1, 2),
+        )
+        run = await session.get(ShortResearchSignalRun, legacy_id)
         metadata = snapshot_metadata(run)
 
     assert selected is None
-    assert run is not None
     assert metadata["coverage_policy_mode"] == "degraded"
-    assert metadata["readiness_state"] == "degraded"
     assert metadata["snapshot_state"] == "provisional"
-    assert metadata["unavailable_reason"] == (
-        "history_depth_61_coverage_below_95pct"
-    )
-    assert metadata["data_receipt_cutoff"] == run.data_cutoff
 
 
 def test_required_etf_snapshot_trade_date_uses_completed_exchange_session() -> None:

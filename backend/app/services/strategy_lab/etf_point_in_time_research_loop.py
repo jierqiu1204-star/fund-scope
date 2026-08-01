@@ -33,6 +33,10 @@ from app.services.short_research.daily_reconstructable import (
     PRICE_BASIS,
     daily_reconstructable_manifest,
 )
+from app.services.short_research.coverage_policy import (
+    ETF_COMPLETE_SCORE_COVERAGE,
+    ETF_DAILY_DECISION_MIN_COVERAGE,
+)
 from app.services.short_research.ranking_surfaces import actionable_rank_manifest
 from app.services.strategy_lab.etf_ranking_candidates import (
     FROZEN_RANKING_CANDIDATES,
@@ -56,7 +60,8 @@ MAX_RESEARCH_LOOP_RSS_BYTES = 3 * 1024**3
 MIN_PROMOTION_SESSIONS = 252
 MIN_PRIMARY_INDEPENDENT_DATES = 40
 MIN_WALK_FORWARD_FOLDS = 3
-MIN_PRODUCTION_COVERAGE = 0.95
+MIN_DECISION_DATA_COVERAGE = ETF_DAILY_DECISION_MIN_COVERAGE
+MIN_PRODUCTION_COVERAGE = ETF_COMPLETE_SCORE_COVERAGE
 MAX_DRAWDOWN_DETERIORATION = 0.02
 
 _CHECKPOINT_STATE_KEY = "__etf_point_in_time_research_loop_v1__"
@@ -345,7 +350,7 @@ def evaluate_research_promotion(
         raise ResearchLoopContractError("promotion counts must be non-negative")
 
     insufficient: list[str] = []
-    if evidence.decision_data_coverage_ratio < MIN_PRODUCTION_COVERAGE:
+    if evidence.decision_data_coverage_ratio < MIN_DECISION_DATA_COVERAGE:
         insufficient.append("decision_data_coverage")
     if evidence.score_coverage_ratio < MIN_PRODUCTION_COVERAGE:
         insufficient.append("score_coverage")

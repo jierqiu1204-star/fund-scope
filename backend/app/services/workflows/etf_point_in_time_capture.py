@@ -27,7 +27,10 @@ from app.models.entities import (
     utcnow,
 )
 from app.services.etf_research_evidence import stable_contract_hash
-from app.services.short_research.coverage_policy import evaluate_etf_readiness
+from app.services.short_research.coverage_policy import (
+    evaluate_persisted_etf_readiness,
+    persisted_etf_complete_coverage_allowed,
+)
 from app.services.short_research.daily_reconstructable import (
     REQUIRED_BAR_COUNT,
     daily_reconstructable_manifest,
@@ -488,7 +491,17 @@ def complete_dual_snapshot_unavailable_reason(
         or warmup_coverage is None
     ):
         return PIT_UNAVAILABLE_COMPLETE_PUBLICATION
-    readiness = evaluate_etf_readiness(
+    summary = _mapping(run.summary_json)
+    policy_payload = _mapping(summary.get("readiness_policy"))
+    persisted_policy_version = policy_payload.get("policy_version") or summary.get(
+        "readiness_policy_version"
+    )
+    readiness = evaluate_persisted_etf_readiness(
+        policy_version=(
+            str(persisted_policy_version)
+            if isinstance(persisted_policy_version, str)
+            else None
+        ),
         daily_coverage_ratio=daily_coverage,
         warmup_coverage_ratio=warmup_coverage,
     )
@@ -504,7 +517,6 @@ def complete_dual_snapshot_unavailable_reason(
         or not _is_sha256(run.ranking_contract_hash)
     ):
         return PIT_UNAVAILABLE_CONTRACT
-    summary = _mapping(run.summary_json)
     if (
         summary.get("readiness_state") != "complete"
         or summary.get("readiness_policy_version") != readiness.policy_version
@@ -600,8 +612,11 @@ def _captured_source_is_valid(source: EtfPitCaptureSource) -> bool:
         or source.cutoff_timezone != PIT_CUTOFF_TIMEZONE
         or _finite_fraction(source.target_date_coverage_ratio) is None
         or _finite_fraction(source.warmup_coverage_ratio) is None
-        or source.target_date_coverage_ratio < 0.95
-        or source.warmup_coverage_ratio < 0.95
+        or not persisted_etf_complete_coverage_allowed(
+            policy_version=source.readiness_policy_version,
+            daily_coverage_ratio=source.target_date_coverage_ratio,
+            warmup_coverage_ratio=source.warmup_coverage_ratio,
+        )
     ):
         return False
     if not all(

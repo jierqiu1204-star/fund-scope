@@ -9,7 +9,7 @@ The deployed leader-tactics surface exposes frozen proxy definitions but cannot 
 - Persist immutable per-session proxy observations, exclusions, pending and matured forward outcomes, MA5 policy-shadow state, manifests, cutoffs, hashes, and idempotent checkpoints without calling live providers.
 - Expose current shadow matches and accumulation progress through the existing read-only evidence API, including exact insufficient-data reasons and promotion counts.
 - Show an explicitly research-only observation list on the strategy-evidence page without changing production ranking, allocation, tracked positions, risk alerts, notifications, SMTP state, or score weights.
-- Keep the continuation disabled until the shared readiness rollout has produced a complete dual-95-percent publication and production PIT scheduling is explicitly enabled.
+- Keep the continuation disabled until the shared readiness rollout has produced a complete policy-v2 publication at daily 95-percent and 61-session 90-percent coverage and production PIT scheduling is explicitly enabled.
 
 ## Capabilities
 

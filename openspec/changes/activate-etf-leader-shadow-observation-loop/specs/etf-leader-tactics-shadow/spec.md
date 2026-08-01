@@ -4,7 +4,7 @@
 The leader-tactics shadow SHALL begin accumulating research observations from the first complete decision-eligible PIT source and MUST keep collection eligibility separate from promotion eligibility.
 
 #### Scenario: First complete PIT source is available
-- **WHEN** one immutable PIT source passes dual 95-percent readiness, cutoff, adjusted-price, membership, and provider-health checks
+- **WHEN** one immutable policy-v2 PIT source passes daily 95-percent and 61-session 90-percent readiness, cutoff, adjusted-price, membership, and provider-health checks
 - **THEN** the system may materialize leader proxy observations for that source with status `insufficient_data` even though fewer than 252 eligible sessions exist
 
 #### Scenario: Promotion sample is short

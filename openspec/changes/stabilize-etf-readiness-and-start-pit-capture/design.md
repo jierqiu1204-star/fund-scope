@@ -14,8 +14,8 @@ The design must preserve the modular-monolith dependency direction, use only dec
 
 - Restore bounded ETF synchronization after a historical memory spike without weakening the 512 MiB current-RSS admission gate.
 - Establish one readiness state machine shared by orchestration, publication, selection, APIs, frontend presentation, evidence, and specs.
-- Keep a useful degraded research preview at 90-to-95-percent warm-up coverage without representing it as a complete dual publication or actionable evidence.
-- Allow complete dual publication and production PIT capture only at dual 95-percent coverage.
+- Allow complete dual publication and production PIT capture when target-date coverage is at least 95 percent and 61-session warm-up coverage is at least 90 percent.
+- Keep legacy v1 90-to-95-percent snapshots provisional instead of retroactively promoting them under policy v2.
 - Schedule only due work, keep one worker, and preserve durable idempotent checkpoints.
 - Compose and schedule one bounded PIT page after complete publication while guaranteeing no production decision side effects.
 - Produce auditable real-trading-day evidence for coverage, provider health, resource use, publication, skips, and rollback.
@@ -32,23 +32,20 @@ The design must preserve the modular-monolith dependency direction, use only dec
 
 ## Decisions
 
-### 1. Use one pure readiness policy with three states
+### 1. Use one versioned readiness policy
 
 A single domain-level policy computes:
 
 ```text
 blocked  = daily < 0.95 OR warmup < 0.90
-degraded = daily >= 0.95 AND 0.90 <= warmup < 0.95
-complete = daily >= 0.95 AND warmup >= 0.95
+complete = daily >= 0.95 AND warmup >= 0.90
 ```
 
-`blocked` produces a waiting result and bounded catch-up only. `degraded` may materialize a cached research preview for eligible ETFs, but the run is marked provisional, has no complete dual-publication identity, cannot satisfy actionable consumers, and cannot start PIT capture. `complete` may publication-validate one complete dual snapshot.
-
-This preserves useful research availability without lowering complete-publication or promotion gates. The alternative—calling a 90-percent run fully published—was rejected because it conflates user display availability with production evidence completeness. The alternative—hiding all rankings below 95 percent—was rejected because it removes a safe research-only surface that already has explicit exclusions.
+`blocked` produces a waiting result and bounded catch-up only. Policy v2 treats the eligible subset as complete at the explicit 95/90 boundary and records excluded ETFs. The threshold change does not alter 300/500-session research-depth completion, raw-price prohibitions, or statistical promotion gates.
 
 ### 2. Derive effective state for legacy snapshots instead of rewriting them
 
-Existing rows are not mutated. Selectors derive effective readiness state from target-date coverage, warm-up coverage, contract identity, and surface summary. A legacy 90-to-95-percent run can be exposed only through the provisional research path; complete and actionable selectors reject it.
+Existing rows are not mutated. Selectors derive effective readiness state from target-date coverage, warm-up coverage, contract identity, surface summary, and the policy version that created the row. A legacy v1 90-to-95-percent run can be exposed only through the provisional research path; complete and actionable selectors reject it.
 
 New runs persist readiness state and policy version in additive summary/evidence JSON. No destructive database migration is required.
 
@@ -114,7 +111,7 @@ Post-close production data may support that day's production research result whe
 2. Add current-RSS measurement and split telemetry; verify Linux current-versus-lifetime behavior under injected readings.
 3. Update the coordinator, materializer, publisher, selectors, API metadata, and frontend to use blocked/degraded/complete semantics.
 4. Deploy with PIT scheduling disabled; run bounded production readiness slices and compare old/new telemetry.
-5. Verify one provisional research preview when warm-up is 90-to-95 percent and one complete dual publication only at dual 95 percent.
+5. Verify one complete policy-v2 dual publication at daily 95 percent and warm-up 90 percent, while a legacy v1 90-to-95-percent row remains provisional.
 6. Enable the due-aware PIT continuation after complete publication and observe at least three different trading dates.
 7. Run focused tests, domain-boundary checks, Ruff, frontend type/static checks, and strict OpenSpec validation, each under an explicit timeout.
 

@@ -18,7 +18,7 @@ from app.services.short_research.coverage_policy import (
     ETF_COMPLETE_SCORE_COVERAGE,
     ETF_DAILY_DECISION_MIN_COVERAGE,
     EtfCoveragePolicyMode,
-    evaluate_etf_readiness,
+    evaluate_persisted_etf_readiness,
 )
 from app.services.short_research.daily_reconstructable import (
     daily_reconstructable_manifest,
@@ -121,20 +121,22 @@ def snapshot_metadata(
             limitations.append(f"missing_{field}")
     if run.scope_kind not in {None, "full"}:
         limitations.append("partial_scope")
-    readiness = evaluate_etf_readiness(
-        daily_coverage_ratio=run.decision_data_coverage_ratio,
-        warmup_coverage_ratio=run.coverage_ratio,
-    )
     summary = run.summary_json or {}
     config = run.config_json or {}
     policy = summary.get("readiness_policy")
-    policy_version = (
-        policy.get("policy_version")
-        if isinstance(policy, dict)
-        else summary.get("readiness_policy_version")
-    )
+    policy_version = policy.get("policy_version") if isinstance(policy, dict) else None
     if not isinstance(policy_version, str):
-        policy_version = readiness.policy_version
+        policy_version = summary.get("readiness_policy_version")
+    if not isinstance(policy_version, str):
+        policy_version = config.get("readiness_policy_version")
+    if not isinstance(policy_version, str):
+        policy_version = None
+    readiness = evaluate_persisted_etf_readiness(
+        policy_version=policy_version,
+        daily_coverage_ratio=run.decision_data_coverage_ratio,
+        warmup_coverage_ratio=run.coverage_ratio,
+    )
+    policy_version = readiness.policy_version
     if readiness.state == "degraded":
         snapshot_state: Literal["unavailable", "provisional", "complete"] = (
             "provisional"
@@ -305,7 +307,14 @@ async def select_current_canonical_etf_snapshot(
         )
         .order_by(ShortResearchSignalRun.published_at.desc(), ShortResearchSignalRun.id.desc())
     )
-    return rows.first()
+    return next(
+        (
+            run
+            for run in rows
+            if snapshot_metadata(run)["snapshot_state"] == "complete"
+        ),
+        None,
+    )
 
 
 async def resolve_current_canonical_etf_snapshot(
@@ -397,7 +406,9 @@ async def resolve_current_etf_ranking_surface_snapshot(
         )
     ).all()
     for run in runs:
-        readiness = evaluate_etf_readiness(
+        metadata = snapshot_metadata(run)
+        readiness = evaluate_persisted_etf_readiness(
+            policy_version=metadata["policy_version"],
             daily_coverage_ratio=run.decision_data_coverage_ratio,
             warmup_coverage_ratio=run.coverage_ratio,
         )
@@ -462,7 +473,14 @@ async def select_canonical_etf_snapshot(
         )
         .order_by(ShortResearchSignalRun.published_at.desc(), ShortResearchSignalRun.id.desc())
     )
-    return rows.first()
+    return next(
+        (
+            run
+            for run in rows
+            if snapshot_metadata(run)["snapshot_state"] == "complete"
+        ),
+        None,
+    )
 
 
 async def resolve_canonical_etf_snapshot(

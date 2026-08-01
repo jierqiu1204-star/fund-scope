@@ -22,8 +22,13 @@ from app.models.entities import (
     ShortResearchSignalRun,
     utcnow,
 )
+from app.services.short_research.coverage_policy import (
+    ETF_COMPLETE_SCORE_COVERAGE,
+    ETF_DAILY_DECISION_MIN_COVERAGE,
+)
 from app.services.short_research.snapshot_selector import (
     required_etf_snapshot_trade_date,
+    snapshot_metadata,
 )
 from app.services.strategy_lab.etf_ranking_validation import (
     RankingValidationContractError,
@@ -441,7 +446,7 @@ async def build_attested_etf_readiness_report(
         )
         .exists()
     )
-    signal_run = await session.scalar(
+    signal_runs = await session.scalars(
         select(ShortResearchSignalRun)
         .where(
             ShortResearchSignalRun.status == "success",
@@ -455,8 +460,10 @@ async def build_attested_etf_readiness_report(
             ShortResearchSignalRun.ranking_contract_hash.is_not(None),
             ShortResearchSignalRun.universe_snapshot_hash.is_not(None),
             ShortResearchSignalRun.input_snapshot_hash.is_not(None),
-            ShortResearchSignalRun.decision_data_coverage_ratio >= 0.95,
-            ShortResearchSignalRun.coverage_ratio >= 0.95,
+            ShortResearchSignalRun.decision_data_coverage_ratio
+            >= ETF_DAILY_DECISION_MIN_COVERAGE,
+            ShortResearchSignalRun.coverage_ratio
+            >= ETF_COMPLETE_SCORE_COVERAGE,
             has_etf_item,
             ~has_non_etf_item,
         )
@@ -464,7 +471,14 @@ async def build_attested_etf_readiness_report(
             ShortResearchSignalRun.as_of_trade_date.desc(),
             ShortResearchSignalRun.id.desc(),
         )
-        .limit(1)
+    )
+    signal_run = next(
+        (
+            run
+            for run in signal_runs
+            if snapshot_metadata(run)["snapshot_state"] == "complete"
+        ),
+        None,
     )
     validation_run = (
         await session.scalar(

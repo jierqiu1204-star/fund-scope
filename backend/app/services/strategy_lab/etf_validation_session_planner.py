@@ -10,6 +10,11 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.entities import EtfPriceHistory, ShortResearchSignalRun
+from app.services.short_research.coverage_policy import (
+    ETF_COMPLETE_SCORE_COVERAGE,
+    ETF_DAILY_DECISION_MIN_COVERAGE,
+)
+from app.services.short_research.snapshot_selector import snapshot_metadata
 
 from .etf_ranking_validation import (
     PRODUCTION_RULE_VERSION,
@@ -235,8 +240,10 @@ async def plan_production_validation_sources(
                         ShortResearchSignalRun.data_cutoff.is_not(None),
                         ShortResearchSignalRun.idempotency_key.is_not(None),
                         ShortResearchSignalRun.expected_item_count > 0,
-                        ShortResearchSignalRun.decision_data_coverage_ratio >= 0.95,
-                        ShortResearchSignalRun.coverage_ratio >= 0.95,
+                        ShortResearchSignalRun.decision_data_coverage_ratio
+                        >= ETF_DAILY_DECISION_MIN_COVERAGE,
+                        ShortResearchSignalRun.coverage_ratio
+                        >= ETF_COMPLETE_SCORE_COVERAGE,
                         ShortResearchSignalRun.as_of_trade_date >= start_date,
                         ShortResearchSignalRun.as_of_trade_date <= end_date,
                     )
@@ -250,6 +257,8 @@ async def plan_production_validation_sources(
         )
         dates: list[date] = []
         for source_run in rows:
+            if snapshot_metadata(source_run)["snapshot_state"] != "complete":
+                continue
             source_date = source_run.as_of_trade_date
             if source_date is None or source_date in source_runs_by_date:
                 continue
