@@ -13,7 +13,10 @@ services:
     build:
       context: ../backend
     env_file:
+      - ./etf-research.env
       - ../.env
+    volumes:
+      - research-artifacts:/app/data
     depends_on:
       - postgres
     restart: unless-stopped
@@ -42,3 +45,4 @@ services:
 volumes:
   postgres-data:
   frontend-static:
+  research-artifacts:

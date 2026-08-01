@@ -26,8 +26,12 @@ RUN pip install --no-cache-dir \
   --trusted-host mirrors.cloud.tencent.com \
   .
 
-RUN mkdir -p /usr/local/lib/python3.11/site-packages/efinance/data \
-  && chown -R appuser:appuser /usr/local/lib/python3.11/site-packages/efinance/data
+RUN mkdir -p \
+      /app/data \
+      /usr/local/lib/python3.11/site-packages/efinance/data \
+  && chown -R appuser:appuser \
+      /app/data \
+      /usr/local/lib/python3.11/site-packages/efinance/data
 
 USER appuser
 
