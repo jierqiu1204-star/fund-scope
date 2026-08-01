@@ -1804,6 +1804,62 @@ export type EtfLeaderTacticsEvidenceStatus =
   | "rejected"
   | "eligible_for_v4_proposal";
 
+export type EtfLeaderObservationState =
+  | "not_started"
+  | "partial"
+  | "observing"
+  | "blocked";
+
+export type EtfLeaderOutcomeCount = {
+  horizon_sessions: number;
+  pending: number;
+  matured: number;
+  unavailable: number;
+};
+
+export type EtfLeaderObservationCounts = {
+  eligible_pit_sessions: number;
+  materialized_pit_sessions: number;
+  required_pit_sessions: number;
+  current_input_asset_count: number;
+  current_available_observation_count: number;
+  current_qualifying_observation_count: number;
+  returned_current_observation_count: number;
+  current_observations_truncated: boolean;
+  pending_outcome_count: number;
+  matured_outcome_count: number;
+  outcomes_by_horizon: EtfLeaderOutcomeCount[];
+  independent_primary_date_count: number;
+  required_primary_date_count: number;
+  completed_walk_forward_fold_count: number;
+  required_walk_forward_fold_count: number;
+};
+
+export type EtfLeaderCurrentObservation = {
+  candidate_id: string;
+  asset_code: string;
+  signal_date: string;
+  source_cutoff: string;
+  availability: "available" | "unavailable";
+  qualifies: boolean;
+  score: number | null;
+  peer_group: string | null;
+  theme: string | null;
+  sector: string | null;
+  gate_reasons: string[];
+  unavailable_reasons: string[];
+  components: Record<string, string | number | boolean | null>;
+  feature_hash: string;
+};
+
+export type EtfLeaderPendingOutcome = {
+  candidate_id: string;
+  asset_code: string;
+  signal_date: string;
+  pending_horizons: number[];
+  feature_hash: string;
+};
+
 export type EtfLeaderTacticsEvidence = {
   schema_version: "etf_leader_tactics_evidence_view_v1";
   experiment_family: "leader_tactics_shadow_v1";
@@ -1817,6 +1873,14 @@ export type EtfLeaderTacticsEvidence = {
   universe_manifest_hash: string | null;
   input_snapshot_hash: string | null;
   feature_panel_hashes: string[];
+  observation_state?: EtfLeaderObservationState;
+  observation_unavailable_reason?: string | null;
+  observation_data_cutoff?: string | null;
+  observation_manifest_hash?: string | null;
+  observation_counts?: EtfLeaderObservationCounts;
+  current_observations?: EtfLeaderCurrentObservation[];
+  pending_outcomes?: EtfLeaderPendingOutcome[];
+  partial_checkpoint?: Record<string, unknown>;
   hypothesis_registry: Record<string, unknown>;
   candidate_registry: Record<string, unknown>;
   ranking_source_kind: "research_replay";

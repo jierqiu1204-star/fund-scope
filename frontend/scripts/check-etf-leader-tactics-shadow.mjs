@@ -69,6 +69,36 @@ const checks = [
     ].every((field) => types.includes(field))
   },
   {
+    name: "declares a bounded research-observation contract",
+    pass: [
+      "EtfLeaderObservationState",
+      "EtfLeaderObservationCounts",
+      "EtfLeaderCurrentObservation",
+      "EtfLeaderPendingOutcome",
+      "observation_state?:",
+      "observation_unavailable_reason?:",
+      "observation_data_cutoff?:",
+      "observation_manifest_hash?:",
+      "observation_counts?:",
+      "current_observations?:",
+      "pending_outcomes?:",
+      "partial_checkpoint?:"
+    ].every((field) => types.includes(field))
+  },
+  {
+    name: "renders daily shadow observations, pending outcomes and exact progress without a trade claim",
+    pass: [
+      "当日 Shadow 观察",
+      "待结算结果",
+      "积累进度",
+      "非买入信号、不会发邮件",
+      "currentObservations = (evidence.current_observations ?? []).slice(0, 20)",
+      "pendingOutcomes = (evidence.pending_outcomes ?? []).slice(0, 20)",
+      "current_observations_truncated",
+      "outcomes_by_horizon"
+    ].every((field) => evidencePage.includes(field))
+  },
+  {
     name: "does not inject leader candidates into the production ranking page",
     pass:
       !productionPage.includes("龙头战术透明代理") &&

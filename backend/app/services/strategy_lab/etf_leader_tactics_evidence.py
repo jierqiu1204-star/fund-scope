@@ -23,6 +23,10 @@ from app.services.strategy_lab.etf_leader_tactics_evaluation import (
 from app.services.strategy_lab.etf_leader_tactics_ma5 import (
     LeaderMa5PolicyResult,
 )
+from app.services.strategy_lab.etf_leader_tactics_observation import (
+    LEADER_MATURITY_EXPERIMENT_FAMILY,
+    LEADER_OBSERVATION_EXPERIMENT_FAMILY,
+)
 from app.services.strategy_lab.etf_leader_tactics_shadow import (
     FROZEN_LEADER_CANDIDATE_REGISTRY,
     LEADER_EXPERIMENT_FAMILY,
@@ -297,6 +301,42 @@ async def latest_leader_factor_evidence(
         .where(
             EtfFactorExperimentEvidence.experiment_family
             == LEADER_EXPERIMENT_FAMILY
+        )
+        .order_by(
+            EtfFactorExperimentEvidence.created_at.desc(),
+            EtfFactorExperimentEvidence.id.desc(),
+        )
+        .limit(1)
+    )
+
+
+async def latest_leader_observation_evidence(
+    session: AsyncSession,
+) -> EtfFactorExperimentEvidence | None:
+    return await session.scalar(
+        select(EtfFactorExperimentEvidence)
+        .where(
+            EtfFactorExperimentEvidence.experiment_family
+            == LEADER_OBSERVATION_EXPERIMENT_FAMILY
+        )
+        .order_by(
+            EtfFactorExperimentEvidence.created_at.desc(),
+            EtfFactorExperimentEvidence.id.desc(),
+        )
+        .limit(1)
+    )
+
+
+async def latest_leader_maturity_evidence(
+    session: AsyncSession,
+) -> EtfFactorExperimentEvidence | None:
+    return await session.scalar(
+        select(EtfFactorExperimentEvidence)
+        .where(
+            EtfFactorExperimentEvidence.experiment_family
+            == LEADER_MATURITY_EXPERIMENT_FAMILY,
+            EtfFactorExperimentEvidence.hypothesis_registry_hash
+            == LEADER_HYPOTHESIS_REGISTRY.registry_hash,
         )
         .order_by(
             EtfFactorExperimentEvidence.created_at.desc(),

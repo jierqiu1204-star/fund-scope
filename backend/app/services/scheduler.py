@@ -43,6 +43,10 @@ from app.services.short_research.jobs import (
 )
 from app.services.strategy_lab.jobs import daily_strategy_paper_job
 from app.services.tracked_positions.jobs import daily_tracked_position_alerts_job
+from app.services.workflows.etf_leader_tactics_shadow import (
+    LEADER_CONTINUATION_JOB_NAME,
+    continue_etf_leader_tactics_shadow_job,
+)
 from app.services.workflows.etf_point_in_time_capture import (
     preflight_production_pit_capture,
 )
@@ -147,6 +151,15 @@ def register_default_jobs(
         )
         return decision.to_dict()
 
+    async def etf_leader_tactics_observation_tracked(
+        session: AsyncSession,
+    ) -> dict[str, Any]:
+        return await continue_etf_leader_tactics_shadow_job(
+            session,
+            settings=settings,
+            timeout_seconds=50.0,
+        )
+
     scheduler.add_job(
         _run_tracked_job,
         "cron",
@@ -156,6 +169,23 @@ def register_default_jobs(
         id="daily_fund_nav",
         replace_existing=True,
     )
+    if settings.etf_leader_tactics_continuation_enabled:
+        scheduler.add_job(
+            _run_tracked_job,
+            "cron",
+            args=[
+                db,
+                LEADER_CONTINUATION_JOB_NAME,
+                etf_leader_tactics_observation_tracked,
+            ],
+            day_of_week="tue-sat",
+            hour="0-6",
+            minute="*/2",
+            id=LEADER_CONTINUATION_JOB_NAME,
+            max_instances=1,
+            coalesce=True,
+            replace_existing=True,
+        )
     scheduler.add_job(
         _run_tracked_job,
         "cron",

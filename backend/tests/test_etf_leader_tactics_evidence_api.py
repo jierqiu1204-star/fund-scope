@@ -5,8 +5,14 @@ from copy import deepcopy
 import pytest
 from sqlalchemy import func, select
 
-from app.models.entities import EtfFactorExperimentEvidence
+from app.models.entities import (
+    EtfFactorExperimentCheckpoint,
+    EtfFactorExperimentEvidence,
+)
 from app.services.etf_research_evidence import stable_contract_hash
+from app.services.strategy_lab.etf_leader_tactics_continuation import (
+    LEADER_CONTINUATION_STATE_KEY,
+)
 from app.services.strategy_lab.etf_leader_tactics_evidence import (
     LEADER_EVIDENCE_SCHEMA_VERSION,
 )
@@ -19,6 +25,14 @@ from app.services.strategy_lab.etf_leader_tactics_evidence_view import (
     LEADER_OUTCOMES_PENDING,
     LEADER_PIT_INPUT_MISSING,
     LEADER_REGISTRY_MISSING,
+)
+from app.services.strategy_lab.etf_leader_tactics_observation import (
+    LEADER_MATURITY_EXPERIMENT_FAMILY,
+    LEADER_MATURITY_REPORT_KIND,
+    LEADER_MATURITY_SCHEMA_VERSION,
+    LEADER_OBSERVATION_EXPERIMENT_FAMILY,
+    LEADER_OBSERVATION_REPORT_KIND,
+    LEADER_OBSERVATION_SCHEMA_VERSION,
 )
 from app.services.strategy_lab.etf_leader_tactics_shadow import (
     FROZEN_LEADER_CANDIDATE_REGISTRY,
@@ -88,6 +102,7 @@ async def _insert_evidence(
     *,
     report: dict,
     registry_hash: str | None = None,
+    experiment_family: str = LEADER_EXPERIMENT_FAMILY,
 ) -> None:
     async with app.state.db.session() as session:
         session.add(
@@ -95,13 +110,18 @@ async def _insert_evidence(
                 manifest_hash=str(report.get("manifest_hash") or _hash("manifest")),
                 ranking_contract_hash=_hash("ranking"),
                 code_version="leader-api-test-v1",
-                experiment_family=LEADER_EXPERIMENT_FAMILY,
+                experiment_family=experiment_family,
                 hypothesis_registry_hash=(
                     LEADER_HYPOTHESIS_REGISTRY.registry_hash
                     if registry_hash is None
                     else registry_hash
                 ),
-                evidence_hash=_hash("evidence"),
+                evidence_hash=stable_contract_hash(
+                    {
+                        "experiment_family": experiment_family,
+                        "report": report,
+                    }
+                ),
                 promotion_state=str(report.get("status") or "insufficient_data"),
                 report_json=report,
                 costs_json={
@@ -114,6 +134,81 @@ async def _insert_evidence(
             )
         )
         await session.commit()
+
+
+def _observation_report(*, match: bool = True) -> dict:
+    manifest_hash = _hash("observation-manifest")
+    observations = (
+        [
+            {
+                "candidate_id": "leader_breakout_proxy_v1",
+                "asset_code": "510300",
+                "asset_name": None,
+                "signal_date": "2026-07-31",
+                "source_cutoff": "2026-07-31T16:00:00+08:00",
+                "availability": "available",
+                "qualifies": True,
+                "score": 0.88,
+                "rank": 1,
+                "peer_group": "broad-market",
+                "theme": "宽基",
+                "sector": None,
+                "matched_gates": [],
+                "gate_reasons": [],
+                "unavailable_reasons": [],
+                "components": {},
+                "feature_hash": _hash("observation-feature"),
+            }
+        ]
+        if match
+        else []
+    )
+    return {
+        "schema_version": LEADER_OBSERVATION_SCHEMA_VERSION,
+        "report_kind": LEADER_OBSERVATION_REPORT_KIND,
+        "experiment_family": LEADER_OBSERVATION_EXPERIMENT_FAMILY,
+        "manifest_hash": manifest_hash,
+        "observation_manifest_hash": manifest_hash,
+        "status": "insufficient_data",
+        "ranking_source_kind": "research_replay",
+        "policy_mode": "none",
+        "notification_provenance": "none",
+        "execution_provenance": "none",
+        "research_only": True,
+        "production_mutation_allowed": False,
+        "observation_state": "observing",
+        "observation_unavailable_reason": "leader_observation_dates_below_252",
+        "observation_data_cutoff": "2026-07-31T16:00:00+08:00",
+        "observation_counts": {
+            "eligible_pit_sessions": 1,
+            "materialized_pit_sessions": 1,
+            "required_pit_sessions": 252,
+            "current_input_asset_count": 1490,
+            "current_available_observation_count": 3 if match else 0,
+            "current_qualifying_observation_count": len(observations),
+            "returned_current_observation_count": len(observations),
+            "current_observations_truncated": False,
+            "pending_outcome_count": len(observations),
+            "matured_outcome_count": 0,
+            "outcomes_by_horizon": [],
+            "independent_primary_date_count": 0,
+            "required_primary_date_count": 40,
+            "completed_walk_forward_fold_count": 0,
+            "required_walk_forward_fold_count": 3,
+        },
+        "current_observations": observations,
+        "pending_outcomes": [
+            {
+                "candidate_id": item["candidate_id"],
+                "asset_code": item["asset_code"],
+                "signal_date": item["signal_date"],
+                "pending_horizons": [5, 10],
+                "feature_hash": item["feature_hash"],
+            }
+            for item in observations
+        ],
+        "partial_checkpoint": {"state": "complete"},
+    }
 
 
 async def _count(app) -> int:
@@ -156,6 +251,155 @@ async def test_enabled_api_reports_missing_materialized_evidence(app, client) ->
     assert response.json()["unavailable_reason"] == (
         LEADER_EVIDENCE_NOT_MATERIALIZED
     )
+
+
+@pytest.mark.anyio
+async def test_partial_checkpoint_is_visible_without_partial_ranks(
+    app,
+    client,
+) -> None:
+    app.state.settings.etf_leader_tactics_evidence_api_enabled = True
+    async with app.state.db.session() as session:
+        session.add(
+            EtfFactorExperimentCheckpoint(
+                manifest_hash=_hash("partial-checkpoint"),
+                code_version="leader-api-test-v1",
+                status="partial",
+                cached_factor_rows_json={
+                    LEADER_CONTINUATION_STATE_KEY: {
+                        "phase": "features",
+                        "generation": 3,
+                        "phase_item_counts": {"features": 48},
+                        "coverage": {
+                            "observation_input": {"expected": 1490}
+                        },
+                        "page_profile": {"page_size": 16},
+                        "phase_cursor": {"code_after": "510300"},
+                        "checkpoint_hash": _hash("partial-state"),
+                    }
+                },
+            )
+        )
+        await session.commit()
+
+    payload = (await client.get(ENDPOINT)).json()
+
+    assert payload["observation_state"] == "partial"
+    assert payload["partial_checkpoint"]["processed_asset_count"] == 48
+    assert payload["partial_checkpoint"]["total_asset_count"] == 1490
+    assert payload["current_observations"] == []
+    assert payload["primary_metrics"] == []
+
+
+@pytest.mark.anyio
+async def test_first_observation_is_visible_without_fabricated_returns(
+    app,
+    client,
+) -> None:
+    app.state.settings.etf_leader_tactics_evidence_api_enabled = True
+    report = _observation_report()
+    await _insert_evidence(
+        app,
+        report=report,
+        experiment_family=LEADER_OBSERVATION_EXPERIMENT_FAMILY,
+    )
+
+    payload = (await client.get(ENDPOINT)).json()
+
+    assert payload["status"] == "insufficient_data"
+    assert payload["observation_state"] == "observing"
+    assert payload["observation_counts"]["materialized_pit_sessions"] == 1
+    assert payload["current_observations"][0]["asset_code"] == "510300"
+    assert payload["primary_metrics"] == []
+    assert payload["exploratory_metrics"] == []
+    assert payload["notification_provenance"] == "none"
+    assert payload["execution_provenance"] == "none"
+    assert payload["production_mutation_allowed"] is False
+
+
+@pytest.mark.anyio
+async def test_daily_observation_does_not_mask_final_report(app, client) -> None:
+    app.state.settings.etf_leader_tactics_evidence_api_enabled = True
+    final_report = _valid_report("rejected")
+    final_report["coverage"] = {"eligible_point_in_time_sessions": 300}
+    await _insert_evidence(app, report=final_report)
+    await _insert_evidence(
+        app,
+        report=_observation_report(match=False),
+        experiment_family=LEADER_OBSERVATION_EXPERIMENT_FAMILY,
+    )
+
+    payload = (await client.get(ENDPOINT)).json()
+
+    assert payload["status"] == "rejected"
+    assert payload["manifest_hash"] == final_report["manifest_hash"]
+    assert payload["observation_state"] == "observing"
+    assert payload["current_observations"] == []
+
+
+@pytest.mark.anyio
+async def test_maturity_updates_counts_without_exposing_a_primary_metric(
+    app,
+    client,
+) -> None:
+    app.state.settings.etf_leader_tactics_evidence_api_enabled = True
+    observation = _observation_report()
+    await _insert_evidence(
+        app,
+        report=observation,
+        experiment_family=LEADER_OBSERVATION_EXPERIMENT_FAMILY,
+    )
+    maturity = {
+        "schema_version": LEADER_MATURITY_SCHEMA_VERSION,
+        "report_kind": LEADER_MATURITY_REPORT_KIND,
+        "experiment_family": LEADER_MATURITY_EXPERIMENT_FAMILY,
+        "manifest_hash": _hash("maturity-manifest"),
+        "observation_manifest_hash": observation["manifest_hash"],
+        "observation_hash": _hash("observation-result"),
+        "signal_date": "2026-07-31",
+        "outcome_cutoff": "2026-08-14T16:00:00+08:00",
+        "outcomes": [
+            {
+                "candidate_id": "leader_breakout_proxy_v1",
+                "asset_code": "510300",
+                "signal_date": "2026-07-31",
+                "horizon_sessions": 5,
+                "status": "matured",
+            },
+            {
+                "candidate_id": "leader_breakout_proxy_v1",
+                "asset_code": "510300",
+                "signal_date": "2026-07-31",
+                "horizon_sessions": 10,
+                "status": "pending",
+            },
+        ],
+        "matured_outcome_count": 1,
+        "pending_outcome_count": 1,
+        "unavailable_outcome_count": 0,
+        "ranking_source_kind": "research_replay",
+        "policy_mode": "policy_shadow",
+        "notification_provenance": "none",
+        "execution_provenance": "simulated_execution",
+        "holdout_consumed": False,
+        "research_only": True,
+        "production_mutation_allowed": False,
+    }
+    await _insert_evidence(
+        app,
+        report=maturity,
+        experiment_family=LEADER_MATURITY_EXPERIMENT_FAMILY,
+    )
+
+    payload = (await client.get(ENDPOINT)).json()
+
+    assert payload["observation_counts"]["matured_outcome_count"] == 1
+    assert payload["observation_counts"]["pending_outcome_count"] == 1
+    assert payload["observation_counts"]["outcomes_by_horizon"] == [
+        {"horizon_sessions": 5, "pending": 0, "matured": 1, "unavailable": 0},
+        {"horizon_sessions": 10, "pending": 1, "matured": 0, "unavailable": 0},
+    ]
+    assert payload["primary_metrics"] == []
 
 
 @pytest.mark.anyio

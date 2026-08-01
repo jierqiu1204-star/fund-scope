@@ -508,6 +508,27 @@ function leaderStatusLabel(status: EtfLeaderTacticsEvidence["status"]) {
   return labels[status];
 }
 
+function leaderObservationStateLabel(
+  state: NonNullable<EtfLeaderTacticsEvidence["observation_state"]>
+) {
+  const labels: Record<
+    NonNullable<EtfLeaderTacticsEvidence["observation_state"]>,
+    string
+  > = {
+    not_started: "尚未开始",
+    partial: "分页积累中",
+    observing: "持续观察中",
+    blocked: "观察受阻"
+  };
+  return labels[state];
+}
+
+function leaderCount(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : 0;
+}
+
 function leaderEvidenceValue(key: string, value: unknown): string {
   if (typeof value === "number" && Number.isFinite(value)) {
     return key.includes("ratio") ||
@@ -548,6 +569,54 @@ function LeaderTacticsEvidencePanel({
   const articles = asRecordArray(evidence.hypothesis_registry.articles);
   const statements = asRecordArray(evidence.hypothesis_registry.statements);
   const candidates = asRecordArray(evidence.candidate_registry.candidates);
+  const observationState = evidence.observation_state ?? "not_started";
+  const observationCounts = evidence.observation_counts;
+  const currentObservations = (evidence.current_observations ?? []).slice(0, 20);
+  const pendingOutcomes = (evidence.pending_outcomes ?? []).slice(0, 20);
+  const outcomeCounts = observationCounts?.outcomes_by_horizon ?? [];
+  const eligiblePitSessions = leaderCount(
+    observationCounts?.eligible_pit_sessions
+  );
+  const materializedPitSessions = leaderCount(
+    observationCounts?.materialized_pit_sessions
+  );
+  const requiredPitSessions = leaderCount(
+    observationCounts?.required_pit_sessions
+  );
+  const currentInputAssetCount = leaderCount(
+    observationCounts?.current_input_asset_count
+  );
+  const currentAvailableObservationCount = leaderCount(
+    observationCounts?.current_available_observation_count
+  );
+  const currentQualifyingObservationCount = leaderCount(
+    observationCounts?.current_qualifying_observation_count
+  );
+  const pendingOutcomeCount = leaderCount(
+    observationCounts?.pending_outcome_count
+  );
+  const maturedOutcomeCount = leaderCount(
+    observationCounts?.matured_outcome_count
+  );
+  const independentPrimaryDateCount = leaderCount(
+    observationCounts?.independent_primary_date_count
+  );
+  const requiredPrimaryDateCount = leaderCount(
+    observationCounts?.required_primary_date_count
+  );
+  const completedWalkForwardFoldCount = leaderCount(
+    observationCounts?.completed_walk_forward_fold_count
+  );
+  const requiredWalkForwardFoldCount = leaderCount(
+    observationCounts?.required_walk_forward_fold_count
+  );
+  const observationHasMore =
+    observationCounts?.current_observations_truncated === true ||
+    currentQualifyingObservationCount > currentObservations.length;
+  const observationDataCutoff =
+    evidence.observation_data_cutoff ?? evidence.data_cutoff;
+  const observationManifestHash =
+    evidence.observation_manifest_hash ?? evidence.manifest_hash;
   const diagnostics = [
     [
       "残差重叠",
@@ -605,7 +674,7 @@ function LeaderTacticsEvidencePanel({
           />
         </div>
         <p className="mt-3 rounded-[8px] border border-border bg-paper px-3 py-2 text-xs leading-5 text-ink/60">
-          数据截止：{formatDateTime(evidence.data_cutoff)} · manifest：
+          证据数据截止：{formatDateTime(evidence.data_cutoff)} · manifest：
           {evidence.manifest_hash
             ? `${evidence.manifest_hash.slice(0, 12)}…`
             : "暂无"}
@@ -614,9 +683,182 @@ function LeaderTacticsEvidencePanel({
 
         {evidence.unavailable_reason ? (
           <p className="mt-3 rounded-[8px] border border-dashed border-border bg-white px-3 py-3 text-sm text-ink/60">
-            当前不可用原因：{evidence.unavailable_reason}
+            正式验证/晋升不足原因：{evidence.unavailable_reason}
           </p>
         ) : null}
+
+        <div className="mt-4 rounded-[10px] border border-border bg-white p-4">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <p className="text-sm font-semibold text-ink">积累进度</p>
+              <p className="mt-1 text-xs leading-5 text-ink/55">
+                Shadow 观察从首个完整 PIT session 开始累计；非买入信号、不会发邮件，也不影响正式榜单、持仓或执行。
+              </p>
+            </div>
+            <span className="w-fit rounded-full bg-paper px-2.5 py-1 text-xs font-semibold text-ink/60">
+              {leaderObservationStateLabel(observationState)}
+            </span>
+          </div>
+          <p className="mt-3 text-xs leading-5 text-ink/55">
+            观察数据截止：{formatDateTime(observationDataCutoff)} · observation manifest：
+            {observationManifestHash
+              ? `${observationManifestHash.slice(0, 12)}…`
+              : "暂无"}
+          </p>
+          {evidence.observation_unavailable_reason ? (
+            <p className="mt-3 rounded-[8px] border border-dashed border-border bg-paper px-3 py-2 text-xs text-ink/60">
+              观察不可用原因：{evidence.observation_unavailable_reason}
+            </p>
+          ) : null}
+          <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <EvidenceStat
+              label="完整 PIT sessions"
+              value={`${materializedPitSessions || eligiblePitSessions}/${requiredPitSessions || "?"}`}
+            />
+            <EvidenceStat
+              label="当日输入 ETF"
+              value={`${currentInputAssetCount} 只`}
+            />
+            <EvidenceStat
+              label="可用/符合观察"
+              value={`${currentAvailableObservationCount}/${currentQualifyingObservationCount}`}
+            />
+            <EvidenceStat
+              label="主指标独立样本"
+              value={`${independentPrimaryDateCount}/${requiredPrimaryDateCount || "?"}`}
+            />
+            <EvidenceStat
+              label="待结算/已成熟"
+              value={`${pendingOutcomeCount}/${maturedOutcomeCount}`}
+            />
+            <EvidenceStat
+              label="Walk-forward"
+              value={`${completedWalkForwardFoldCount}/${requiredWalkForwardFoldCount || "?"}`}
+            />
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-4 xl:grid-cols-2">
+          <div className="rounded-[10px] border border-border bg-white p-4">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <p className="text-sm font-semibold text-ink">当日 Shadow 观察</p>
+                <p className="mt-1 text-xs leading-5 text-ink/55">
+                  最多展示 20 条当前代理观察；仅用于记录条件是否出现，不构成买入、卖出或仓位建议。
+                </p>
+              </div>
+              <span className="w-fit rounded-full bg-paper px-2.5 py-1 text-xs text-ink/60">
+                显示 {currentObservations.length}/{currentQualifyingObservationCount}
+              </span>
+            </div>
+            <div className="mt-3 space-y-2">
+              {currentObservations.length ? (
+                currentObservations.map((observation) => {
+                  const reasons = [
+                    ...observation.gate_reasons,
+                    ...observation.unavailable_reasons
+                  ];
+                  const componentRows = Object.entries(observation.components).slice(
+                    0,
+                    3
+                  );
+                  return (
+                    <div
+                      key={`${observation.candidate_id}-${observation.asset_code}-${observation.feature_hash}`}
+                      className="rounded-[8px] bg-paper px-3 py-2 text-xs leading-5 text-ink/60"
+                    >
+                      <p className="font-semibold text-ink/75">
+                        {observation.candidate_id} · {observation.asset_code}
+                      </p>
+                      <p>
+                        {observation.qualifies
+                          ? "当前满足代理条件（研究）"
+                          : "当前未形成条件，仅记录观察"}
+                        {" · "}
+                        {observation.availability === "available"
+                          ? "数据可用"
+                          : "数据不可用"}
+                        {" · 分数 "}
+                        {leaderEvidenceValue("score", observation.score)}
+                      </p>
+                      <p className="text-ink/45">
+                        信号日 {formatDateTime(observation.signal_date)} · 截止 {formatDateTime(observation.source_cutoff)}
+                        {observation.peer_group
+                          ? ` · 同类 ${observation.peer_group}`
+                          : ""}
+                      </p>
+                      {componentRows.length ? (
+                        <p className="text-ink/45">
+                          组件：
+                          {componentRows
+                            .map(([key, value]) =>
+                              `${key}=${leaderEvidenceValue(key, value)}`
+                            )
+                            .join(" · ")}
+                        </p>
+                      ) : null}
+                      {reasons.length ? (
+                        <p className="text-ink/45">
+                          原因：{reasons.slice(0, 5).join("、")}
+                        </p>
+                      ) : null}
+                    </div>
+                  );
+                })
+              ) : (
+                <p className="rounded-[8px] bg-paper px-3 py-3 text-xs text-ink/50">
+                  当前没有可展示的 Shadow 观察；这不表示收益为零，也不构成现金或交易建议。
+                </p>
+              )}
+            </div>
+            {observationHasMore ? (
+              <p className="mt-3 text-xs text-ink/45">
+                当前符合条件的观察超过页面展示上限，已仅显示前 20 条。
+              </p>
+            ) : null}
+          </div>
+
+          <div className="rounded-[10px] border border-border bg-white p-4">
+            <p className="text-sm font-semibold text-ink">待结算结果</p>
+            <p className="mt-1 text-xs leading-5 text-ink/55">
+              只有相应交易日真实完成后才写入 outcome；待结算不等于零收益，不会提前填充或推断。
+            </p>
+            <div className="mt-3 grid gap-2 sm:grid-cols-2">
+              {outcomeCounts.length ? (
+                outcomeCounts.slice(0, 4).map((outcome) => (
+                  <EvidenceStat
+                    key={outcome.horizon_sessions}
+                    label={`${outcome.horizon_sessions} 日 outcome`}
+                    value={`待 ${leaderCount(outcome.pending)} · 成熟 ${leaderCount(outcome.matured)} · 不可用 ${leaderCount(outcome.unavailable)}`}
+                  />
+                ))
+              ) : (
+                <p className="rounded-[8px] bg-paper px-3 py-3 text-xs text-ink/50">
+                  尚无可结算窗口统计。
+                </p>
+              )}
+            </div>
+            <div className="mt-3 space-y-2">
+              {pendingOutcomes.length ? (
+                pendingOutcomes.map((outcome) => (
+                  <div
+                    key={`${outcome.candidate_id}-${outcome.asset_code}-${outcome.feature_hash}`}
+                    className="rounded-[8px] bg-paper px-3 py-2 text-xs text-ink/60"
+                  >
+                    <p className="font-semibold text-ink/75">
+                      {outcome.candidate_id} · {outcome.asset_code}
+                    </p>
+                    <p className="mt-1">
+                      信号日 {formatDateTime(outcome.signal_date)} · 待结算窗口 {outcome.pending_horizons.join("、")} 日
+                    </p>
+                  </div>
+                ))
+              ) : (
+                <p className="text-xs text-ink/50">当前没有待结算条目。</p>
+              )}
+            </div>
+          </div>
+        </div>
 
         <div className="mt-5 grid gap-4 xl:grid-cols-2">
           <div className="rounded-[10px] border border-border bg-white p-4">

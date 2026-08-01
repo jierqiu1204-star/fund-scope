@@ -5,11 +5,30 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.entities import EtfFactorExperimentCheckpoint
+from app.services.strategy_lab.etf_leader_tactics_continuation import (
+    LEADER_CONTINUATION_STATE_KEY,
+)
 from app.services.strategy_lab.etf_leader_tactics_evidence import (
     LEADER_EVIDENCE_SCHEMA_VERSION,
     latest_leader_factor_evidence,
+    latest_leader_maturity_evidence,
+    latest_leader_observation_evidence,
+)
+from app.services.strategy_lab.etf_leader_tactics_observation import (
+    LEADER_MATURITY_EXPERIMENT_FAMILY,
+    LEADER_MATURITY_REPORT_KIND,
+    LEADER_MATURITY_SCHEMA_VERSION,
+    LEADER_OBSERVATION_EXPERIMENT_FAMILY,
+    LEADER_OBSERVATION_PARTIAL,
+    LEADER_OBSERVATION_REPORT_KIND,
+    LEADER_OBSERVATION_SCHEMA_VERSION,
+    MINIMUM_PROMOTION_INDEPENDENT_DATES,
+    MINIMUM_PROMOTION_PIT_SESSIONS,
+    MINIMUM_PROMOTION_WALK_FORWARD_FOLDS,
 )
 from app.services.strategy_lab.etf_leader_tactics_shadow import (
     FROZEN_LEADER_CANDIDATE_REGISTRY,
@@ -27,6 +46,9 @@ LEADER_OUTCOMES_PENDING = "leader_forward_outcomes_pending"
 LEADER_DATES_INSUFFICIENT = "leader_eligible_pit_dates_below_252"
 LEADER_EVIDENCE_INCOMPATIBLE = "leader_evidence_incompatible"
 LEADER_EVIDENCE_INSUFFICIENT = "leader_evidence_insufficient_data"
+LEADER_OBSERVATION_EVIDENCE_INCOMPATIBLE = (
+    "leader_observation_evidence_incompatible"
+)
 
 _VALID_STATUSES = {
     "insufficient_data",
@@ -120,6 +142,34 @@ def _base_view(reason: str) -> dict[str, Any]:
         "holdout": {},
         "ma5_policy_shadow": [],
         "candidate_decisions": [],
+        "observation_state": "not_started",
+        "observation_unavailable_reason": reason,
+        "observation_data_cutoff": None,
+        "observation_manifest_hash": None,
+        "observation_counts": {
+            "eligible_pit_sessions": 0,
+            "materialized_pit_sessions": 0,
+            "required_pit_sessions": MINIMUM_PROMOTION_PIT_SESSIONS,
+            "current_input_asset_count": 0,
+            "current_available_observation_count": 0,
+            "current_qualifying_observation_count": 0,
+            "returned_current_observation_count": 0,
+            "current_observations_truncated": False,
+            "pending_outcome_count": 0,
+            "matured_outcome_count": 0,
+            "outcomes_by_horizon": [],
+            "independent_primary_date_count": 0,
+            "required_primary_date_count": (
+                MINIMUM_PROMOTION_INDEPENDENT_DATES
+            ),
+            "completed_walk_forward_fold_count": 0,
+            "required_walk_forward_fold_count": (
+                MINIMUM_PROMOTION_WALK_FORWARD_FOLDS
+            ),
+        },
+        "current_observations": [],
+        "pending_outcomes": [],
+        "partial_checkpoint": {},
         "costs": {},
         "limitations": [
             LEADER_HYPOTHESIS_REGISTRY.non_equivalence_notice,
@@ -128,6 +178,169 @@ def _base_view(reason: str) -> dict[str, Any]:
         "research_only": True,
         "production_mutation_allowed": False,
     }
+
+
+def _observation_report_is_compatible(row: Any, report: Mapping[str, Any]) -> bool:
+    observations = _sequence(report.get("current_observations"))
+    counts = _mapping(report.get("observation_counts"))
+    returned_count = _finite_int(counts.get("returned_current_observation_count"))
+    return (
+        row.experiment_family == LEADER_OBSERVATION_EXPERIMENT_FAMILY
+        and row.hypothesis_registry_hash
+        == LEADER_HYPOTHESIS_REGISTRY.registry_hash
+        and row.promotion_state == "insufficient_data"
+        and report.get("schema_version") == LEADER_OBSERVATION_SCHEMA_VERSION
+        and report.get("report_kind") == LEADER_OBSERVATION_REPORT_KIND
+        and report.get("experiment_family")
+        == LEADER_OBSERVATION_EXPERIMENT_FAMILY
+        and report.get("manifest_hash") == row.manifest_hash
+        and report.get("observation_manifest_hash") == row.manifest_hash
+        and report.get("status") == "insufficient_data"
+        and report.get("ranking_source_kind") == "research_replay"
+        and report.get("policy_mode") == "none"
+        and report.get("notification_provenance") == "none"
+        and report.get("execution_provenance") == "none"
+        and report.get("research_only") is True
+        and report.get("production_mutation_allowed") is False
+        and len(observations) <= 20
+        and returned_count is not None
+        and returned_count == len(observations)
+    )
+
+
+def _observation_projection(row: Any | None) -> dict[str, Any]:
+    if row is None:
+        return {}
+    report = _mapping(row.report_json)
+    if not _observation_report_is_compatible(row, report):
+        return {
+            "observation_state": "blocked",
+            "observation_unavailable_reason": (
+                LEADER_OBSERVATION_EVIDENCE_INCOMPATIBLE
+            ),
+        }
+    return {
+        "observation_state": report.get("observation_state"),
+        "observation_unavailable_reason": report.get(
+            "observation_unavailable_reason"
+        ),
+        "observation_data_cutoff": report.get("observation_data_cutoff"),
+        "observation_manifest_hash": row.manifest_hash,
+        "observation_counts": _mapping(report.get("observation_counts")),
+        "current_observations": _sequence(report.get("current_observations")),
+        "pending_outcomes": _sequence(report.get("pending_outcomes")),
+        "partial_checkpoint": _mapping(report.get("partial_checkpoint")),
+    }
+
+
+def _merge_maturity_projection(
+    observation: dict[str, Any],
+    row: Any | None,
+) -> dict[str, Any]:
+    if row is None or not observation:
+        return observation
+    report = _mapping(row.report_json)
+    if (
+        row.experiment_family != LEADER_MATURITY_EXPERIMENT_FAMILY
+        or report.get("schema_version") != LEADER_MATURITY_SCHEMA_VERSION
+        or report.get("report_kind") != LEADER_MATURITY_REPORT_KIND
+        or report.get("experiment_family")
+        != LEADER_MATURITY_EXPERIMENT_FAMILY
+        or report.get("observation_manifest_hash")
+        != observation.get("observation_manifest_hash")
+        or report.get("ranking_source_kind") != "research_replay"
+        or report.get("research_only") is not True
+        or report.get("production_mutation_allowed") is not False
+        or report.get("holdout_consumed") is not False
+    ):
+        return observation
+    outcomes = [
+        _mapping(item) for item in _sequence(report.get("outcomes"))
+    ]
+    by_horizon: dict[int, dict[str, int]] = {}
+    for item in outcomes:
+        horizon = _finite_int(item.get("horizon_sessions"))
+        status = item.get("status")
+        if horizon not in {5, 10} or status not in {
+            "matured",
+            "pending",
+            "unavailable",
+        }:
+            continue
+        counts = by_horizon.setdefault(
+            int(horizon),
+            {"pending": 0, "matured": 0, "unavailable": 0},
+        )
+        counts[str(status)] += 1
+    counts = _mapping(observation.get("observation_counts"))
+    counts.update(
+        {
+            "pending_outcome_count": _finite_int(
+                report.get("pending_outcome_count")
+            )
+            or 0,
+            "matured_outcome_count": _finite_int(
+                report.get("matured_outcome_count")
+            )
+            or 0,
+            "outcomes_by_horizon": [
+                {"horizon_sessions": horizon, **values}
+                for horizon, values in sorted(by_horizon.items())
+            ],
+        }
+    )
+    return {**observation, "observation_counts": counts}
+
+
+async def _latest_partial_observation_projection(
+    session: AsyncSession,
+) -> dict[str, Any]:
+    rows = (
+        await session.scalars(
+            select(EtfFactorExperimentCheckpoint)
+            .where(EtfFactorExperimentCheckpoint.status != "complete")
+            .order_by(
+                EtfFactorExperimentCheckpoint.updated_at.desc(),
+                EtfFactorExperimentCheckpoint.id.desc(),
+            )
+            .limit(32)
+        )
+    ).all()
+    for row in rows:
+        payload = _mapping(row.cached_factor_rows_json).get(
+            LEADER_CONTINUATION_STATE_KEY
+        )
+        if not isinstance(payload, Mapping):
+            continue
+        checkpoint = _mapping(payload)
+        phase_counts = _mapping(checkpoint.get("phase_item_counts"))
+        coverage = _mapping(checkpoint.get("coverage"))
+        input_coverage = _mapping(coverage.get("observation_input"))
+        processed = _finite_int(phase_counts.get("features")) or 0
+        expected = _finite_int(input_coverage.get("expected")) or processed
+        base_counts = _base_view(LEADER_OBSERVATION_PARTIAL)[
+            "observation_counts"
+        ]
+        return {
+            "observation_state": "partial",
+            "observation_unavailable_reason": LEADER_OBSERVATION_PARTIAL,
+            "observation_counts": {
+                **base_counts,
+                "current_input_asset_count": expected,
+                "returned_current_observation_count": 0,
+            },
+            "partial_checkpoint": {
+                "phase": checkpoint.get("phase"),
+                "generation": checkpoint.get("generation"),
+                "processed_asset_count": processed,
+                "total_asset_count": expected,
+                "page_profile": _mapping(checkpoint.get("page_profile")),
+                "cursor": _mapping(checkpoint.get("phase_cursor")),
+                "stop_reason": checkpoint.get("stop_reason"),
+                "checkpoint_hash": checkpoint.get("checkpoint_hash"),
+            },
+        }
+    return {}
 
 
 def _mapping(value: object) -> dict[str, Any]:
@@ -211,21 +424,38 @@ async def build_latest_leader_evidence_view(
 
     if not enabled:
         return _base_view(LEADER_EVIDENCE_API_DISABLED)
+    observation_row = await latest_leader_observation_evidence(session)
+    observation = _observation_projection(observation_row)
+    if not observation:
+        observation = await _latest_partial_observation_projection(session)
+    maturity_row = await latest_leader_maturity_evidence(session)
+    observation = _merge_maturity_projection(observation, maturity_row)
     row = await latest_leader_factor_evidence(session)
     if row is None:
-        return _base_view(LEADER_EVIDENCE_NOT_MATERIALIZED)
+        observation_state = observation.get("observation_state")
+        reason = (
+            LEADER_DATES_INSUFFICIENT
+            if observation_state == "observing"
+            else LEADER_OBSERVATION_PARTIAL
+            if observation_state == "partial"
+            else LEADER_EVIDENCE_NOT_MATERIALIZED
+        )
+        view = {**_base_view(reason), **observation}
+        if observation_row is not None:
+            view["generated_at"] = observation_row.created_at
+        return view
     if (
         row.hypothesis_registry_hash
         != LEADER_HYPOTHESIS_REGISTRY.registry_hash
     ):
         view = _base_view(LEADER_REGISTRY_MISSING)
         view["generated_at"] = row.created_at
-        return view
+        return {**view, **observation}
     report = _mapping(row.report_json)
     if not _report_is_compatible(row, report):
         view = _base_view(LEADER_EVIDENCE_INCOMPATIBLE)
         view["generated_at"] = row.created_at
-        return view
+        return {**view, **observation}
 
     status = str(report["status"])
     unavailable_reason = (
@@ -268,4 +498,5 @@ async def build_latest_leader_evidence_view(
                 ]
             )
         ),
+        **observation,
     }

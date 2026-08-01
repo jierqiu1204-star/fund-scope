@@ -6,7 +6,12 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from app.models.entities import EtfPitCaptureSource
+from app.models.entities import (
+    EtfObservationPortfolioSnapshot,
+    EtfPitCaptureSource,
+    ShortResearchSignalItem,
+    ShortResearchSignalRun,
+)
 from app.services.etf_research_evidence import stable_contract_hash
 from app.services.short_research.daily_reconstructable import (
     AdjustedOhlcvBar,
@@ -19,6 +24,7 @@ from app.services.strategy_lab.etf_leader_tactics_pit import (
     LeaderSectorTrendFact,
     LeaderTaxonomyFact,
     adapt_leader_pit_inputs,
+    load_leader_source_bound_facts,
 )
 from app.services.strategy_lab.etf_leader_tactics_shadow import (
     LEADER_BREAKOUT_CANDIDATE,
@@ -186,6 +192,90 @@ def _regime():
             status="available",
             fact_hash="",
         )
+    )
+
+
+@pytest.mark.asyncio
+async def test_source_bound_fact_loader_uses_only_visible_published_items(app) -> None:
+    async with app.state.db.session() as session:
+        run = ShortResearchSignalRun(
+            status="success",
+            as_of_date=date(2026, 7, 30),
+            as_of_trade_date=date(2026, 7, 30),
+            scope_kind="all",
+            publication_state=None,
+        )
+        session.add(run)
+        await session.flush()
+        session.add_all(
+            [
+                ShortResearchSignalItem(
+                    run_id=run.id,
+                    asset_type="etf",
+                    asset_code="510300",
+                    rank=1,
+                    total_score=80.0,
+                    ranking_score=80.0,
+                    score_eligible=True,
+                    conclusion="观察",
+                    score_breakdown_json={},
+                    risk_flags_json=[],
+                    rationale_json={},
+                    metrics_json={
+                        "theme_group": "broad-market",
+                        "tracked_underlying_id": "CSI300",
+                        "sector_trend_score": 82.0,
+                        "theme_profile": {"primary_theme": "宽基"},
+                    },
+                    created_at=datetime(2026, 7, 30, 7, 1),
+                ),
+                ShortResearchSignalItem(
+                    run_id=run.id,
+                    asset_type="etf",
+                    asset_code="510500",
+                    rank=2,
+                    total_score=70.0,
+                    ranking_score=70.0,
+                    score_eligible=True,
+                    conclusion="观察",
+                    score_breakdown_json={},
+                    risk_flags_json=[],
+                    rationale_json={},
+                    metrics_json={
+                        "theme_group": "broad-market",
+                        "sector_trend_score": 82.0,
+                    },
+                    created_at=datetime(2026, 7, 30, 8, 0),
+                ),
+                EtfObservationPortfolioSnapshot(
+                    status="success",
+                    source_signal_run_id=run.id,
+                    as_of_date=date(2026, 7, 30),
+                    asset_type="etf",
+                    summary_json={"market_regime": "risk_on"},
+                    created_at=datetime(2026, 7, 30, 7, 1),
+                ),
+            ]
+        )
+        await session.flush()
+        source = _source()
+        source.source_signal_run_id = run.id
+
+        facts = await load_leader_source_bound_facts(
+            session,
+            capture_source=source,
+            asset_codes=("510300", "510500"),
+        )
+
+    assert facts.taxonomy["510300"].peer_group == "broad-market"
+    assert facts.taxonomy["510300"].clone_group == "CSI300"
+    assert facts.sector_trends["510300"].score == 82.0
+    assert facts.baseline_scores["510300"].score == 80.0
+    assert facts.regime is not None
+    assert facts.regime.status == "available"
+    assert "510500" not in facts.taxonomy
+    assert facts.exclusions["510500"] == (
+        "source_item_received_after_visibility_cutoff",
     )
 
 
