@@ -11,6 +11,7 @@ from app.defaults.short_research import ASSET_TYPE_ETF
 from app.models.entities import JobRun
 from app.services.market_data import ASIA_SHANGHAI, is_etf_exchange_trading_day
 from app.services.short_etf.bounded_history_sync import (
+    HISTORY_SELECTION_POLICY,
     RESEARCH_DEPTH_SELECTION_POLICY,
     BoundedHistorySyncRequest,
     BoundedHistorySyncResult,
@@ -30,6 +31,8 @@ from app.services.short_research.coverage_policy import (
 from app.services.short_research.history_readiness import (
     DEEP_TELEMETRY_DEPTH_SCOPE,
     DEEP_TELEMETRY_DEPTH_SESSIONS,
+    SCORE_WARMUP_SCOPE,
+    SCORE_WARMUP_SESSIONS,
     history_depth_scope,
 )
 from app.services.short_research.ranking_contract import canonical_hash
@@ -44,6 +47,7 @@ RESEARCH_RSS_LIMIT_BYTES = 512 * 1024 * 1024
 RESEARCH_PROFILE_MIN_CODES = 5
 RESEARCH_PROFILE_INITIAL_CODES = 10
 RESEARCH_PROFILE_MAX_CODES = 20
+WARMUP_REPAIR_LOOKBACK_DAYS = 730
 COMPACT_SAMPLE_LIMIT = 20
 _PRESSURE_STOP_REASONS = {
     "admission_deadline",
@@ -328,7 +332,7 @@ async def run_post_publication_etf_research_history_slice(
         daily_coverage_ratio=float(daily.get("coverage_ratio") or 0.0),
         warmup_coverage_ratio=float(warmup.get("coverage_ratio") or 0.0),
     )
-    if not readiness_policy.complete_publication_allowed:
+    if not readiness_policy.preview_allowed:
         return {
             "asset_type": ASSET_TYPE_ETF,
             "status": "skipped",
@@ -338,8 +342,15 @@ async def run_post_publication_etf_research_history_slice(
             "readiness_policy": readiness_policy.to_dict(),
         }
 
+    repairing_warmup = not readiness_policy.complete_publication_allowed
     contract_lane = readiness.get("contract_depth") or {}
-    if not _lane_completion_gate_passed(contract_lane):
+    if repairing_warmup:
+        selected_lane = warmup
+        scope = SCORE_WARMUP_SCOPE
+        contract_hash = current_etf_history_contract_hash(
+            horizons=DEFAULT_HISTORY_HORIZONS
+        )
+    elif not _lane_completion_gate_passed(contract_lane):
         selected_lane = contract_lane
         scope = history_depth_scope(str(readiness["contract_hash"]))
         contract_hash = current_etf_history_contract_hash(
@@ -361,17 +372,28 @@ async def run_post_publication_etf_research_history_slice(
         }
 
     required_sessions = int(selected_lane.get("required_sessions") or 0)
-    try:
-        required_trade_dates = tuple(
-            date.fromisoformat(str(value))
-            for value in selected_lane.get("required_trade_dates") or ()
-        )
-    except ValueError:
+    required_trade_dates: tuple[date, ...]
+    if repairing_warmup:
+        required_sessions = SCORE_WARMUP_SESSIONS
         required_trade_dates = ()
-    if (
-        required_sessions <= 0
-        or len(required_trade_dates) != required_sessions
-        or required_trade_dates != tuple(sorted(set(required_trade_dates)))
+        from_date = effective_date - timedelta(days=WARMUP_REPAIR_LOOKBACK_DAYS)
+        to_date = effective_date
+    else:
+        try:
+            required_trade_dates = tuple(
+                date.fromisoformat(str(value))
+                for value in selected_lane.get("required_trade_dates") or ()
+            )
+        except ValueError:
+            required_trade_dates = ()
+        from_date = required_trade_dates[0] if required_trade_dates else effective_date
+        to_date = required_trade_dates[-1] if required_trade_dates else effective_date
+    if required_sessions <= 0 or (
+        not repairing_warmup
+        and (
+            len(required_trade_dates) != required_sessions
+            or required_trade_dates != tuple(sorted(set(required_trade_dates)))
+        )
     ):
         return {
             "asset_type": ASSET_TYPE_ETF,
@@ -420,13 +442,15 @@ async def run_post_publication_etf_research_history_slice(
     recent_runs = await _recent_lane_slices(session, scope=scope)
     evidence = [dict(run.details_json or {}) for run in recent_runs]
     profile_max_codes = choose_research_depth_batch_size(evidence)
+    if repairing_warmup:
+        profile_max_codes = min(profile_max_codes, 10)
     request = BoundedHistorySyncRequest(
         scope=scope,
         contract_hash=contract_hash,
         universe_hash=universe_hash,
         eligible_codes=codes,
-        from_date=required_trade_dates[0],
-        to_date=required_trade_dates[-1],
+        from_date=from_date,
+        to_date=to_date,
         required_sessions=required_sessions,
         required_trade_dates=required_trade_dates,
         max_codes=profile_max_codes,
@@ -437,7 +461,11 @@ async def run_post_publication_etf_research_history_slice(
         process_deadline_seconds=60.0,
         rss_limit_bytes=RESEARCH_RSS_LIMIT_BYTES,
         provider_timeout_seconds=6.0,
-        selection_policy=RESEARCH_DEPTH_SELECTION_POLICY,
+        selection_policy=(
+            HISTORY_SELECTION_POLICY
+            if repairing_warmup
+            else RESEARCH_DEPTH_SELECTION_POLICY
+        ),
         provider_policy_version=PUBLICATION_PROVIDER_POLICY_VERSION,
         adjustment_contract=RESEARCH_ADJUSTMENT_CONTRACT,
         price_basis="total_return_adjusted",
@@ -458,7 +486,9 @@ async def run_post_publication_etf_research_history_slice(
         horizons=DEFAULT_HISTORY_HORIZONS,
     )
     lane_key = (
-        "contract_depth"
+        "history_depth_61"
+        if repairing_warmup
+        else "contract_depth"
         if scope != DEEP_TELEMETRY_DEPTH_SCOPE
         else "telemetry_depth_500"
     )
