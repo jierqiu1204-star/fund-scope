@@ -27,4 +27,4 @@
 
 - [x] 5.1 Run focused formula, no-lookahead, cost, zero-match, page-consistency, persistence, API, and frontend tests.
 - [x] 5.2 Run changed-file Ruff, backend domain boundaries, TypeScript, static separation, formatting, and strict OpenSpec validation with per-command timeouts below 60 seconds.
-- [ ] 5.3 Deploy once, run bounded production continuations to completion, verify read-only evidence projection, and record the real multi-horizon results and limitations.
+- [x] 5.3 Deploy once, run bounded production continuations to completion, verify read-only evidence projection, and record the real multi-horizon results and limitations.
