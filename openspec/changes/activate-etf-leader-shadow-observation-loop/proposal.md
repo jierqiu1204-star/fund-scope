@@ -9,6 +9,7 @@ The deployed leader-tactics surface exposes frozen proxy definitions but cannot 
 - Persist immutable per-session proxy observations, exclusions, pending and matured forward outcomes, MA5 policy-shadow state, manifests, cutoffs, hashes, and idempotent checkpoints without calling live providers.
 - Expose current shadow matches and accumulation progress through the existing read-only evidence API, including exact insufficient-data reasons and promotion counts.
 - Show an explicitly research-only observation list on the strategy-evidence page without changing production ranking, allocation, tracked positions, risk alerts, notifications, SMTP state, or score weights.
+- Admit a separately labelled current-vintage historical-price proxy artifact for immediate screening, with zero PIT-promotion credit and no claim that current membership or taxonomy was historically visible.
 - Keep the continuation disabled until the shared readiness rollout has produced a complete policy-v2 publication at daily 95-percent and 61-session 90-percent coverage and production PIT scheduling is explicitly enabled.
 
 ## Capabilities
@@ -29,5 +30,6 @@ None.
 - Backend: leader-tactics workflow composition, PIT input loading, observation and outcome persistence, checkpoints, scheduler preflight, evidence projection, schemas, and admin orchestration.
 - Frontend: the existing ETF strategy-evidence page and TypeScript evidence contract.
 - Data: additive research-only observation and checkpoint records; no rewrite of historical membership, receipt timestamps, adjusted prices, production snapshots, or user state.
+- Evidence: one additional immutable historical-proxy family that cannot replace factual PIT observations or satisfy any promotion sample gate.
 - Operations: one worker, pages of at most 20 ETFs, no live provider calls, bounded memory, and a hard return below 55 seconds on the 2-core/4-GB server.
 - Verification: PIT cutoff, idempotency, outcome-maturity, promotion-gate, production-isolation, API/UI, domain-boundary, Ruff, and strict OpenSpec checks.

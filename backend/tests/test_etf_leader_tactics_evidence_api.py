@@ -26,6 +26,13 @@ from app.services.strategy_lab.etf_leader_tactics_evidence_view import (
     LEADER_PIT_INPUT_MISSING,
     LEADER_REGISTRY_MISSING,
 )
+from app.services.strategy_lab.etf_leader_tactics_historical_proxy import (
+    LEADER_HISTORICAL_PROXY_EVIDENCE_MODE,
+    LEADER_HISTORICAL_PROXY_EXPERIMENT_FAMILY,
+    LEADER_HISTORICAL_PROXY_NOT_PIT,
+    LEADER_HISTORICAL_PROXY_REPORT_KIND,
+    LEADER_HISTORICAL_PROXY_SCHEMA_VERSION,
+)
 from app.services.strategy_lab.etf_leader_tactics_observation import (
     LEADER_MATURITY_EXPERIMENT_FAMILY,
     LEADER_MATURITY_REPORT_KIND,
@@ -251,6 +258,87 @@ async def test_enabled_api_reports_missing_materialized_evidence(app, client) ->
     assert response.json()["unavailable_reason"] == (
         LEADER_EVIDENCE_NOT_MATERIALIZED
     )
+
+
+@pytest.mark.anyio
+async def test_historical_proxy_is_visible_without_pit_gate_credit(
+    app,
+    client,
+) -> None:
+    app.state.settings.etf_leader_tactics_evidence_api_enabled = True
+    manifest_hash = _hash("historical-proxy-manifest")
+    report = {
+        "schema_version": LEADER_HISTORICAL_PROXY_SCHEMA_VERSION,
+        "report_kind": LEADER_HISTORICAL_PROXY_REPORT_KIND,
+        "experiment_family": LEADER_HISTORICAL_PROXY_EXPERIMENT_FAMILY,
+        "manifest_hash": manifest_hash,
+        "status": "insufficient_data",
+        "unavailable_reason": LEADER_HISTORICAL_PROXY_NOT_PIT,
+        "ranking_source_kind": "research_replay",
+        "evidence_mode": LEADER_HISTORICAL_PROXY_EVIDENCE_MODE,
+        "policy_mode": "none",
+        "notification_provenance": "none",
+        "execution_provenance": "none",
+        "signal_date": "2026-07-31",
+        "signal_run_id": 121,
+        "history_sessions": 180,
+        "membership_mode": "sealed_source_snapshot_current_vintage_proxy",
+        "price_basis": "total_return_adjusted",
+        "contract_hash": _hash("historical-proxy-contract"),
+        "source_ranking_contract_hash": _hash("historical-ranking"),
+        "source_input_snapshot_hash": _hash("historical-input"),
+        "coverage": {
+            "source_ranked_asset_count": 1376,
+            "eligible_history_asset_count": 750,
+            "eligible_history_ratio": 750 / 1376,
+            "history_sessions": 180,
+        },
+        "exclusion_counts": {"unclassified_peer_group": 299},
+        "candidate_counts": {
+            "leader_breakout_proxy_v1": 0,
+            "former_leader_repair_proxy_v1": 1,
+        },
+        "candidates": [
+            {
+                "candidate_id": "former_leader_repair_proxy_v1",
+                "asset_code": "512710",
+                "name": "军工龙头ETF富国",
+                "score": 0.6481481481481481,
+                "baseline_score": 41.212968016154,
+                "peer_group": "industrial",
+                "components": {"peer_count": 19},
+                "feature_hash": _hash("historical-candidate"),
+            }
+        ],
+        "promotion_gate_credit": {
+            "eligible_pit_sessions": 0,
+            "independent_primary_dates": 0,
+            "walk_forward_folds": 0,
+        },
+        "limitations": ["research only"],
+        "research_only": True,
+        "production_mutation_allowed": False,
+    }
+    await _insert_evidence(
+        app,
+        report=report,
+        experiment_family=LEADER_HISTORICAL_PROXY_EXPERIMENT_FAMILY,
+    )
+
+    payload = (await client.get(ENDPOINT)).json()
+
+    historical = payload["historical_proxy"]
+    assert historical["status"] == "complete"
+    assert historical["candidates"][0]["asset_code"] == "512710"
+    assert historical["promotion_gate_credit"] == {
+        "eligible_pit_sessions": 0,
+        "independent_primary_dates": 0,
+        "walk_forward_folds": 0,
+    }
+    assert payload["observation_counts"]["eligible_pit_sessions"] == 0
+    assert payload["current_observations"] == []
+    assert payload["notification_provenance"] == "none"
+    assert payload["execution_provenance"] == "none"
 
 
 @pytest.mark.anyio

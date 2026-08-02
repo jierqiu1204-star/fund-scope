@@ -55,12 +55,19 @@ New observation sources take precedence over already-complete units, while the o
 
 Core feature and evaluation logic remains in `strategy_lab`; database loading and cross-domain composition live in `app.services.workflows`; scheduler and admin routes only invoke one bounded continuation. Separate evidence-API and continuation flags remain fail-closed. Read-only evidence may be enabled before continuation, but observation work starts only after complete PIT sources exist.
 
+### 7. Keep current-vintage historical screening in a zero-credit sidecar
+
+An already materialized bounded artifact may combine one sealed current source snapshot with decision-eligible total-return-adjusted history to show which transparent formulas match now. It is persisted under `leader_tactics_historical_proxy_v1`, not the factual observation family. The adapter validates source and feature hashes, rejects unclassified peer groups and raw-price fallbacks, and hard-codes zero eligible PIT sessions, independent dates, and walk-forward folds.
+
+This sidecar is preferred to presenting an empty page while evidence accumulates, but it is not historical PIT reconstruction: membership and taxonomy remain explicitly current-vintage. It cannot feed production ranking, outcomes, holdout, positions, alerts, notifications, or execution.
+
 ## Risks / Trade-offs
 
 - [Current source items may lack factual taxonomy or regime fields] → Persist exact per-field exclusions and add no fallback; future complete source capture can include compatible facts.
 - [A 1,490-ETF source needs many pages] → Keep 20-ETF pages, compact primitives, monotonic cursors, and due-aware oldest-source scheduling.
 - [Outcome append rows could double-count a signal date] → Bind every row to the original observation hash and select the latest compatible maturity version per signal date.
 - [Existing evidence rows use the final-report schema] → Add an explicitly versioned observation report kind and retain backward-compatible final-report projection.
+- [Users may mistake historical-price screening for a validated backtest] → Render it in a separate amber research card, expose the current-vintage membership limitation, and force all PIT-promotion credit to zero.
 - [Leader work could contend with PIT capture] → Separate leases and cadence, one page per trigger, no provider calls, and skip when server resource admission fails.
 
 ## Migration Plan

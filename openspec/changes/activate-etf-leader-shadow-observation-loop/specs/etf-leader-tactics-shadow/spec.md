@@ -39,3 +39,10 @@ The leader-tactics shadow SHALL use only taxonomy, peer, sector-trend, baseline-
 #### Scenario: Historical metadata is absent
 - **WHEN** a required peer mapping, sector fact, baseline fact, or regime fact is missing, stale, received late, or incompatible
 - **THEN** the affected asset or routed proxy is excluded with a stable reason while other factually complete assets may continue
+
+### Requirement: Historical proxy screening cannot masquerade as factual observation
+The leader-tactics shadow SHALL keep sealed-source current-vintage historical screening outside the factual observation and outcome families.
+
+#### Scenario: Current-vintage screening finds a match
+- **WHEN** total-return-adjusted historical prices and a sealed current source snapshot produce a transparent proxy match
+- **THEN** the match is stored only in the historical-proxy family, reports its current-vintage membership limitation, grants zero promotion credit, and cannot enter ranking, position, alert, email, execution, or holdout state

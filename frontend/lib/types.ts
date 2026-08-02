@@ -1860,6 +1860,46 @@ export type EtfLeaderPendingOutcome = {
   feature_hash: string;
 };
 
+export type EtfLeaderHistoricalProxyCandidate = {
+  candidate_id: "leader_breakout_proxy_v1" | "former_leader_repair_proxy_v1";
+  asset_code: string;
+  name: string | null;
+  score: number;
+  baseline_score: number | null;
+  peer_group: string;
+  components: Record<string, number | null>;
+  feature_hash: string;
+};
+
+export type EtfLeaderHistoricalProxy = {
+  schema_version: "etf_leader_tactics_historical_proxy_evidence_v1";
+  status: "complete" | "unavailable" | "incompatible";
+  unavailable_reason: string | null;
+  generated_at: string | null;
+  manifest_hash: string | null;
+  contract_hash: string | null;
+  source_ranking_contract_hash: string | null;
+  source_input_snapshot_hash: string | null;
+  ranking_source_kind: "research_replay";
+  evidence_mode: "source_snapshot_historical_proxy";
+  policy_mode: "none";
+  notification_provenance: "none";
+  execution_provenance: "none";
+  signal_date: string | null;
+  signal_run_id: number | null;
+  history_sessions: number | null;
+  membership_mode: "sealed_source_snapshot_current_vintage_proxy";
+  price_basis: "total_return_adjusted";
+  coverage: Record<string, number>;
+  exclusion_counts: Record<string, number>;
+  candidate_counts: Record<string, number>;
+  candidates: EtfLeaderHistoricalProxyCandidate[];
+  promotion_gate_credit: Record<string, 0>;
+  limitations: string[];
+  research_only: true;
+  production_mutation_allowed: false;
+};
+
 export type EtfLeaderTacticsEvidence = {
   schema_version: "etf_leader_tactics_evidence_view_v1";
   experiment_family: "leader_tactics_shadow_v1";
@@ -1881,6 +1921,7 @@ export type EtfLeaderTacticsEvidence = {
   current_observations?: EtfLeaderCurrentObservation[];
   pending_outcomes?: EtfLeaderPendingOutcome[];
   partial_checkpoint?: Record<string, unknown>;
+  historical_proxy: EtfLeaderHistoricalProxy;
   hypothesis_registry: Record<string, unknown>;
   candidate_registry: Record<string, unknown>;
   ranking_source_kind: "research_replay";

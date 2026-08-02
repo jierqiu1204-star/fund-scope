@@ -571,8 +571,19 @@ function LeaderTacticsEvidencePanel({
   const candidates = asRecordArray(evidence.candidate_registry.candidates);
   const observationState = evidence.observation_state ?? "not_started";
   const observationCounts = evidence.observation_counts;
-  const currentObservations = (evidence.current_observations ?? []).slice(0, 20);
+  const currentObservations = (evidence.current_observations ?? []).slice(
+    0,
+    20
+  );
   const pendingOutcomes = (evidence.pending_outcomes ?? []).slice(0, 20);
+  const historicalProxy = evidence.historical_proxy;
+  const historicalCandidates = historicalProxy.candidates.slice(0, 20);
+  const historicalSourceCount = leaderCount(
+    historicalProxy.coverage.source_ranked_asset_count
+  );
+  const historicalEligibleCount = leaderCount(
+    historicalProxy.coverage.eligible_history_asset_count
+  );
   const outcomeCounts = observationCounts?.outcomes_by_horizon ?? [];
   const eligiblePitSessions = leaderCount(
     observationCounts?.eligible_pit_sessions
@@ -687,12 +698,111 @@ function LeaderTacticsEvidencePanel({
           </p>
         ) : null}
 
+        <div
+          className="mt-4 rounded-[10px] border border-amber-200 bg-amber-50/40 p-4"
+          data-evidence-mode="source-snapshot-historical-proxy"
+          data-pit-promotion-credit="0"
+        >
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <p className="text-sm font-semibold text-ink">
+                历史成员代理筛选（研究）
+              </p>
+              <p className="mt-1 max-w-4xl text-xs leading-5 text-ink/55">
+                使用封存来源榜单中的当前成员/分类配合历史复权行情做初筛。它不是事实
+                PIT 回放，不能计入 252 个 session、40 个独立样本或 3 个
+                walk-forward 门槛，也不是买入信号。
+              </p>
+            </div>
+            <span className="w-fit rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-ink/60">
+              {historicalProxy.status === "complete"
+                ? "已生成 · 不可晋升"
+                : historicalProxy.status === "incompatible"
+                  ? "证据不兼容"
+                  : "尚未生成"}
+            </span>
+          </div>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <EvidenceStat
+              label="来源信号日"
+              value={formatDateTime(historicalProxy.signal_date)}
+            />
+            <EvidenceStat
+              label="来源 Run"
+              value={
+                historicalProxy.signal_run_id
+                  ? `#${historicalProxy.signal_run_id}`
+                  : "暂无"
+              }
+            />
+            <EvidenceStat
+              label="历史深度"
+              value={
+                historicalProxy.history_sessions
+                  ? `${historicalProxy.history_sessions} 个交易日`
+                  : "暂无"
+              }
+            />
+            <EvidenceStat
+              label="有效历史/来源 ETF"
+              value={`${historicalEligibleCount}/${historicalSourceCount}`}
+            />
+          </div>
+          {historicalProxy.unavailable_reason ? (
+            <p className="mt-3 text-xs text-ink/50">
+              证据限制：{historicalProxy.unavailable_reason}
+            </p>
+          ) : null}
+          <div className="mt-3 space-y-2">
+            {historicalCandidates.length ? (
+              historicalCandidates.map((candidate) => (
+                <div
+                  key={`${candidate.candidate_id}-${candidate.asset_code}-${candidate.feature_hash}`}
+                  className="rounded-[8px] border border-amber-100 bg-white px-3 py-2 text-xs leading-5 text-ink/60"
+                >
+                  <p className="font-semibold text-ink/75">
+                    {candidate.asset_code} {candidate.name ?? ""} ·{" "}
+                    {candidate.candidate_id}
+                  </p>
+                  <p>
+                    代理分数 {leaderEvidenceValue("score", candidate.score)} ·
+                    同类 {candidate.peer_group} · 正式榜单分数{" "}
+                    {leaderEvidenceValue(
+                      "baseline_score",
+                      candidate.baseline_score
+                    )}
+                  </p>
+                  <p className="text-ink/45">
+                    {Object.entries(candidate.components)
+                      .slice(0, 5)
+                      .map(
+                        ([key, value]) =>
+                          `${key}=${leaderEvidenceValue(key, value)}`
+                      )
+                      .join(" · ")}
+                  </p>
+                </div>
+              ))
+            ) : (
+              <p className="rounded-[8px] bg-white px-3 py-3 text-xs text-ink/50">
+                {historicalProxy.status === "complete"
+                  ? "本次历史代理没有透明条件命中；不代表收益为零。"
+                  : "等待独立历史代理证据；不会回退到原始价或当前分类伪造正式 PIT。"}
+              </p>
+            )}
+          </div>
+          <p className="mt-3 text-xs leading-5 text-ink/45">
+            {historicalProxy.limitations.join("；")}
+          </p>
+        </div>
+
         <div className="mt-4 rounded-[10px] border border-border bg-white p-4">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
             <div>
               <p className="text-sm font-semibold text-ink">积累进度</p>
               <p className="mt-1 text-xs leading-5 text-ink/55">
-                Shadow 观察从首个完整 PIT session 开始累计；非买入信号、不会发邮件，也不影响正式榜单、持仓或执行。
+                Shadow 观察从首个完整 PIT session
+                开始累计；非买入信号、不会发邮件，也不影响正式榜单、持仓或执行。
               </p>
             </div>
             <span className="w-fit rounded-full bg-paper px-2.5 py-1 text-xs font-semibold text-ink/60">
@@ -700,7 +810,8 @@ function LeaderTacticsEvidencePanel({
             </span>
           </div>
           <p className="mt-3 text-xs leading-5 text-ink/55">
-            观察数据截止：{formatDateTime(observationDataCutoff)} · observation manifest：
+            观察数据截止：{formatDateTime(observationDataCutoff)} · observation
+            manifest：
             {observationManifestHash
               ? `${observationManifestHash.slice(0, 12)}…`
               : "暂无"}
@@ -742,13 +853,17 @@ function LeaderTacticsEvidencePanel({
           <div className="rounded-[10px] border border-border bg-white p-4">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
               <div>
-                <p className="text-sm font-semibold text-ink">当日 Shadow 观察</p>
+                <p className="text-sm font-semibold text-ink">
+                  当日 Shadow 观察
+                </p>
                 <p className="mt-1 text-xs leading-5 text-ink/55">
-                  最多展示 20 条当前代理观察；仅用于记录条件是否出现，不构成买入、卖出或仓位建议。
+                  最多展示 20
+                  条当前代理观察；仅用于记录条件是否出现，不构成买入、卖出或仓位建议。
                 </p>
               </div>
               <span className="w-fit rounded-full bg-paper px-2.5 py-1 text-xs text-ink/60">
-                显示 {currentObservations.length}/{currentQualifyingObservationCount}
+                显示 {currentObservations.length}/
+                {currentQualifyingObservationCount}
               </span>
             </div>
             <div className="mt-3 space-y-2">
@@ -758,10 +873,9 @@ function LeaderTacticsEvidencePanel({
                     ...observation.gate_reasons,
                     ...observation.unavailable_reasons
                   ];
-                  const componentRows = Object.entries(observation.components).slice(
-                    0,
-                    3
-                  );
+                  const componentRows = Object.entries(
+                    observation.components
+                  ).slice(0, 3);
                   return (
                     <div
                       key={`${observation.candidate_id}-${observation.asset_code}-${observation.feature_hash}`}
@@ -782,7 +896,8 @@ function LeaderTacticsEvidencePanel({
                         {leaderEvidenceValue("score", observation.score)}
                       </p>
                       <p className="text-ink/45">
-                        信号日 {formatDateTime(observation.signal_date)} · 截止 {formatDateTime(observation.source_cutoff)}
+                        信号日 {formatDateTime(observation.signal_date)} · 截止{" "}
+                        {formatDateTime(observation.source_cutoff)}
                         {observation.peer_group
                           ? ` · 同类 ${observation.peer_group}`
                           : ""}
@@ -791,8 +906,9 @@ function LeaderTacticsEvidencePanel({
                         <p className="text-ink/45">
                           组件：
                           {componentRows
-                            .map(([key, value]) =>
-                              `${key}=${leaderEvidenceValue(key, value)}`
+                            .map(
+                              ([key, value]) =>
+                                `${key}=${leaderEvidenceValue(key, value)}`
                             )
                             .join(" · ")}
                         </p>
@@ -807,7 +923,8 @@ function LeaderTacticsEvidencePanel({
                 })
               ) : (
                 <p className="rounded-[8px] bg-paper px-3 py-3 text-xs text-ink/50">
-                  当前没有可展示的 Shadow 观察；这不表示收益为零，也不构成现金或交易建议。
+                  当前没有可展示的 Shadow
+                  观察；这不表示收益为零，也不构成现金或交易建议。
                 </p>
               )}
             </div>
@@ -821,17 +938,20 @@ function LeaderTacticsEvidencePanel({
           <div className="rounded-[10px] border border-border bg-white p-4">
             <p className="text-sm font-semibold text-ink">待结算结果</p>
             <p className="mt-1 text-xs leading-5 text-ink/55">
-              只有相应交易日真实完成后才写入 outcome；待结算不等于零收益，不会提前填充或推断。
+              只有相应交易日真实完成后才写入
+              outcome；待结算不等于零收益，不会提前填充或推断。
             </p>
             <div className="mt-3 grid gap-2 sm:grid-cols-2">
               {outcomeCounts.length ? (
-                outcomeCounts.slice(0, 4).map((outcome) => (
-                  <EvidenceStat
-                    key={outcome.horizon_sessions}
-                    label={`${outcome.horizon_sessions} 日 outcome`}
-                    value={`待 ${leaderCount(outcome.pending)} · 成熟 ${leaderCount(outcome.matured)} · 不可用 ${leaderCount(outcome.unavailable)}`}
-                  />
-                ))
+                outcomeCounts
+                  .slice(0, 4)
+                  .map((outcome) => (
+                    <EvidenceStat
+                      key={outcome.horizon_sessions}
+                      label={`${outcome.horizon_sessions} 日 outcome`}
+                      value={`待 ${leaderCount(outcome.pending)} · 成熟 ${leaderCount(outcome.matured)} · 不可用 ${leaderCount(outcome.unavailable)}`}
+                    />
+                  ))
               ) : (
                 <p className="rounded-[8px] bg-paper px-3 py-3 text-xs text-ink/50">
                   尚无可结算窗口统计。
@@ -849,7 +969,8 @@ function LeaderTacticsEvidencePanel({
                       {outcome.candidate_id} · {outcome.asset_code}
                     </p>
                     <p className="mt-1">
-                      信号日 {formatDateTime(outcome.signal_date)} · 待结算窗口 {outcome.pending_horizons.join("、")} 日
+                      信号日 {formatDateTime(outcome.signal_date)} · 待结算窗口{" "}
+                      {outcome.pending_horizons.join("、")} 日
                     </p>
                   </div>
                 ))

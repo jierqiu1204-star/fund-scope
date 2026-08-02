@@ -21,3 +21,10 @@ The strategy-evidence page SHALL display observation-session count, matured prim
 #### Scenario: Evidence is still accumulating
 - **WHEN** observations exist but promotion gates are incomplete
 - **THEN** the panel shows `研究积累中 / 样本不足` and keeps formal ranking, email accuracy, provider delivery, and confirmed execution unavailable
+
+### Requirement: Leader panel labels historical-price screening as non-PIT research
+The strategy-evidence page SHALL render current-vintage historical-price candidates separately from factual daily Shadow observations and SHALL state that they cannot satisfy promotion gates or constitute a buy signal.
+
+#### Scenario: Historical proxy evidence is complete
+- **WHEN** compatible `leader_tactics_historical_proxy_v1` evidence exists
+- **THEN** the panel shows source signal date, history depth, eligible/source asset counts, candidate formulas, scores, peer group, limitations, and explicit zero PIT-promotion credit in a separate research section

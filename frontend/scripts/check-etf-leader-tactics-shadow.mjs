@@ -92,11 +92,26 @@ const checks = [
       "待结算结果",
       "积累进度",
       "非买入信号、不会发邮件",
-      "currentObservations = (evidence.current_observations ?? []).slice(0, 20)",
+      "const currentObservations = (",
+      "evidence.current_observations ?? []",
       "pendingOutcomes = (evidence.pending_outcomes ?? []).slice(0, 20)",
       "current_observations_truncated",
       "outcomes_by_horizon"
     ].every((field) => evidencePage.includes(field))
+  },
+  {
+    name: "separates current-vintage historical proxy screening from factual PIT promotion",
+    pass:
+      evidencePage.includes("历史成员代理筛选（研究）") &&
+      evidencePage.includes(
+        'data-evidence-mode="source-snapshot-historical-proxy"'
+      ) &&
+      evidencePage.includes('data-pit-promotion-credit="0"') &&
+      evidencePage.includes("它不是事实") &&
+      evidencePage.includes("PIT 回放，不能计入") &&
+      evidencePage.includes("也不是买入信号") &&
+      types.includes("EtfLeaderHistoricalProxy") &&
+      types.includes("promotion_gate_credit")
   },
   {
     name: "does not inject leader candidates into the production ranking page",
