@@ -45,11 +45,11 @@
 - [x] 7.1 Run focused leader contract, PIT adapter, continuation, observation, outcome, workflow, evidence API, and migration-free persistence tests with per-command timeouts below 60 seconds.
 - [x] 7.2 Run frontend TypeScript and leader-tactics static checks with bounded timeouts.
 - [x] 7.3 Run backend domain-boundary tests and Ruff on changed files in bounded groups.
-- [ ] 7.4 Run strict OpenSpec validation and verify all observation work remains research-only and production-isolated.
+- [x] 7.4 Run strict OpenSpec validation and verify all observation work remains research-only and production-isolated.
 
 ## 8. Expose A Zero-Credit Historical Proxy
 
 - [x] 8.1 Validate and persist a separate current-vintage historical-price proxy evidence family with adjusted-price-only provenance, classified peer groups, immutable hashes, and zero formal PIT gate credit.
 - [x] 8.2 Project the proxy through the read-only leader evidence API without changing factual observation counts, outcomes, or promotion state.
 - [x] 8.3 Render a separate research-only historical proxy card that cannot be interpreted as a factual PIT replay or buy signal.
-- [ ] 8.4 Add focused contract, API, frontend separation, domain-boundary, Ruff, and strict OpenSpec checks with per-command timeouts below 60 seconds.
+- [x] 8.4 Add focused contract, API, frontend separation, domain-boundary, Ruff, and strict OpenSpec checks with per-command timeouts below 60 seconds.
