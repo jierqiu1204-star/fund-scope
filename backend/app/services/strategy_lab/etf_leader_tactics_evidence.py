@@ -20,6 +20,9 @@ from app.services.strategy_lab.etf_leader_tactics_evaluation import (
     LeaderExperimentRegistration,
     LeaderPrimaryInference,
 )
+from app.services.strategy_lab.etf_leader_tactics_historical_backtest import (
+    LEADER_HISTORICAL_BACKTEST_EXPERIMENT_FAMILY,
+)
 from app.services.strategy_lab.etf_leader_tactics_historical_proxy import (
     LEADER_HISTORICAL_PROXY_EXPERIMENT_FAMILY,
 )
@@ -357,6 +360,25 @@ async def latest_leader_historical_proxy_evidence(
         .where(
             EtfFactorExperimentEvidence.experiment_family
             == LEADER_HISTORICAL_PROXY_EXPERIMENT_FAMILY,
+            EtfFactorExperimentEvidence.hypothesis_registry_hash
+            == LEADER_HYPOTHESIS_REGISTRY.registry_hash,
+        )
+        .order_by(
+            EtfFactorExperimentEvidence.created_at.desc(),
+            EtfFactorExperimentEvidence.id.desc(),
+        )
+        .limit(1)
+    )
+
+
+async def latest_leader_historical_backtest_evidence(
+    session: AsyncSession,
+) -> EtfFactorExperimentEvidence | None:
+    return await session.scalar(
+        select(EtfFactorExperimentEvidence)
+        .where(
+            EtfFactorExperimentEvidence.experiment_family
+            == LEADER_HISTORICAL_BACKTEST_EXPERIMENT_FAMILY,
             EtfFactorExperimentEvidence.hypothesis_registry_hash
             == LEADER_HYPOTHESIS_REGISTRY.registry_hash,
         )

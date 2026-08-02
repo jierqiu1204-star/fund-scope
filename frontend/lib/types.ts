@@ -1900,6 +1900,45 @@ export type EtfLeaderHistoricalProxy = {
   production_mutation_allowed: false;
 };
 
+export type EtfLeaderHistoricalBacktestAggregate = {
+  candidate_id: string;
+  horizon_sessions: 1 | 3 | 5 | 10 | 20;
+  event_count: number;
+  signal_date_count: number;
+  mean_net_return: number | null;
+  median_net_return: number | null;
+  win_rate: number | null;
+  mean_peer_net_return: number | null;
+  mean_net_excess_return: number | null;
+  mean_net_return_ci95_lower: number | null;
+  mean_net_return_ci95_upper: number | null;
+  event_series_max_drawdown: number | null;
+};
+
+export type EtfLeaderHistoricalBacktest = {
+  schema_version: "etf_leader_tactics_historical_backtest_evidence_v1";
+  status: "complete" | "unavailable" | "incompatible";
+  unavailable_reason: string | null;
+  generated_at: string | null;
+  manifest_hash: string | null;
+  contract_hash: string;
+  source_signal_run_id: number | null;
+  source_signal_date: string | null;
+  first_signal_date: string | null;
+  last_signal_date: string | null;
+  ranking_source_kind: "research_replay";
+  evidence_mode: "current_vintage_membership_rolling_research_replay";
+  membership_mode: "sealed_source_snapshot_current_vintage_proxy";
+  price_basis: "total_return_adjusted";
+  coverage: Record<string, number>;
+  exclusion_counts: Record<string, number>;
+  aggregates: EtfLeaderHistoricalBacktestAggregate[];
+  promotion_gate_credit: Record<string, 0>;
+  limitations: string[];
+  research_only: true;
+  production_mutation_allowed: false;
+};
+
 export type EtfLeaderTacticsEvidence = {
   schema_version: "etf_leader_tactics_evidence_view_v1";
   experiment_family: "leader_tactics_shadow_v1";
@@ -1922,6 +1961,7 @@ export type EtfLeaderTacticsEvidence = {
   pending_outcomes?: EtfLeaderPendingOutcome[];
   partial_checkpoint?: Record<string, unknown>;
   historical_proxy: EtfLeaderHistoricalProxy;
+  historical_backtest: EtfLeaderHistoricalBacktest;
   hypothesis_registry: Record<string, unknown>;
   candidate_registry: Record<string, unknown>;
   ranking_source_kind: "research_replay";

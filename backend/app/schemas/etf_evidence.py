@@ -187,6 +187,38 @@ class EtfLeaderHistoricalProxyOut(BaseModel):
     production_mutation_allowed: Literal[False]
 
 
+class EtfLeaderHistoricalBacktestOut(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
+
+    schema_version: Literal[
+        "etf_leader_tactics_historical_backtest_evidence_v1"
+    ]
+    status: Literal["complete", "unavailable", "incompatible"]
+    unavailable_reason: str | None = None
+    generated_at: datetime | None = None
+    manifest_hash: str | None = None
+    contract_hash: str
+    source_signal_run_id: int | None = Field(default=None, ge=1)
+    source_signal_date: str | None = None
+    first_signal_date: str | None = None
+    last_signal_date: str | None = None
+    ranking_source_kind: Literal["research_replay"]
+    evidence_mode: Literal[
+        "current_vintage_membership_rolling_research_replay"
+    ]
+    membership_mode: Literal[
+        "sealed_source_snapshot_current_vintage_proxy"
+    ]
+    price_basis: Literal["total_return_adjusted"]
+    coverage: dict[str, float | int] = Field(default_factory=dict)
+    exclusion_counts: dict[str, int] = Field(default_factory=dict)
+    aggregates: list[dict[str, Any]] = Field(default_factory=list, max_length=15)
+    promotion_gate_credit: dict[str, Literal[0]] = Field(default_factory=dict)
+    limitations: list[str] = Field(default_factory=list)
+    research_only: Literal[True]
+    production_mutation_allowed: Literal[False]
+
+
 class EtfLeaderTacticsEvidenceOut(BaseModel):
     schema_version: Literal["etf_leader_tactics_evidence_view_v1"]
     experiment_family: Literal["leader_tactics_shadow_v1"]
@@ -235,6 +267,7 @@ class EtfLeaderTacticsEvidenceOut(BaseModel):
     )
     partial_checkpoint: dict[str, Any] = Field(default_factory=dict)
     historical_proxy: EtfLeaderHistoricalProxyOut
+    historical_backtest: EtfLeaderHistoricalBacktestOut
     costs: dict[str, Any] = Field(default_factory=dict)
     limitations: list[str] = Field(default_factory=list)
     research_only: Literal[True]

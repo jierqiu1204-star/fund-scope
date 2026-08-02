@@ -15,9 +15,20 @@ from app.services.strategy_lab.etf_leader_tactics_continuation import (
 from app.services.strategy_lab.etf_leader_tactics_evidence import (
     LEADER_EVIDENCE_SCHEMA_VERSION,
     latest_leader_factor_evidence,
+    latest_leader_historical_backtest_evidence,
     latest_leader_historical_proxy_evidence,
     latest_leader_maturity_evidence,
     latest_leader_observation_evidence,
+)
+from app.services.strategy_lab.etf_leader_tactics_historical_backtest import (
+    HISTORICAL_BACKTEST_CONTRACT_HASH,
+    LEADER_HISTORICAL_BACKTEST_EVIDENCE_MODE,
+    LEADER_HISTORICAL_BACKTEST_EXPERIMENT_FAMILY,
+    LEADER_HISTORICAL_BACKTEST_INCOMPATIBLE,
+    LEADER_HISTORICAL_BACKTEST_NOT_PIT,
+    LEADER_HISTORICAL_BACKTEST_REPORT_KIND,
+    LEADER_HISTORICAL_BACKTEST_SCHEMA_VERSION,
+    LEADER_HISTORICAL_BACKTEST_UNAVAILABLE,
 )
 from app.services.strategy_lab.etf_leader_tactics_historical_proxy import (
     LEADER_HISTORICAL_PROXY_EVIDENCE_MODE,
@@ -106,6 +117,39 @@ def _base_historical_proxy(reason: str) -> dict[str, Any]:
         },
         "limitations": [
             "历史行情代理不具备事实 PIT 成员与接收时间，不能计入正式验证。",
+            "仅供研究；不影响排名、持仓、提醒、邮件或执行。",
+        ],
+        "research_only": True,
+        "production_mutation_allowed": False,
+    }
+
+
+def _base_historical_backtest(reason: str) -> dict[str, Any]:
+    return {
+        "schema_version": LEADER_HISTORICAL_BACKTEST_SCHEMA_VERSION,
+        "status": "unavailable",
+        "unavailable_reason": reason,
+        "generated_at": None,
+        "manifest_hash": None,
+        "contract_hash": HISTORICAL_BACKTEST_CONTRACT_HASH,
+        "source_signal_run_id": None,
+        "source_signal_date": None,
+        "first_signal_date": None,
+        "last_signal_date": None,
+        "ranking_source_kind": "research_replay",
+        "evidence_mode": LEADER_HISTORICAL_BACKTEST_EVIDENCE_MODE,
+        "membership_mode": "sealed_source_snapshot_current_vintage_proxy",
+        "price_basis": "total_return_adjusted",
+        "coverage": {},
+        "exclusion_counts": {},
+        "aggregates": [],
+        "promotion_gate_credit": {
+            "eligible_pit_sessions": 0,
+            "independent_primary_dates": 0,
+            "walk_forward_folds": 0,
+        },
+        "limitations": [
+            "当前成员和分类存在幸存者/前视偏差，不能计入正式 PIT 验证。",
             "仅供研究；不影响排名、持仓、提醒、邮件或执行。",
         ],
         "research_only": True,
@@ -221,6 +265,9 @@ def _base_view(reason: str) -> dict[str, Any]:
         "historical_proxy": _base_historical_proxy(
             LEADER_HISTORICAL_PROXY_UNAVAILABLE
         ),
+        "historical_backtest": _base_historical_backtest(
+            LEADER_HISTORICAL_BACKTEST_UNAVAILABLE
+        ),
         "costs": {},
         "limitations": [
             LEADER_HYPOTHESIS_REGISTRY.non_equivalence_notice,
@@ -297,6 +344,64 @@ def _historical_proxy_projection(row: Any | None) -> dict[str, Any]:
         "exclusion_counts": _mapping(report.get("exclusion_counts")),
         "candidate_counts": _mapping(report.get("candidate_counts")),
         "candidates": candidates,
+        "promotion_gate_credit": promotion_gate_credit,
+        "limitations": _sequence(report.get("limitations")),
+    }
+
+
+def _historical_backtest_projection(row: Any | None) -> dict[str, Any]:
+    if row is None:
+        return _base_historical_backtest(LEADER_HISTORICAL_BACKTEST_UNAVAILABLE)
+    report = _mapping(row.report_json)
+    promotion_gate_credit = _mapping(report.get("promotion_gate_credit"))
+    aggregates = _sequence(report.get("aggregates"))
+    compatible = (
+        row.experiment_family == LEADER_HISTORICAL_BACKTEST_EXPERIMENT_FAMILY
+        and row.hypothesis_registry_hash
+        == LEADER_HYPOTHESIS_REGISTRY.registry_hash
+        and row.promotion_state == "insufficient_data"
+        and report.get("schema_version")
+        == LEADER_HISTORICAL_BACKTEST_SCHEMA_VERSION
+        and report.get("report_kind") == LEADER_HISTORICAL_BACKTEST_REPORT_KIND
+        and report.get("experiment_family")
+        == LEADER_HISTORICAL_BACKTEST_EXPERIMENT_FAMILY
+        and report.get("manifest_hash") == row.manifest_hash
+        and report.get("status") == "insufficient_data"
+        and report.get("unavailable_reason") == LEADER_HISTORICAL_BACKTEST_NOT_PIT
+        and report.get("contract_hash") == HISTORICAL_BACKTEST_CONTRACT_HASH
+        and report.get("ranking_source_kind") == "research_replay"
+        and report.get("evidence_mode") == LEADER_HISTORICAL_BACKTEST_EVIDENCE_MODE
+        and report.get("membership_mode")
+        == "sealed_source_snapshot_current_vintage_proxy"
+        and report.get("price_basis") == "total_return_adjusted"
+        and report.get("research_only") is True
+        and report.get("production_mutation_allowed") is False
+        and len(aggregates) <= 15
+        and promotion_gate_credit
+        == {
+            "eligible_pit_sessions": 0,
+            "independent_primary_dates": 0,
+            "walk_forward_folds": 0,
+        }
+    )
+    if not compatible:
+        view = _base_historical_backtest(
+            LEADER_HISTORICAL_BACKTEST_INCOMPATIBLE
+        )
+        view.update({"status": "incompatible", "generated_at": row.created_at})
+        return view
+    return {
+        **_base_historical_backtest(LEADER_HISTORICAL_BACKTEST_NOT_PIT),
+        "status": "complete",
+        "generated_at": row.created_at,
+        "manifest_hash": row.manifest_hash,
+        "source_signal_run_id": report.get("source_signal_run_id"),
+        "source_signal_date": report.get("source_signal_date"),
+        "first_signal_date": report.get("first_signal_date"),
+        "last_signal_date": report.get("last_signal_date"),
+        "coverage": _mapping(report.get("coverage")),
+        "exclusion_counts": _mapping(report.get("exclusion_counts")),
+        "aggregates": aggregates,
         "promotion_gate_credit": promotion_gate_credit,
         "limitations": _sequence(report.get("limitations")),
     }
@@ -549,6 +654,9 @@ async def build_latest_leader_evidence_view(
     historical_proxy = _historical_proxy_projection(
         await latest_leader_historical_proxy_evidence(session)
     )
+    historical_backtest = _historical_backtest_projection(
+        await latest_leader_historical_backtest_evidence(session)
+    )
     observation_row = await latest_leader_observation_evidence(session)
     observation = _observation_projection(observation_row)
     if not observation:
@@ -569,6 +677,7 @@ async def build_latest_leader_evidence_view(
         if observation_row is not None:
             view["generated_at"] = observation_row.created_at
         view["historical_proxy"] = historical_proxy
+        view["historical_backtest"] = historical_backtest
         return view
     if (
         row.hypothesis_registry_hash
@@ -580,6 +689,7 @@ async def build_latest_leader_evidence_view(
             **view,
             **observation,
             "historical_proxy": historical_proxy,
+            "historical_backtest": historical_backtest,
         }
     report = _mapping(row.report_json)
     if not _report_is_compatible(row, report):
@@ -589,6 +699,7 @@ async def build_latest_leader_evidence_view(
             **view,
             **observation,
             "historical_proxy": historical_proxy,
+            "historical_backtest": historical_backtest,
         }
 
     status = str(report["status"])
@@ -634,4 +745,5 @@ async def build_latest_leader_evidence_view(
         ),
         **observation,
         "historical_proxy": historical_proxy,
+        "historical_backtest": historical_backtest,
     }

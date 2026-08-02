@@ -578,6 +578,8 @@ function LeaderTacticsEvidencePanel({
   const pendingOutcomes = (evidence.pending_outcomes ?? []).slice(0, 20);
   const historicalProxy = evidence.historical_proxy;
   const historicalCandidates = historicalProxy.candidates.slice(0, 20);
+  const historicalBacktest = evidence.historical_backtest;
+  const historicalBacktestRows = historicalBacktest.aggregates;
   const historicalSourceCount = leaderCount(
     historicalProxy.coverage.source_ranked_asset_count
   );
@@ -793,6 +795,111 @@ function LeaderTacticsEvidencePanel({
           </div>
           <p className="mt-3 text-xs leading-5 text-ink/45">
             {historicalProxy.limitations.join("；")}
+          </p>
+        </div>
+
+        <div
+          className="mt-4 rounded-[10px] border border-sky-200 bg-sky-50/40 p-4"
+          data-evidence-mode="current-vintage-membership-rolling-research-replay"
+          data-pit-promotion-credit="0"
+        >
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <p className="text-sm font-semibold text-ink">
+                龙头代理历史滚动回测（研究）
+              </p>
+              <p className="mt-1 max-w-4xl text-xs leading-5 text-ink/55">
+                每个历史信号日只用当日及以前的复权行情选候选，T+1
+                收盘进入，并计入双边费用和滑点。当前成员及分类并非历史
+                PIT，存在幸存者偏差，因此结果只能用于排雷，不能当成正式策略业绩。
+              </p>
+            </div>
+            <span className="w-fit rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-ink/60">
+              {historicalBacktest.status === "complete"
+                ? "已完成 · 不可晋升"
+                : historicalBacktest.status === "incompatible"
+                  ? "证据不兼容"
+                  : "尚未生成"}
+            </span>
+          </div>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <EvidenceStat
+              label="回测信号区间"
+              value={
+                historicalBacktest.first_signal_date
+                  ? `${historicalBacktest.first_signal_date} 至 ${historicalBacktest.last_signal_date ?? "暂无"}`
+                  : "暂无"
+              }
+            />
+            <EvidenceStat
+              label="历史信号日"
+              value={`${leaderCount(historicalBacktest.coverage.eligible_signal_date_count)} 日`}
+            />
+            <EvidenceStat
+              label="候选事件"
+              value={`${leaderCount(historicalBacktest.coverage.unique_candidate_signal_count)} 个`}
+            />
+            <EvidenceStat
+              label="复权 180 日覆盖"
+              value={`${leaderCount(historicalBacktest.coverage.history_180_asset_count)}/${leaderCount(historicalBacktest.coverage.classified_asset_count)}`}
+            />
+          </div>
+          {historicalBacktestRows.length ? (
+            <div className="mt-3 overflow-x-auto rounded-[8px] border border-sky-100 bg-white">
+              <table className="min-w-[920px] w-full text-left text-xs text-ink/60">
+                <thead className="bg-paper text-ink/70">
+                  <tr>
+                    <th className="px-3 py-2">候选</th>
+                    <th className="px-3 py-2">持有</th>
+                    <th className="px-3 py-2">事件/日期</th>
+                    <th className="px-3 py-2">平均净收益</th>
+                    <th className="px-3 py-2">胜率</th>
+                    <th className="px-3 py-2">同组净收益</th>
+                    <th className="px-3 py-2">净超额</th>
+                    <th className="px-3 py-2">95% 区间</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {historicalBacktestRows.map((row) => (
+                    <tr
+                      key={`${row.candidate_id}-${row.horizon_sessions}`}
+                      className="border-t border-border/70"
+                    >
+                      <td className="px-3 py-2 font-medium text-ink/75">
+                        {row.candidate_id}
+                      </td>
+                      <td className="px-3 py-2">{row.horizon_sessions} 日</td>
+                      <td className="px-3 py-2">
+                        {row.event_count}/{row.signal_date_count}
+                      </td>
+                      <td className="px-3 py-2">
+                        {formatNullableRate(row.mean_net_return)}
+                      </td>
+                      <td className="px-3 py-2">
+                        {formatNullableRate(row.win_rate)}
+                      </td>
+                      <td className="px-3 py-2">
+                        {formatNullableRate(row.mean_peer_net_return)}
+                      </td>
+                      <td className="px-3 py-2">
+                        {formatNullableRate(row.mean_net_excess_return)}
+                      </td>
+                      <td className="px-3 py-2">
+                        {formatNullableRate(row.mean_net_return_ci95_lower)} ～{" "}
+                        {formatNullableRate(row.mean_net_return_ci95_upper)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="mt-3 rounded-[8px] bg-white px-3 py-3 text-xs text-ink/50">
+              等待生产复权数据上的可续跑历史回测证据。
+            </p>
+          )}
+          <p className="mt-3 text-xs leading-5 text-ink/45">
+            {historicalBacktest.limitations.join("；")}
           </p>
         </div>
 
