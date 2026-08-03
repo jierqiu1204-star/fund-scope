@@ -278,6 +278,8 @@
     ],
     "unknown_or_incompatible": "score_unavailable",
     "cross_bucket_percentiles": false,
+    "minimum_eligible_non_clone_peers": 2,
+    "clone_activation_minimum_underlying_coverage": 0.9,
     "clone_policy": "one_underlying_distribution_contribution"
   },
   "anti_double_count": {

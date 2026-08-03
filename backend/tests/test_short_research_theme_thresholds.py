@@ -50,6 +50,30 @@ def test_etf_theme_classifier_keeps_unknown_auditable() -> None:
     assert "没有命中" in profile.classification_reason
 
 
+def test_etf_theme_classifier_prioritizes_cross_border_before_domestic_keywords() -> None:
+    profile = classify_etf_theme(
+        code="599998",
+        name="港股创新药ETF",
+        asset_class="sector",
+    )
+
+    assert profile.asset_bucket == "cross_border"
+    assert profile.theme_group == "cross_border"
+    assert profile.classification_source == "cross_border_keyword"
+
+
+def test_etf_theme_classifier_prioritizes_asset_class_before_domestic_keywords() -> None:
+    profile = classify_etf_theme(
+        code="599997",
+        name="科技债ETF",
+        asset_class="bond",
+    )
+
+    assert profile.asset_bucket == "bond"
+    assert profile.primary_theme == "债券"
+    assert profile.classification_source == "asset_class"
+
+
 @pytest.mark.parametrize(
     ("code", "name", "expected_group", "expected_theme"),
     [
@@ -78,7 +102,7 @@ def test_etf_theme_classifier_covers_audited_sector_universe(
     assert profile.asset_bucket == "equity"
     assert profile.theme_group == expected_group
     assert profile.primary_theme == expected_theme
-    assert profile.classification_source == "fund_name"
+    assert profile.classification_source == "domestic_keyword"
     assert profile.classification_confidence == "high"
 
 

@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from app.defaults.short_research import ASSET_TYPE_ETF, ShortResearchAsset
 from app.models.entities import (
+    EtfCanonicalPublicationRegistry,
     ShortResearchSignalItem,
     ShortResearchSignalRun,
     TradableEtf,
@@ -81,9 +82,30 @@ def _asset(
             "actionable_score": actionable_score,
             "actionable_eligible": actionable_score is not None,
             "actionable_exclusion_reasons": actionable_reasons or [],
-            "actionable_field_statuses": {},
-            "actionable_source_times": {},
+            "actionable_field_statuses": {
+                "provider": "available",
+                "provider_health": "available",
+                "freshness": "available",
+                "provider_consensus": "available",
+            },
+            "actionable_source_times": {
+                "provider": CUTOFF.isoformat(),
+                "provider_health": CUTOFF.isoformat(),
+                "freshness": CUTOFF.isoformat(),
+                "provider_consensus": CUTOFF.isoformat(),
+            },
             "v3_adjusted_price_history_digest": code[0] * 64,
+            "average_turnover_20d": 100_000_000.0,
+            "default_display_eligible": True,
+            "default_exclusion_reasons": [],
+            "ranking_asset_bucket": "broad-equity",
+            "theme_profile": {
+                "asset_bucket": "broad_base",
+                "theme_group": "broad_base",
+                "primary_theme": "宽基",
+                "classification_source": "fixture_authoritative",
+                "classification_confidence": "high",
+            },
         },
         score_breakdown={},
         risk_flags=[],
@@ -186,7 +208,7 @@ async def test_ninety_percent_materialization_is_complete_and_publishable(
     assert persisted_run.summary_json["readiness_state"] == "complete"
     assert persisted_run.summary_json["snapshot_state"] == "complete_candidate"
     assert persisted_run.summary_json["readiness_policy_version"] == (
-        "etf_readiness_policy_v2"
+        "etf_readiness_policy_v3"
     )
     assert (
         persisted_run.summary_json["ranking_surfaces"]["actionable"][
@@ -200,6 +222,96 @@ async def test_ninety_percent_materialization_is_complete_and_publishable(
     assert research.run is not None and research.run.id == run_id
     assert actionable.state == "ready"
     assert actionable.run is not None and actionable.run.id == run_id
+
+
+@pytest.mark.asyncio
+async def test_low_turnover_top_score_is_persisted_as_observation_only(
+    client,
+    app,
+    monkeypatch,
+) -> None:
+    universe_codes = [f"5102{index:02d}" for index in range(10)]
+    assets = [
+        _asset(code, research_score=99.0 - index, actionable_score=90.0 - index)
+        for index, code in enumerate(universe_codes)
+    ]
+    rejected = assets[0]
+    rejected.metrics["average_turnover_20d"] = 10_000_000.0
+    rejected.metrics["default_display_eligible"] = False
+    rejected.metrics["default_exclusion_reasons"] = [
+        "近 20 日平均成交额偏低，流动性不足"
+    ]
+    _install(monkeypatch, assets, universe_codes=universe_codes)
+    monkeypatch.setattr(
+        short_research_service,
+        "required_etf_snapshot_trade_date",
+        lambda _now=None: TRADE_DATE,
+    )
+
+    async with app.state.db.session() as session:
+        session.add_all(
+            [
+                TradableEtf(
+                    code=code,
+                    name=f"ETF{code}",
+                    exchange="SH",
+                    theme_tags_json=["宽基"],
+                    trading_rule_label="证券账户 T+1 ETF",
+                    asset_class="broad_index",
+                    is_short_term_eligible=True,
+                    is_watchlist=True,
+                )
+                for code in universe_codes
+            ]
+        )
+        run = await materialize_dual_ranking_snapshot(
+            session,
+            trade_date=TRADE_DATE,
+            decision_cutoff=CUTOFF,
+        )
+        items = (
+            await session.scalars(
+                select(ShortResearchSignalItem).where(
+                    ShortResearchSignalItem.run_id == run.id
+                )
+            )
+        ).all()
+        await session.commit()
+        await publish_dual_ranking_snapshot(session, run_id=run.id)
+
+    assert len(items) == 9
+    assert rejected.metadata.code not in {item.asset_code for item in items}
+    observation = run.summary_json["observation_only"]
+    assert observation["count"] == 1
+    assert observation["items"][0]["asset_code"] == rejected.metadata.code
+    assert observation["items"][0]["reasons"] == [
+        "absolute_tradability_below_threshold"
+    ]
+    assert observation["items"][0]["evidence"] == {
+        "eligible_adjusted_sessions": 250,
+        "price_basis": "total_return_adjusted",
+        "decision_data_eligible": True,
+        "average_turnover_20d": 10_000_000.0,
+        "taxonomy_bucket": "broad-equity",
+        "taxonomy_source": "fixture_authoritative",
+        "taxonomy_confidence": "high",
+        "research_score": 99.0,
+        "research_score_eligible": True,
+        "latest_data_date": TRADE_DATE.isoformat(),
+    }
+    response = await client.get(
+        "/api/short-research/assets/observation-only"
+        f"?q={rejected.metadata.code}&reason=absolute_tradability_below_threshold"
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert body["items"][0]["code"] == rejected.metadata.code
+    assert body["items"][0]["reasons"] == [
+        "absolute_tradability_below_threshold"
+    ]
+    assert body["items"][0]["evidence"]["average_turnover_20d"] == 10_000_000.0
+    assert body["snapshot"]["quality_evidence"]["observation_only"]["count"] == 1
 
 
 @pytest.mark.asyncio
@@ -332,6 +444,13 @@ async def test_dual_snapshot_publishes_research_when_actionable_surface_is_empty
     assert published.publication_state == "published"
     assert published.summary_json["ranking_surfaces"]["research"]["eligible_count"] == 1
     assert published.summary_json["ranking_surfaces"]["actionable"]["eligible_count"] == 0
+    assert (
+        published.summary_json["surface_availability_state"]
+        == "research_complete_actionable_unavailable"
+    )
+    assert published.summary_json["ranking_surfaces"]["actionable"][
+        "blocker_counts"
+    ] == {"provider_health:unhealthy": 1}
 
     async with app.state.db.session() as session:
         research = await resolve_current_etf_ranking_surface_snapshot(
@@ -526,7 +645,7 @@ async def test_ninety_percent_assets_api_exposes_complete_dual_ranking(
     research = research_response.json()
     assert research["snapshot"]["snapshot_state"] == "complete"
     assert research["snapshot"]["readiness_state"] == "complete"
-    assert research["snapshot"]["policy_version"] == "etf_readiness_policy_v2"
+    assert research["snapshot"]["policy_version"] == "etf_readiness_policy_v3"
     assert len(research["items"]) == 9
     assert all(item["actionable_rank"] is not None for item in research["items"])
     assert all(item["actionable_score"] is not None for item in research["items"])
@@ -536,7 +655,11 @@ async def test_ninety_percent_assets_api_exposes_complete_dual_ranking(
     assert len(actionable["items"]) == 9
     assert actionable["snapshot"]["snapshot_state"] == "complete"
     assert watchlist.signal_status == "ready"
-    assert all(SOURCE_TOP20_SIGNAL in item.sources for item in watchlist.items)
+    ranked_watchlist = [item for item in watchlist.items if item.rank is not None]
+    unranked_watchlist = [item for item in watchlist.items if item.rank is None]
+    assert len(ranked_watchlist) == 9
+    assert all(SOURCE_TOP20_SIGNAL in item.sources for item in ranked_watchlist)
+    assert all(SOURCE_TOP20_SIGNAL not in item.sources for item in unranked_watchlist)
 
 
 @pytest.mark.asyncio
@@ -605,3 +728,133 @@ async def test_dual_snapshot_feeds_research_consumers_and_actionable_live_top20(
     assert SOURCE_TOP20_SIGNAL in by_code["510001"].sources
     assert by_code["510002"].rank is None
     assert SOURCE_TOP20_SIGNAL not in by_code["510002"].sources
+
+
+@pytest.mark.asyncio
+async def test_missing_provider_health_seal_publishes_research_only(
+    app,
+    monkeypatch,
+) -> None:
+    asset = _asset("510300", research_score=80.0, actionable_score=90.0)
+    asset.metrics["actionable_field_statuses"] = {
+        **asset.metrics["actionable_field_statuses"],
+        "provider_health": "missing",
+    }
+    _install(monkeypatch, [asset])
+
+    async with app.state.db.session() as session:
+        session.add(
+            TradableEtf(
+                code=asset.metadata.code,
+                name=asset.metadata.name,
+                exchange="SH",
+                theme_tags_json=["宽基"],
+                trading_rule_label="证券账户 T+1 ETF",
+                asset_class="broad_index",
+                is_short_term_eligible=True,
+                is_watchlist=True,
+            )
+        )
+        run = await materialize_dual_ranking_snapshot(
+            session,
+            trade_date=TRADE_DATE,
+            decision_cutoff=CUTOFF,
+        )
+        assert run.summary_json["provider_health_identity"]["state"] == "missing"
+        assert (
+            run.summary_json["surface_availability_state"]
+            == "research_complete_actionable_unavailable"
+        )
+        actionable = run.summary_json["ranking_surfaces"]["actionable"]
+        assert actionable["eligible_count"] == 0
+        assert actionable["blocker_counts"] == {
+            "provider_health_seal_missing": 1
+        }
+        await session.commit()
+
+        published = await publish_dual_ranking_snapshot(session, run_id=run.id)
+        registry = await session.scalar(
+            select(EtfCanonicalPublicationRegistry).where(
+                EtfCanonicalPublicationRegistry.source_signal_run_id == run.id
+            )
+        )
+
+    assert published.id == run.id
+    assert published.publication_state == "published"
+    assert registry is not None
+    assert registry.provider_health_state == "missing"
+    assert registry.provider_health_unavailable_reason == (
+        "provider_health_seal_missing"
+    )
+    assert published.summary_json["publication_evidence"][
+        "publication_identity"
+    ] == registry.publication_identity_hash
+
+
+@pytest.mark.asyncio
+async def test_new_same_date_identity_supersedes_without_rewriting_prior_run(
+    app,
+    monkeypatch,
+) -> None:
+    first_asset = _asset("510300", research_score=70.0, actionable_score=80.0)
+    second_asset = _asset("510300", research_score=75.0, actionable_score=85.0)
+    _install(monkeypatch, [first_asset])
+
+    async with app.state.db.session() as session:
+        session.add(
+            TradableEtf(
+                code="510300",
+                name="ETF510300",
+                exchange="SH",
+                theme_tags_json=["宽基"],
+                trading_rule_label="证券账户 T+1 ETF",
+                asset_class="broad_index",
+                is_short_term_eligible=True,
+                is_watchlist=True,
+            )
+        )
+        first = await materialize_dual_ranking_snapshot(
+            session,
+            trade_date=TRADE_DATE,
+            decision_cutoff=CUTOFF,
+        )
+        await session.commit()
+        await publish_dual_ranking_snapshot(session, run_id=first.id)
+
+        _install(monkeypatch, [second_asset])
+        second = await materialize_dual_ranking_snapshot(
+            session,
+            trade_date=TRADE_DATE,
+            decision_cutoff=CUTOFF,
+        )
+        await session.commit()
+        await publish_dual_ranking_snapshot(session, run_id=second.id)
+
+        selection = await resolve_current_etf_ranking_surface_snapshot(
+            session,
+            required_trade_date=TRADE_DATE,
+            ranking_surface="research",
+        )
+        registries = (
+            await session.scalars(
+                select(EtfCanonicalPublicationRegistry).order_by(
+                    EtfCanonicalPublicationRegistry.id.asc()
+                )
+            )
+        ).all()
+        persisted_first = await session.get(ShortResearchSignalRun, first.id)
+
+    assert first.id != second.id
+    assert selection.state == "ready"
+    assert selection.run is not None
+    assert selection.run.id == second.id
+    assert [(row.source_signal_run_id, row.is_current) for row in registries] == [
+        (first.id, False),
+        (second.id, True),
+    ]
+    assert registries[1].supersedes_publication_id == registries[0].id
+    assert persisted_first is not None
+    assert persisted_first.publication_state == "published"
+    assert persisted_first.summary_json["ranking_surfaces"]["research"][
+        "eligible_count"
+    ] == 1

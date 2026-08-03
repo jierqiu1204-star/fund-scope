@@ -8,7 +8,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
-from app.models.entities import ShortResearchSignalItem, ShortResearchSignalRun
+from app.models.entities import (
+    EtfCanonicalPublicationRegistry,
+    ShortResearchSignalItem,
+    ShortResearchSignalRun,
+)
 from app.services.intraday_etf.exchange_calendar import (
     AFTERNOON_CLOSE,
     is_trading_day,
@@ -59,12 +63,18 @@ class SnapshotMetadata(TypedDict):
     readiness_state: EtfCoveragePolicyMode | None
     policy_version: str | None
     snapshot_state: Literal["unavailable", "provisional", "complete"]
+    surface_availability_state: str | None
     unavailable_reason: str | None
     market_decision_cutoff: datetime | str | None
     data_receipt_cutoff: datetime | str | None
     replay_visibility_cutoff: datetime | str | None
     resource_profile: dict[str, Any]
     provider_health_identity: dict[str, Any]
+    quality_evidence: dict[str, Any]
+    publication_evidence: dict[str, Any]
+    pit_evidence: dict[str, Any]
+    cost_evidence: dict[str, Any]
+    concentration_evidence: dict[str, Any]
     freshness_status: str
     limitations: list[str]
 
@@ -93,12 +103,18 @@ def snapshot_metadata(
             "readiness_state": None,
             "policy_version": None,
             "snapshot_state": "unavailable",
+            "surface_availability_state": None,
             "unavailable_reason": f"canonical_snapshot_{freshness_status}",
             "market_decision_cutoff": None,
             "data_receipt_cutoff": None,
             "replay_visibility_cutoff": None,
             "resource_profile": {},
             "provider_health_identity": {},
+            "quality_evidence": {},
+            "publication_evidence": {},
+            "pit_evidence": {},
+            "cost_evidence": {},
+            "concentration_evidence": {},
             "freshness_status": freshness_status,
             "limitations": ["no_snapshot", f"canonical_snapshot_{freshness_status}"],
         }
@@ -176,6 +192,16 @@ def snapshot_metadata(
     )
     resource_profile = summary.get("resource_profile")
     provider_health_identity = summary.get("provider_health_identity")
+    quality_evidence = {
+        "canonical_research_eligibility": summary.get(
+            "canonical_research_eligibility",
+            {},
+        ),
+        "observation_only": summary.get("observation_only", {}),
+        "ranking_surfaces": summary.get("ranking_surfaces", {}),
+        "non_finite_reject_count": summary.get("non_finite_reject_count", 0),
+        "cap_violation_count": summary.get("cap_violation_count", 0),
+    }
     return {
         "snapshot_id": run.id,
         "score_version": run.score_version,
@@ -193,6 +219,11 @@ def snapshot_metadata(
         "readiness_state": readiness.state,
         "policy_version": policy_version,
         "snapshot_state": snapshot_state,
+        "surface_availability_state": (
+            str(summary["surface_availability_state"])
+            if summary.get("surface_availability_state")
+            else None
+        ),
         "unavailable_reason": unavailable_reason,
         "market_decision_cutoff": cutoff_payload.get(
             "market_decision_cutoff",
@@ -213,6 +244,13 @@ def snapshot_metadata(
             dict(provider_health_identity)
             if isinstance(provider_health_identity, dict)
             else {}
+        ),
+        "quality_evidence": quality_evidence,
+        "publication_evidence": dict(summary.get("publication_evidence") or {}),
+        "pit_evidence": dict(summary.get("pit_evidence") or {}),
+        "cost_evidence": dict(summary.get("cost_evidence") or {}),
+        "concentration_evidence": dict(
+            summary.get("concentration_evidence") or {}
         ),
         "freshness_status": freshness_status,
         "limitations": limitations,
@@ -297,6 +335,30 @@ async def select_current_canonical_etf_snapshot(
     required_trade_date: date,
 ) -> ShortResearchSignalRun | None:
     has_etf_item, has_non_etf_item = _etf_item_clauses()
+    registered = (
+        await session.scalars(
+            select(ShortResearchSignalRun)
+            .join(
+                EtfCanonicalPublicationRegistry,
+                EtfCanonicalPublicationRegistry.source_signal_run_id
+                == ShortResearchSignalRun.id,
+            )
+            .where(
+                *_current_contract_clauses(),
+                ShortResearchSignalRun.as_of_trade_date == required_trade_date,
+                EtfCanonicalPublicationRegistry.is_current.is_(True),
+                has_etf_item,
+                ~has_non_etf_item,
+            )
+            .order_by(EtfCanonicalPublicationRegistry.id.desc())
+            .limit(2)
+        )
+    ).all()
+    if len(registered) > 1:
+        return None
+    if registered:
+        run = registered[0]
+        return run if snapshot_metadata(run)["snapshot_state"] == "complete" else None
     rows = await session.scalars(
         select(ShortResearchSignalRun)
         .where(
@@ -392,7 +454,26 @@ async def resolve_current_etf_ranking_surface_snapshot(
         has_etf_item,
         ~has_non_etf_item,
     )
-    runs = (
+    registered_runs = (
+        await session.scalars(
+            select(ShortResearchSignalRun)
+            .join(
+                EtfCanonicalPublicationRegistry,
+                EtfCanonicalPublicationRegistry.source_signal_run_id
+                == ShortResearchSignalRun.id,
+            )
+            .where(
+                *base,
+                ShortResearchSignalRun.as_of_trade_date == required_trade_date,
+                EtfCanonicalPublicationRegistry.is_current.is_(True),
+            )
+            .order_by(EtfCanonicalPublicationRegistry.id.desc())
+            .limit(2)
+        )
+    ).all()
+    if len(registered_runs) > 1:
+        return CanonicalSnapshotSelection("version_mismatch", None)
+    legacy_runs = (
         await session.scalars(
             select(ShortResearchSignalRun)
             .where(
@@ -405,6 +486,7 @@ async def resolve_current_etf_ranking_surface_snapshot(
             )
         )
     ).all()
+    runs = registered_runs or legacy_runs
     for run in runs:
         metadata = snapshot_metadata(run)
         readiness = evaluate_persisted_etf_readiness(
@@ -454,6 +536,40 @@ async def select_canonical_etf_snapshot(
     required_trade_date: date,
 ) -> ShortResearchSignalRun | None:
     has_etf_item, has_non_etf_item = _etf_item_clauses()
+    registered = (
+        await session.scalars(
+            select(ShortResearchSignalRun)
+            .join(
+                EtfCanonicalPublicationRegistry,
+                EtfCanonicalPublicationRegistry.source_signal_run_id
+                == ShortResearchSignalRun.id,
+            )
+            .where(
+                ShortResearchSignalRun.status == "success",
+                ShortResearchSignalRun.publication_state == "published",
+                ShortResearchSignalRun.scope_kind == "full",
+                ShortResearchSignalRun.score_version == score_version,
+                ShortResearchSignalRun.ranking_contract_hash
+                == ranking_contract_hash,
+                ShortResearchSignalRun.price_basis == price_basis,
+                ShortResearchSignalRun.as_of_trade_date == required_trade_date,
+                ShortResearchSignalRun.decision_data_coverage_ratio
+                >= ETF_DAILY_DECISION_MIN_COVERAGE,
+                ShortResearchSignalRun.coverage_ratio
+                >= ETF_COMPLETE_SCORE_COVERAGE,
+                EtfCanonicalPublicationRegistry.is_current.is_(True),
+                has_etf_item,
+                ~has_non_etf_item,
+            )
+            .order_by(EtfCanonicalPublicationRegistry.id.desc())
+            .limit(2)
+        )
+    ).all()
+    if len(registered) > 1:
+        return None
+    if registered:
+        run = registered[0]
+        return run if snapshot_metadata(run)["snapshot_state"] == "complete" else None
     rows = await session.scalars(
         select(ShortResearchSignalRun)
         .where(

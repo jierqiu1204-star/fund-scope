@@ -98,6 +98,7 @@ def _series(code: str, replay_date: date) -> PointInTimeAdjustedSeries:
         earliest_source_timestamp=cutoff - timedelta(days=60),
         latest_source_timestamp=cutoff,
         synchronized_after_cutoff=False,
+        revision_hashes=(_hash(f"revision:{code}:{replay_date.isoformat()}"),),
         series_hash=_hash(f"series:{code}:{replay_date.isoformat()}"),
     )
 

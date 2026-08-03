@@ -37,7 +37,6 @@ from app.models.entities import (
     EtfSyncCursor,
     EtfThemeCatalystEvent,
     EtfThemeExposure,
-    EtfUniverseMembership,
     Fund,
     FundNavHistory,
     JobRun,
@@ -93,6 +92,9 @@ from app.services.short_research.daily_reconstructable import (
 from app.services.short_research.dynamic_thresholds import (
     ThresholdPricePoint,
     dynamic_threshold_context,
+)
+from app.services.short_research.etf_identity_facts import (
+    select_tracked_underlying_facts_at_cutoff,
 )
 from app.services.short_research.factors import (
     FACTOR_PROFILE_UNAVAILABLE_VERSION,
@@ -4379,23 +4381,33 @@ async def _with_final_score_v3_shadow(
     if not etf_assets:
         return assets
     codes = [asset.metadata.code for asset in etf_assets]
-    membership_rows = (
-        await session.scalars(
-            select(EtfUniverseMembership)
-            .where(
-                EtfUniverseMembership.etf_code.in_(codes),
-                EtfUniverseMembership.effective_from <= as_of_date,
-                or_(
-                    EtfUniverseMembership.effective_to.is_(None),
-                    EtfUniverseMembership.effective_to >= as_of_date,
-                ),
-            )
-            .order_by(EtfUniverseMembership.etf_code.asc(), EtfUniverseMembership.effective_from.desc())
+    underlying_facts = await select_tracked_underlying_facts_at_cutoff(
+        session,
+        etf_codes=codes,
+        cutoff=decision_cutoff,
+    )
+    underlying_by_code = {
+        code: (
+            fact.tracked_underlying_id
+            if fact.identity_state == "resolved"
+            else None
         )
-    ).all()
-    underlying_by_code: dict[str, str | None] = {}
-    for row in membership_rows:
-        underlying_by_code.setdefault(row.etf_code, row.tracked_underlying_id)
+        for code, fact in underlying_facts.items()
+    }
+    underlying_evidence_by_code = {
+        code: {
+            "identity_state": fact.identity_state,
+            "source": fact.source,
+            "provider_version": fact.provider_version,
+            "external_source_id": fact.external_source_id,
+            "observed_at": fact.observed_at.isoformat(),
+            "confidence": fact.confidence,
+            "rule_version": fact.rule_version,
+            "evidence_hash": fact.evidence_hash,
+            "fact_hash": fact.fact_hash,
+        }
+        for code, fact in underlying_facts.items()
+    }
     quote_by_code = await etf_quotes_at_decision_cutoff(
         session,
         codes,
@@ -4622,11 +4634,21 @@ async def _with_final_score_v3_shadow(
             "v3_observation_explanation": v3_observation_explanation,
             "v3_metric_peer_counts": dict(result.metric_peer_counts),
             "v3_missing_by_component": dict(result.missing_by_component),
+            "clone_policy_active": result.clone_policy_active,
+            "tracked_underlying_coverage": result.tracked_underlying_coverage,
+            "clone_group_id": result.clone_group_id,
+            "diversified_representative": result.diversified_representative,
+            "cap_violation": result.cap_violation,
+            "non_finite_reject": result.non_finite_reject,
             "v3_input_values": {
                 key: input_by_code[asset.metadata.code].values.get(key)
                 for key in sorted(contract_input_keys)
             },
             "tracked_underlying_id": underlying_by_code.get(asset.metadata.code),
+            "underlying_evidence": underlying_evidence_by_code.get(
+                asset.metadata.code,
+                {},
+            ),
             "actionable_contract_id": actionable.contract_id,
             "actionable_score_field": actionable.score_field,
             "actionable_contract_hash": actionable.manifest_hash,
@@ -4656,6 +4678,16 @@ async def _with_final_score_v3_shadow(
                         "metric_peer_counts": dict(result.metric_peer_counts),
                         "missing_by_component": dict(result.missing_by_component),
                         "limitation_reasons": list(result.limitation_reasons),
+                        "clone_policy_active": result.clone_policy_active,
+                        "tracked_underlying_coverage": (
+                            result.tracked_underlying_coverage
+                        ),
+                        "clone_group_id": result.clone_group_id,
+                        "diversified_representative": (
+                            result.diversified_representative
+                        ),
+                        "cap_violation": result.cap_violation,
+                        "non_finite_reject": result.non_finite_reject,
                     },
                 },
             )
@@ -5037,7 +5069,10 @@ async def compute_etf_snapshot_assets(
     batch_progress_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     resume_after_code: str | None = None,
     resumed_assets_by_code: Mapping[str, ComputedAsset] | None = None,
+    batch_size: int = ETF_RANKING_BATCH_SIZE,
 ) -> list[ComputedAsset]:
+    if isinstance(batch_size, bool) or not 5 <= batch_size <= ETF_RANKING_BATCH_SIZE:
+        raise ValueError("ETF ranking batch size must be within [5, 20]")
     candidates = await _available_assets(session, asset_type=ASSET_TYPE_ETF, codes=codes)
     candidates = sorted(candidates, key=lambda candidate: candidate.code)
     candidate_codes = [candidate.code for candidate in candidates]
@@ -5053,9 +5088,9 @@ async def compute_etf_snapshot_assets(
     computed_by_code = {
         code: resumed[code] for code in candidate_codes[:start_index]
     }
-    for batch_start in range(start_index, len(candidates), ETF_RANKING_BATCH_SIZE):
+    for batch_start in range(start_index, len(candidates), batch_size):
         started = perf_counter()
-        batch = candidates[batch_start : batch_start + ETF_RANKING_BATCH_SIZE]
+        batch = candidates[batch_start : batch_start + batch_size]
         batch_codes = [item.code for item in batch]
         (
             series_by_code,
@@ -5109,7 +5144,7 @@ async def compute_etf_snapshot_assets(
             for asset in batch_assets
         )
         progress = {
-            "batch_number": batch_start // ETF_RANKING_BATCH_SIZE + 1,
+            "batch_number": batch_start // batch_size + 1,
             "batch_size": len(batch),
             "first_code": batch_codes[0],
             "last_code": batch_codes[-1],

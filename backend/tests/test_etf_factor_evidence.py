@@ -327,6 +327,9 @@ async def test_operational_factor_evidence_persists_explicit_promotion_state(
             "trend": {
                 "incremental_ic": 0.02,
                 "residualized": True,
+                "residual_ic": 0.011,
+                "common_support_observation_count": 252,
+                "common_support_marginal_contribution": 0.011,
             }
         },
         coverage={
@@ -349,6 +352,12 @@ async def test_operational_factor_evidence_persists_explicit_promotion_state(
             "ranking_source_kind": "research_replay",
             "policy_mode": "policy_shadow",
         },
+        primary_diagnostics={
+            "hit_rate": 0.54,
+            "concentration": {"maximum_underlying_weight": 0.2},
+            "clone_coverage": {"coverage_ratio": 0.95},
+            "cost_provenance": "frozen_conservative_fallback",
+        },
     )
 
     async with app.state.db.session() as session:
@@ -360,9 +369,86 @@ async def test_operational_factor_evidence_persists_explicit_promotion_state(
     )
     assert evidence.report_json["primary_metric"]["primary"] is True
     assert evidence.report_json["exploratory_metrics"] == []
+    assert evidence.report_json["candidate_state"] == "research_only"
+    assert len(evidence.report_json["main_candidate_ids"]) == 3
+    assert evidence.report_json["residual_common_support"]["trend"]["residual_ic"] == 0.011
+    assert evidence.report_json["primary_diagnostics"]["hit_rate"] == 0.54
+    assert evidence.costs_json["candidate_cost_drag"] == pytest.approx(0.002)
     assert evidence.report_json["production_mutation_allowed"] is False
     response = await client.get(
         f"/api/strategy-lab/etf-factor-evidence/{manifest.manifest_hash}"
     )
     assert response.status_code == 200
     assert response.json()["promotion_state"] == "promotion_eligible"
+
+
+def test_operational_evidence_marks_candidates_insufficient_until_pit_gates_pass() -> None:
+    manifest = _operational_manifest()
+    promotion = evaluate_research_promotion(
+        PromotionGateEvidence(
+            decision_data_coverage_ratio=0.96,
+            score_coverage_ratio=0.96,
+            eligible_point_in_time_sessions=251,
+            independent_primary_dates=39,
+            completed_walk_forward_folds=2,
+            adjusted_primary_interval_lower=None,
+            fold_sign_stable=False,
+            regime_sign_stable=False,
+            candidate_maximum_drawdown=None,
+            baseline_maximum_drawdown=None,
+            holdout_consumed=False,
+        )
+    )
+
+    payload = build_operational_factor_evidence(
+        manifest=manifest,
+        data_cutoff=datetime(2026, 7, 24, 15, 0),
+        primary_result=_ranking_result(manifest),
+        exploratory_results=(),
+        factor_diagnostics={},
+        coverage={"eligible_point_in_time_sessions": 251},
+        exclusion_counts={},
+        split_reports={"holdout": {"consumed": False, "use_count": 0}},
+        raw_primary_p_values=(0.01,),
+        promotion=promotion,
+    )
+
+    assert payload.report["candidate_state"] == "insufficient_data"
+    assert payload.report["production_mutation_allowed"] is False
+    assert "production weights remain frozen" in " ".join(payload.limitations)
+
+
+def test_operational_evidence_rejects_shadow_ideas_from_frozen_main_registry() -> None:
+    manifest = _operational_manifest()
+    promotion = evaluate_research_promotion(
+        PromotionGateEvidence(
+            decision_data_coverage_ratio=0.96,
+            score_coverage_ratio=0.96,
+            eligible_point_in_time_sessions=252,
+            independent_primary_dates=40,
+            completed_walk_forward_folds=3,
+            adjusted_primary_interval_lower=0.001,
+            fold_sign_stable=True,
+            regime_sign_stable=True,
+            candidate_maximum_drawdown=0.10,
+            baseline_maximum_drawdown=0.09,
+            holdout_consumed=True,
+        )
+    )
+
+    with pytest.raises(FactorEvidenceContractError, match="frozen ranking endpoint"):
+        build_operational_factor_evidence(
+            manifest=manifest,
+            data_cutoff=datetime(2026, 7, 24, 15, 0),
+            primary_result=replace(
+                _ranking_result(manifest),
+                candidate_id="leader_shadow_candidate",
+            ),
+            exploratory_results=(),
+            factor_diagnostics={},
+            coverage={},
+            exclusion_counts={},
+            split_reports={"holdout": {"consumed": True, "use_count": 1}},
+            raw_primary_p_values=(0.01,),
+            promotion=promotion,
+        )

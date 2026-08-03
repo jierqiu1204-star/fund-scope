@@ -22,6 +22,7 @@ from app.services.short_research.coverage_policy import (
     ETF_COMPLETE_SCORE_COVERAGE,
     ETF_DAILY_DECISION_MIN_COVERAGE,
     ETF_LEGACY_COMPLETE_SCORE_COVERAGE,
+    ETF_PREVIOUS_READINESS_POLICY_VERSION,
     ETF_READINESS_POLICY_VERSION,
 )
 from app.services.strategy_lab.etf_action_replay.artifact_store import (
@@ -106,15 +107,24 @@ _MATURITY_PRICE_CONTRACT_HASH = stable_contract_hash(
 
 def _complete_pit_source_coverage_clause():
     current_policy = and_(
-        EtfPitCaptureSource.readiness_policy_version
-        == ETF_READINESS_POLICY_VERSION,
+        EtfPitCaptureSource.readiness_policy_version.in_(
+            (
+                ETF_PREVIOUS_READINESS_POLICY_VERSION,
+                ETF_READINESS_POLICY_VERSION,
+            )
+        ),
         EtfPitCaptureSource.warmup_coverage_ratio
         >= ETF_COMPLETE_SCORE_COVERAGE,
     )
     legacy_policy = and_(
         or_(
             EtfPitCaptureSource.readiness_policy_version
-            != ETF_READINESS_POLICY_VERSION,
+            .notin_(
+                (
+                    ETF_PREVIOUS_READINESS_POLICY_VERSION,
+                    ETF_READINESS_POLICY_VERSION,
+                )
+            ),
             EtfPitCaptureSource.readiness_policy_version.is_(None),
         ),
         EtfPitCaptureSource.warmup_coverage_ratio

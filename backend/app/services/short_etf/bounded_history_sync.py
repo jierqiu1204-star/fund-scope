@@ -12,9 +12,7 @@ from datetime import date, datetime, timedelta
 from functools import partial
 from typing import Any, Literal
 
-from sqlalchemy import and_, case, event, false, func, or_, select
-from sqlalchemy.dialects.postgresql import insert as postgresql_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy import and_, case, event, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.entities import (
@@ -26,10 +24,12 @@ from app.models.entities import (
 )
 from app.services.market_data import etf_decision_adjusted_provider_versions
 from app.services.short_etf.data import (
+    MAX_ADJUSTED_PRICE_PERSISTENCE_PAGE_ROWS,
     ProviderFetchResult,
     _research_price_fields,
     compute_etf_metric,
     fetch_etf_price_history_with_provider,
+    persist_etf_price_history_page,
 )
 
 HistoryFetcher = Callable[[str, date, date], Awaitable[ProviderFetchResult]]
@@ -1007,7 +1007,10 @@ async def _persist_pages(
     source_timestamp = _utcnow()
     requested_date_set = set(requested_trade_dates)
 
-    for page in _chunks(rows, request.page_size):
+    for page in _chunks(
+        rows,
+        min(request.page_size, MAX_ADJUSTED_PRICE_PERSISTENCE_PAGE_ROWS),
+    ):
         elapsed = clock() - started
         rss = _sample_current_rss(totals, rss_reader)
         if elapsed >= request.worker_deadline_seconds:
@@ -1070,86 +1073,21 @@ async def _persist_pages(
                 normalized_by_date[trade_date] = values
 
             normalized = list(normalized_by_date.items())
-            page_dates = tuple(trade_date for trade_date, _values in normalized)
-            existing_rows = (
-                await session.execute(
-                    select(
-                        EtfPriceHistory.trade_date,
-                        EtfPriceHistory.open,
-                        EtfPriceHistory.high,
-                        EtfPriceHistory.low,
-                        EtfPriceHistory.close,
-                        EtfPriceHistory.volume,
-                        EtfPriceHistory.turnover,
-                        EtfPriceHistory.pct_change,
-                        EtfPriceHistory.raw_price_basis,
-                        EtfPriceHistory.research_adjusted_value,
-                        EtfPriceHistory.research_price_basis,
-                        EtfPriceHistory.data_provider,
-                        EtfPriceHistory.provider_version,
-                        EtfPriceHistory.source_timestamp,
-                        EtfPriceHistory.adjustment_version,
-                        EtfPriceHistory.decision_eligible,
-                        EtfPriceHistory.decision_ineligibility_reason,
-                    ).where(
-                        EtfPriceHistory.etf_code == code,
-                        (
-                            EtfPriceHistory.trade_date.in_(page_dates)
-                            if page_dates
-                            else false()
-                        ),
-                    )
-                )
-            ).mappings().all()
-            totals["sql_statements"] += 1
-            existing = {item["trade_date"]: item for item in existing_rows}
-            payloads: list[dict[str, Any]] = []
-            for trade_date, values in normalized:
-                current = existing.get(trade_date)
-                if (
-                    current is not None
-                    and current["decision_eligible"] is True
-                    and not values["decision_eligible"]
-                ):
-                    totals["excluded_rows"] += 1
-                    continue
-                if current is None:
-                    totals["inserted_rows"] += 1
-                else:
-                    if all(current[field] == value for field, value in values.items()):
-                        totals["unchanged_rows"] += 1
-                        continue
-                    totals["updated_rows"] += 1
-                payloads.append({"etf_code": code, **values})
+            persisted = await persist_etf_price_history_page(
+                session,
+                etf_code=code,
+                rows=normalized,
+            )
+            totals["inserted_rows"] += persisted.inserted_rows
+            totals["updated_rows"] += persisted.updated_rows
+            totals["unchanged_rows"] += persisted.unchanged_rows
+            totals["excluded_rows"] += persisted.projection_skipped_rows
+            totals["sql_statements"] += persisted.sql_statements
 
-            if payloads:
-                dialect_name = session.get_bind().dialect.name
-                statement: Any
-                if dialect_name == "postgresql":
-                    statement = postgresql_insert(EtfPriceHistory).values(payloads)
-                elif dialect_name == "sqlite":
-                    statement = sqlite_insert(EtfPriceHistory).values(payloads)
-                else:
-                    raise RuntimeError(f"unsupported_history_sync_dialect:{dialect_name}")
-                update_fields = tuple(
-                    field
-                    for field in payloads[0]
-                    if field not in {"etf_code", "trade_date", "created_at"}
-                )
-                statement = statement.on_conflict_do_update(
-                    index_elements=["etf_code", "trade_date"],
-                    set_={
-                        field: getattr(statement.excluded, field)
-                        for field in update_fields
-                    },
-                )
-                await session.execute(statement)
-                totals["sql_statements"] += 1
-
-            page_persisted = len(payloads)
+            page_persisted = persisted.inserted_rows + persisted.updated_rows
             persisted_for_code += page_persisted
             totals["persisted_rows"] += page_persisted
-            totals["max_page_rows"] = max(totals["max_page_rows"], len(page))
+            totals["max_page_rows"] = max(totals["max_page_rows"], len(normalized))
             checkpoint = {
                 "identity_hash": request.identity_hash,
                 "scope": request.scope,
@@ -1185,7 +1123,7 @@ async def _persist_pages(
                 totals["max_page_sql_statements"],
                 page_sql_statements,
             )
-            del existing_rows, existing, normalized, normalized_by_date, payloads
+            del normalized, normalized_by_date
         except (Exception, asyncio.CancelledError):
             await _rollback_before(session, deadline=hard_process_deadline)
             for key, value in rollback_counts.items():

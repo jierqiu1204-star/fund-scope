@@ -90,6 +90,14 @@ class PitCaptureSourceImmutableError(ValueError):
     pass
 
 
+class AdjustedPriceRevisionImmutableError(ValueError):
+    pass
+
+
+class CanonicalPublicationImmutableError(ValueError):
+    pass
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -416,6 +424,70 @@ class EtfPriceHistory(Base):
     decision_ineligibility_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
+class EtfAdjustedPriceRevision(Base):
+    """Append-only adjusted-price evidence; ``EtfPriceHistory`` is its projection."""
+
+    __tablename__ = "etf_adjusted_price_revisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "revision_hash",
+            name="uq_etf_adjusted_price_revisions_revision_hash",
+        ),
+        SaIndex(
+            "ix_etf_adjusted_price_revisions_pit_lookup",
+            "etf_code",
+            "trade_date",
+            "first_seen_at",
+            "observed_at",
+            "id",
+        ),
+        SaIndex(
+            "ix_etf_adjusted_price_revisions_payload",
+            "etf_code",
+            "trade_date",
+            "payload_hash",
+        ),
+        SaIndex(
+            "ix_etf_adjusted_price_revisions_supersession",
+            "supersedes_revision_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    etf_code: Mapped[str] = mapped_column(
+        ForeignKey("tradable_etfs.code", ondelete="CASCADE"),
+    )
+    trade_date: Mapped[date] = mapped_column(Date)
+    open: Mapped[float] = mapped_column(Float)
+    high: Mapped[float] = mapped_column(Float)
+    low: Mapped[float] = mapped_column(Float)
+    close: Mapped[float] = mapped_column(Float)
+    volume: Mapped[float] = mapped_column(Float)
+    turnover: Mapped[float] = mapped_column(Float)
+    pct_change: Mapped[float] = mapped_column(Float)
+    raw_price_basis: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    research_adjusted_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    research_price_basis: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    data_provider: Mapped[str] = mapped_column(String(64))
+    provider_version: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_timestamp: Mapped[datetime] = mapped_column(DateTime)
+    adjustment_version: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    decision_eligible: Mapped[bool] = mapped_column(Boolean)
+    decision_ineligibility_reason: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime)
+    observed_at: Mapped[datetime] = mapped_column(DateTime)
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    revision_hash: Mapped[str] = mapped_column(String(64))
+    supersedes_revision_id: Mapped[int | None] = mapped_column(
+        ForeignKey("etf_adjusted_price_revisions.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class EtfMetric(Base):
     __tablename__ = "etf_metrics"
     __table_args__ = (UniqueConstraint("etf_code", "metric_date", name="uq_etf_metric"),)
@@ -465,6 +537,104 @@ class EtfThemeProfile(Base):
     classification_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class EtfTaxonomyFact(Base):
+    """Immutable taxonomy evidence; ``EtfThemeProfile`` is its current projection."""
+
+    __tablename__ = "etf_taxonomy_facts"
+    __table_args__ = (
+        UniqueConstraint("evidence_hash", name="uq_etf_taxonomy_facts_evidence"),
+        UniqueConstraint("fact_hash", name="uq_etf_taxonomy_facts_fact"),
+        SaIndex(
+            "ix_etf_taxonomy_facts_cutoff",
+            "etf_code",
+            "observed_at",
+            "id",
+        ),
+        SaIndex("ix_etf_taxonomy_facts_supersession", "supersedes_fact_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    etf_code: Mapped[str] = mapped_column(
+        ForeignKey("tradable_etfs.code", ondelete="CASCADE"),
+    )
+    external_source_id: Mapped[str] = mapped_column(String(255))
+    source: Mapped[str] = mapped_column(String(64))
+    provider_version: Mapped[str] = mapped_column(String(128))
+    observed_at: Mapped[datetime] = mapped_column(DateTime)
+    asset_bucket: Mapped[str] = mapped_column(String(64))
+    theme_group: Mapped[str] = mapped_column(String(64))
+    primary_theme: Mapped[str] = mapped_column(String(64))
+    secondary_themes_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    classification_source: Mapped[str] = mapped_column(String(64))
+    confidence: Mapped[str] = mapped_column(String(32))
+    rule_version: Mapped[str] = mapped_column(String(128))
+    classification_reason: Mapped[str] = mapped_column(Text)
+    raw_payload_hash: Mapped[str] = mapped_column(String(64))
+    evidence_hash: Mapped[str] = mapped_column(String(64))
+    fact_hash: Mapped[str] = mapped_column(String(64))
+    supersedes_fact_id: Mapped[int | None] = mapped_column(
+        ForeignKey("etf_taxonomy_facts.id"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class EtfTrackedUnderlyingFact(Base):
+    """Immutable formal-underlying evidence; membership is its current projection."""
+
+    __tablename__ = "etf_tracked_underlying_facts"
+    __table_args__ = (
+        UniqueConstraint("evidence_hash", name="uq_etf_tracked_underlying_facts_evidence"),
+        UniqueConstraint("fact_hash", name="uq_etf_tracked_underlying_facts_fact"),
+        SaIndex(
+            "ix_etf_tracked_underlying_facts_cutoff",
+            "etf_code",
+            "observed_at",
+            "id",
+        ),
+        SaIndex(
+            "ix_etf_tracked_underlying_facts_supersession",
+            "supersedes_fact_id",
+        ),
+        CheckConstraint(
+            "identity_state IN ('resolved', 'unresolved')",
+            name="ck_etf_tracked_underlying_facts_state",
+        ),
+        CheckConstraint(
+            "(identity_state = 'resolved' AND tracked_underlying_id IS NOT NULL) "
+            "OR (identity_state = 'unresolved' AND tracked_underlying_id IS NULL)",
+            name="ck_etf_tracked_underlying_facts_resolution",
+        ),
+        CheckConstraint(
+            "mapping_basis IN ('authoritative', 'manual')",
+            name="ck_etf_tracked_underlying_facts_basis",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    etf_code: Mapped[str] = mapped_column(
+        ForeignKey("tradable_etfs.code", ondelete="CASCADE"),
+    )
+    external_source_id: Mapped[str] = mapped_column(String(255))
+    source: Mapped[str] = mapped_column(String(64))
+    provider_version: Mapped[str] = mapped_column(String(128))
+    observed_at: Mapped[datetime] = mapped_column(DateTime)
+    identity_state: Mapped[str] = mapped_column(String(16))
+    tracked_underlying_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    mapping_basis: Mapped[str] = mapped_column(String(32))
+    confidence: Mapped[str] = mapped_column(String(32))
+    rule_version: Mapped[str] = mapped_column(String(128))
+    identity_reason: Mapped[str] = mapped_column(Text)
+    raw_payload_hash: Mapped[str] = mapped_column(String(64))
+    evidence_hash: Mapped[str] = mapped_column(String(64))
+    fact_hash: Mapped[str] = mapped_column(String(64))
+    supersedes_fact_id: Mapped[int | None] = mapped_column(
+        ForeignKey("etf_tracked_underlying_facts.id"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class EtfDataHealth(Base):
@@ -848,6 +1018,81 @@ class ShortResearchSignalRun(Base):
     publication_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class EtfCanonicalPublicationRegistry(Base):
+    """Immutable identity records plus the bounded canonical-selection head."""
+
+    __tablename__ = "etf_canonical_publication_registry"
+    __table_args__ = (
+        UniqueConstraint(
+            "publication_identity_hash",
+            name="uq_etf_canonical_publication_registry_identity",
+        ),
+        UniqueConstraint(
+            "source_signal_run_id",
+            name="uq_etf_canonical_publication_registry_source_run",
+        ),
+        CheckConstraint(
+            "provider_health_state IN "
+            "('compatible', 'missing', 'stale', 'incompatible', 'not_applicable')",
+            name="ck_etf_canonical_publication_registry_provider_health_state",
+        ),
+        SaIndex(
+            "ix_etf_canonical_publication_registry_trade_lookup",
+            "as_of_trade_date",
+            "scope_kind",
+            "price_basis",
+            "surface_group_hash",
+        ),
+        SaIndex(
+            "ix_etf_canonical_publication_registry_supersession",
+            "supersedes_publication_id",
+        ),
+        SaIndex(
+            "ux_etf_canonical_publication_registry_current_slot",
+            "canonical_slot_hash",
+            unique=True,
+            sqlite_where=text("is_current = 1"),
+            postgresql_where=text("is_current = true"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_signal_run_id: Mapped[int] = mapped_column(
+        ForeignKey("short_research_signal_runs.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    as_of_trade_date: Mapped[date] = mapped_column(Date, nullable=False)
+    scope_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    scope_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    price_basis: Mapped[str] = mapped_column(String(64), nullable=False)
+    research_contract_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    actionable_contract_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    readiness_policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    readiness_policy_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    universe_snapshot_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    input_snapshot_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    data_cutoff: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    provider_health_seal_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    provider_health_check_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    provider_health_policy: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    provider_health_covered_fields: Mapped[list[str]] = mapped_column(JSON, default=list)
+    provider_health_source_range: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    provider_health_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider_health_unavailable_reason: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+    )
+    surface_group_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    publication_identity_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    canonical_slot_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    supersedes_publication_id: Mapped[int | None] = mapped_column(
+        ForeignKey("etf_canonical_publication_registry.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class ShortResearchSignalItem(Base):
@@ -3079,6 +3324,32 @@ _SNAPSHOT_ITEM_FIELDS = (
 _INITIAL_PUBLICATION_ALLOWED_RUN_FIELDS = frozenset(
     {"summary_json", "publication_state", "published_at"}
 )
+_CANONICAL_PUBLICATION_FROZEN_FIELDS = (
+    "source_signal_run_id",
+    "as_of_trade_date",
+    "scope_kind",
+    "scope_hash",
+    "price_basis",
+    "research_contract_hash",
+    "actionable_contract_hash",
+    "readiness_policy_version",
+    "readiness_policy_hash",
+    "universe_snapshot_hash",
+    "input_snapshot_hash",
+    "data_cutoff",
+    "provider_health_seal_hash",
+    "provider_health_check_time",
+    "provider_health_policy",
+    "provider_health_covered_fields",
+    "provider_health_source_range",
+    "provider_health_state",
+    "provider_health_unavailable_reason",
+    "surface_group_hash",
+    "publication_identity_hash",
+    "canonical_slot_hash",
+    "supersedes_publication_id",
+    "created_at",
+)
 
 
 def _changed_fields(instance: object, fields: Collection[str]) -> bool:
@@ -3097,6 +3368,30 @@ def _prevent_published_snapshot_mutation(session: Session, _flush_context: objec
     if not isinstance(authorized_run_ids, set):
         authorized_run_ids = set()
     for instance in session.dirty:
+        if isinstance(instance, EtfCanonicalPublicationRegistry):
+            if _changed_fields(instance, _CANONICAL_PUBLICATION_FROZEN_FIELDS):
+                raise CanonicalPublicationImmutableError(
+                    "canonical publication identity and provenance are immutable"
+                )
+            current_history = inspect(instance).attrs.is_current.history
+            if current_history.has_changes():
+                explicitly_superseded = (
+                    instance.is_current is False
+                    and True in current_history.deleted
+                    and any(
+                        isinstance(candidate, EtfCanonicalPublicationRegistry)
+                        and candidate.supersedes_publication_id == instance.id
+                        for candidate in session.new
+                    )
+                )
+                if not explicitly_superseded:
+                    raise CanonicalPublicationImmutableError(
+                        "canonical publication current state may change only through explicit supersession"
+                    )
+        if isinstance(instance, EtfAdjustedPriceRevision):
+            raise AdjustedPriceRevisionImmutableError(
+                "adjusted price revisions are immutable"
+            )
         if isinstance(instance, DatabaseInstanceIdentity):
             raise DatabaseInstanceIdentityImmutableError(
                 "database instance identity is immutable after provisioning"
@@ -3183,12 +3478,24 @@ def _prevent_published_snapshot_mutation(session: Session, _flush_context: objec
             raise PublishedSnapshotImmutableError(
                 "ranking snapshot cannot be created as published"
             )
+        if isinstance(instance, EtfCanonicalPublicationRegistry) and instance.is_current is not True:
+            raise CanonicalPublicationImmutableError(
+                "canonical publication registry entries must be created as current"
+            )
         if isinstance(instance, ShortResearchSignalItem):
             item_run_ids.add(instance.run_id)
     for instance in session.deleted:
+        if isinstance(instance, EtfAdjustedPriceRevision):
+            raise AdjustedPriceRevisionImmutableError(
+                "adjusted price revisions cannot be deleted"
+            )
         if isinstance(instance, EtfPitCaptureSource):
             raise PitCaptureSourceImmutableError(
                 "PIT capture source cannot be deleted"
+            )
+        if isinstance(instance, EtfCanonicalPublicationRegistry):
+            raise CanonicalPublicationImmutableError(
+                "canonical publication registry entries cannot be deleted"
             )
         if isinstance(instance, DatabaseInstanceIdentity):
             raise DatabaseInstanceIdentityImmutableError(

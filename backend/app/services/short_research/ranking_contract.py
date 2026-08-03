@@ -64,6 +64,22 @@ _REQUIRED_STRATEGY_SEMANTICS = frozenset(
         "ordering",
     }
 )
+_VALID_PRIMITIVE_DIRECTIONS = frozenset(
+    {
+        "higher_is_better",
+        "lower_is_better",
+        "lower_absolute_loss_is_better",
+        "closer_to_zero_is_better",
+    }
+)
+_VALID_PRIMITIVE_NORMALIZATIONS = frozenset(
+    {
+        "bucket_percentile",
+        "winsorized_bucket_percentile",
+        "absolute_distance_bucket_percentile",
+        "bounded_0_100",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -118,6 +134,8 @@ class RankingManifest:
     explanatory_only: tuple[str, ...]
     dag_edges: tuple[RankingDagEdge, ...]
     acyclic_order: tuple[str, ...]
+    minimum_peer_count: int
+    clone_activation_minimum_coverage: float
 
     def validate_input(self, ranking_input: RankingInput) -> RankingInputValidation:
         missing: dict[str, tuple[str, ...]] = {}
@@ -159,6 +177,10 @@ def parse_ranking_manifest(contract: Mapping[str, Any]) -> RankingManifest:
     if not isinstance(raw_components, list):
         raise ValueError("ranking contract components must be a list")
     missing_data_behavior = str(calculation.get("missing_score_bearing_input") or "score_unavailable")
+    if missing_data_behavior != "score_unavailable":
+        raise ValueError("score-bearing missing inputs must make the score unavailable")
+    if calculation.get("renormalize_missing_weights") is not False:
+        raise ValueError("ranking contract must explicitly forbid missing-weight renormalization")
     components: dict[str, RankingComponent] = {}
     score_bearing_primitives: dict[str, str] = {}
     for raw_component in raw_components:
@@ -193,6 +215,29 @@ def parse_ranking_manifest(contract: Mapping[str, Any]) -> RankingManifest:
             units={key: _PRIMITIVE_UNITS.get(key, "unknown") for key in required_inputs},
             missing_data_behavior=missing_data_behavior,
         )
+        if not 0.0 <= component.weight <= 1.0:
+            raise ValueError(f"ranking component {component_id} weight must be within [0, 1]")
+        if not component.score_bearing and component.weight != 0.0:
+            raise ValueError(f"explanatory component {component_id} must have zero weight")
+        if any(not 0.0 <= primitive.weight <= 1.0 for primitive in primitive_inputs):
+            raise ValueError(f"ranking component {component_id} primitive weights must be within [0, 1]")
+        if any(primitive.direction not in _VALID_PRIMITIVE_DIRECTIONS for primitive in primitive_inputs):
+            raise ValueError(f"ranking component {component_id} has undeclared primitive direction")
+        if any(
+            primitive.normalization not in _VALID_PRIMITIVE_NORMALIZATIONS
+            for primitive in primitive_inputs
+        ):
+            raise ValueError(f"ranking component {component_id} has undeclared normalization")
+        if not math.isclose(
+            sum(primitive.weight for primitive in primitive_inputs),
+            1.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        ):
+            raise ValueError(f"ranking component {component_id} primitive weights must sum to 1")
+        primitive_ids = tuple(primitive.primitive_id for primitive in primitive_inputs)
+        if len(set(primitive_ids)) != len(primitive_ids):
+            raise ValueError(f"ranking component {component_id} has duplicate primitive inputs")
         if component.score_bearing:
             for primitive in component.primitive_lineage:
                 prior_component = score_bearing_primitives.get(primitive)
@@ -201,7 +246,14 @@ def parse_ranking_manifest(contract: Mapping[str, Any]) -> RankingManifest:
                         f"double-counted primitive {primitive} in {prior_component} and {component.component_id}"
                     )
                 score_bearing_primitives[primitive] = component.component_id
+        if set(primitive_ids) != set(primitive_lineage):
+            raise ValueError(f"ranking component {component_id} primitive lineage must match formula inputs")
         components[component_id] = component
+    score_bearing_weight = sum(
+        component.weight for component in components.values() if component.score_bearing
+    )
+    if not math.isclose(score_bearing_weight, 1.0, rel_tol=0.0, abs_tol=1e-9):
+        raise ValueError("score-bearing ranking component weights must sum to 1")
     component_ids = set(components)
     composite_primitives = component_ids.intersection(score_bearing_primitives)
     if composite_primitives:
@@ -219,6 +271,33 @@ def parse_ranking_manifest(contract: Mapping[str, Any]) -> RankingManifest:
             raise ValueError("ranking DAG edges require source and target")
         weight = raw_edge.get("weight")
         dag_edges.append(RankingDagEdge(source=source, target=target, weight=float(weight) if weight is not None else None))
+    acyclic_order = tuple(str(value) for value in dag.get("acyclic_order") or [])
+    if not acyclic_order or len(set(acyclic_order)) != len(acyclic_order):
+        raise ValueError("ranking DAG acyclic order must contain unique nodes")
+    node_positions = {node: index for index, node in enumerate(acyclic_order)}
+    seen_edges: set[tuple[str, str]] = set()
+    for edge in dag_edges:
+        edge_key = (edge.source, edge.target)
+        if edge_key in seen_edges:
+            raise ValueError(f"ranking DAG contains duplicate edge {edge.source}->{edge.target}")
+        seen_edges.add(edge_key)
+        if edge.source not in node_positions or edge.target not in node_positions:
+            raise ValueError(f"ranking DAG edge references undeclared node {edge.source}->{edge.target}")
+        if node_positions[edge.source] >= node_positions[edge.target]:
+            raise ValueError(f"ranking DAG is cyclic or out of order at {edge.source}->{edge.target}")
+    minimum_peer_count = asset_buckets.get("minimum_eligible_non_clone_peers", 2)
+    if isinstance(minimum_peer_count, bool) or not isinstance(minimum_peer_count, int) or minimum_peer_count < 2:
+        raise ValueError("minimum eligible non-clone peer count must be an integer of at least 2")
+    clone_activation_minimum_coverage = asset_buckets.get(
+        "clone_activation_minimum_underlying_coverage",
+        1.0,
+    )
+    if (
+        isinstance(clone_activation_minimum_coverage, bool)
+        or not isinstance(clone_activation_minimum_coverage, int | float)
+        or not 0.0 <= float(clone_activation_minimum_coverage) <= 1.0
+    ):
+        raise ValueError("clone activation minimum coverage must be within [0, 1]")
     return RankingManifest(
         score_version=str(contract.get("contract_id") or ""),
         price_basis=str(calculation.get("price_basis") or ""),
@@ -227,7 +306,9 @@ def parse_ranking_manifest(contract: Mapping[str, Any]) -> RankingManifest:
         missing_data_behavior=missing_data_behavior,
         explanatory_only=tuple(str(value) for value in contract.get("explanatory_only") or []),
         dag_edges=tuple(dag_edges),
-        acyclic_order=tuple(str(value) for value in dag.get("acyclic_order") or []),
+        acyclic_order=acyclic_order,
+        minimum_peer_count=minimum_peer_count,
+        clone_activation_minimum_coverage=float(clone_activation_minimum_coverage),
     )
 
 

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from math import isfinite, sqrt
 from statistics import mean, pstdev
 from typing import Any, cast
@@ -13,10 +14,13 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.defaults.etfs import DEFAULT_SHORT_ETFS
 from app.models.entities import (
+    EtfAdjustedPriceRevision,
     EtfDataHealth,
     EtfIntradayQuote,
     EtfMetric,
@@ -38,6 +42,7 @@ DEFAULT_SYNC_DELAY_SECONDS = 1.0
 DEFAULT_PROVIDER_RETRIES = 2
 DEFAULT_PROVIDER_RETRY_DELAY_SECONDS = 1.0
 ETF_HISTORY_PROVIDER_TIMEOUT_SECONDS = 20.0
+MAX_ADJUSTED_PRICE_PERSISTENCE_PAGE_ROWS = 20
 
 INELIGIBLE_NAME_KEYWORDS = ("一年持有", "持有期", "定开", "封闭", "封闭期")
 PRICE_HISTORY_PROVIDER_NAMES = ("tickflow", "eastmoney", "efinance", "sina")
@@ -78,6 +83,35 @@ class ProviderFetchResult:
     fallback_used: bool
     primary_error: str | None = None
     provider_health: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class AdjustedPricePersistenceResult:
+    inserted_rows: int
+    updated_rows: int
+    unchanged_rows: int
+    projection_skipped_rows: int
+    revision_rows: int
+    sql_statements: int
+
+
+_ADJUSTED_PRICE_MATERIAL_FIELDS = (
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "turnover",
+    "pct_change",
+    "raw_price_basis",
+    "research_adjusted_value",
+    "research_price_basis",
+    "data_provider",
+    "provider_version",
+    "adjustment_version",
+    "decision_eligible",
+    "decision_ineligibility_reason",
+)
 
 
 def is_short_term_eligible_name(name: str) -> bool:
@@ -155,6 +189,218 @@ def _research_price_fields(row: dict[str, Any], *, provider: str, source_timesta
         "decision_eligible": True,
         "decision_ineligibility_reason": None,
     }
+
+
+def _naive_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(UTC).replace(tzinfo=None)
+
+
+def _factual_observed_at(values: dict[str, Any]) -> datetime:
+    value = values.get("source_timestamp")
+    if not isinstance(value, datetime):
+        raise ValueError("adjusted price revision requires factual source_timestamp")
+    return _naive_utc(value)
+
+
+def _revision_payload(
+    *,
+    etf_code: str,
+    trade_date: date,
+    values: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "etf_code": etf_code,
+        "trade_date": trade_date.isoformat(),
+        **{field: values.get(field) for field in _ADJUSTED_PRICE_MATERIAL_FIELDS},
+    }
+
+
+def _stable_hash(payload: dict[str, Any]) -> str:
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _projection_matches(
+    current: EtfPriceHistory,
+    values: dict[str, Any],
+) -> bool:
+    return all(getattr(current, field) == values.get(field) for field in _ADJUSTED_PRICE_MATERIAL_FIELDS)
+
+
+async def persist_etf_price_history_page(
+    session: AsyncSession,
+    *,
+    etf_code: str,
+    rows: Sequence[tuple[date, dict[str, Any]]],
+) -> AdjustedPricePersistenceResult:
+    """Append immutable adjusted revisions and refresh at most one small projection page.
+
+    The revision payload intentionally excludes receipt time. Repeated retrieval of the
+    same material observation is idempotent and retains its first factual receipt.
+    """
+
+    page = tuple(rows)
+    if len(page) > MAX_ADJUSTED_PRICE_PERSISTENCE_PAGE_ROWS:
+        raise ValueError(
+            "adjusted price persistence pages must not exceed "
+            f"{MAX_ADJUSTED_PRICE_PERSISTENCE_PAGE_ROWS} rows"
+        )
+    if not page:
+        return AdjustedPricePersistenceResult(0, 0, 0, 0, 0, 0)
+
+    trade_dates = tuple(trade_date for trade_date, _values in page)
+    if len(set(trade_dates)) != len(trade_dates):
+        raise ValueError("adjusted price persistence page has duplicate trade dates")
+
+    latest_rows = (
+        await session.scalars(
+            select(EtfAdjustedPriceRevision)
+            .where(
+                EtfAdjustedPriceRevision.etf_code == etf_code,
+                EtfAdjustedPriceRevision.trade_date.in_(trade_dates),
+            )
+            .order_by(
+                EtfAdjustedPriceRevision.trade_date.asc(),
+                EtfAdjustedPriceRevision.first_seen_at.desc(),
+                EtfAdjustedPriceRevision.observed_at.desc(),
+                EtfAdjustedPriceRevision.id.desc(),
+            )
+        )
+    ).all()
+    latest_by_date: dict[date, EtfAdjustedPriceRevision] = {}
+    for item in latest_rows:
+        latest_by_date.setdefault(item.trade_date, item)
+
+    revision_payloads: list[dict[str, Any]] = []
+    normalized_rows: list[tuple[date, dict[str, Any]]] = []
+    for trade_date, source_values in page:
+        values = dict(source_values)
+        observed_at = _factual_observed_at(values)
+        values["source_timestamp"] = observed_at
+        normalized_rows.append((trade_date, values))
+        payload_hash = _stable_hash(
+            _revision_payload(
+                etf_code=etf_code,
+                trade_date=trade_date,
+                values=values,
+            )
+        )
+        previous = latest_by_date.get(trade_date)
+        if previous is not None and previous.payload_hash == payload_hash:
+            continue
+        revision_hash = _stable_hash(
+            {
+                "payload_hash": payload_hash,
+                "supersedes_revision_hash": (
+                    previous.revision_hash if previous is not None else None
+                ),
+            }
+        )
+        revision_payloads.append(
+            {
+                "etf_code": etf_code,
+                "trade_date": trade_date,
+                **{field: values.get(field) for field in _ADJUSTED_PRICE_MATERIAL_FIELDS},
+                "source_timestamp": observed_at,
+                "first_seen_at": observed_at,
+                "observed_at": observed_at,
+                "payload_hash": payload_hash,
+                "revision_hash": revision_hash,
+                "supersedes_revision_id": previous.id if previous is not None else None,
+                "created_at": observed_at,
+            }
+        )
+
+    sql_statements = 1
+    if revision_payloads:
+        dialect_name = session.get_bind().dialect.name
+        if dialect_name == "postgresql":
+            revision_statement: Any = postgresql_insert(EtfAdjustedPriceRevision).values(
+                revision_payloads
+            )
+        elif dialect_name == "sqlite":
+            revision_statement = sqlite_insert(EtfAdjustedPriceRevision).values(
+                revision_payloads
+            )
+        else:
+            raise RuntimeError(
+                f"unsupported_adjusted_price_revision_dialect:{dialect_name}"
+            )
+        revision_statement = revision_statement.on_conflict_do_nothing(
+            index_elements=[EtfAdjustedPriceRevision.revision_hash]
+        )
+        await session.execute(revision_statement)
+        sql_statements += 1
+
+    current_rows = (
+        await session.scalars(
+            select(EtfPriceHistory).where(
+                EtfPriceHistory.etf_code == etf_code,
+                EtfPriceHistory.trade_date.in_(trade_dates),
+            )
+        )
+    ).all()
+    sql_statements += 1
+    current_by_date = {item.trade_date: item for item in current_rows}
+    projection_payloads: list[dict[str, Any]] = []
+    inserted_rows = 0
+    updated_rows = 0
+    unchanged_rows = 0
+    projection_skipped_rows = 0
+    for trade_date, values in normalized_rows:
+        current = current_by_date.get(trade_date)
+        if current is None:
+            inserted_rows += 1
+            projection_payloads.append({"etf_code": etf_code, "trade_date": trade_date, **values})
+            continue
+        if current.decision_eligible is True and values.get("decision_eligible") is not True:
+            projection_skipped_rows += 1
+            continue
+        if _projection_matches(current, values):
+            unchanged_rows += 1
+            continue
+        updated_rows += 1
+        projection_payloads.append({"etf_code": etf_code, "trade_date": trade_date, **values})
+
+    if projection_payloads:
+        dialect_name = session.get_bind().dialect.name
+        if dialect_name == "postgresql":
+            projection_statement: Any = postgresql_insert(EtfPriceHistory).values(
+                projection_payloads
+            )
+        elif dialect_name == "sqlite":
+            projection_statement = sqlite_insert(EtfPriceHistory).values(
+                projection_payloads
+            )
+        else:
+            raise RuntimeError(f"unsupported_history_sync_dialect:{dialect_name}")
+        projection_statement = projection_statement.on_conflict_do_update(
+            index_elements=["etf_code", "trade_date"],
+            set_={
+                field: getattr(projection_statement.excluded, field)
+                for field in (*_ADJUSTED_PRICE_MATERIAL_FIELDS, "source_timestamp")
+            },
+        )
+        await session.execute(projection_statement)
+        session.expire_all()
+        sql_statements += 1
+
+    return AdjustedPricePersistenceResult(
+        inserted_rows=inserted_rows,
+        updated_rows=updated_rows,
+        unchanged_rows=unchanged_rows,
+        projection_skipped_rows=projection_skipped_rows,
+        revision_rows=len(revision_payloads),
+        sql_statements=sql_statements,
+    )
 
 
 def _float_env(name: str, default: float) -> float:
@@ -937,18 +1183,23 @@ async def sync_etf_price_history(
     provider_counts: dict[str, int] = {provider: 0 for provider in PRICE_HISTORY_PROVIDER_NAMES}
     sync_delay = _sync_delay_seconds()
     for index, etf in enumerate(etfs):
+        # Bulk revision/projection upserts expire ORM state. Keep the immutable
+        # loop identity as a scalar so post-flush health/metric work never causes
+        # implicit async IO through an expired TradableEtf instance.
+        etf_code = etf.code
         try:
-            result = await fetch_etf_price_history_with_provider(etf.code, from_date, to_date)
+            result = await fetch_etf_price_history_with_provider(etf_code, from_date, to_date)
             rows = result.rows
         except Exception as exc:  # noqa: BLE001
-            failures.append({"code": etf.code, "error": str(exc)})
-            await upsert_etf_data_health_failure(session, etf_code=etf.code, error_message=str(exc))
+            failures.append({"code": etf_code, "error": str(exc)})
+            await upsert_etf_data_health_failure(session, etf_code=etf_code, error_message=str(exc))
             await session.commit()
         else:
             provider_counts[result.provider] = provider_counts.get(result.provider, 0) + 1
             if result.fallback_used:
                 fallback_used += 1
             source_timestamp = utcnow()
+            normalized_by_date: dict[date, dict[str, Any]] = {}
             for row in rows:
                 trade_date = date.fromisoformat(str(row["date"]))
                 values = {
@@ -961,38 +1212,36 @@ async def sync_etf_price_history(
                     "pct_change": float(row["pct_change"]),
                     **_research_price_fields(row, provider=result.provider, source_timestamp=source_timestamp),
                 }
-                existing = await session.scalar(
-                    select(EtfPriceHistory).where(
-                        EtfPriceHistory.etf_code == etf.code,
-                        EtfPriceHistory.trade_date == trade_date,
-                    )
-                )
-                if existing is None:
-                    session.add(
-                        EtfPriceHistory(
-                            etf_code=etf.code,
-                            trade_date=trade_date,
-                            **values,
-                        )
-                    )
-                    inserted += 1
-                elif existing.decision_eligible is True and values["decision_eligible"] is not True:
+                previous = normalized_by_date.get(trade_date)
+                if (
+                    previous is not None
+                    and previous["decision_eligible"] is True
+                    and values["decision_eligible"] is not True
+                ):
                     continue
-                else:
-                    for field, value in values.items():
-                        setattr(existing, field, value)
-                    updated += 1
+                normalized_by_date[trade_date] = values
+            normalized_rows = sorted(normalized_by_date.items())
+            for offset in range(0, len(normalized_rows), MAX_ADJUSTED_PRICE_PERSISTENCE_PAGE_ROWS):
+                persisted = await persist_etf_price_history_page(
+                    session,
+                    etf_code=etf_code,
+                    rows=normalized_rows[
+                        offset : offset + MAX_ADJUSTED_PRICE_PERSISTENCE_PAGE_ROWS
+                    ],
+                )
+                inserted += persisted.inserted_rows
+                updated += persisted.updated_rows
             latest_row_date = max((date.fromisoformat(str(row["date"])) for row in rows), default=None)
             await upsert_etf_data_health_success(
                 session,
-                etf_code=etf.code,
+                etf_code=etf_code,
                 provider=result.provider,
                 latest_price_date=latest_row_date,
                 row_count=len(rows),
                 fallback_error=result.primary_error,
             )
             await session.commit()
-            await compute_etf_metric(session, etf.code, to_date)
+            await compute_etf_metric(session, etf_code, to_date)
         if sync_delay > 0 and index < len(etfs) - 1:
             await asyncio.sleep(sync_delay)
     return {

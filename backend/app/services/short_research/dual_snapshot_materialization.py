@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from datetime import date, datetime
 from typing import Any
@@ -14,6 +15,12 @@ from app.models.entities import (
     authorize_snapshot_publication,
     utcnow,
 )
+from app.services.short_research.canonical_publication import (
+    CanonicalPublicationError,
+    build_provider_health_seal,
+    canonical_publication_draft_from_run,
+    register_canonical_publication,
+)
 from app.services.short_research.coverage_policy import (
     ETF_COMPLETE_SCORE_COVERAGE,
     ETF_DAILY_DECISION_MIN_COVERAGE,
@@ -26,6 +33,10 @@ from app.services.short_research.daily_reconstructable import (
 from app.services.short_research.ranking_contract import (
     build_ranking_contract,
     canonical_hash,
+)
+from app.services.short_research.ranking_quality import (
+    canonical_research_eligibility_policy,
+    evaluate_canonical_research_eligibility,
 )
 from app.services.short_research.ranking_surfaces import (
     DUAL_RANKING_RULE_VERSION,
@@ -51,6 +62,41 @@ def _finite_score(value: object) -> float | None:
         return None
     score = float(value)
     return score if math.isfinite(score) else None
+
+
+def _observation_evidence(
+    *,
+    code: str,
+    asset: ComputedAsset | None,
+    reasons: list[str],
+    decision_data_eligible: bool,
+    price_basis: str,
+) -> dict[str, Any]:
+    metrics = asset.metrics if asset is not None else {}
+    theme_profile = metrics.get("theme_profile")
+    theme_profile = theme_profile if isinstance(theme_profile, dict) else {}
+    return {
+        "asset_code": code,
+        "reasons": sorted(set(reasons)),
+        "evidence": {
+            "eligible_adjusted_sessions": asset.usable_days if asset is not None else 0,
+            "price_basis": price_basis,
+            "decision_data_eligible": decision_data_eligible,
+            "average_turnover_20d": _finite_score(
+                metrics.get("average_turnover_20d")
+            ),
+            "taxonomy_bucket": metrics.get("ranking_asset_bucket"),
+            "taxonomy_source": theme_profile.get("classification_source"),
+            "taxonomy_confidence": theme_profile.get("classification_confidence"),
+            "research_score": _finite_score(metrics.get("research_score")),
+            "research_score_eligible": metrics.get("research_score_eligible") is True,
+            "latest_data_date": (
+                asset.latest_date.isoformat()
+                if asset is not None and asset.latest_date is not None
+                else None
+            ),
+        },
+    }
 
 
 async def materialize_dual_ranking_snapshot(
@@ -121,9 +167,38 @@ async def materialize_dual_ranking_snapshot(
                 or asset.metrics.get("research_contract_hash") != research_manifest.manifest_hash
             ):
                 research_reasons.append("research_contract_identity_mismatch")
+            theme_profile = asset.metrics.get("theme_profile")
+            taxonomy_evidence_valid = (
+                isinstance(theme_profile, dict)
+                and str(theme_profile.get("classification_source") or "") != "unknown"
+                and str(theme_profile.get("classification_confidence") or "")
+                not in {"", "unknown"}
+            )
+            quality = evaluate_canonical_research_eligibility(
+                eligible_sessions=int(asset.usable_days),
+                price_basis=research_manifest.price_basis,
+                decision_data_eligible=code in decision_code_set,
+                finite_adjusted_inputs=(
+                    score is not None
+                    and asset.metrics.get("research_score_eligible") is True
+                ),
+                average_turnover_20d=asset.metrics.get("average_turnover_20d"),
+                taxonomy_bucket=asset.metrics.get("ranking_asset_bucket"),
+                taxonomy_evidence_valid=taxonomy_evidence_valid,
+                default_display_eligible=(
+                    asset.metrics.get("default_display_eligible") is True
+                ),
+            )
+            research_reasons.extend(quality.reasons)
         if research_reasons:
             research_excluded.append(
-                {"asset_code": code, "reasons": sorted(set(research_reasons))}
+                _observation_evidence(
+                    code=code,
+                    asset=asset,
+                    reasons=research_reasons,
+                    decision_data_eligible=code in decision_code_set,
+                    price_basis=research_manifest.price_basis,
+                )
             )
         else:
             assert asset is not None
@@ -181,9 +256,100 @@ async def materialize_dual_ranking_snapshot(
             }
             for code in expected_codes
         ]
+    provider_health_identity = build_provider_health_seal(
+        candidate_evidence=[
+            {
+                "asset_code": asset.metadata.code,
+                "field_statuses": dict(
+                    asset.metrics.get("actionable_field_statuses") or {}
+                ),
+                "source_times": dict(
+                    asset.metrics.get("actionable_source_times") or {}
+                ),
+            }
+            for asset, _score in research
+        ],
+        manifest=actionable_manifest,
+        trade_date=trade_date,
+        decision_cutoff=market_cutoff,
+    )
+    provider_health_reason = (
+        str(provider_health_identity.get("unavailable_reason") or "") or None
+    )
+    if (
+        readiness.state == "complete"
+        and provider_health_identity.get("state") != "compatible"
+    ):
+        exclusion_by_code = {
+            str(item["asset_code"]): set(item.get("reasons") or [])
+            for item in actionable_excluded
+        }
+        for asset, _score in research:
+            exclusion_by_code.setdefault(asset.metadata.code, set()).add(
+                provider_health_reason or "provider_health_seal_incompatible"
+            )
+        actionable = []
+        actionable_excluded = [
+            {
+                "asset_code": code,
+                "reasons": sorted(exclusion_by_code[code]),
+            }
+            for code in sorted(exclusion_by_code)
+        ]
     actionable_rank_by_code = {
         asset.metadata.code: rank
         for rank, (asset, _score) in enumerate(actionable, start=1)
+    }
+    diversified_position_by_code = {
+        asset.metadata.code: position
+        for position, (asset, _score) in enumerate(
+            (
+                item
+                for item in research
+                if item[0].metrics.get("diversified_representative") is True
+            ),
+            start=1,
+        )
+    }
+    theme_counts = Counter(
+        str(
+            (asset.metrics.get("theme_profile") or {}).get("theme_group")
+            if isinstance(asset.metrics.get("theme_profile"), dict)
+            else "unknown"
+        )
+        for asset, _score in research
+    )
+    clone_group_counts = Counter(
+        str(asset.metrics.get("clone_group_id"))
+        for asset, _score in research
+        if asset.metrics.get("clone_group_id")
+    )
+    tracked_underlying_coverage = max(
+        (
+            float(asset.metrics.get("tracked_underlying_coverage") or 0.0)
+            for asset, _score in research
+        ),
+        default=0.0,
+    )
+    concentration_evidence = {
+        "clone_policy_active": any(
+            asset.metrics.get("clone_policy_active") is True
+            for asset, _score in research
+        ),
+        "tracked_underlying_coverage": round(
+            tracked_underlying_coverage,
+            6,
+        ),
+        "unresolved_underlying_count": sum(
+            not bool(str(asset.metrics.get("tracked_underlying_id") or "").strip())
+            for asset, _score in research
+        ),
+        "clone_group_count": len(clone_group_counts),
+        "repeated_clone_group_count": sum(
+            count > 1 for count in clone_group_counts.values()
+        ),
+        "diversified_representative_count": len(diversified_position_by_code),
+        "theme_counts": dict(sorted(theme_counts.items())),
     }
     input_snapshot = {
         "trade_date": trade_date,
@@ -218,6 +384,25 @@ async def materialize_dual_ranking_snapshot(
                     if code in assets_by_code
                     else None
                 ),
+                "canonical_eligibility": (
+                    {
+                        "policy": canonical_research_eligibility_policy(),
+                        "default_display_eligible": assets_by_code[code].metrics.get(
+                            "default_display_eligible"
+                        ),
+                        "average_turnover_20d": assets_by_code[code].metrics.get(
+                            "average_turnover_20d"
+                        ),
+                        "taxonomy_bucket": assets_by_code[code].metrics.get(
+                            "ranking_asset_bucket"
+                        ),
+                        "theme_profile": assets_by_code[code].metrics.get(
+                            "theme_profile"
+                        ),
+                    }
+                    if code in assets_by_code
+                    else None
+                ),
             }
             for code in expected_codes
         ],
@@ -232,6 +417,8 @@ async def materialize_dual_ranking_snapshot(
             "daily_coverage_threshold": ETF_DAILY_DECISION_MIN_COVERAGE,
             "warmup_coverage_threshold": ETF_COMPLETE_SCORE_COVERAGE,
         },
+        "canonical_research_eligibility": canonical_research_eligibility_policy(),
+        "provider_health_policy": provider_health_identity.get("policy", {}),
     }
     identity = build_ranking_contract(
         score_version=research_manifest.contract_id,
@@ -256,6 +443,7 @@ async def materialize_dual_ranking_snapshot(
             "input_snapshot_hash": identity["input_snapshot_hash"],
             "ranking_contract_hash": identity["ranking_contract_hash"],
             "surface_group_hash": surface_group_hash,
+            "provider_health_seal_hash": provider_health_identity["hash"],
         }
     )
     existing = await session.scalar(
@@ -285,6 +473,15 @@ async def materialize_dual_ranking_snapshot(
         return existing
 
     actionable_ratio = len(actionable) / expected_count if expected_count else 0.0
+    actionable_blocker_counts = dict(
+        sorted(
+            Counter(
+                reason
+                for item in actionable_excluded
+                for reason in item["reasons"]
+            ).items()
+        )
+    )
     now = utcnow()
     run = ShortResearchSignalRun(
         status="success",
@@ -314,9 +511,19 @@ async def materialize_dual_ranking_snapshot(
                 if readiness.state == "degraded"
                 else "complete_candidate"
             ),
+            "surface_availability_state": (
+                "provisional"
+                if readiness.state == "degraded"
+                else "research_complete_actionable_available"
+                if actionable
+                else "research_complete_actionable_unavailable"
+            ),
             "unavailable_reason": (
                 "history_depth_61_coverage_below_95pct"
                 if readiness.state == "degraded"
+                else provider_health_reason
+                if not actionable
+                and provider_health_identity.get("state") != "compatible"
                 else None
             ),
             "cutoff_provenance": {
@@ -325,6 +532,7 @@ async def materialize_dual_ranking_snapshot(
                 "replay_visibility_cutoff": None,
             },
             "surface_group_hash": surface_group_hash,
+            "provider_health_identity": provider_health_identity,
             "ranking_surfaces": {
                 "research": {
                     "contract_id": research_manifest.contract_id,
@@ -341,7 +549,14 @@ async def materialize_dual_ranking_snapshot(
                     "eligible_count": len(actionable),
                     "coverage_ratio": round(actionable_ratio, 6),
                     "excluded": actionable_excluded,
+                    "blocker_counts": actionable_blocker_counts,
                 },
+            },
+            "canonical_research_eligibility": canonical_research_eligibility_policy(),
+            "concentration_evidence": concentration_evidence,
+            "observation_only": {
+                "count": len(research_excluded),
+                "items": research_excluded,
             },
             "input_snapshot": _json_safe(input_snapshot),
             "non_finite_reject_count": sum(
@@ -433,8 +648,25 @@ async def materialize_dual_ranking_snapshot(
                     {
                         **asset.metrics,
                         "ranking_surface": "research",
+                        "canonical_research_rank": research_rank,
+                        "observation_only": False,
                         "research_rank": research_rank,
                         "research_score": research_score,
+                        "peer_diagnostics": {
+                            "asset_bucket": asset.metrics.get(
+                                "ranking_asset_bucket"
+                            ),
+                            "metric_peer_counts": asset.metrics.get(
+                                "v3_metric_peer_counts",
+                                {},
+                            ),
+                        },
+                        "diversified_presentation_position": (
+                            diversified_position_by_code.get(code)
+                        ),
+                        "diversified_representative": asset.metrics.get(
+                            "diversified_representative"
+                        ),
                         "actionable_rank": actionable_rank,
                         "actionable_score": actionable_score,
                         "actionable_eligible": actionable_rank is not None,
@@ -568,6 +800,53 @@ async def publish_dual_ranking_snapshot(
         if sorted(actionable_ranks) != list(range(1, len(actionable_ranks) + 1)):
             raise SnapshotPublicationError("actionable ranks are not contiguous")
         _verify_snapshot_draft_seal(run, items)
+        try:
+            publication_draft = canonical_publication_draft_from_run(
+                run,
+                actionable_manifest=actionable_manifest,
+            )
+        except CanonicalPublicationError as exc:
+            raise SnapshotPublicationError(str(exc)) from exc
+        if actionable_ranks and not publication_draft.actionable_available:
+            raise SnapshotPublicationError(
+                "actionable rows require a compatible provider-health seal"
+            )
+        try:
+            registration = await register_canonical_publication(
+                session,
+                run=run,
+                actionable_manifest=actionable_manifest,
+            )
+        except CanonicalPublicationError as exc:
+            raise SnapshotPublicationError(str(exc)) from exc
+        if registration.winner_run_id != run.id:
+            winner = await session.get(
+                ShortResearchSignalRun,
+                registration.winner_run_id,
+            )
+            if winner is None or winner.publication_state != "published":
+                raise SnapshotPublicationError(
+                    "canonical publication winner is not available"
+                )
+            return winner
+        run.summary_json = {
+            **summary,
+            "publication_evidence": {
+                "identity_version": "etf_canonical_publication_v1",
+                "publication_registry_id": registration.registry.id,
+                "publication_identity": registration.registry.publication_identity_hash,
+                "canonical_slot_hash": registration.registry.canonical_slot_hash,
+                "supersedes_publication_id": (
+                    registration.registry.supersedes_publication_id
+                ),
+                "duplicate_publication": not registration.created,
+                "is_current": registration.registry.is_current,
+            },
+        }
+        run.summary_json = {
+            **run.summary_json,
+            "draft_seal": build_snapshot_draft_seal(run, items),
+        }
         with authorize_snapshot_publication(session.sync_session, run_id=run.id):
             run.publication_state = "published"
             run.published_at = utcnow()

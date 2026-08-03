@@ -279,9 +279,9 @@ def evaluate_actionable_rank(
         for reason in sorted(missing):
             reasons.append(f"final_score_v3.{component}:{reason}")
 
-    if cap_violation:
+    if cap_violation or final_score.cap_violation:
         reasons.append("final_score_v3:cap_violation")
-    if non_finite_reject:
+    if non_finite_reject or final_score.non_finite_reject:
         reasons.append("final_score_v3:non_finite_reject")
 
     field_statuses: dict[str, str] = {}

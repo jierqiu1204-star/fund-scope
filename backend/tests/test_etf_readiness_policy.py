@@ -4,6 +4,7 @@ import pytest
 
 from app.services.short_research.coverage_policy import (
     ETF_LEGACY_READINESS_POLICY_VERSION,
+    ETF_PREVIOUS_READINESS_POLICY_VERSION,
     ETF_READINESS_POLICY_VERSION,
     evaluate_etf_readiness,
     evaluate_persisted_etf_readiness,
@@ -82,6 +83,18 @@ def test_persisted_legacy_policy_is_not_reinterpreted_by_v2() -> None:
     assert legacy.complete_publication_allowed is False
     assert current.state == "complete"
     assert current.complete_publication_allowed is True
+
+
+def test_persisted_v2_policy_retains_its_original_ninety_percent_semantics() -> None:
+    prior = evaluate_persisted_etf_readiness(
+        policy_version=ETF_PREVIOUS_READINESS_POLICY_VERSION,
+        daily_coverage_ratio=0.95,
+        warmup_coverage_ratio=0.90,
+    )
+
+    assert prior.policy_version == ETF_PREVIOUS_READINESS_POLICY_VERSION
+    assert prior.state == "complete"
+    assert prior.complete_publication_allowed is True
 
 
 def test_readiness_policy_reports_all_factual_blockers() -> None:

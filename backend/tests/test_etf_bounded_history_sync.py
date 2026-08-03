@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 import app.services.short_etf.bounded_history_sync as bounded_history_sync
 from app.models.entities import (
     EtfAdjustedHistoryAvailability,
+    EtfAdjustedPriceRevision,
     EtfPriceHistory,
     EtfSyncCursor,
     JobRun,
@@ -1210,11 +1211,18 @@ async def test_precommit_failure_rolls_back_page_and_resumes_same_page(app) -> N
         row_count_after_failure = await session.scalar(
             select(func.count()).select_from(EtfPriceHistory)
         )
+        revision_count_after_failure = await session.scalar(
+            select(func.count()).select_from(EtfAdjustedPriceRevision)
+        )
         failed_job = await session.scalar(
             select(JobRun)
             .where(JobRun.job_name == f"etf_history_continuation:{request.scope}")
             .order_by(JobRun.id.desc())
             .limit(1)
+        )
+        failed_job_status = failed_job.status if failed_job is not None else None
+        failed_job_details = (
+            dict(failed_job.details_json) if failed_job is not None else {}
         )
         cursor_after_failure = await session.get(EtfSyncCursor, request.scope)
 
@@ -1226,16 +1234,21 @@ async def test_precommit_failure_rolls_back_page_and_resumes_same_page(app) -> N
         row_count_after_resume = await session.scalar(
             select(func.count()).select_from(EtfPriceHistory)
         )
+        revision_count_after_resume = await session.scalar(
+            select(func.count()).select_from(EtfAdjustedPriceRevision)
+        )
 
     assert row_count_after_failure == 0
+    assert revision_count_after_failure == 0
     assert failed_job is not None
-    assert failed_job.status == "failed"
-    assert failed_job.details_json["stop_reason"] == "page_persistence_error:RuntimeError"
-    assert "last_trade_date" not in failed_job.details_json
+    assert failed_job_status == "failed"
+    assert failed_job_details["stop_reason"] == "page_persistence_error:RuntimeError"
+    assert "last_trade_date" not in failed_job_details
     assert cursor_after_failure is None
     assert resumed.attempted_codes == (code,)
     assert resumed.status == "complete"
     assert row_count_after_resume == 3
+    assert revision_count_after_resume == 3
 
 
 @pytest.mark.asyncio
@@ -1330,9 +1343,13 @@ async def test_500_row_page_uses_bounded_batch_sql(app) -> None:
         row_count = await session.scalar(
             select(func.count()).select_from(EtfPriceHistory)
         )
+        revision_count = await session.scalar(
+            select(func.count()).select_from(EtfAdjustedPriceRevision)
+        )
 
     assert result.status == "complete"
-    assert result.max_page_rows == 500
+    assert result.max_page_rows == 20
     assert result.max_page_sql_statements <= 8
     assert result.persisted_rows == 500
     assert row_count == 500
+    assert revision_count == 500

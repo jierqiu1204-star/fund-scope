@@ -6,6 +6,7 @@ const page = readFileSync(
   "utf8"
 );
 const types = readFileSync(join(process.cwd(), "lib", "types.ts"), "utf8");
+const etfSortOptions = page.match(/const etfSortOptions:[\s\S]*?\n\];/)?.[0] ?? "";
 
 const checks = [
   {
@@ -25,17 +26,19 @@ const checks = [
       page.includes('params.set("ranking_surface", rankingSurface)')
   },
   {
-    name: "defaults ETF sorting to the comprehensive ranking",
+    name: "uses one ETF score sort without the duplicate opportunity alias",
     pass:
-      page.includes('{ key: "opportunity", label: "综合榜单" }') &&
-      page.includes('useState<SortKey>("opportunity")') &&
-      page.includes('setSort(item === "etf" ? "opportunity" : "score")')
+      etfSortOptions.includes('{ key: "score", label: "按综合分" }') &&
+      !etfSortOptions.includes("opportunity") &&
+      page.includes('useState<SortKey>("score")') &&
+      page.includes('if (result.kind === "canonical_refresh") {\n        setSort("score");') &&
+      page.includes('setAssetType(item);\n                  setSort("score");')
   },
   {
-    name: "offers a separate actionable filter",
+    name: "uses distinct daily research and intraday actionable surfaces",
     pass:
-      page.includes('["research", "研究榜（默认）"]') &&
-      page.includes('["actionable", "可行动榜"]')
+      page.includes('["research", "日线研究榜"]') &&
+      page.includes('["actionable", "盘中可行动榜"]')
   },
   {
     name: "keeps ranks and scores visibly separate",
@@ -48,7 +51,7 @@ const checks = [
     name: "shows history tier and fail-closed action evidence",
     pass:
       page.includes("provisional_short_history") &&
-      page.includes("暂不可行动：缺少行动证据") &&
+      page.includes("暂无可行动资格：缺少行动证据") &&
       page.includes("不会用研究榜、旧行情或估算数据补候选")
   },
   {
@@ -60,7 +63,7 @@ const checks = [
       page.split("研究榜与行动资格").length - 1 >= 2
   },
   {
-    name: "labels degraded evidence as provisional and non-actionable",
+    name: "renders existing provisional, stale, taxonomy, liquidity, and coverage states honestly",
     pass:
       types.includes(
         'coverage_policy_mode?: "blocked" | "degraded" | "complete" | null'
@@ -68,10 +71,20 @@ const checks = [
       types.includes(
         'snapshot_state?: "unavailable" | "provisional" | "complete"'
       ) &&
-      page.includes('coverage_policy_mode === "degraded"') &&
-      page.includes("当前为临时研究预览，并非完整发布") &&
-      page.includes("本期仅研究预览，不产生可行动名次") &&
+      page.includes('coverage_policy_mode === "blocked"') &&
+      page.includes("临时研究预览：只展示日线研究榜") &&
+      page.includes("快照已过期：等待同一合同下的新鲜日线数据后再判断") &&
+      page.includes("主题归类未知：") &&
+      page.includes("流动性风险：已触发“流动性不足”门槛") &&
+      page.includes("盘中行动字段：") &&
       page.includes('snapshot_state === "provisional"')
+  },
+  {
+    name: "keeps research, shadow, delivery, and execution evidence separate",
+    pass:
+      page.includes("影子研究，权重为 0；不改变研究榜、可行动榜、组合配置、持仓动作或邮件状态") &&
+      page.includes("历史回放与真实前瞻均为研究证据，不等同于正式策略业绩、邮件送达或用户确认成交") &&
+      page.includes("不等同于历史回放表现、邮件送达或用户确认成交")
   }
 ];
 

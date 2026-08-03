@@ -47,12 +47,13 @@ import type {
 
 type AssetType = "fund" | "etf";
 type RankingSurface = "research" | "actionable";
-type SortKey = "score" | "opportunity" | "return_5d" | "return_20d" | "drawdown_low" | "risk_low" | "liquidity";
+type SortKey = "score" | "return_5d" | "return_20d" | "drawdown_low" | "risk_low" | "liquidity";
 type OrderTimeBucket = "before_15" | "after_15" | "unknown";
 type MobileTab = "ranking" | "detail" | "tracking" | "explanation";
 type RankedAssetItem = ShortResearchAsset | IntradayEtfLiveRankingItem;
 type RankedAssetResponse = ShortResearchAssetList | IntradayEtfLiveRankingList;
 type FreshIntradayQuote = NonNullable<IntradayEtfLiveRankingItem["quote"]> & { change_percent: number };
+type EtfStateMessage = { key: string; text: string };
 type LabelFilterKey = "observation" | "entry" | "tracking";
 type LabelFilterState = Record<LabelFilterKey, string[]>;
 type TrackedPositionPatchPayload = {
@@ -104,8 +105,7 @@ const baseSortOptions: Array<{ key: SortKey; label: string }> = [
 ];
 
 const etfSortOptions: Array<{ key: SortKey; label: string }> = [
-  { key: "opportunity", label: "综合榜单" },
-  { key: "score", label: "盘中买点榜" }
+  { key: "score", label: "按综合分" }
 ];
 
 const labelFilterGroups: Array<{
@@ -646,7 +646,7 @@ function assetScoreSummaryText(asset: ShortResearchAsset | null | undefined) {
 function historyTierText(tier: string | null | undefined) {
   switch (tier) {
     case "provisional_short_history":
-      return "短样本（61-119 个交易日）";
+      return "临时短样本（61-119 个交易日）";
     case "standard_history":
       return "标准历史（120-249 个交易日）";
     case "full_history_context":
@@ -661,13 +661,149 @@ function actionableStateText(
   snapshotState?: EtfRankingSnapshotMetadata["snapshot_state"]
 ) {
   if (snapshotState === "provisional") {
-    return "本期仅研究预览，不产生可行动名次";
+    return "临时研究预览：只展示日线研究榜，不产生盘中可行动名次";
   }
   if (asset.actionable_eligible && asset.actionable_rank !== null && asset.actionable_rank !== undefined) {
-    return `可行动榜 #${asset.actionable_rank}`;
+    return `盘中可行动榜 #${asset.actionable_rank}`;
   }
   const reasons = asset.actionable_exclusion_reasons ?? [];
-  return reasons.length ? `暂不可行动：${reasons.slice(0, 2).join("；")}` : "暂不可行动：缺少行动证据";
+  return reasons.length ? `暂无可行动资格：${reasons.slice(0, 2).join("；")}` : "暂无可行动资格：缺少行动证据";
+}
+
+function actionableFieldLabel(field: string) {
+  const labels: Record<string, string> = {
+    bid: "买一价",
+    ask: "卖一价",
+    iopv: "IOPV",
+    premium_discount: "折溢价",
+    provider: "行情来源",
+    provider_health: "服务商健康",
+    freshness: "新鲜度",
+    provider_consensus: "多源一致性"
+  };
+  return labels[field] ?? field;
+}
+
+function actionableFieldStatusLabel(status: string) {
+  const labels: Record<string, string> = {
+    missing: "缺失",
+    stale: "已过期",
+    not_applicable: "不适用",
+    unhealthy: "异常",
+    inconsistent: "不一致"
+  };
+  return labels[status] ?? "状态未知";
+}
+
+function snapshotUnavailableText(reason: string | null | undefined) {
+  switch (reason) {
+    case "canonical_snapshot_stale":
+      return "当前快照已过期";
+    case "canonical_snapshot_waiting":
+      return "尚未生成兼容快照";
+    case "complete_snapshot_not_published":
+      return "完整快照尚未发布";
+    case "legacy_snapshot_missing_readiness_evidence":
+      return "旧快照缺少当前就绪证据";
+    case "snapshot_readiness_incompatible":
+      return "快照未满足当前就绪合同";
+    case "history_depth_61_coverage_below_95pct":
+      return "历史预热覆盖未达发布门槛";
+    default:
+      return "尚未满足可发布条件";
+  }
+}
+
+function etfSnapshotStateMessages(
+  snapshot: EtfRankingSnapshotMetadata | null | undefined
+): EtfStateMessage[] {
+  if (!snapshot) {
+    return [];
+  }
+  const messages: EtfStateMessage[] = [];
+  if (snapshot.snapshot_state === "provisional") {
+    messages.push({
+      key: "provisional",
+      text: "临时研究预览：只展示日线研究榜，不产生盘中可行动名次、组合或邮件候选。"
+    });
+  }
+  if (snapshot.snapshot_state === "unavailable") {
+    messages.push({
+      key: "unavailable",
+      text: `榜单暂不可用：${snapshotUnavailableText(snapshot.unavailable_reason)}。`
+    });
+  }
+  if (snapshot.coverage_policy_mode === "blocked") {
+    messages.push({
+      key: "coverage-blocked",
+      text: "覆盖门槛未通过：不使用旧快照、估算数据或回退候选补成正式榜单。"
+    });
+  }
+  if (snapshot.coverage_policy_mode === "degraded" && snapshot.snapshot_state !== "provisional") {
+    messages.push({
+      key: "coverage-degraded",
+      text: "覆盖为降级状态：仅作日线研究观察，不产生盘中可行动名次。"
+    });
+  }
+  if (snapshot.freshness_status === "stale") {
+    messages.push({
+      key: "snapshot-stale",
+      text: "快照已过期：等待同一合同下的新鲜日线数据后再判断。"
+    });
+  }
+  return messages;
+}
+
+function etfAssetStateMessages(asset: ShortResearchAsset): EtfStateMessage[] {
+  const messages: EtfStateMessage[] = [];
+  const taxonomyValues = [
+    asset.classification_source,
+    asset.classification_confidence,
+    asset.theme_group,
+    asset.primary_theme
+  ];
+  const hasUnknownTaxonomy = taxonomyValues.some((value) => {
+    const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+    return normalized === "unknown" || normalized === "未分类";
+  });
+  if (hasUnknownTaxonomy) {
+    messages.push({
+      key: "unknown-taxonomy",
+      text: `主题归类未知：${asset.classification_reason ?? "没有可审计分类证据。"}`
+    });
+  }
+
+  const lowLiquidity =
+    asset.risk_flags.includes("流动性不足") ||
+    (asset.risk_gates ?? []).some(
+      (gate) =>
+        gate.active === true &&
+        (gate.gate_id === "low_liquidity" || gate.label === "流动性不足")
+    );
+  if (lowLiquidity) {
+    messages.push({
+      key: "low-liquidity",
+      text: "流动性风险：已触发“流动性不足”门槛，需谨慎观察。"
+    });
+  }
+
+  const exclusionReasons = asset.actionable_exclusion_reasons ?? [];
+  const fieldIssues = Object.entries(asset.actionable_field_statuses ?? {})
+    .filter(([field, status]) => {
+      if (status === "available") {
+        return false;
+      }
+      return status !== "not_applicable" || exclusionReasons.some((reason) => reason.startsWith(`${field}:`));
+    })
+    .slice(0, 3)
+    .map(([field, status]) => `${actionableFieldLabel(field)}：${actionableFieldStatusLabel(status)}`);
+  if (fieldIssues.length) {
+    messages.push({
+      key: "actionable-field-issues",
+      text: `盘中行动字段：${fieldIssues.join("；")}。`
+    });
+  }
+  return messages;
 }
 
 function opportunityScoreText(asset: ShortResearchAsset | null | undefined) {
@@ -1785,7 +1921,7 @@ function ShortTermClient() {
   const [assetType, setAssetType] = useState<AssetType>("etf");
   const [rankingSurface, setRankingSurface] = useState<RankingSurface>("research");
   const [theme, setTheme] = useState("all");
-  const [sort, setSort] = useState<SortKey>("opportunity");
+  const [sort, setSort] = useState<SortKey>("score");
   const [keyword, setKeyword] = useState("");
   const [labelFilters, setLabelFilters] = useState<LabelFilterState>(emptyLabelFilters);
   const [labelFilterExpanded, setLabelFilterExpanded] = useState(false);
@@ -2059,7 +2195,7 @@ function ShortTermClient() {
     },
     onSuccess: async (result) => {
       if (result.kind === "canonical_refresh") {
-        setSort("opportunity");
+        setSort("score");
         setAssetOffset(0);
         setLastResult({
           status: "refreshed",
@@ -2774,6 +2910,7 @@ function ShortTermClient() {
               })}
             </div>
             <p className="mt-2">{selectedValidationGroup ? labelValidationLine(selectedValidationGroup, "10") : "样本不足时只能继续观察，不能把标签当成买入结论。"}</p>
+            <p>历史回放与真实前瞻均为研究证据，不等同于正式策略业绩、邮件送达或用户确认成交。</p>
             <p>{observationPortfolioText(selectedAsset)}</p>
           </div>
         ) : null}
@@ -2965,8 +3102,8 @@ function ShortTermClient() {
             <div className="flex flex-wrap gap-2">
               {(
                 [
-                  ["research", "研究榜（默认）"],
-                  ["actionable", "可行动榜"]
+                  ["research", "日线研究榜"],
+                  ["actionable", "盘中可行动榜"]
                 ] as const
               ).map(([surface, label]) => (
                 <button
@@ -2993,8 +3130,8 @@ function ShortTermClient() {
             </div>
             <p className="mt-2 text-xs leading-5 text-ink/55">
               {rankingSurface === "research"
-                ? "研究榜只使用可追溯复权日线，覆盖更广；行动资格与行动名次单独展示。"
-                : "可行动榜仅保留具备同日买卖价、IOPV、溢折价、健康 provider 与一致性证据的 ETF；缺失时不使用回退候选。"}
+                ? "日线研究榜只使用可追溯复权日线，供研究观察；盘中行动资格与名次单独展示。它不等同于历史回放表现、邮件送达或用户确认成交。"
+                : "盘中可行动榜仅保留具备同日买卖价、IOPV、溢折价、健康 provider 与一致性证据的 ETF；缺失时不使用回退候选，也不代表已成交。"}
             </p>
             <p className="mt-1 text-xs text-ink/45">
               当日复权覆盖：
@@ -3019,14 +3156,11 @@ function ShortTermClient() {
                 ? ` · 状态原因：${shortAssetData.snapshot.unavailable_reason}`
                 : ""}
             </p>
-            {rankingSurface === "research" &&
-            shortAssetData?.snapshot?.coverage_policy_mode === "degraded" ? (
-              <p className="mt-2 rounded-md bg-amber-50 px-2.5 py-2 text-xs leading-5 text-amber-800">
-                当前是旧策略生成的临时研究预览，并非完整发布；系统不会用新门槛
-                追认旧快照。历史不足的 ETF 已排除，不参与本期排名。本期不产生组合、
-                邮件候选或可行动名次。
+            {etfSnapshotStateMessages(shortAssetData?.snapshot).map((message) => (
+              <p key={message.key} className="mt-2 rounded-md bg-amber-50 px-2.5 py-2 text-xs leading-5 text-amber-800">
+                {message.text}
               </p>
-            ) : null}
+            ))}
           </div>
         ) : null}
         <div className={`grid gap-3 ${compact ? "" : "md:grid-cols-2"}`}>
@@ -3243,6 +3377,14 @@ function ShortTermClient() {
                               shortAssetData?.snapshot?.snapshot_state
                             )}
                           </span>
+                          {etfAssetStateMessages(item).map((message) => (
+                            <span
+                              key={message.key}
+                              className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                            >
+                              {message.text}
+                            </span>
+                          ))}
                           {item.sector_trend_score !== null && item.sector_trend_score !== undefined ? (
                             <span className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
                               板块趋势：{sectorTrendText(item)}
@@ -3359,6 +3501,11 @@ function ShortTermClient() {
                     shortAssetData?.snapshot?.snapshot_state
                   )}
                 </p>
+                {etfAssetStateMessages(selectedAsset).map((message) => (
+                  <p key={message.key} className="mt-1 text-sm leading-6 text-ink/65">
+                    {message.text}
+                  </p>
+                ))}
                 <p className="mt-3 text-xs font-semibold uppercase tracking-[0.18em] text-accent">主题/板块辅助</p>
                 <p className="mt-2 text-base font-semibold text-ink">
                   {opportunityStatusText(selectedAsset)}
@@ -4409,7 +4556,7 @@ function ShortTermClient() {
                 }`}
                 onClick={() => {
                   setAssetType(item);
-                  setSort(item === "etf" ? "opportunity" : "score");
+                  setSort("score");
                   setTheme("all");
                   setSelected(null);
                   setAssetOffset(0);
@@ -4919,6 +5066,11 @@ function ShortTermClient() {
                           shortAssetData?.snapshot?.snapshot_state
                         )}
                       </p>
+                      {etfAssetStateMessages(selectedAsset).map((message) => (
+                        <p key={message.key} className="mt-1 text-sm leading-6 text-ink/65">
+                          {message.text}
+                        </p>
+                      ))}
                       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                         <p className="mt-4 text-xs font-semibold uppercase tracking-[0.18em] text-accent">主题/板块辅助</p>
                         <p className="text-sm font-semibold text-ink">

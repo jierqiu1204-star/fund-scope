@@ -10,6 +10,11 @@ from app.services.short_research.daily_reconstructable import (
     daily_reconstructable_manifest,
 )
 from app.services.short_research.final_score_v3 import FinalScoreV3Result
+from app.services.short_research.ranking_quality import (
+    CANONICAL_PRICE_BASIS,
+    MIN_CANONICAL_AVERAGE_TURNOVER_20D,
+    evaluate_canonical_research_eligibility,
+)
 from app.services.short_research.ranking_surfaces import (
     ActionableFieldEvidence,
     ActionableRankResult,
@@ -33,6 +38,13 @@ class RankingSurfaceCandidate:
     product_type: str = "etf"
     cap_violation: bool = False
     non_finite_reject: bool = False
+    price_basis: str = CANONICAL_PRICE_BASIS
+    decision_data_eligible: bool = True
+    finite_adjusted_inputs: bool = True
+    average_turnover_20d: float | None = MIN_CANONICAL_AVERAGE_TURNOVER_20D
+    taxonomy_bucket: str = "broad-equity"
+    taxonomy_evidence_valid: bool = True
+    default_display_eligible: bool = True
 
 
 @dataclass(frozen=True)
@@ -76,6 +88,17 @@ def _research_exclusion_reasons(candidate: RankingSurfaceCandidate) -> tuple[str
         or not math.isfinite(float(score))
     ):
         reasons.append("research_score:unavailable_or_non_finite")
+    eligibility = evaluate_canonical_research_eligibility(
+        eligible_sessions=candidate.eligible_sessions,
+        price_basis=candidate.price_basis,
+        decision_data_eligible=candidate.decision_data_eligible,
+        finite_adjusted_inputs=candidate.finite_adjusted_inputs,
+        average_turnover_20d=candidate.average_turnover_20d,
+        taxonomy_bucket=candidate.taxonomy_bucket,
+        taxonomy_evidence_valid=candidate.taxonomy_evidence_valid,
+        default_display_eligible=candidate.default_display_eligible,
+    )
+    reasons.extend(eligibility.reasons)
     return tuple(sorted(set(reasons)))
 
 

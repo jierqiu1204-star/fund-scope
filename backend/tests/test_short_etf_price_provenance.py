@@ -6,7 +6,12 @@ import httpx
 import pytest
 from sqlalchemy import select
 
-from app.models.entities import EtfDataHealth, EtfPriceHistory, TradableEtf
+from app.models.entities import (
+    EtfAdjustedPriceRevision,
+    EtfDataHealth,
+    EtfPriceHistory,
+    TradableEtf,
+)
 from app.services.market_data import (
     etf_adjusted_price_provenance_issue,
     etf_decision_adjusted_provider_versions,
@@ -316,6 +321,11 @@ async def test_sync_records_primary_source_failure_for_raw_fallback(app, monkeyp
         )
         health = await session.scalar(select(EtfDataHealth).where(EtfDataHealth.etf_code == "159605"))
         price = await session.scalar(select(EtfPriceHistory).where(EtfPriceHistory.etf_code == "159605"))
+        revision = await session.scalar(
+            select(EtfAdjustedPriceRevision).where(
+                EtfAdjustedPriceRevision.etf_code == "159605"
+            )
+        )
 
     assert health is not None
     assert health.status == "success"
@@ -323,6 +333,9 @@ async def test_sync_records_primary_source_failure_for_raw_fallback(app, monkeyp
     assert price is not None
     assert price.decision_eligible is False
     assert price.decision_ineligibility_reason == "missing_total_return_provenance"
+    assert revision is not None
+    assert revision.decision_eligible is False
+    assert revision.first_seen_at == revision.observed_at
 
 
 @pytest.mark.asyncio
@@ -396,6 +409,13 @@ async def test_raw_fallback_does_not_downgrade_existing_decision_eligible_histor
                 EtfPriceHistory.trade_date == date(2026, 7, 10),
             )
         )
+        revisions = (
+            await session.scalars(
+                select(EtfAdjustedPriceRevision)
+                .where(EtfAdjustedPriceRevision.etf_code == "510050")
+                .order_by(EtfAdjustedPriceRevision.id.asc())
+            )
+        ).all()
 
     assert result["updated"] == 0
     assert price is not None
@@ -404,3 +424,5 @@ async def test_raw_fallback_does_not_downgrade_existing_decision_eligible_histor
     assert price.research_adjusted_value == 2.0
     assert price.research_price_basis == data.TOTAL_RETURN_PRICE_BASIS
     assert price.decision_eligible is True
+    assert len(revisions) == 1
+    assert revisions[0].decision_eligible is False

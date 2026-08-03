@@ -669,7 +669,20 @@ export type ShortResearchAsset = {
   actionable_exclusion_reasons?: string[];
   actionable_field_statuses?: Record<string, string>;
   actionable_source_times?: Record<string, string>;
+  canonical_research_rank?: number | null;
+  observation_only?: boolean;
   history_confidence_tier?: string | null;
+  tradability_eligible?: boolean | null;
+  average_turnover_20d?: number | null;
+  taxonomy_bucket?: string | null;
+  tracked_underlying_id?: string | null;
+  tracked_underlying_coverage?: number | null;
+  underlying_evidence?: Record<string, unknown>;
+  clone_group_id?: string | null;
+  clone_policy_active?: boolean | null;
+  diversified_representative?: boolean | null;
+  diversified_presentation_position?: number | null;
+  peer_diagnostics?: Record<string, unknown>;
   total_score: number | null;
   technical_score?: number | null;
   opportunity_score?: number | null;
@@ -1641,14 +1654,42 @@ export type EtfRankingSnapshotMetadata = {
   readiness_state?: "blocked" | "degraded" | "complete" | null;
   policy_version?: string | null;
   snapshot_state?: "unavailable" | "provisional" | "complete";
+  surface_availability_state?: string | null;
   unavailable_reason?: string | null;
   market_decision_cutoff?: string | null;
   data_receipt_cutoff?: string | null;
   replay_visibility_cutoff?: string | null;
   resource_profile?: Record<string, unknown>;
   provider_health_identity?: Record<string, unknown>;
+  quality_evidence?: Record<string, unknown>;
+  publication_evidence?: Record<string, unknown>;
+  pit_evidence?: Record<string, unknown>;
+  cost_evidence?: Record<string, unknown>;
+  concentration_evidence?: Record<string, unknown>;
   freshness_status?: string | null;
   limitations?: string[];
+};
+
+export type EtfIdentityCoverage = {
+  cutoff: string;
+  universe_count: number;
+  taxonomy_fact_count: number;
+  known_taxonomy_count: number;
+  unknown_taxonomy_count: number;
+  taxonomy_coverage_ratio: number;
+  tracked_underlying_fact_count: number;
+  resolved_underlying_count: number;
+  unresolved_underlying_count: number;
+  tracked_underlying_coverage_ratio: number;
+  evidence_groups: Array<{
+    fact_kind: "taxonomy" | "tracked_underlying";
+    source: string;
+    provider_version: string;
+    rule_version: string;
+    count: number;
+    latest_observed_at: string;
+  }>;
+  identity_fact_contract: Record<string, unknown>;
 };
 
 export type IntradayEtfLiveRankingItem = {

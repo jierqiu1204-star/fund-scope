@@ -135,3 +135,39 @@ async def test_ranking_batch_cursor_requires_and_reuses_persisted_assets(
             decision_cutoff=datetime(2026, 7, 17, 15, 0),
             resume_after_code=sorted(codes)[19],
         )
+
+
+@pytest.mark.asyncio
+async def test_ranking_results_are_invariant_across_safe_batch_sizes(
+    monkeypatch,
+) -> None:
+    codes = [f"52{index:04d}" for index in range(40)]
+    _install_batch_fakes(monkeypatch, codes)
+    results: dict[int, list[ComputedAsset]] = {}
+
+    for batch_size in (5, 10, 20):
+        results[batch_size] = await compute_etf_snapshot_assets(
+            object(),  # type: ignore[arg-type]
+            codes=list(reversed(codes)),
+            as_of_date=date(2026, 7, 17),
+            decision_cutoff=datetime(2026, 7, 17, 15, 0),
+            batch_size=batch_size,
+        )
+
+    assert results[5] == results[10] == results[20]
+
+
+@pytest.mark.asyncio
+async def test_ranking_rejects_unsafe_batch_sizes(monkeypatch) -> None:
+    codes = ["510300"]
+    _install_batch_fakes(monkeypatch, codes)
+
+    for batch_size in (4, 21):
+        with pytest.raises(ValueError, match="within \\[5, 20\\]"):
+            await compute_etf_snapshot_assets(
+                object(),  # type: ignore[arg-type]
+                codes=codes,
+                as_of_date=date(2026, 7, 17),
+                decision_cutoff=datetime(2026, 7, 17, 15, 0),
+                batch_size=batch_size,
+            )

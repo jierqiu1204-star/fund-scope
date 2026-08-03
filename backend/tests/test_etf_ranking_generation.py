@@ -97,6 +97,61 @@ def test_missing_intraday_preserves_research_but_excludes_action_with_field_reas
     assert surfaces.actionable_exclusions["510300"] == ("bid:missing", "iopv:stale")
 
 
+def test_low_turnover_and_unknown_taxonomy_remain_observation_only() -> None:
+    surfaces = generate_dual_ranking_surfaces(
+        [
+            replace(
+                _candidate("510001", research_score=99.0),
+                average_turnover_20d=49_999_999.0,
+                default_display_eligible=False,
+            ),
+            replace(
+                _candidate("510002", research_score=98.0),
+                taxonomy_bucket="unknown",
+                taxonomy_evidence_valid=False,
+            ),
+            _candidate("510003", research_score=70.0),
+        ]
+    )
+
+    assert [row.asset_code for row in surfaces.research_rows] == ["510003"]
+    assert surfaces.research_exclusions["510001"] == (
+        "absolute_tradability_below_threshold",
+    )
+    assert surfaces.research_exclusions["510002"] == (
+        "taxonomy_bucket_unresolved",
+    )
+    assert "research_surface:unavailable" in surfaces.actionable_exclusions["510001"]
+    assert "research_surface:unavailable" in surfaces.actionable_exclusions["510002"]
+
+
+def test_raw_or_ineligible_decision_data_cannot_enter_research_rank() -> None:
+    surfaces = generate_dual_ranking_surfaces(
+        [
+            replace(_candidate("510001"), price_basis="sina_raw_close"),
+            replace(_candidate("510002"), price_basis="efinance_display_only"),
+            replace(_candidate("510003"), price_basis="estimated_adjusted_close"),
+            replace(_candidate("510004"), decision_data_eligible=False),
+            replace(_candidate("510005"), finite_adjusted_inputs=False),
+        ]
+    )
+
+    assert surfaces.research_rows == ()
+    assert surfaces.research_exclusions["510001"] == (
+        "price_basis:decision_ineligible",
+    )
+    assert surfaces.research_exclusions["510002"] == (
+        "price_basis:decision_ineligible",
+    )
+    assert surfaces.research_exclusions["510003"] == (
+        "price_basis:decision_ineligible",
+    )
+    assert surfaces.research_exclusions["510004"] == ("decision_data:ineligible",)
+    assert surfaces.research_exclusions["510005"] == (
+        "adjusted_inputs:missing_or_non_finite",
+    )
+
+
 def test_surfaces_rank_independently_and_break_ties_by_code() -> None:
     surfaces = generate_dual_ranking_surfaces(
         [
@@ -187,5 +242,5 @@ def test_production_shaped_shadow_is_bounded_and_deterministic() -> None:
         "final_score_v3:cap_violation": 352
     }
     assert first_hash == second_hash
-    assert first_hash == "bb90260cec8f268f2ab85cfbb3daf4a148c1b11118bb48dd957f6f9486c65632"
+    assert first_hash == "8711b8b98b300d831260b433e25e33587eaa8c6da8e824e9edd9760506b14bc2"
     assert latency_seconds < 5.0

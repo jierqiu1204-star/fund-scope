@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -13,6 +13,7 @@ from app.services.strategy_lab.etf_ranking_candidates import (
 from app.services.strategy_lab.etf_ranking_forward_outcomes import (
     FORWARD_HORIZONS,
     ForwardAdjustedClose,
+    ForwardExecutionCostEvidence,
     ForwardOutcomeContractError,
     calculate_ranking_forward_outcomes,
 )
@@ -72,6 +73,29 @@ def _close(code: str, session_date: date, value: float) -> ForwardAdjustedClose:
     )
 
 
+def _cost_evidence(
+    code: str,
+    session_date: date,
+    *,
+    available_at: datetime | None = None,
+) -> ForwardExecutionCostEvidence:
+    quote_time = datetime.combine(session_date, datetime.min.time()).replace(hour=10)
+    cutoff = quote_time.replace(minute=2)
+    return ForwardExecutionCostEvidence(
+        asset_code=code,
+        execution_session=session_date,
+        provider="eastmoney",
+        source_hash=_hash(f"cost:{code}:{session_date}"),
+        quote_time=quote_time,
+        available_at=available_at or quote_time.replace(minute=1),
+        execution_cutoff=cutoff,
+        bid=99.9,
+        ask=100.1,
+        liquidity_notional=50_000_000.0,
+        liquidity_cost_bps_per_side=2.0,
+    )
+
+
 def test_forward_outcomes_use_t_plus_one_close_and_full_session_exits() -> None:
     sessions = _sessions()
     closes = tuple(
@@ -117,6 +141,76 @@ def test_forward_outcomes_apply_each_side_fee_and_slippage_multiplicatively() ->
     assert outcome.slippage_bps_per_side == 5
     assert outcome.round_trip_cost_bps == 20
     assert outcome.cost_contract_hash == RANKING_COST_CONTRACT_HASH
+    assert outcome.cost_provenance == "frozen_conservative_fallback"
+    assert outcome.cost_unavailable_reasons == (
+        "entry_cost_evidence_missing",
+        "exit_cost_evidence_missing",
+    )
+
+
+def test_forward_outcomes_use_cutoff_valid_factual_spread_and_liquidity_costs() -> None:
+    sessions = _sessions()
+    closes = tuple(_close("510001", session, 100.0) for session in sessions)
+    evidence = (
+        _cost_evidence("510001", sessions[1]),
+        _cost_evidence("510001", sessions[2]),
+    )
+
+    bundle = calculate_ranking_forward_outcomes(
+        selection=_selection(sessions[0]),
+        trading_sessions=sessions,
+        adjusted_closes=closes,
+        execution_cost_evidence=evidence,
+        horizons=(1,),
+    )
+    outcome = bundle.outcomes[0]
+    expected = (1.0 - 0.0012) * (1.0 - 0.0005) / (
+        (1.0 + 0.0012) * (1.0 + 0.0005)
+    ) - 1.0
+
+    assert outcome.cost_provenance == "factual_cutoff_valid"
+    assert outcome.entry_factual_spread_bps == pytest.approx(20.0)
+    assert outcome.entry_liquidity_cost_bps_per_side == 2.0
+    assert outcome.entry_slippage_bps_per_side == pytest.approx(12.0)
+    assert outcome.exit_slippage_bps_per_side == pytest.approx(12.0)
+    assert outcome.round_trip_cost_bps == pytest.approx(34.0)
+    assert outcome.net_return == pytest.approx(expected)
+    assert len(outcome.cost_input_hashes) == 2
+    assert len(outcome.cost_source_hashes) == 2
+    assert outcome.cost_evidence == evidence
+    assert bundle.cost_provenance_counts == (("factual_cutoff_valid", 1),)
+    assert bundle.cost_unavailable_reason_counts == ()
+
+
+def test_late_or_missing_cost_evidence_uses_explicit_frozen_fallback() -> None:
+    sessions = _sessions()
+    closes = tuple(_close("510001", session, 100.0) for session in sessions)
+    late_evidence = _cost_evidence(
+        "510001",
+        sessions[1],
+        available_at=datetime.combine(sessions[1], datetime.min.time()).replace(
+            hour=10,
+            minute=3,
+        ),
+    )
+
+    bundle = calculate_ranking_forward_outcomes(
+        selection=_selection(sessions[0]),
+        trading_sessions=sessions,
+        adjusted_closes=closes,
+        execution_cost_evidence=(late_evidence,),
+        horizons=(1,),
+    )
+    outcome = bundle.outcomes[0]
+
+    assert outcome.cost_provenance == "frozen_conservative_fallback"
+    assert outcome.entry_factual_spread_bps is None
+    assert outcome.entry_slippage_bps_per_side == 5.0
+    assert "entry_available_after_execution_cutoff" in outcome.cost_unavailable_reasons
+    assert "exit_cost_evidence_missing" in outcome.cost_unavailable_reasons
+    assert outcome.cost_source_hashes == (late_evidence.source_hash,)
+    assert outcome.cost_evidence == (late_evidence,)
+    assert bundle.execution_cost_evidence_hash
 
 
 def test_missing_entry_or_exit_is_excluded_without_signal_close_substitution() -> None:
@@ -197,6 +291,17 @@ def test_forward_inputs_reject_duplicates_raw_prices_and_dynamic_horizons() -> N
             trading_sessions=sessions,
             adjusted_closes=(row,),
             horizons=(2,),
+        )
+    with pytest.raises(ForwardOutcomeContractError, match="duplicate execution"):
+        calculate_ranking_forward_outcomes(
+            selection=_selection(sessions[0]),
+            trading_sessions=sessions,
+            adjusted_closes=(row,),
+            execution_cost_evidence=(
+                _cost_evidence("510001", sessions[1]),
+                _cost_evidence("510001", sessions[1]),
+            ),
+            horizons=(1,),
         )
 
 

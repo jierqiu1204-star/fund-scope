@@ -1,26 +1,20 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from app.services.short_research.final_score_v3 import (
+    _percentile,
     build_final_score_v3_sector_inputs,
     build_v3_shadow_comparison,
     score_final_score_v3,
 )
-from app.services.short_research.ranking_contract import RankingInput, parse_ranking_manifest
+from app.services.short_research.ranking_contract import RankingInput, final_score_v3_manifest
 
 
 def _manifest():
-    contract_path = (
-        Path(__file__).resolve().parents[2]
-        / "openspec"
-        / "changes"
-        / "harden-etf-comprehensive-ranking"
-        / "final-score-v3-contract.json"
-    )
-    return parse_ranking_manifest(json.loads(contract_path.read_text(encoding="utf-8")))
+    return final_score_v3_manifest()
 
 
 def _input(
@@ -82,7 +76,7 @@ def test_v3_cluster_weights_clones_once_inside_their_asset_bucket() -> None:
     results = score_final_score_v3(
         [
             _input("510300", underlying_id="000300", return_5d=0.08),
-            _input("510310", underlying_id="000300", return_5d=0.08),
+            _input("510310", underlying_id="000300", return_5d=0.04),
             _input("510500", underlying_id="000905", return_5d=0.02),
         ],
         manifest=_manifest(),
@@ -93,9 +87,108 @@ def test_v3_cluster_weights_clones_once_inside_their_asset_bucket() -> None:
     assert first_clone.score_eligible is True
     assert first_clone.asset_bucket == "broad-equity"
     assert first_clone.metric_peer_counts["return_5d"] == 2
+    assert first_clone.clone_policy_active is True
+    assert first_clone.tracked_underlying_coverage == 1.0
     assert first_clone.component_scores["technical_momentum_cross_section"] == second_clone.component_scores[
         "technical_momentum_cross_section"
     ]
+
+
+def test_v3_keeps_wrapper_execution_primitives_product_specific() -> None:
+    first = _input("510300", underlying_id="000300")
+    second = _input("510310", underlying_id="000300")
+    third = _input("510500", underlying_id="000905")
+    first_values = {**first.values, "spread_bps": 1.0, "average_turnover_20d": 300_000_000}
+    second_values = {**second.values, "spread_bps": 12.0, "average_turnover_20d": 60_000_000}
+    inputs = [
+        RankingInput(first.asset_code, first.asset_bucket, first.price_basis, first.profile_version, first_values),
+        RankingInput(second.asset_code, second.asset_bucket, second.price_basis, second.profile_version, second_values),
+        third,
+    ]
+
+    results = score_final_score_v3(inputs, manifest=_manifest())
+
+    assert results["510300"].component_scores["technical_momentum_cross_section"] == results["510310"].component_scores[
+        "technical_momentum_cross_section"
+    ]
+    assert results["510300"].component_scores["structure_liquidity"] != results["510310"].component_scores[
+        "structure_liquidity"
+    ]
+    assert results["510300"].clone_group_id == "underlying:000300"
+    assert results["510300"].diversified_representative is True
+    assert results["510310"].diversified_representative is False
+    assert results["510500"].diversified_representative is True
+
+
+def test_v3_clone_policy_stays_shadow_until_underlying_coverage_gate_passes() -> None:
+    results = score_final_score_v3(
+        [
+            _input("510300", underlying_id="000300", return_5d=0.08),
+            _input("510310", underlying_id="000300", return_5d=0.04),
+            _input("510500", underlying_id=None, return_5d=0.02),
+        ],
+        manifest=_manifest(),
+    )
+
+    assert all(result.clone_policy_active is False for result in results.values())
+    assert all(result.tracked_underlying_coverage == pytest.approx(2 / 3, abs=1e-6) for result in results.values())
+    assert all(result.clone_group_id is None for result in results.values())
+    assert all(result.diversified_representative is None for result in results.values())
+    assert results["510300"].metric_peer_counts["return_5d"] == 3
+
+
+def test_v3_zero_underlying_coverage_cannot_claim_clone_control() -> None:
+    results = score_final_score_v3(
+        [_input("510300"), _input("510500"), _input("510880")],
+        manifest=_manifest(),
+    )
+
+    assert all(result.tracked_underlying_coverage == 0.0 for result in results.values())
+    assert all(result.clone_policy_active is False for result in results.values())
+    assert all(result.clone_group_id is None for result in results.values())
+    assert all(result.diversified_representative is None for result in results.values())
+
+
+def test_empirical_midrank_is_bounded_for_unobserved_and_out_of_range_values() -> None:
+    values = [10.0, 20.0, 30.0]
+
+    assert _percentile(0.0, values, higher_is_better=True) == 0.0
+    assert _percentile(15.0, values, higher_is_better=True) == pytest.approx(100 / 3)
+    assert _percentile(20.0, values, higher_is_better=True) == 50.0
+    assert _percentile(40.0, values, higher_is_better=True) == 100.0
+    assert _percentile(0.0, values, higher_is_better=False) == 100.0
+    assert _percentile(40.0, values, higher_is_better=False) == 0.0
+
+
+def test_v3_components_stay_bounded_when_wrapper_differs_from_clone_mean() -> None:
+    inputs = [
+        _input("510300", underlying_id="000300", return_5d=10.0),
+        _input("510310", underlying_id="000300", return_5d=-10.0),
+        _input("510500", underlying_id="000905", return_5d=0.10),
+        _input("510880", underlying_id="000852", return_5d=0.20),
+    ]
+
+    results = score_final_score_v3(inputs, manifest=_manifest())
+
+    for result in results.values():
+        assert all(0.0 <= score <= 100.0 for score in result.component_scores.values())
+        assert result.cap_violation is False
+        assert result.non_finite_reject is False
+        if result.ranking_score is not None:
+            assert 0.0 <= result.ranking_score <= 100.0
+
+
+def test_v3_results_are_input_order_invariant_with_clone_groups() -> None:
+    inputs = [
+        _input("510300", underlying_id="000300", return_5d=0.08),
+        _input("510310", underlying_id="000300", return_5d=0.06),
+        _input("510500", underlying_id="000905", return_5d=0.02),
+    ]
+
+    forward = score_final_score_v3(inputs, manifest=_manifest())
+    reversed_results = score_final_score_v3(list(reversed(inputs)), manifest=_manifest())
+
+    assert reversed_results == forward
 
 
 def test_v3_rejects_missing_and_incompatible_inputs_without_neutral_fill() -> None:

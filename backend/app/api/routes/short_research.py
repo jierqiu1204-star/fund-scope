@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
@@ -15,6 +15,7 @@ from app.models.entities import (
     EtfSignalValidationRun,
     EtfSignalValidationSourceEvent,
     ShortResearchSignalRun,
+    TradableEtf,
     User,
 )
 from app.schemas.etf_evidence import (
@@ -26,6 +27,9 @@ from app.schemas.short_research import (
     EtfExitCredibilityRunOut,
     EtfExitHyperoptRequest,
     EtfExitHyperoptRunOut,
+    EtfIdentityCoverageOut,
+    EtfObservationOnlyItemOut,
+    EtfObservationOnlyListOut,
     EtfOptimizedAllocationOut,
     EtfPortfolioBacktestDetailOut,
     EtfPortfolioBacktestListOut,
@@ -76,6 +80,9 @@ from app.services.short_research.etf_exit_credibility import (
     etf_exit_credibility_payload,
     latest_etf_exit_credibility_run,
     run_etf_exit_credibility,
+)
+from app.services.short_research.etf_identity_facts import (
+    identity_fact_coverage_at_cutoff,
 )
 from app.services.short_research.healthcheck import (
     healthcheck_payload,
@@ -394,11 +401,64 @@ def _asset_out(
             metrics.get("actionable_field_statuses") or {}
         ),
         actionable_source_times=dict(metrics.get("actionable_source_times") or {}),
+        canonical_research_rank=(
+            int(metrics["canonical_research_rank"])
+            if isinstance(metrics.get("canonical_research_rank"), int)
+            else None
+        ),
+        observation_only=metrics.get("observation_only") is True,
         history_confidence_tier=(
             str(metrics["history_confidence_tier"])
             if metrics.get("history_confidence_tier")
             else None
         ),
+        tradability_eligible=(
+            metrics.get("default_display_eligible")
+            if isinstance(metrics.get("default_display_eligible"), bool)
+            else None
+        ),
+        average_turnover_20d=(
+            float(metrics["average_turnover_20d"])
+            if isinstance(metrics.get("average_turnover_20d"), int | float)
+            else None
+        ),
+        taxonomy_bucket=(
+            str(metrics["ranking_asset_bucket"])
+            if metrics.get("ranking_asset_bucket")
+            else None
+        ),
+        tracked_underlying_id=(
+            str(metrics["tracked_underlying_id"])
+            if metrics.get("tracked_underlying_id")
+            else None
+        ),
+        tracked_underlying_coverage=(
+            float(metrics["tracked_underlying_coverage"])
+            if isinstance(metrics.get("tracked_underlying_coverage"), int | float)
+            else None
+        ),
+        underlying_evidence=dict(metrics.get("underlying_evidence") or {}),
+        clone_group_id=(
+            str(metrics["clone_group_id"])
+            if metrics.get("clone_group_id")
+            else None
+        ),
+        clone_policy_active=(
+            metrics.get("clone_policy_active")
+            if isinstance(metrics.get("clone_policy_active"), bool)
+            else None
+        ),
+        diversified_representative=(
+            metrics.get("diversified_representative")
+            if isinstance(metrics.get("diversified_representative"), bool)
+            else None
+        ),
+        diversified_presentation_position=(
+            int(metrics["diversified_presentation_position"])
+            if isinstance(metrics.get("diversified_presentation_position"), int)
+            else None
+        ),
+        peer_diagnostics=dict(metrics.get("peer_diagnostics") or {}),
         total_score=round(asset.total_score, 2),
         technical_score=round(float(metrics["technical_score"]), 2) if isinstance(metrics.get("technical_score"), (int, float)) else None,
         opportunity_score=round(float(opportunity_score), 2)
@@ -788,6 +848,100 @@ def _ranking_surface_snapshot_metadata(
         "score_coverage_ratio": coverage_ratio,
         "coverage_ratio": coverage_ratio,
     }
+
+
+@router.get(
+    "/assets/identity-coverage",
+    response_model=EtfIdentityCoverageOut,
+)
+async def get_etf_identity_coverage(
+    cutoff: datetime | None = Query(default=None),
+    session: AsyncSession = Depends(get_db_session),
+) -> EtfIdentityCoverageOut:
+    """Return compact taxonomy/underlying coverage visible at one factual cutoff."""
+
+    effective_cutoff = cutoff or datetime.now(UTC)
+    projection = await identity_fact_coverage_at_cutoff(
+        session,
+        cutoff=effective_cutoff,
+    )
+    return EtfIdentityCoverageOut.model_validate(projection.as_dict())
+
+
+@router.get(
+    "/assets/observation-only",
+    response_model=EtfObservationOnlyListOut,
+)
+async def list_etf_observation_only_assets(
+    q: str | None = Query(default=None),
+    reason: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_db_session),
+) -> EtfObservationOnlyListOut:
+    """Return persisted quality exclusions without assigning a ranking."""
+
+    selection = await current_etf_ranking_surface_selection(
+        session,
+        ranking_surface="research",
+    )
+    run = selection.run
+    metadata = EtfRankingSnapshotMetadataOut.model_validate(
+        _ranking_surface_snapshot_metadata(
+            run,
+            ranking_surface="research",
+            selection_state=selection.state,
+        )
+    )
+    if run is None:
+        return EtfObservationOnlyListOut(items=[], total=0, snapshot=metadata)
+    observation = (run.summary_json or {}).get("observation_only")
+    raw_items = observation.get("items") if isinstance(observation, dict) else None
+    rows = [item for item in raw_items or [] if isinstance(item, dict)]
+    normalized_reason = reason.strip() if reason else None
+    if normalized_reason:
+        rows = [
+            item
+            for item in rows
+            if normalized_reason in {
+                str(value) for value in item.get("reasons") or []
+            }
+        ]
+    codes = [str(item.get("asset_code") or "") for item in rows]
+    names = {
+        item.code: item.name
+        for item in (
+            await session.scalars(
+                select(TradableEtf).where(TradableEtf.code.in_(codes))
+            )
+        ).all()
+    } if codes else {}
+    keyword = q.strip().casefold() if q else None
+    payload = [
+        EtfObservationOnlyItemOut(
+            code=code,
+            name=names.get(code, code),
+            reasons=[str(value) for value in item.get("reasons") or []],
+            evidence=(
+                dict(item.get("evidence"))
+                if isinstance(item.get("evidence"), dict)
+                else {}
+            ),
+        )
+        for item in rows
+        if (code := str(item.get("asset_code") or ""))
+        and (
+            keyword is None
+            or keyword in code.casefold()
+            or keyword in names.get(code, code).casefold()
+        )
+    ]
+    payload.sort(key=lambda item: item.code)
+    return EtfObservationOnlyListOut(
+        items=payload[offset : offset + limit],
+        total=len(payload),
+        snapshot=metadata,
+    )
 
 
 @router.get("/assets", response_model=ShortResearchAssetListOut)

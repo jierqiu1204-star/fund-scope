@@ -8,7 +8,8 @@ ETF_SCORE_PUBLICATION_MIN_COVERAGE = 0.90
 ETF_COMPLETE_SCORE_COVERAGE = 0.90
 ETF_LEGACY_COMPLETE_SCORE_COVERAGE = 0.95
 ETF_RESEARCH_DEPTH_MIN_COVERAGE = 0.95
-ETF_READINESS_POLICY_VERSION = "etf_readiness_policy_v2"
+ETF_READINESS_POLICY_VERSION = "etf_readiness_policy_v3"
+ETF_PREVIOUS_READINESS_POLICY_VERSION = "etf_readiness_policy_v2"
 ETF_LEGACY_READINESS_POLICY_VERSION = "etf_readiness_policy_v1"
 
 EtfCoveragePolicyMode = Literal["blocked", "degraded", "complete"]
@@ -65,23 +66,12 @@ def evaluate_etf_readiness(
     )
 
 
-def evaluate_persisted_etf_readiness(
+def _evaluate_legacy_etf_readiness(
     *,
-    policy_version: str | None,
+    policy_version: str,
     daily_coverage_ratio: float | None,
     warmup_coverage_ratio: float | None,
 ) -> EtfReadinessPolicyResult:
-    """Evaluate immutable evidence under the policy that created it.
-
-    Missing or unknown versions are treated as the stricter legacy policy so a
-    later threshold change cannot silently promote historical snapshots.
-    """
-
-    if policy_version == ETF_READINESS_POLICY_VERSION:
-        return evaluate_etf_readiness(
-            daily_coverage_ratio=daily_coverage_ratio,
-            warmup_coverage_ratio=warmup_coverage_ratio,
-        )
     daily = _coverage_ratio(daily_coverage_ratio)
     warmup = _coverage_ratio(warmup_coverage_ratio)
     blockers: list[str] = []
@@ -97,13 +87,46 @@ def evaluate_persisted_etf_readiness(
     else:
         state = "complete"
     return EtfReadinessPolicyResult(
-        policy_version=policy_version or ETF_LEGACY_READINESS_POLICY_VERSION,
+        policy_version=policy_version,
         state=state,
         daily_coverage_ratio=daily,
         warmup_coverage_ratio=warmup,
         blocker_reasons=tuple(blockers),
         preview_allowed=state != "blocked",
         complete_publication_allowed=state == "complete",
+    )
+
+
+def evaluate_persisted_etf_readiness(
+    *,
+    policy_version: str | None,
+    daily_coverage_ratio: float | None,
+    warmup_coverage_ratio: float | None,
+) -> EtfReadinessPolicyResult:
+    """Evaluate immutable evidence under the policy that created it.
+
+    Missing or unknown versions are treated as the stricter legacy policy so a
+    later threshold change cannot silently promote historical snapshots.
+    """
+
+    if policy_version in {
+        ETF_READINESS_POLICY_VERSION,
+        ETF_PREVIOUS_READINESS_POLICY_VERSION,
+    }:
+        current = evaluate_etf_readiness(
+            daily_coverage_ratio=daily_coverage_ratio,
+            warmup_coverage_ratio=warmup_coverage_ratio,
+        )
+        return EtfReadinessPolicyResult(
+            **{
+                **current.__dict__,
+                "policy_version": policy_version,
+            }
+        )
+    return _evaluate_legacy_etf_readiness(
+        policy_version=policy_version or ETF_LEGACY_READINESS_POLICY_VERSION,
+        daily_coverage_ratio=daily_coverage_ratio,
+        warmup_coverage_ratio=warmup_coverage_ratio,
     )
 
 
@@ -134,6 +157,7 @@ __all__ = [
     "ETF_DAILY_DECISION_MIN_COVERAGE",
     "ETF_LEGACY_COMPLETE_SCORE_COVERAGE",
     "ETF_LEGACY_READINESS_POLICY_VERSION",
+    "ETF_PREVIOUS_READINESS_POLICY_VERSION",
     "ETF_READINESS_POLICY_VERSION",
     "ETF_RESEARCH_DEPTH_MIN_COVERAGE",
     "ETF_SCORE_PUBLICATION_MIN_COVERAGE",

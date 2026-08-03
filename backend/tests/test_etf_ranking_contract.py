@@ -80,6 +80,8 @@ def test_final_score_v3_manifest_has_typed_score_inputs_and_missing_policy() -> 
     assert manifest.dag_edges[0].source == "technical_momentum_cross_section"
     assert manifest.dag_edges[0].target == "weighted_aggregate"
     assert manifest.acyclic_order[-1] == "ranking_score"
+    assert manifest.minimum_peer_count == 2
+    assert manifest.clone_activation_minimum_coverage == pytest.approx(0.9)
     assert "label_validation" in manifest.explanatory_only
 
 
@@ -155,3 +157,55 @@ def test_ranking_manifest_rejects_double_counted_score_bearing_primitive() -> No
 
     with pytest.raises(ValueError, match="double-counted primitive"):
         parse_ranking_manifest(contract)
+
+
+def test_ranking_manifest_rejects_invalid_component_and_primitive_weights() -> None:
+    component_contract = json.loads(json.dumps(final_score_v3_contract()))
+    component_contract["calculation"]["components"][0]["weight"] = -0.1
+
+    with pytest.raises(ValueError, match="weight must be within"):
+        parse_ranking_manifest(component_contract)
+
+    primitive_contract = json.loads(json.dumps(final_score_v3_contract()))
+    primitive_contract["calculation"]["components"][0]["formula"]["inputs"][0]["weight"] = 0.5
+
+    with pytest.raises(ValueError, match="primitive weights must sum to 1"):
+        parse_ranking_manifest(primitive_contract)
+
+
+def test_ranking_manifest_rejects_cycle_and_invalid_peer_minimum() -> None:
+    cyclic = json.loads(json.dumps(final_score_v3_contract()))
+    cyclic["calculation"]["dag"]["terminal_edges"].append(
+        {"from": "ranking_score", "to": "weighted_aggregate"}
+    )
+
+    with pytest.raises(ValueError, match="cyclic or out of order"):
+        parse_ranking_manifest(cyclic)
+
+    invalid_peers = json.loads(json.dumps(final_score_v3_contract()))
+    invalid_peers["asset_buckets"]["minimum_eligible_non_clone_peers"] = 1
+
+    with pytest.raises(ValueError, match="at least 2"):
+        parse_ranking_manifest(invalid_peers)
+
+
+def test_ranking_manifest_rejects_undeclared_transform_and_missing_fallback() -> None:
+    invalid_direction = json.loads(json.dumps(final_score_v3_contract()))
+    invalid_direction["calculation"]["components"][0]["formula"]["inputs"][0]["direction"] = "magic"
+
+    with pytest.raises(ValueError, match="undeclared primitive direction"):
+        parse_ranking_manifest(invalid_direction)
+
+    invalid_normalization = json.loads(json.dumps(final_score_v3_contract()))
+    invalid_normalization["calculation"]["components"][0]["formula"]["inputs"][0][
+        "normalization"
+    ] = "silent_fallback"
+
+    with pytest.raises(ValueError, match="undeclared normalization"):
+        parse_ranking_manifest(invalid_normalization)
+
+    invalid_missing_policy = json.loads(json.dumps(final_score_v3_contract()))
+    invalid_missing_policy["calculation"]["renormalize_missing_weights"] = True
+
+    with pytest.raises(ValueError, match="forbid missing-weight renormalization"):
+        parse_ranking_manifest(invalid_missing_policy)

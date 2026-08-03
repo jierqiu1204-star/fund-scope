@@ -19,6 +19,7 @@ class FactorObservation:
     baseline_value: float
     technical_momentum: float
     outcomes: Mapping[int, float | None]
+    portfolio_weight: float | None = None
 
 
 def _rank(values: Sequence[float]) -> list[float]:
@@ -66,6 +67,7 @@ def cross_sectional_factor_diagnostics(
     for item in observations:
         groups[(item.signal_date, item.peer_bucket)].append(item)
     ic_by_horizon: dict[int, list[float]] = defaultdict(list)
+    residual_ic_by_horizon: dict[int, list[float]] = defaultdict(list)
     peer_counts: list[int] = []
     quantile_returns: dict[int, dict[int, list[float]]] = defaultdict(
         lambda: defaultdict(list)
@@ -87,12 +89,26 @@ def cross_sectional_factor_diagnostics(
             )
             if ic is not None:
                 ic_by_horizon[horizon].append(ic)
+            residual_rows = [
+                row
+                for row in eligible
+                if _finite_number(row.baseline_value) is not None
+            ]
+            if len(residual_rows) >= minimum_peer_count:
+                residual_values = _residual_values_against_baseline(residual_rows)
+                residual_ic = spearman(
+                    residual_values,
+                    [float(row.outcomes[horizon]) for row in residual_rows],
+                )
+                if residual_ic is not None:
+                    residual_ic_by_horizon[horizon].append(residual_ic)
             for index, row in enumerate(eligible):
                 bucket = min(quantile_count - 1, index * quantile_count // len(eligible))
                 quantile_returns[horizon][bucket].append(float(row.outcomes[horizon]))
     horizons_out: dict[str, Any] = {}
     for horizon in horizons:
         values = ic_by_horizon[horizon]
+        residual_values = residual_ic_by_horizon[horizon]
         dispersion = pstdev(values) if len(values) > 1 else 0.0
         quantiles = {
             str(bucket + 1): mean(returns)
@@ -101,6 +117,9 @@ def cross_sectional_factor_diagnostics(
         }
         horizons_out[str(horizon)] = {
             "ic_mean": mean(values) if values else None,
+            "residual_ic_mean": (
+                mean(residual_values) if residual_values else None
+            ),
             "ic_dispersion": dispersion if values else None,
             "information_ratio": (
                 mean(values) / dispersion if values and dispersion > 0 else None
@@ -154,34 +173,57 @@ def redundancy_and_marginal_diagnostics(
     observations: Sequence[FactorObservation],
     *,
     horizon: int = 5,
-) -> dict[str, float | None]:
-    eligible = [item for item in observations if item.outcomes.get(horizon) is not None]
-    factor = [item.factor_value for item in eligible]
-    baseline = [item.baseline_value for item in eligible]
+) -> dict[str, float | int | None]:
+    """Measure incremental factor evidence only on common, same-date support.
+
+    A raw factor name is not evidence of a new signal when it reuses the baseline
+    momentum/risk/liquidity inputs.  The residual is therefore fitted inside each
+    factual signal-date and peer bucket, never across later dates.
+    """
+
+    eligible = [
+        item
+        for item in observations
+        if (
+            _finite_number(item.factor_value) is not None
+            and _finite_number(item.baseline_value) is not None
+            and _finite_number(item.outcomes.get(horizon)) is not None
+        )
+    ]
+    factor = [float(item.factor_value) for item in eligible]
+    baseline = [float(item.baseline_value) for item in eligible]
     outcomes = [float(item.outcomes[horizon]) for item in eligible]
     correlation = spearman(factor, baseline)
-    residualized = []
-    if eligible:
-        baseline_mean = mean(baseline)
-        factor_mean = mean(factor)
-        variance = sum((value - baseline_mean) ** 2 for value in baseline)
-        slope = (
-            sum(
-                (x - baseline_mean) * (y - factor_mean)
-                for x, y in zip(baseline, factor, strict=True)
-            )
-            / variance
-            if variance > 0
-            else 0.0
-        )
-        residualized = [
-            y - (factor_mean + slope * (x - baseline_mean))
-            for x, y in zip(baseline, factor, strict=True)
-        ]
+    residualized: list[float] = []
+    residual_outcomes: list[float] = []
+    groups: dict[tuple[date, str], list[FactorObservation]] = defaultdict(list)
+    for item in eligible:
+        groups[(item.signal_date, item.peer_bucket)].append(item)
+    for rows in groups.values():
+        if len(rows) < 2:
+            continue
+        residualized.extend(_residual_values_against_baseline(rows))
+        residual_outcomes.extend(float(item.outcomes[horizon]) for item in rows)
+    factor_ic = spearman(factor, outcomes)
+    baseline_ic = spearman(baseline, outcomes)
+    residual_ic = spearman(residualized, residual_outcomes)
     return {
         "factor_baseline_spearman": correlation,
-        "factor_outcome_spearman": spearman(factor, outcomes),
-        "marginal_residual_spearman": spearman(residualized, outcomes),
+        "factor_outcome_spearman": factor_ic,
+        "baseline_outcome_spearman": baseline_ic,
+        "residual_ic": residual_ic,
+        "marginal_residual_spearman": residual_ic,
+        "common_support_marginal_contribution": residual_ic,
+        "common_support_ic_delta": (
+            factor_ic - baseline_ic
+            if factor_ic is not None and baseline_ic is not None
+            else None
+        ),
+        "common_support_observation_count": len(eligible),
+        "common_support_date_count": len(
+            {item.signal_date for item in eligible}
+        ),
+        "common_support_bucket_count": len(groups),
     }
 
 
@@ -193,36 +235,82 @@ def portfolio_diagnostics(
     top_ns: Sequence[int] = (5, 10, 20),
     round_trip_cost: float,
     input_count: int | None = None,
+    primary_dates: Sequence[date] | None = None,
+    weight_attr: str | None = None,
 ) -> dict[str, Any]:
+    """Calculate outcome diagnostics without dropping daily implementation facts.
+
+    `primary_dates` may contain non-overlapping outcome dates.  It deliberately
+    does *not* constrain daily membership/weight turnover or common-member rank
+    churn: those are measured on every consecutive eligible ranking date.
+    """
+
+    if not math.isfinite(round_trip_cost) or round_trip_cost < 0.0:
+        raise ValueError("round-trip cost must be finite and non-negative")
+    frozen_primary_dates = _validate_primary_dates(primary_dates)
     dates: dict[date, list[FactorObservation]] = defaultdict(list)
+    invalid_score_count = 0
     for item in observations:
-        if item.outcomes.get(horizon) is not None:
-            dates[item.signal_date].append(item)
-    previous: dict[int, set[str]] = {}
+        if _score_value(item, score_attr) is None:
+            invalid_score_count += 1
+            continue
+        dates[item.signal_date].append(item)
+    _validate_daily_asset_uniqueness(dates)
     results: dict[str, Any] = {}
     for top_n in top_ns:
+        if top_n <= 0:
+            raise ValueError("Top-N diagnostics require positive portfolio size")
         gross_returns: list[float] = []
         net_returns: list[float] = []
-        turnovers: list[float] = []
-        churns: list[float] = []
+        membership_turnovers: list[float] = []
+        weight_turnovers: list[float] = []
+        rank_churns: list[float] = []
+        transitions: list[dict[str, Any]] = []
+        prior_date: date | None = None
+        prior_rows: tuple[FactorObservation, ...] | None = None
+        incomplete_outcome_dates = 0
         for signal_date in sorted(dates):
-            rows = sorted(
+            rows = _ranked_portfolio_rows(
                 dates[signal_date],
-                key=lambda item: (-float(getattr(item, score_attr)), item.asset_code),
-            )[:top_n]
+                score_attr=score_attr,
+                top_n=top_n,
+            )
             if not rows:
                 continue
-            selected = {row.asset_code for row in rows}
-            prior = previous.get(top_n, set())
-            turnover = (
-                1.0 if not prior else 1 - len(selected & prior) / max(len(selected), 1)
-            )
-            gross = mean(float(row.outcomes[horizon]) for row in rows)
+            if prior_rows is not None and prior_date is not None:
+                transition = _portfolio_transition(
+                    previous_date=prior_date,
+                    previous_rows=prior_rows,
+                    current_date=signal_date,
+                    current_rows=rows,
+                    weight_attr=weight_attr,
+                )
+                transitions.append(transition)
+                membership_turnovers.append(
+                    float(transition["membership_turnover"])
+                )
+                weight_turnovers.append(float(transition["weight_turnover"]))
+                if transition["normalized_rank_churn"] is not None:
+                    rank_churns.append(
+                        float(transition["normalized_rank_churn"])
+                    )
+            prior_date = signal_date
+            prior_rows = rows
+            if (
+                frozen_primary_dates is not None
+                and signal_date not in frozen_primary_dates
+            ):
+                continue
+            outcome_values = [_finite_number(row.outcomes.get(horizon)) for row in rows]
+            if any(value is None for value in outcome_values):
+                incomplete_outcome_dates += 1
+                continue
+            gross = mean(float(value) for value in outcome_values if value is not None)
             gross_returns.append(gross)
-            net_returns.append(gross - turnover * round_trip_cost)
-            turnovers.append(turnover)
-            churns.append(turnover)
-            previous[top_n] = selected
+            most_recent_turnover = (
+                membership_turnovers[-1] if membership_turnovers else 1.0
+            )
+            net_returns.append(gross - most_recent_turnover * round_trip_cost)
         wealth = 1.0
         peak = 1.0
         max_drawdown = 0.0
@@ -233,8 +321,24 @@ def portfolio_diagnostics(
         results[str(top_n)] = {
             "gross_return_mean": mean(gross_returns) if gross_returns else None,
             "net_return_mean": mean(net_returns) if net_returns else None,
-            "turnover_mean": mean(turnovers) if turnovers else None,
-            "rank_churn_mean": mean(churns) if churns else None,
+            # `turnover_mean` is retained as the legacy membership-turnover alias.
+            "turnover_mean": (
+                mean(membership_turnovers) if membership_turnovers else None
+            ),
+            "membership_turnover_mean": (
+                mean(membership_turnovers) if membership_turnovers else None
+            ),
+            "weight_turnover_mean": (
+                mean(weight_turnovers) if weight_turnovers else None
+            ),
+            "rank_churn_mean": mean(rank_churns) if rank_churns else None,
+            "daily_transition_count": len(transitions),
+            "common_member_rank_churn_transition_count": len(rank_churns),
+            "no_common_member_transition_count": sum(
+                item["normalized_rank_churn"] is None for item in transitions
+            ),
+            "daily_transitions": transitions,
+            "outcome_incomplete_date_count": incomplete_outcome_dates,
             "maximum_drawdown": max_drawdown if net_returns else None,
             "maximum_single_weight": 1 / top_n,
             "date_count": len(net_returns),
@@ -243,6 +347,155 @@ def portfolio_diagnostics(
     return {
         "top_n": results,
         "exclusion_rate": 1 - len(observations) / total if total else 0.0,
+        "invalid_score_exclusion_count": invalid_score_count,
+        "primary_dates_are_outcome_only": frozen_primary_dates is not None,
+    }
+
+
+def _finite_number(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _residual_values_against_baseline(
+    rows: Sequence[FactorObservation],
+) -> list[float]:
+    baseline = [float(item.baseline_value) for item in rows]
+    factor = [float(item.factor_value) for item in rows]
+    baseline_mean = mean(baseline)
+    factor_mean = mean(factor)
+    variance = sum((value - baseline_mean) ** 2 for value in baseline)
+    slope = (
+        sum(
+            (x - baseline_mean) * (y - factor_mean)
+            for x, y in zip(baseline, factor, strict=True)
+        )
+        / variance
+        if variance > 0
+        else 0.0
+    )
+    return [
+        value - (factor_mean + slope * (base - baseline_mean))
+        for base, value in zip(baseline, factor, strict=True)
+    ]
+
+
+def _score_value(item: FactorObservation, score_attr: str) -> float | None:
+    try:
+        raw_value = getattr(item, score_attr)
+    except AttributeError as exc:
+        raise ValueError(f"unknown score attribute: {score_attr}") from exc
+    return _finite_number(raw_value)
+
+
+def _validate_primary_dates(
+    primary_dates: Sequence[date] | None,
+) -> set[date] | None:
+    if primary_dates is None:
+        return None
+    values = tuple(primary_dates)
+    if len(values) != len(set(values)):
+        raise ValueError("primary dates must be unique")
+    return set(values)
+
+
+def _validate_daily_asset_uniqueness(
+    dates: Mapping[date, Sequence[FactorObservation]],
+) -> None:
+    for signal_date, rows in dates.items():
+        codes = tuple(item.asset_code for item in rows)
+        if len(codes) != len(set(codes)):
+            raise ValueError(
+                f"duplicate asset observations on signal date: {signal_date.isoformat()}"
+            )
+
+
+def _ranked_portfolio_rows(
+    rows: Sequence[FactorObservation],
+    *,
+    score_attr: str,
+    top_n: int,
+) -> tuple[FactorObservation, ...]:
+    return tuple(
+        sorted(
+            rows,
+            key=lambda item: (-float(_score_value(item, score_attr) or 0.0), item.asset_code),
+        )[:top_n]
+    )
+
+
+def _portfolio_weights(
+    rows: Sequence[FactorObservation],
+    *,
+    weight_attr: str | None,
+) -> dict[str, float]:
+    if weight_attr is None:
+        return {item.asset_code: 1.0 / len(rows) for item in rows}
+    raw_weights: list[float] = []
+    for item in rows:
+        try:
+            value = _finite_number(getattr(item, weight_attr))
+        except AttributeError as exc:
+            raise ValueError(f"unknown weight attribute: {weight_attr}") from exc
+        if value is None or value < 0.0:
+            raise ValueError("portfolio weights must be finite and non-negative")
+        raw_weights.append(value)
+    total = sum(raw_weights)
+    if total <= 0.0:
+        raise ValueError("portfolio weights must contain positive total weight")
+    return {
+        item.asset_code: weight / total
+        for item, weight in zip(rows, raw_weights, strict=True)
+    }
+
+
+def _portfolio_transition(
+    *,
+    previous_date: date,
+    previous_rows: Sequence[FactorObservation],
+    current_date: date,
+    current_rows: Sequence[FactorObservation],
+    weight_attr: str | None,
+) -> dict[str, Any]:
+    previous_ranks = {
+        item.asset_code: index for index, item in enumerate(previous_rows)
+    }
+    current_ranks = {
+        item.asset_code: index for index, item in enumerate(current_rows)
+    }
+    common = tuple(sorted(set(previous_ranks) & set(current_ranks)))
+    membership_turnover = 1.0 - len(common) / max(
+        len(previous_rows), len(current_rows), 1
+    )
+    previous_weights = _portfolio_weights(previous_rows, weight_attr=weight_attr)
+    current_weights = _portfolio_weights(current_rows, weight_attr=weight_attr)
+    weight_turnover = 0.5 * sum(
+        abs(previous_weights.get(code, 0.0) - current_weights.get(code, 0.0))
+        for code in sorted(set(previous_weights) | set(current_weights))
+    )
+    denominator = max(max(len(previous_rows), len(current_rows)) - 1, 1)
+    normalized_rank_churn = (
+        mean(
+            abs(previous_ranks[code] - current_ranks[code]) / denominator
+            for code in common
+        )
+        if common
+        else None
+    )
+    return {
+        "from_date": previous_date.isoformat(),
+        "to_date": current_date.isoformat(),
+        "previous_member_count": len(previous_rows),
+        "current_member_count": len(current_rows),
+        "common_member_count": len(common),
+        "membership_turnover": membership_turnover,
+        "weight_turnover": weight_turnover,
+        "normalized_rank_churn": normalized_rank_churn,
     }
 
 

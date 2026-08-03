@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -19,7 +20,9 @@ from app.services.strategy_lab.etf_point_in_time_research_loop import (
     ResearchPromotionState,
 )
 from app.services.strategy_lab.etf_ranking_candidates import (
+    FROZEN_RANKING_CANDIDATES,
     RANKING_COST_CONTRACT_HASH,
+    freeze_ranking_candidate_registry,
 )
 from app.services.strategy_lab.etf_ranking_validation import RankingEndpointResult
 
@@ -228,10 +231,54 @@ def _ranking_metric(
         "coverage_ratio": result.coverage_ratio,
         "average_turnover": result.average_turnover,
         "average_rank_churn": result.average_rank_churn,
+        "mean_candidate_cost_drag": result.mean_candidate_cost_drag,
+        "mean_baseline_cost_drag": result.mean_baseline_cost_drag,
         "candidate_maximum_drawdown": result.candidate_maximum_drawdown,
         "baseline_maximum_drawdown": result.baseline_maximum_drawdown,
         "result_hash": result.result_hash,
     }
+
+
+def _residual_common_support_summary(
+    factor_diagnostics: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Expose incremental-factor fields through the existing evidence payload.
+
+    The evidence model intentionally stores diagnostics in its established JSON
+    contract.  This avoids treating residual/common-support research as a new
+    production score or API contract.
+    """
+
+    fields = (
+        "residual_ic",
+        "marginal_residual_spearman",
+        "common_support_marginal_contribution",
+        "common_support_ic_delta",
+        "common_support_observation_count",
+        "common_support_date_count",
+        "common_support_bucket_count",
+    )
+    output: dict[str, dict[str, Any]] = {}
+    for name in sorted(factor_diagnostics):
+        value = factor_diagnostics[name]
+        if not isinstance(value, Mapping):
+            continue
+        supported = {
+            field: value[field]
+            for field in fields
+            if field in value
+        }
+        if supported:
+            output[str(name)] = supported
+    return output
+
+
+def _candidate_state(
+    promotion: ResearchPromotionDecision,
+) -> str:
+    if promotion.state is ResearchPromotionState.INSUFFICIENT_DATA:
+        return "insufficient_data"
+    return "research_only"
 
 
 def build_operational_factor_evidence(
@@ -248,22 +295,32 @@ def build_operational_factor_evidence(
     promotion: ResearchPromotionDecision,
     policy_shadow: dict[str, Any] | None = None,
     limitations: tuple[str, ...] = (),
+    primary_diagnostics: Mapping[str, Any] | None = None,
 ) -> FactorEvidencePayload:
     """Build current evidence from existing result objects without rescoring."""
 
     manifest.validate()
+    registry = freeze_ranking_candidate_registry(FROZEN_RANKING_CANDIDATES)
+    frozen_candidate_ids = tuple(item.candidate_id for item in registry.candidates)
     if (
         primary_result.endpoint_role != "primary"
         or primary_result.top_n != 10
         or primary_result.horizon_sessions != 5
         or primary_result.candidate_registry_hash
         != manifest.candidate_registry_hash
+        or manifest.candidate_registry_hash != registry.registry_hash
+        or primary_result.candidate_id not in frozen_candidate_ids
         or primary_result.cost_contract_hash != RANKING_COST_CONTRACT_HASH
     ):
         raise FactorEvidenceContractError(
             "operational primary result does not match the frozen ranking endpoint"
         )
-    if any(result.endpoint_role != "exploratory" for result in exploratory_results):
+    if any(
+        result.endpoint_role != "exploratory"
+        or result.candidate_registry_hash != registry.registry_hash
+        or result.candidate_id not in frozen_candidate_ids
+        for result in exploratory_results
+    ):
         raise FactorEvidenceContractError(
             "auxiliary ranking results must remain exploratory"
         )
@@ -276,6 +333,8 @@ def build_operational_factor_evidence(
             "operational exclusion counts must be non-negative"
         )
     adjusted_p_values = holm_bonferroni(raw_primary_p_values)
+    residual_common_support = _residual_common_support_summary(factor_diagnostics)
+    immutable_primary_diagnostics = dict(primary_diagnostics or {})
     primary_metric = _ranking_metric(
         primary_result,
         label=manifest.primary_ranking_endpoint,
@@ -302,6 +361,10 @@ def build_operational_factor_evidence(
         "primary_metric": primary_metric,
         "exploratory_metrics": exploratory_metrics,
         "factor_diagnostics": factor_diagnostics,
+        "residual_common_support": residual_common_support,
+        "primary_diagnostics": immutable_primary_diagnostics,
+        "main_candidate_ids": frozen_candidate_ids,
+        "candidate_state": _candidate_state(promotion),
         "policy_shadow": policy_shadow,
         "promotion": promotion_payload,
         "holdout": dict(split_reports.get("holdout") or {}),
@@ -325,11 +388,15 @@ def build_operational_factor_evidence(
             "baseline_net_return": primary_result.mean_baseline_net_return,
             "average_turnover": primary_result.average_turnover,
             "average_rank_churn": primary_result.average_rank_churn,
+            "candidate_cost_drag": primary_result.mean_candidate_cost_drag,
+            "baseline_cost_drag": primary_result.mean_baseline_cost_drag,
             "candidate_maximum_drawdown": (
                 primary_result.candidate_maximum_drawdown
             ),
             "baseline_maximum_drawdown": primary_result.baseline_maximum_drawdown,
             "coverage_ratio": primary_result.coverage_ratio,
+            "residual_common_support": residual_common_support,
+            "primary_diagnostics": immutable_primary_diagnostics,
         },
         exclusions=tuple(
             {"reason": reason, "count": count}
@@ -356,9 +423,20 @@ def build_operational_factor_evidence(
             "slippage_bps_per_side": primary_result.slippage_bps_per_side,
             "round_trip_cost_bps": primary_result.round_trip_cost_bps,
             "cost_contract_hash": primary_result.cost_contract_hash,
+            "candidate_cost_drag": primary_result.mean_candidate_cost_drag,
+            "baseline_cost_drag": primary_result.mean_baseline_cost_drag,
+            "provenance": immutable_primary_diagnostics.get(
+                "cost_provenance",
+                "unavailable",
+            ),
         },
         limitations=(
             *limitations,
+            *(
+                ("insufficient PIT evidence; production weights remain frozen",)
+                if promotion.state is ResearchPromotionState.INSUFFICIENT_DATA
+                else ()
+            ),
             "research evidence only; manual promotion required",
         ),
         report=report,

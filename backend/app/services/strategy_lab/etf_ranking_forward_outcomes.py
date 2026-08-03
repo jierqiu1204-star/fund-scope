@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import math
+from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, replace
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Literal
 
 from app.services.tracked_positions.lifecycle import stable_contract_hash
@@ -20,6 +21,33 @@ from .etf_ranking_candidates import (
 FORWARD_HORIZONS = (1, 3, 5, 10)
 FORWARD_EXECUTION_MODEL = "t_plus_one_adjusted_close_v1"
 _BPS_DENOMINATOR = 10_000.0
+FACTUAL_CUTOFF_VALID_COST_PROVENANCE = "factual_cutoff_valid"
+FROZEN_CONSERVATIVE_COST_PROVENANCE = "frozen_conservative_fallback"
+NOT_EVALUATED_COST_PROVENANCE = "not_evaluated"
+FORWARD_COST_PROVENANCE_CONTRACT_HASH = stable_contract_hash(
+    {
+        "contract_id": "ranking_forward_execution_cost_provenance_v1",
+        "factual_inputs": (
+            "bid_ask_or_declared_spread",
+            "liquidity_notional",
+            "declared_liquidity_cost_bps_per_side",
+            "quote_time",
+            "available_at",
+            "execution_cutoff",
+            "provider",
+            "source_hash",
+        ),
+        "factual_formula": (
+            "fee_bps_per_side_plus_half_spread_bps_plus_declared_liquidity_cost"
+        ),
+        "fallback": {
+            "cost_contract_hash": RANKING_COST_CONTRACT_HASH,
+            "fee_bps_per_side": RANKING_FEE_BPS_PER_SIDE,
+            "slippage_bps_per_side": RANKING_SLIPPAGE_BPS_PER_SIDE,
+        },
+        "no_intraday_reconstruction": True,
+    }
+)
 
 
 class ForwardOutcomeContractError(ValueError):
@@ -67,6 +95,36 @@ class ForwardAdjustedClose:
 
 
 @dataclass(frozen=True)
+class ForwardExecutionCostEvidence:
+    """Factual execution evidence available at an individual trade cutoff.
+
+    This is deliberately a research input rather than a quote reconstruction
+    adapter.  A missing, stale, fallback-timestamped, or later-visible fact is
+    retained as an explicit fallback reason instead of being filled from a
+    current quote or adjusted close.
+    """
+
+    asset_code: str
+    execution_session: date
+    provider: str
+    source_hash: str
+    quote_time: datetime | None = None
+    available_at: datetime | None = None
+    execution_cutoff: datetime | None = None
+    bid: float | None = None
+    ask: float | None = None
+    quoted_spread_bps: float | None = None
+    liquidity_notional: float | None = None
+    liquidity_cost_bps_per_side: float | None = None
+    quote_time_is_fallback: bool = False
+    decision_eligible: bool = True
+
+    @property
+    def evidence_hash(self) -> str:
+        return stable_contract_hash(asdict(self))
+
+
+@dataclass(frozen=True)
 class RankingForwardOutcome:
     replay_run_key: str
     replay_date: date
@@ -83,10 +141,26 @@ class RankingForwardOutcome:
     exit_adjusted_close: float | None
     gross_return: float | None
     net_return: float | None
-    fee_bps_per_side: int
-    slippage_bps_per_side: int
-    round_trip_cost_bps: int
+    fee_bps_per_side: float
+    slippage_bps_per_side: float
+    round_trip_cost_bps: float
     cost_contract_hash: str
+    cost_provenance: Literal[
+        "factual_cutoff_valid",
+        "frozen_conservative_fallback",
+        "not_evaluated",
+    ]
+    cost_provenance_contract_hash: str
+    cost_evidence: tuple[ForwardExecutionCostEvidence, ...]
+    cost_input_hashes: tuple[str, ...]
+    cost_source_hashes: tuple[str, ...]
+    cost_unavailable_reasons: tuple[str, ...]
+    entry_slippage_bps_per_side: float | None
+    exit_slippage_bps_per_side: float | None
+    entry_factual_spread_bps: float | None
+    exit_factual_spread_bps: float | None
+    entry_liquidity_cost_bps_per_side: float | None
+    exit_liquidity_cost_bps_per_side: float | None
     exclusion_reason: str | None
     missing_leg: Literal["entry", "exit"] | None
     input_hash: str
@@ -112,10 +186,15 @@ class RankingForwardOutcomeBundle:
     source_selection_hash: str
     execution_model: str
     horizons: tuple[int, ...]
-    fee_bps_per_side: int
-    slippage_bps_per_side: int
-    round_trip_cost_bps: int
+    fee_bps_per_side: float
+    slippage_bps_per_side: float
+    round_trip_cost_bps: float
     cost_contract_hash: str
+    cost_provenance_contract_hash: str
+    cost_provenance_counts: tuple[tuple[str, int], ...]
+    cost_unavailable_reason_counts: tuple[tuple[str, int], ...]
+    cost_input_hashes: tuple[str, ...]
+    execution_cost_evidence_hash: str
     requested_outcome_count: int
     completed_outcome_count: int
     pending_outcome_count: int
@@ -210,6 +289,212 @@ def _outcome_payload(outcome: RankingForwardOutcome) -> dict[str, Any]:
     return payload
 
 
+def _finite_nonnegative(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number >= 0.0 else None
+
+
+def _cutoff_valid(
+    value: datetime | None,
+    cutoff: datetime | None,
+) -> bool:
+    if value is None or cutoff is None:
+        return False
+    if (value.tzinfo is None) != (cutoff.tzinfo is None):
+        return False
+    try:
+        return value <= cutoff
+    except TypeError:
+        return False
+
+
+def _cost_evidence_reasons(
+    evidence: ForwardExecutionCostEvidence,
+) -> tuple[float | None, tuple[str, ...]]:
+    """Return factual spread/liquidity inputs or stable unavailable reasons."""
+
+    reasons: list[str] = []
+    if not evidence.provider.strip():
+        reasons.append("missing_provider")
+    if not evidence.source_hash.strip():
+        reasons.append("missing_source_hash")
+    if evidence.quote_time_is_fallback:
+        reasons.append("quote_time_fallback")
+    if evidence.decision_eligible is not True:
+        reasons.append("not_decision_eligible")
+    if evidence.quote_time is None:
+        reasons.append("missing_quote_time")
+    elif not _cutoff_valid(evidence.quote_time, evidence.execution_cutoff):
+        reasons.append("quote_time_after_execution_cutoff")
+    elif evidence.quote_time.date() != evidence.execution_session:
+        reasons.append("quote_time_outside_execution_session")
+    if evidence.available_at is None:
+        reasons.append("missing_available_at")
+    elif not _cutoff_valid(evidence.available_at, evidence.execution_cutoff):
+        reasons.append("available_after_execution_cutoff")
+
+    spread_bps: float | None = None
+    bid = _finite_nonnegative(evidence.bid)
+    ask = _finite_nonnegative(evidence.ask)
+    declared_spread = _finite_nonnegative(evidence.quoted_spread_bps)
+    if evidence.bid is not None or evidence.ask is not None:
+        if bid is None or ask is None or bid <= 0.0 or ask <= bid:
+            reasons.append("invalid_bid_ask")
+        else:
+            spread_bps = (ask - bid) / ((ask + bid) / 2.0) * _BPS_DENOMINATOR
+            if (
+                declared_spread is not None
+                and not math.isclose(
+                    spread_bps,
+                    declared_spread,
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                )
+            ):
+                reasons.append("conflicting_spread_inputs")
+    elif declared_spread is not None:
+        spread_bps = declared_spread
+    else:
+        reasons.append("missing_spread")
+
+    liquidity_notional = _finite_nonnegative(evidence.liquidity_notional)
+    liquidity_cost = _finite_nonnegative(evidence.liquidity_cost_bps_per_side)
+    if liquidity_notional is None or liquidity_notional <= 0.0:
+        reasons.append("missing_or_invalid_liquidity_notional")
+    if liquidity_cost is None:
+        reasons.append("missing_or_invalid_liquidity_cost")
+    if reasons:
+        return None, tuple(sorted(set(reasons)))
+    assert spread_bps is not None and liquidity_cost is not None
+    return spread_bps / 2.0 + liquidity_cost, ()
+
+
+def _index_execution_cost_evidence(
+    rows: Iterable[ForwardExecutionCostEvidence],
+    *,
+    trading_sessions: tuple[date, ...],
+) -> tuple[
+    dict[tuple[str, date], ForwardExecutionCostEvidence],
+    tuple[ForwardExecutionCostEvidence, ...],
+]:
+    by_key: dict[tuple[str, date], ForwardExecutionCostEvidence] = {}
+    valid_sessions = set(trading_sessions)
+    for row in rows:
+        if not row.asset_code.strip():
+            raise ForwardOutcomeContractError(
+                "execution cost evidence asset code is required"
+            )
+        if row.execution_session not in valid_sessions:
+            raise ForwardOutcomeContractError(
+                "execution cost evidence is outside the trading-session calendar"
+            )
+        key = (row.asset_code, row.execution_session)
+        if key in by_key:
+            raise ForwardOutcomeContractError("duplicate execution cost evidence")
+        by_key[key] = row
+    return by_key, tuple(
+        sorted(
+            by_key.values(),
+            key=lambda row: (row.asset_code, row.execution_session),
+        )
+    )
+
+
+def _execution_cost_decision(
+    *,
+    asset_code: str,
+    entry_session: date,
+    exit_session: date,
+    evidence_by_key: dict[tuple[str, date], ForwardExecutionCostEvidence],
+) -> dict[str, Any]:
+    facts = (
+        ("entry", entry_session),
+        ("exit", exit_session),
+    )
+    slippages: dict[str, float] = {}
+    spreads: dict[str, float] = {}
+    liquidity_costs: dict[str, float] = {}
+    input_hashes: list[str] = []
+    source_hashes: list[str] = []
+    cost_evidence: list[ForwardExecutionCostEvidence] = []
+    unavailable_reasons: list[str] = []
+    for leg, session_date in facts:
+        evidence = evidence_by_key.get((asset_code, session_date))
+        if evidence is None:
+            unavailable_reasons.append(f"{leg}_cost_evidence_missing")
+            continue
+        cost_evidence.append(evidence)
+        input_hashes.append(evidence.evidence_hash)
+        if evidence.source_hash.strip():
+            source_hashes.append(evidence.source_hash)
+        slippage, reasons = _cost_evidence_reasons(evidence)
+        if reasons:
+            unavailable_reasons.extend(f"{leg}_{reason}" for reason in reasons)
+            continue
+        assert slippage is not None
+        slippages[leg] = slippage
+        if evidence.bid is not None and evidence.ask is not None:
+            bid = _finite_nonnegative(evidence.bid)
+            ask = _finite_nonnegative(evidence.ask)
+            assert bid is not None and ask is not None
+            spreads[leg] = (ask - bid) / ((ask + bid) / 2.0) * _BPS_DENOMINATOR
+        else:
+            declared_spread = _finite_nonnegative(evidence.quoted_spread_bps)
+            assert declared_spread is not None
+            spreads[leg] = declared_spread
+        liquidity_cost = _finite_nonnegative(evidence.liquidity_cost_bps_per_side)
+        assert liquidity_cost is not None
+        liquidity_costs[leg] = liquidity_cost
+    if not unavailable_reasons and len(slippages) == len(facts):
+        return {
+            "cost_provenance": FACTUAL_CUTOFF_VALID_COST_PROVENANCE,
+            "entry_slippage_bps_per_side": slippages["entry"],
+            "exit_slippage_bps_per_side": slippages["exit"],
+            "entry_factual_spread_bps": spreads["entry"],
+            "exit_factual_spread_bps": spreads["exit"],
+            "entry_liquidity_cost_bps_per_side": liquidity_costs["entry"],
+            "exit_liquidity_cost_bps_per_side": liquidity_costs["exit"],
+            "cost_evidence": tuple(cost_evidence),
+            "cost_input_hashes": tuple(input_hashes),
+            "cost_source_hashes": tuple(source_hashes),
+            "cost_unavailable_reasons": (),
+        }
+    return {
+        "cost_provenance": FROZEN_CONSERVATIVE_COST_PROVENANCE,
+        "entry_slippage_bps_per_side": float(RANKING_SLIPPAGE_BPS_PER_SIDE),
+        "exit_slippage_bps_per_side": float(RANKING_SLIPPAGE_BPS_PER_SIDE),
+        "entry_factual_spread_bps": None,
+        "exit_factual_spread_bps": None,
+        "entry_liquidity_cost_bps_per_side": None,
+        "exit_liquidity_cost_bps_per_side": None,
+        "cost_evidence": tuple(cost_evidence),
+        "cost_input_hashes": tuple(input_hashes),
+        "cost_source_hashes": tuple(source_hashes),
+        "cost_unavailable_reasons": tuple(sorted(set(unavailable_reasons))),
+    }
+
+
+def _not_evaluated_cost_fields() -> dict[str, Any]:
+    return {
+        "cost_provenance": NOT_EVALUATED_COST_PROVENANCE,
+        "cost_evidence": (),
+        "cost_input_hashes": (),
+        "cost_source_hashes": (),
+        "cost_unavailable_reasons": ("outcome_not_completed",),
+        "entry_slippage_bps_per_side": None,
+        "exit_slippage_bps_per_side": None,
+        "entry_factual_spread_bps": None,
+        "exit_factual_spread_bps": None,
+        "entry_liquidity_cost_bps_per_side": None,
+        "exit_liquidity_cost_bps_per_side": None,
+    }
+
+
 def _outcome(
     *,
     selection: RankingCandidateSelection,
@@ -218,6 +503,9 @@ def _outcome(
     sessions: tuple[date, ...],
     signal_index: int,
     closes: dict[tuple[str, date], ForwardAdjustedClose],
+    execution_cost_evidence: dict[
+        tuple[str, date], ForwardExecutionCostEvidence
+    ],
     input_hash: str,
 ) -> RankingForwardOutcome:
     entry_index = signal_index + 1
@@ -236,6 +524,7 @@ def _outcome(
         "round_trip_cost_bps": 2
         * (RANKING_FEE_BPS_PER_SIDE + RANKING_SLIPPAGE_BPS_PER_SIDE),
         "cost_contract_hash": RANKING_COST_CONTRACT_HASH,
+        "cost_provenance_contract_hash": FORWARD_COST_PROVENANCE_CONTRACT_HASH,
         "input_hash": input_hash,
         "outcome_hash": "pending",
     }
@@ -251,6 +540,7 @@ def _outcome(
             exit_adjusted_close=None,
             gross_return=None,
             net_return=None,
+            **_not_evaluated_cost_fields(),
             exclusion_reason="future_window_pending",
             missing_leg=None,
         )
@@ -280,6 +570,7 @@ def _outcome(
             ),
             gross_return=None,
             net_return=None,
+            **_not_evaluated_cost_fields(),
             exclusion_reason="missing_adjusted_entry_or_exit",
             missing_leg=missing_leg,
         )
@@ -289,18 +580,36 @@ def _outcome(
         )
 
     assert entry is not None and exit_row is not None
+    cost_fields = _execution_cost_decision(
+        asset_code=asset_code,
+        entry_session=entry_session,
+        exit_session=exit_session,
+        evidence_by_key=execution_cost_evidence,
+    )
+    entry_slippage_bps = float(cost_fields["entry_slippage_bps_per_side"])
+    exit_slippage_bps = float(cost_fields["exit_slippage_bps_per_side"])
     fee = RANKING_FEE_BPS_PER_SIDE / _BPS_DENOMINATOR
-    slippage = RANKING_SLIPPAGE_BPS_PER_SIDE / _BPS_DENOMINATOR
+    entry_slippage = entry_slippage_bps / _BPS_DENOMINATOR
+    exit_slippage = exit_slippage_bps / _BPS_DENOMINATOR
     gross_return = exit_row.adjusted_close / entry.adjusted_close - 1.0
     net_return = (
         exit_row.adjusted_close
-        * (1.0 - slippage)
+        * (1.0 - exit_slippage)
         * (1.0 - fee)
-        / (entry.adjusted_close * (1.0 + slippage) * (1.0 + fee))
+        / (entry.adjusted_close * (1.0 + entry_slippage) * (1.0 + fee))
         - 1.0
     )
-    draft = RankingForwardOutcome(
+    completed_common = {
         **common,
+        "slippage_bps_per_side": (entry_slippage_bps + exit_slippage_bps) / 2.0,
+        "round_trip_cost_bps": (
+            2.0 * RANKING_FEE_BPS_PER_SIDE
+            + entry_slippage_bps
+            + exit_slippage_bps
+        ),
+    }
+    draft = RankingForwardOutcome(
+        **completed_common,
         status="completed",
         entry_session=entry_session,
         exit_session=exit_session,
@@ -308,6 +617,7 @@ def _outcome(
         exit_adjusted_close=exit_row.adjusted_close,
         gross_return=gross_return,
         net_return=net_return,
+        **cost_fields,
         exclusion_reason=None,
         missing_leg=None,
     )
@@ -322,6 +632,7 @@ def calculate_ranking_forward_outcomes(
     selection: RankingCandidateSelection,
     trading_sessions: Sequence[date],
     adjusted_closes: Iterable[ForwardAdjustedClose],
+    execution_cost_evidence: Iterable[ForwardExecutionCostEvidence] = (),
     horizons: Iterable[int] = FORWARD_HORIZONS,
 ) -> RankingForwardOutcomeBundle:
     """Calculate immutable research outcomes without writing production state."""
@@ -336,6 +647,10 @@ def calculate_ranking_forward_outcomes(
         adjusted_closes,
         trading_sessions=sessions,
     )
+    cost_evidence_by_key, ordered_cost_evidence = _index_execution_cost_evidence(
+        execution_cost_evidence,
+        trading_sessions=sessions,
+    )
     input_hash = stable_contract_hash(
         {
             "contract_id": "ranking_forward_outcome_input_v1",
@@ -343,8 +658,12 @@ def calculate_ranking_forward_outcomes(
             "trading_sessions": sessions,
             "horizons": frozen_horizons,
             "adjusted_closes": tuple(asdict(row) for row in ordered_closes),
+            "execution_cost_evidence": tuple(
+                asdict(row) for row in ordered_cost_evidence
+            ),
             "execution_model": FORWARD_EXECUTION_MODEL,
             "cost_contract_hash": RANKING_COST_CONTRACT_HASH,
+            "cost_provenance_contract_hash": FORWARD_COST_PROVENANCE_CONTRACT_HASH,
         }
     )
     signal_index = sessions.index(selection.replay_date)
@@ -356,6 +675,7 @@ def calculate_ranking_forward_outcomes(
             sessions=sessions,
             signal_index=signal_index,
             closes=closes_by_key,
+            execution_cost_evidence=cost_evidence_by_key,
             input_hash=input_hash,
         )
         for asset_code in selection.selected_asset_codes
@@ -382,6 +702,27 @@ def calculate_ranking_forward_outcomes(
         )
         for horizon in frozen_horizons
     )
+    provenance_counts = Counter(outcome.cost_provenance for outcome in outcomes)
+    unavailable_reason_counts = Counter(
+        reason
+        for outcome in outcomes
+        for reason in outcome.cost_unavailable_reasons
+    )
+    cost_input_hashes = tuple(
+        sorted(
+            {
+                input_hash
+                for outcome in outcomes
+                for input_hash in outcome.cost_input_hashes
+            }
+        )
+    )
+    evidence_hash = stable_contract_hash(
+        {
+            "contract_hash": FORWARD_COST_PROVENANCE_CONTRACT_HASH,
+            "evidence": tuple(asdict(row) for row in ordered_cost_evidence),
+        }
+    )
     draft = RankingForwardOutcomeBundle(
         replay_run_key=selection.replay_run_key,
         replay_date=selection.replay_date,
@@ -396,6 +737,13 @@ def calculate_ranking_forward_outcomes(
         round_trip_cost_bps=2
         * (RANKING_FEE_BPS_PER_SIDE + RANKING_SLIPPAGE_BPS_PER_SIDE),
         cost_contract_hash=RANKING_COST_CONTRACT_HASH,
+        cost_provenance_contract_hash=FORWARD_COST_PROVENANCE_CONTRACT_HASH,
+        cost_provenance_counts=tuple(sorted(provenance_counts.items())),
+        cost_unavailable_reason_counts=tuple(
+            sorted(unavailable_reason_counts.items())
+        ),
+        cost_input_hashes=cost_input_hashes,
+        execution_cost_evidence_hash=evidence_hash,
         requested_outcome_count=len(outcomes),
         completed_outcome_count=sum(
             outcome.status == "completed" for outcome in outcomes

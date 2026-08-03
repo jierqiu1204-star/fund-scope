@@ -72,14 +72,57 @@ class EtfRankingSnapshotMetadataOut(BaseModel):
     readiness_state: Literal["blocked", "degraded", "complete"] | None = None
     policy_version: str | None = None
     snapshot_state: Literal["unavailable", "provisional", "complete"] = "unavailable"
+    surface_availability_state: str | None = None
     unavailable_reason: str | None = None
     market_decision_cutoff: datetime | None = None
     data_receipt_cutoff: datetime | None = None
     replay_visibility_cutoff: datetime | None = None
     resource_profile: dict[str, Any] = Field(default_factory=dict)
     provider_health_identity: dict[str, Any] = Field(default_factory=dict)
+    quality_evidence: dict[str, Any] = Field(default_factory=dict)
+    publication_evidence: dict[str, Any] = Field(default_factory=dict)
+    pit_evidence: dict[str, Any] = Field(default_factory=dict)
+    cost_evidence: dict[str, Any] = Field(default_factory=dict)
+    concentration_evidence: dict[str, Any] = Field(default_factory=dict)
     freshness_status: str = "waiting"
     limitations: list[str] = Field(default_factory=list)
+
+
+class EtfObservationOnlyItemOut(BaseModel):
+    code: str
+    name: str
+    reasons: list[str] = Field(default_factory=list)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class EtfObservationOnlyListOut(BaseModel):
+    items: list[EtfObservationOnlyItemOut] = Field(default_factory=list)
+    total: int = 0
+    snapshot: EtfRankingSnapshotMetadataOut
+
+
+class EtfIdentityEvidenceGroupOut(BaseModel):
+    fact_kind: Literal["taxonomy", "tracked_underlying"]
+    source: str
+    provider_version: str
+    rule_version: str
+    count: int
+    latest_observed_at: datetime
+
+
+class EtfIdentityCoverageOut(BaseModel):
+    cutoff: datetime
+    universe_count: int
+    taxonomy_fact_count: int
+    known_taxonomy_count: int
+    unknown_taxonomy_count: int
+    taxonomy_coverage_ratio: float
+    tracked_underlying_fact_count: int
+    resolved_underlying_count: int
+    unresolved_underlying_count: int
+    tracked_underlying_coverage_ratio: float
+    evidence_groups: list[EtfIdentityEvidenceGroupOut] = Field(default_factory=list)
+    identity_fact_contract: dict[str, Any]
 
 
 class EtfSignalValidationItemOut(BaseModel):
@@ -254,7 +297,20 @@ class ShortResearchAssetOut(BaseModel):
     actionable_exclusion_reasons: list[str] = Field(default_factory=list)
     actionable_field_statuses: dict[str, str] = Field(default_factory=dict)
     actionable_source_times: dict[str, str] = Field(default_factory=dict)
+    canonical_research_rank: int | None = None
+    observation_only: bool = False
     history_confidence_tier: str | None = None
+    tradability_eligible: bool | None = None
+    average_turnover_20d: float | None = None
+    taxonomy_bucket: str | None = None
+    tracked_underlying_id: str | None = None
+    tracked_underlying_coverage: float | None = None
+    underlying_evidence: dict[str, Any] = Field(default_factory=dict)
+    clone_group_id: str | None = None
+    clone_policy_active: bool | None = None
+    diversified_representative: bool | None = None
+    diversified_presentation_position: int | None = None
+    peer_diagnostics: dict[str, Any] = Field(default_factory=dict)
     total_score: float
     technical_score: float | None = None
     opportunity_score: float | None = None

@@ -129,6 +129,7 @@ def _series(code: str, *, turnover: float | None = 1_000_000.0) -> PointInTimeAd
         earliest_source_timestamp=_cutoff() - timedelta(minutes=2),
         latest_source_timestamp=_cutoff() - timedelta(minutes=1),
         synchronized_after_cutoff=False,
+        revision_hashes=(HASH_D,),
         series_hash=HASH_D,
     )
 

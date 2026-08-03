@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import event
 
 from app.models.entities import (
+    EtfAdjustedPriceRevision,
     EtfPointInTimeMembershipFact,
     EtfPriceHistory,
     TradableEtf,
@@ -92,8 +93,8 @@ def _adjusted_history(
     count: int = 61,
     source_timestamp: datetime = datetime(2022, 6, 30, 6, 30),
     daily_step: float = 0.005,
-) -> list[EtfPriceHistory]:
-    rows: list[EtfPriceHistory] = []
+) -> list[EtfPriceHistory | EtfAdjustedPriceRevision]:
+    rows: list[EtfPriceHistory | EtfAdjustedPriceRevision] = []
     trade_dates: list[date] = []
     cursor = end_date
     while len(trade_dates) < count:
@@ -102,25 +103,43 @@ def _adjusted_history(
         cursor -= timedelta(days=1)
     for offset, trade_date in enumerate(reversed(trade_dates)):
         raw_close = 1.0 + offset * daily_step
-        rows.append(
-            EtfPriceHistory(
-                etf_code=code,
-                trade_date=trade_date,
-                open=raw_close * 0.995,
-                high=raw_close * 1.01,
-                low=raw_close * 0.99,
-                close=raw_close,
-                volume=1_000_000 + offset,
-                turnover=raw_close * (1_000_000 + offset),
-                pct_change=0.0,
-                raw_price_basis="raw_ohlc",
-                research_adjusted_value=raw_close * 2.0,
-                research_price_basis="total_return_adjusted",
-                data_provider="eastmoney",
-                provider_version="eastmoney.push2his.kline.hfq_v1",
-                source_timestamp=source_timestamp,
-                adjustment_version="eastmoney.push2his.kline.hfq_v1",
-                decision_eligible=True,
+        payload_hash = hashlib.sha256(
+            f"{code}:{trade_date.isoformat()}:{raw_close}:payload".encode()
+        ).hexdigest()
+        revision_hash = hashlib.sha256(
+            f"{code}:{trade_date.isoformat()}:{source_timestamp.isoformat()}:revision".encode()
+        ).hexdigest()
+        values = {
+            "etf_code": code,
+            "trade_date": trade_date,
+            "open": raw_close * 0.995,
+            "high": raw_close * 1.01,
+            "low": raw_close * 0.99,
+            "close": raw_close,
+            "volume": 1_000_000 + offset,
+            "turnover": raw_close * (1_000_000 + offset),
+            "pct_change": 0.0,
+            "raw_price_basis": "raw_ohlc",
+            "research_adjusted_value": raw_close * 2.0,
+            "research_price_basis": "total_return_adjusted",
+            "data_provider": "eastmoney",
+            "provider_version": "eastmoney.push2his.kline.hfq_v1",
+            "source_timestamp": source_timestamp,
+            "adjustment_version": "eastmoney.push2his.kline.hfq_v1",
+            "decision_eligible": True,
+            "decision_ineligibility_reason": None,
+        }
+        rows.extend(
+            (
+                EtfPriceHistory(**values),
+                EtfAdjustedPriceRevision(
+                    **values,
+                    first_seen_at=source_timestamp,
+                    observed_at=source_timestamp,
+                    payload_hash=payload_hash,
+                    revision_hash=revision_hash,
+                    created_at=source_timestamp,
+                ),
             )
         )
     return rows
@@ -450,13 +469,13 @@ async def test_loader_reports_stable_adjustment_and_eligibility_exclusions(app) 
         item.asset_code: item.reason
         for item in snapshot.exclusions
     } == {
-        "510101": ReplayInputExclusionReason.RAW_OR_FALLBACK_PROVIDER_DATA,
-        "510102": ReplayInputExclusionReason.UNPROVEN_ADJUSTMENT_POINT_IN_TIME,
+        "510101": ReplayInputExclusionReason.STALE_OR_INELIGIBLE_ADJUSTED_INPUT,
+        "510102": ReplayInputExclusionReason.STALE_OR_INELIGIBLE_ADJUSTED_INPUT,
         "510103": ReplayInputExclusionReason.STALE_OR_INELIGIBLE_ADJUSTED_INPUT,
         "510104": ReplayInputExclusionReason.STALE_OR_INELIGIBLE_ADJUSTED_INPUT,
         "510105": ReplayInputExclusionReason.STALE_OR_INELIGIBLE_ADJUSTED_INPUT,
         "510106": ReplayInputExclusionReason.RAW_OR_FALLBACK_PROVIDER_DATA,
-        "510107": ReplayInputExclusionReason.FUTURE_KNOWN_INPUT,
+        "510107": ReplayInputExclusionReason.STALE_OR_INELIGIBLE_ADJUSTED_INPUT,
     }
 
 
@@ -564,7 +583,10 @@ async def test_cutoff_at_t_is_invariant_to_larger_database_history(app) -> None:
     assert through_t.eligible_inputs == larger_database.eligible_inputs
     assert through_t.universe_hash == larger_database.universe_hash
     assert through_t.input_hash == larger_database.input_hash
-    assert through_t.source_snapshot_hash != larger_database.source_snapshot_hash
+    # Late rows outside the cutoff no longer rewrite the selected revision
+    # identity.  They may still add an explicit current-vintage exclusion to
+    # the coverage audit below, but cannot change historical inputs or ranks.
+    assert through_t.source_snapshot_hash == larger_database.source_snapshot_hash
     assert through_t.coverage_manifest_hash != larger_database.coverage_manifest_hash
     assert features_through_t == features_larger
     assert ranks_through_t == ranks_larger

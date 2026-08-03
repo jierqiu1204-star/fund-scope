@@ -51,7 +51,20 @@ _MANUAL_OVERRIDES: dict[str, tuple[str, str, str, list[str], str]] = {
     "518880": ("commodity", "gold", "黄金", ["商品"], "黄金 ETF 代码覆盖"),
 }
 
-_KEYWORD_RULES: list[tuple[tuple[str, ...], str, str, str, list[str]]] = [
+_CROSS_BORDER_KEYWORD_RULES: list[tuple[tuple[str, ...], str, str, str, list[str]]] = [
+    (("纳斯达克",), "cross_border", "cross_border", "纳指", ["纳斯达克", "跨境"]),
+    (("纳指",), "cross_border", "cross_border", "纳指", ["纳斯达克", "跨境"]),
+    (("恒生科技",), "cross_border", "cross_border", "恒生科技", ["港股", "跨境"]),
+    (
+        ("恒生", "港股", "中概", "日经", "标普", "德国", "法国"),
+        "cross_border",
+        "cross_border",
+        "跨境",
+        ["海外市场"],
+    ),
+]
+
+_DOMESTIC_KEYWORD_RULES: list[tuple[tuple[str, ...], str, str, str, list[str]]] = [
     (("半导体", "芯片", "集成电路"), "equity", "technology", "半导体", ["芯片", "科技"]),
     (("机器人", "具身智能", "人形机器人", "工业机器人"), "equity", "technology", "机器人", ["高端制造", "人工智能"]),
     (("人工智能", "AI", "云计算", "软件", "计算机"), "equity", "technology", "人工智能", ["AI", "科技"]),
@@ -75,9 +88,6 @@ _KEYWORD_RULES: list[tuple[tuple[str, ...], str, str, str, list[str]]] = [
     (("黄金",), "commodity", "gold", "黄金", ["商品"]),
     (("债", "国债", "政金债", "可转债"), "bond", "bond", "债券", ["低波动"]),
     (("货币", "现金", "添益", "保证金"), "money", "money", "货币", ["现金管理"]),
-    (("纳斯达克", "纳指"), "cross_border", "cross_border", "纳指", ["纳斯达克", "跨境"]),
-    (("恒生科技",), "cross_border", "cross_border", "恒生科技", ["港股", "跨境"]),
-    (("恒生", "港股", "中概", "日经", "标普", "德国", "法国"), "cross_border", "cross_border", "跨境", ["海外市场"]),
     (("沪深300", "上证50", "中证500", "中证1000", "A500", "宽基"), "broad_base", "broad_base", "宽基", ["指数"]),
 ]
 
@@ -86,6 +96,7 @@ _ASSET_CLASS_BUCKETS = {
     "commodity": ("commodity", "gold", "商品"),
     "cross_border": ("cross_border", "cross_border", "跨境"),
     "broad_index": ("broad_base", "broad_base", "宽基"),
+    "money": ("money", "money", "货币"),
     "sector": ("equity", "unknown", UNKNOWN_THEME),
 }
 
@@ -100,7 +111,20 @@ def classify_etf_theme(
     name: str,
     asset_class: str | None = None,
     theme_tags: list[str] | tuple[str, ...] | None = None,
+    authoritative_profile: EtfThemeProfileData | None = None,
 ) -> EtfThemeProfileData:
+    if authoritative_profile is not None:
+        return EtfThemeProfileData(
+            etf_code=code,
+            asset_bucket=authoritative_profile.asset_bucket,
+            theme_group=authoritative_profile.theme_group,
+            primary_theme=authoritative_profile.primary_theme,
+            secondary_themes=_dedupe(authoritative_profile.secondary_themes),
+            classification_source="authoritative",
+            classification_confidence=authoritative_profile.classification_confidence,
+            classification_reason=authoritative_profile.classification_reason,
+        )
+
     tags = list(theme_tags or [])
     if code in _MANUAL_OVERRIDES:
         bucket, group, primary, secondary, reason = _MANUAL_OVERRIDES[code]
@@ -115,8 +139,8 @@ def classify_etf_theme(
             classification_reason=reason,
         )
 
-    text = " ".join([name, asset_class or "", *tags])
-    for keywords, bucket, group, primary, secondary in _KEYWORD_RULES:
+    text = " ".join([name, *tags])
+    for keywords, bucket, group, primary, secondary in _CROSS_BORDER_KEYWORD_RULES:
         matched = next((keyword for keyword in keywords if keyword in text), None)
         if matched:
             return EtfThemeProfileData(
@@ -125,9 +149,9 @@ def classify_etf_theme(
                 theme_group=group,
                 primary_theme=primary,
                 secondary_themes=_dedupe([*secondary, *tags]),
-                classification_source="fund_name",
+                classification_source="cross_border_keyword",
                 classification_confidence="high" if matched in name else "medium",
-                classification_reason=f"名称或标签命中“{matched}”。",
+                classification_reason=f"跨境名称或标签命中“{matched}”。",
             )
 
     if asset_class in _ASSET_CLASS_BUCKETS:
@@ -139,9 +163,23 @@ def classify_etf_theme(
                 theme_group=group,
                 primary_theme=primary,
                 secondary_themes=_dedupe(tags),
-                classification_source="category",
+                classification_source="asset_class",
                 classification_confidence="medium",
                 classification_reason=f"资产类别为 {asset_class}，但名称没有更细主题证据。",
+            )
+
+    for keywords, bucket, group, primary, secondary in _DOMESTIC_KEYWORD_RULES:
+        matched = next((keyword for keyword in keywords if keyword in text), None)
+        if matched:
+            return EtfThemeProfileData(
+                etf_code=code,
+                asset_bucket=bucket,
+                theme_group=group,
+                primary_theme=primary,
+                secondary_themes=_dedupe([*secondary, *tags]),
+                classification_source="domestic_keyword",
+                classification_confidence="high" if matched in name else "medium",
+                classification_reason=f"国内名称或标签命中“{matched}”。",
             )
 
     return EtfThemeProfileData(

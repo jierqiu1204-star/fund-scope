@@ -21,6 +21,10 @@ from app.services.short_research.daily_reconstructable import (
     AdjustedOhlcvBar,
     AdjustmentProvenance,
 )
+from app.services.short_research.etf_identity_facts import (
+    select_taxonomy_facts_at_cutoff,
+    select_tracked_underlying_facts_at_cutoff,
+)
 
 _PROVEN_MULTIPLICATIVE_ADJUSTMENTS = {
     ("eastmoney", "eastmoney.push2his.kline.hfq_v1"),
@@ -59,6 +63,19 @@ class PointInTimeEtfMetadata:
     membership_ingested_at: datetime
     eligible_from: date
     eligible_at: date
+    taxonomy_bucket: str | None = None
+    taxonomy_source: str | None = None
+    taxonomy_provider_version: str | None = None
+    taxonomy_rule_version: str | None = None
+    taxonomy_observed_at: datetime | None = None
+    taxonomy_evidence_hash: str | None = None
+    taxonomy_fact_hash: str | None = None
+    underlying_source: str | None = None
+    underlying_provider_version: str | None = None
+    underlying_rule_version: str | None = None
+    underlying_observed_at: datetime | None = None
+    underlying_evidence_hash: str | None = None
+    underlying_fact_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +94,7 @@ class PointInTimeAdjustedSeries:
     earliest_source_timestamp: datetime
     latest_source_timestamp: datetime
     synchronized_after_cutoff: bool
+    revision_hashes: tuple[str, ...]
     series_hash: str
 
 
@@ -127,6 +145,27 @@ def _metadata_payload(item: PointInTimeEtfMetadata) -> dict[str, Any]:
         "membership_ingested_at": item.membership_ingested_at.isoformat(),
         "eligible_from": item.eligible_from.isoformat(),
         "eligible_at": item.eligible_at.isoformat(),
+        "taxonomy_bucket": item.taxonomy_bucket,
+        "taxonomy_source": item.taxonomy_source,
+        "taxonomy_provider_version": item.taxonomy_provider_version,
+        "taxonomy_rule_version": item.taxonomy_rule_version,
+        "taxonomy_observed_at": (
+            item.taxonomy_observed_at.isoformat()
+            if item.taxonomy_observed_at is not None
+            else None
+        ),
+        "taxonomy_evidence_hash": item.taxonomy_evidence_hash,
+        "taxonomy_fact_hash": item.taxonomy_fact_hash,
+        "underlying_source": item.underlying_source,
+        "underlying_provider_version": item.underlying_provider_version,
+        "underlying_rule_version": item.underlying_rule_version,
+        "underlying_observed_at": (
+            item.underlying_observed_at.isoformat()
+            if item.underlying_observed_at is not None
+            else None
+        ),
+        "underlying_evidence_hash": item.underlying_evidence_hash,
+        "underlying_fact_hash": item.underlying_fact_hash,
     }
 
 
@@ -202,6 +241,7 @@ def _series_from_rows(
 
     bars: list[AdjustedOhlcvBar] = []
     timestamps: list[datetime] = []
+    revision_hashes: list[str] = []
     for row in window:
         values = (
             row.raw_open,
@@ -216,6 +256,9 @@ def _series_from_rows(
             or row.research_price_basis != PRICE_BASIS
             or row.provider_version != adjustment_version
             or row.source_timestamp is None
+            or row.revision_hash is None
+            or row.first_seen_at is None
+            or row.observed_at is None
             or any(
                 isinstance(value, bool)
                 or not isinstance(value, int | float)
@@ -230,7 +273,9 @@ def _series_from_rows(
                 "daily row is not decision-eligible total-return-adjusted data",
             )
         row_source_timestamp = _utc(row.source_timestamp)
-        if row_source_timestamp > decision_cutoff:
+        row_first_seen_at = _utc(row.first_seen_at)
+        row_observed_at = _utc(row.observed_at)
+        if max(row_source_timestamp, row_first_seen_at, row_observed_at) > decision_cutoff:
             return ReplayInputExclusion(
                 metadata.asset_code,
                 ReplayInputExclusionReason.FUTURE_KNOWN_INPUT,
@@ -273,7 +318,8 @@ def _series_from_rows(
                 ),
             )
         )
-        timestamps.append(row_source_timestamp)
+        timestamps.append(row_first_seen_at)
+        revision_hashes.append(row.revision_hash)
 
     provenance = AdjustmentProvenance(
         provider=provider,
@@ -295,6 +341,7 @@ def _series_from_rows(
         },
         "earliest_source_timestamp": min(timestamps).isoformat(),
         "latest_source_timestamp": max(timestamps).isoformat(),
+        "revision_hashes": revision_hashes,
     }
     return PointInTimeAdjustedSeries(
         asset_code=metadata.asset_code,
@@ -304,6 +351,7 @@ def _series_from_rows(
         earliest_source_timestamp=min(timestamps),
         latest_source_timestamp=max(timestamps),
         synchronized_after_cutoff=max(timestamps) > decision_cutoff,
+        revision_hashes=tuple(revision_hashes),
         series_hash=_hash(payload),
     )
 
@@ -360,6 +408,18 @@ async def load_point_in_time_ranking_inputs(
             continue
         facts_by_code[fact.etf_code].append(fact)
 
+    identity_codes = tuple(sorted(facts_by_code))
+    taxonomy_facts = await select_taxonomy_facts_at_cutoff(
+        session,
+        etf_codes=identity_codes,
+        cutoff=cutoff,
+    )
+    underlying_facts = await select_tracked_underlying_facts_at_cutoff(
+        session,
+        etf_codes=identity_codes,
+        cutoff=cutoff,
+    )
+
     universe: list[PointInTimeEtfMetadata] = []
     for code in sorted(facts_by_code):
         rows = sorted(
@@ -391,6 +451,8 @@ async def load_point_in_time_ranking_inputs(
             )
             continue
         fact_known_at = _utc(fact.observed_at)
+        taxonomy_fact = taxonomy_facts.get(code)
+        underlying_fact = underlying_facts.get(code)
         universe.append(
             PointInTimeEtfMetadata(
                 asset_code=code,
@@ -400,12 +462,68 @@ async def load_point_in_time_ranking_inputs(
                 membership_evidence_hash=fact.evidence_hash,
                 membership_raw_payload_hash=fact.raw_payload_hash,
                 membership_fact_hash=fact.fact_hash,
-                tracked_underlying_id=None,
+                tracked_underlying_id=(
+                    underlying_fact.tracked_underlying_id
+                    if underlying_fact is not None
+                    and underlying_fact.identity_state == "resolved"
+                    else None
+                ),
                 membership_known_at=fact_known_at,
                 membership_last_modified_at=fact_known_at,
                 membership_ingested_at=_utc(fact.created_at),
                 eligible_from=fact.effective_from,
                 eligible_at=replay_date,
+                taxonomy_bucket=(
+                    taxonomy_fact.asset_bucket if taxonomy_fact is not None else None
+                ),
+                taxonomy_source=(
+                    taxonomy_fact.source if taxonomy_fact is not None else None
+                ),
+                taxonomy_provider_version=(
+                    taxonomy_fact.provider_version
+                    if taxonomy_fact is not None
+                    else None
+                ),
+                taxonomy_rule_version=(
+                    taxonomy_fact.rule_version if taxonomy_fact is not None else None
+                ),
+                taxonomy_observed_at=(
+                    _utc(taxonomy_fact.observed_at)
+                    if taxonomy_fact is not None
+                    else None
+                ),
+                taxonomy_evidence_hash=(
+                    taxonomy_fact.evidence_hash if taxonomy_fact is not None else None
+                ),
+                taxonomy_fact_hash=(
+                    taxonomy_fact.fact_hash if taxonomy_fact is not None else None
+                ),
+                underlying_source=(
+                    underlying_fact.source if underlying_fact is not None else None
+                ),
+                underlying_provider_version=(
+                    underlying_fact.provider_version
+                    if underlying_fact is not None
+                    else None
+                ),
+                underlying_rule_version=(
+                    underlying_fact.rule_version
+                    if underlying_fact is not None
+                    else None
+                ),
+                underlying_observed_at=(
+                    _utc(underlying_fact.observed_at)
+                    if underlying_fact is not None
+                    else None
+                ),
+                underlying_evidence_hash=(
+                    underlying_fact.evidence_hash
+                    if underlying_fact is not None
+                    else None
+                ),
+                underlying_fact_hash=(
+                    underlying_fact.fact_hash if underlying_fact is not None else None
+                ),
             )
         )
     if not universe:
@@ -434,6 +552,10 @@ async def load_point_in_time_ranking_inputs(
         replay_date=replay_date,
         rows_per_code=required_history_sessions,
         max_source_rows=max_source_rows,
+        decision_cutoff=cutoff,
+        compatible_provider_versions=tuple(
+            sorted(_PROVEN_MULTIPLICATIVE_ADJUSTMENTS)
+        ),
     )
     prices_by_code: dict[str, list[market_data.EtfAdjustedDailyFact]] = defaultdict(list)
     for row in price_facts:
@@ -459,6 +581,10 @@ async def load_point_in_time_ranking_inputs(
         session,
         etf_codes=tuple(item.asset_code for item in universe_tuple),
         replay_date=replay_date,
+        decision_cutoff=cutoff,
+        compatible_provider_versions=tuple(
+            sorted(_PROVEN_MULTIPLICATIVE_ADJUSTMENTS)
+        ),
     )
     source_snapshot_hash = _hash(
         {
