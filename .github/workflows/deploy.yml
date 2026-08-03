@@ -15,6 +15,11 @@ permissions:
 
 env:
   COMPOSE_FILE: ${{ vars.VPS_COMPOSE_FILE || 'docker-compose.yml' }}
+  BACKUP_KEEP_COUNT: ${{ vars.VPS_BACKUP_KEEP_COUNT || '3' }}
+  BACKUP_RETENTION_DAYS: ${{ vars.VPS_BACKUP_RETENTION_DAYS || '7' }}
+  BACKUP_STALE_TMP_MINUTES: ${{ vars.VPS_BACKUP_STALE_TMP_MINUTES || '360' }}
+  BACKUP_MIN_FREE_BYTES: ${{ vars.VPS_BACKUP_MIN_FREE_BYTES || '2147483648' }}
+  BACKUP_ESTIMATED_BYTES: ${{ vars.VPS_BACKUP_ESTIMATED_BYTES || '3221225472' }}
 
 jobs:
   deploy:
@@ -118,6 +123,11 @@ jobs:
             sudo env \
               BACKUP_DIR="$backup_dir" \
               COMPOSE_FILE="$COMPOSE_FILE" \
+              BACKUP_KEEP_COUNT="$BACKUP_KEEP_COUNT" \
+              BACKUP_RETENTION_DAYS="$BACKUP_RETENTION_DAYS" \
+              BACKUP_STALE_TMP_MINUTES="$BACKUP_STALE_TMP_MINUTES" \
+              BACKUP_MIN_FREE_BYTES="$BACKUP_MIN_FREE_BYTES" \
+              BACKUP_ESTIMATED_BYTES="$BACKUP_ESTIMATED_BYTES" \
               sh "$GITHUB_WORKSPACE/deploy/backup-compose.sh"
           )
           sudo test -s "$backup_path"

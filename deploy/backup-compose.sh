@@ -6,7 +6,16 @@ COMPOSE_FILE=${COMPOSE_FILE:-docker-compose.ip.yml}
 POSTGRES_USER=${POSTGRES_USER:-fundscope}
 POSTGRES_DB=${POSTGRES_DB:-fundscope}
 
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "${SCRIPT_DIR}/backup-retention.sh"
+
 mkdir -p "${BACKUP_DIR}"
+backup_validate_retention_config
+backup_acquire_lock
+backup_cleanup_stale_artifacts
+PREVIOUS_KEEP_COUNT=$((BACKUP_KEEP_COUNT - 1))
+backup_prune_completed "${PREVIOUS_KEEP_COUNT}"
+backup_require_capacity
 
 STAMP=$(date +%Y%m%d_%H%M%S)
 BACKUP_PATH="${BACKUP_DIR}/fundscope_${STAMP}.dump"
@@ -22,5 +31,6 @@ docker compose -f "${COMPOSE_FILE}" exec -T postgres \
 mv "${TMP_PATH}" "${BACKUP_PATH}"
 sha256sum "${BACKUP_PATH}" > "${BACKUP_PATH}.sha256"
 
-find "${BACKUP_DIR}" -type f -name "fundscope_*.dump*" -mtime +7 -delete
+backup_prune_completed "${BACKUP_KEEP_COUNT}"
+backup_cleanup_stale_artifacts
 echo "${BACKUP_PATH}"
