@@ -14,6 +14,9 @@ export const metadata: Metadata = {
 const primaryNavItems = [
   { href: "/short-term", label: "短线研究", primary: true },
   { href: "/short-term/evidence", label: "策略证据" },
+  ...(process.env.NEXT_PUBLIC_ETF_LEADER_TACTICS_V2_ENABLED === "true"
+    ? [{ href: "/short-term/leader-tactics", label: "Leader tactics V2" }]
+    : []),
   { href: "/admin/jobs", label: "数据任务" },
   { href: "/settings/notifications", label: "设置" }
 ];
@@ -35,10 +38,16 @@ export default function RootLayout({ children }: { children: ReactNode }) {
             <header className="sticky top-0 z-40 mb-6 rounded-[12px] border border-border bg-white/95 shadow-card backdrop-blur">
               <div className="flex flex-col gap-3 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
                 <Link href="/short-term" className="min-w-0">
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-accent">FundScope</p>
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-accent">
+                    FundScope
+                  </p>
                   <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                    <h1 className="text-xl font-semibold leading-7 tracking-[-0.02em] text-ink">短线研究工作台</h1>
-                    <p className="text-sm text-ink/55">ETF / 基金短线排序、持仓追踪与邮件提醒</p>
+                    <h1 className="text-xl font-semibold leading-7 tracking-[-0.02em] text-ink">
+                      短线研究工作台
+                    </h1>
+                    <p className="text-sm text-ink/55">
+                      ETF / 基金短线排序、持仓追踪与邮件提醒
+                    </p>
                   </div>
                 </Link>
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-center">

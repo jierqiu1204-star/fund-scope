@@ -12,9 +12,7 @@ from alembic.script import ScriptDirectory
 from app.models.entities import EtfCanonicalPublicationRegistry
 
 VERSIONS_DIR = Path(__file__).resolve().parents[1] / "alembic" / "versions"
-MIGRATION_PATH = (
-    VERSIONS_DIR / "20260802_000061_etf_canonical_publication_registry.py"
-)
+MIGRATION_PATH = VERSIONS_DIR / "20260802_000061_etf_canonical_publication_registry.py"
 
 
 def _migration():
@@ -57,10 +55,7 @@ def test_canonical_publication_registry_migration_is_additive_and_reversible() -
         inspector = sa.inspect(connection)
         assert "etf_canonical_publication_registry" in inspector.get_table_names()
         indexes = {
-            index["name"]
-            for index in inspector.get_indexes(
-                "etf_canonical_publication_registry"
-            )
+            index["name"] for index in inspector.get_indexes("etf_canonical_publication_registry")
         }
         assert {
             "ix_etf_canonical_publication_registry_trade_lookup",
@@ -68,9 +63,7 @@ def test_canonical_publication_registry_migration_is_additive_and_reversible() -
             "ux_etf_canonical_publication_registry_current_slot",
         } <= indexes
         migration.downgrade()
-        assert "etf_canonical_publication_registry" not in sa.inspect(
-            connection
-        ).get_table_names()
+        assert "etf_canonical_publication_registry" not in sa.inspect(connection).get_table_names()
 
 
 def test_canonical_publication_registry_is_the_single_migration_head() -> None:
@@ -78,5 +71,6 @@ def test_canonical_publication_registry_is_the_single_migration_head() -> None:
     config.set_main_option("script_location", str(VERSIONS_DIR.parent))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["20260802_000061"]
+    assert script.get_heads() == ["20260804_000062"]
+    assert script.get_revision("20260804_000062").down_revision == "20260802_000061"
     assert script.get_revision("20260802_000061").down_revision == "20260802_000060"

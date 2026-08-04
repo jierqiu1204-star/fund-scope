@@ -35,7 +35,9 @@ class Settings(BaseSettings):
     auth_jwt_secret: str = Field(default="", alias="AUTH_JWT_SECRET")
     auth_token_expire_days: int = Field(default=30, alias="AUTH_TOKEN_EXPIRE_DAYS")
     auth_bootstrap_admin_email: str = Field(default="", alias="AUTH_BOOTSTRAP_ADMIN_EMAIL")
-    auth_bootstrap_admin_display_name: str = Field(default="qje", alias="AUTH_BOOTSTRAP_ADMIN_DISPLAY_NAME")
+    auth_bootstrap_admin_display_name: str = Field(
+        default="qje", alias="AUTH_BOOTSTRAP_ADMIN_DISPLAY_NAME"
+    )
     auth_bootstrap_admin_password: str = Field(default="", alias="AUTH_BOOTSTRAP_ADMIN_PASSWORD")
     nginx_basic_auth_user: str = Field(default="", alias="NGINX_BASIC_AUTH_USER")
     nginx_basic_auth_pass: str = Field(default="", alias="NGINX_BASIC_AUTH_PASS")
@@ -90,6 +92,26 @@ class Settings(BaseSettings):
     etf_leader_tactics_artifact_dir: str = Field(
         default="./data/etf-leader-tactics-artifacts",
         alias="ETF_LEADER_TACTICS_ARTIFACT_DIR",
+    )
+    etf_leader_tactics_v2_api_enabled: bool = Field(
+        default=False,
+        alias="ETF_LEADER_TACTICS_V2_API_ENABLED",
+    )
+    etf_leader_tactics_v2_capture_enabled: bool = Field(
+        default=False,
+        alias="ETF_LEADER_TACTICS_V2_CAPTURE_ENABLED",
+    )
+    etf_leader_tactics_v2_materialize_enabled: bool = Field(
+        default=False,
+        alias="ETF_LEADER_TACTICS_V2_MATERIALIZE_ENABLED",
+    )
+    etf_leader_tactics_v2_code_version: str = Field(
+        default="dual-universe-leader-tactics-v2",
+        alias="ETF_LEADER_TACTICS_V2_CODE_VERSION",
+    )
+    etf_leader_tactics_v2_artifact_dir: str = Field(
+        default="./data/dual-universe-leader-tactics-v2-artifacts",
+        alias="ETF_LEADER_TACTICS_V2_ARTIFACT_DIR",
     )
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:3000"],

@@ -58,31 +58,18 @@ def test_pit_capture_source_migration_is_additive_constrained_and_reversible() -
         assert {
             "uq_etf_pit_capture_source_signal_run",
             "uq_etf_pit_capture_source_context_hash",
-        } <= {
-            item["name"]
-            for item in inspector.get_unique_constraints(
-                "etf_pit_capture_sources"
-            )
-        }
+        } <= {item["name"] for item in inspector.get_unique_constraints("etf_pit_capture_sources")}
         assert {
             "ck_etf_pit_capture_source_complete_readiness",
             "ck_etf_pit_capture_source_target_coverage",
             "ck_etf_pit_capture_source_warmup_coverage",
-        } <= {
-            item["name"]
-            for item in inspector.get_check_constraints(
-                "etf_pit_capture_sources"
-            )
+        } <= {item["name"] for item in inspector.get_check_constraints("etf_pit_capture_sources")}
+        assert {item["name"] for item in inspector.get_indexes("etf_pit_capture_sources")} == {
+            "ix_etf_pit_capture_sources_trade_date"
         }
-        assert {
-            item["name"]
-            for item in inspector.get_indexes("etf_pit_capture_sources")
-        } == {"ix_etf_pit_capture_sources_trade_date"}
 
         migration.downgrade()
-        assert "etf_pit_capture_sources" not in sa.inspect(
-            connection
-        ).get_table_names()
+        assert "etf_pit_capture_sources" not in sa.inspect(connection).get_table_names()
 
 
 def test_pit_capture_source_chain_has_one_current_alembic_head() -> None:
@@ -90,4 +77,5 @@ def test_pit_capture_source_chain_has_one_current_alembic_head() -> None:
     config.set_main_option("script_location", str(VERSIONS_DIR.parent))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["20260731_000058"]
+    assert script.get_heads() == ["20260804_000062"]
+    assert script.get_revision("20260804_000062").down_revision == "20260802_000061"

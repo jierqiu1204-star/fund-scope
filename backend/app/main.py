@@ -13,6 +13,7 @@ from app.api.routes.admin import router as admin_router
 from app.api.routes.admin_data import router as admin_data_router
 from app.api.routes.admin_users import router as admin_users_router
 from app.api.routes.auth import router as auth_router
+from app.api.routes.dual_universe_leader_tactics_v2 import router as leader_tactics_v2_router
 from app.api.routes.etf_quotes import router as etf_quotes_router
 from app.api.routes.health import router as health_router
 from app.api.routes.news import router as news_router
@@ -65,7 +66,9 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
             async with application.state.db.session() as session:
                 await ensure_bootstrap_admin(session, application.state.settings)
         except SQLAlchemyError:
-            logger.warning("认证字段迁移尚未完成，已跳过 qje 管理员启动补齐。请先运行 alembic upgrade head。")
+            logger.warning(
+                "认证字段迁移尚未完成，已跳过 qje 管理员启动补齐。请先运行 alembic upgrade head。"
+            )
         if start_scheduler:
             application.state.scheduler.start()
         yield
@@ -98,6 +101,7 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
     app.include_router(strategy_lab_router, dependencies=approved_dependencies)
     app.include_router(short_etf_router, dependencies=approved_dependencies)
     app.include_router(short_research_router, dependencies=approved_dependencies)
+    app.include_router(leader_tactics_v2_router, dependencies=approved_dependencies)
     app.include_router(etf_quotes_router, dependencies=approved_dependencies)
     app.include_router(tracked_positions_router, dependencies=approved_dependencies)
     app.include_router(news_router, dependencies=approved_dependencies)

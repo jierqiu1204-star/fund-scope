@@ -13,9 +13,7 @@ from alembic.script import ScriptDirectory
 from app.models.entities import EtfFactorExperimentEvidence
 
 VERSIONS_DIR = Path(__file__).resolve().parents[1] / "alembic" / "versions"
-MIGRATION_PATH = (
-    VERSIONS_DIR / "20260731_000058_etf_leader_tactics_evidence_family.py"
-)
+MIGRATION_PATH = VERSIONS_DIR / "20260731_000058_etf_leader_tactics_evidence_family.py"
 
 
 def _migration():
@@ -47,9 +45,7 @@ def test_leader_evidence_family_migration_is_nullable_indexed_and_reversible() -
             sa.Column("created_at", sa.DateTime, nullable=False),
         )
         metadata.create_all(connection)
-        connection.execute(
-            table.insert().values(id=1, created_at=datetime(2026, 7, 31, 12))
-        )
+        connection.execute(table.insert().values(id=1, created_at=datetime(2026, 7, 31, 12)))
         migration = _migration()
         assert migration.revision == "20260731_000058"
         assert migration.down_revision == "20260729_000057"
@@ -57,14 +53,10 @@ def test_leader_evidence_family_migration_is_nullable_indexed_and_reversible() -
         migration.upgrade()
 
         inspector = sa.inspect(connection)
-        migrated_columns = {
-            item["name"]: item for item in inspector.get_columns(table.name)
-        }
+        migrated_columns = {item["name"]: item for item in inspector.get_columns(table.name)}
         assert migrated_columns["experiment_family"]["nullable"] is True
         assert migrated_columns["hypothesis_registry_hash"]["nullable"] is True
-        assert {
-            item["name"] for item in inspector.get_indexes(table.name)
-        } == {
+        assert {item["name"] for item in inspector.get_indexes(table.name)} == {
             "ix_etf_factor_evidence_family_latest",
             "ix_etf_factor_evidence_hypothesis_registry",
         }
@@ -78,9 +70,7 @@ def test_leader_evidence_family_migration_is_nullable_indexed_and_reversible() -
         assert row == (1, None, None)
 
         migration.downgrade()
-        remaining = {
-            item["name"] for item in sa.inspect(connection).get_columns(table.name)
-        }
+        remaining = {item["name"] for item in sa.inspect(connection).get_columns(table.name)}
         assert remaining == {"id", "created_at"}
 
 
@@ -89,4 +79,5 @@ def test_leader_evidence_migration_is_the_single_head() -> None:
     config.set_main_option("script_location", str(VERSIONS_DIR.parent))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["20260731_000058"]
+    assert script.get_heads() == ["20260804_000062"]
+    assert script.get_revision("20260804_000062").down_revision == "20260802_000061"

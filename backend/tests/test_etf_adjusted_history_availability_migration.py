@@ -12,10 +12,7 @@ from alembic.script import ScriptDirectory
 from app.models.entities import EtfAdjustedHistoryAvailability
 
 VERSIONS_DIR = Path(__file__).resolve().parents[1] / "alembic" / "versions"
-MIGRATION_PATH = (
-    VERSIONS_DIR
-    / "20260725_000054_etf_adjusted_history_availability.py"
-)
+MIGRATION_PATH = VERSIONS_DIR / "20260725_000054_etf_adjusted_history_availability.py"
 
 
 def _migration():
@@ -58,15 +55,10 @@ def test_adjusted_history_availability_migration_is_additive_and_reversible() ->
         inspector = sa.inspect(connection)
         assert "etf_adjusted_history_availability" in inspector.get_table_names()
         assert {"etf_code", "provider_policy_version"} == set(
-            inspector.get_pk_constraint(
-                "etf_adjusted_history_availability"
-            )["constrained_columns"]
+            inspector.get_pk_constraint("etf_adjusted_history_availability")["constrained_columns"]
         )
         migration.downgrade()
-        assert (
-            "etf_adjusted_history_availability"
-            not in sa.inspect(connection).get_table_names()
-        )
+        assert "etf_adjusted_history_availability" not in sa.inspect(connection).get_table_names()
 
 
 def test_adjusted_history_availability_is_latest_single_head() -> None:
@@ -74,5 +66,6 @@ def test_adjusted_history_availability_is_latest_single_head() -> None:
     config.set_main_option("script_location", str(VERSIONS_DIR.parent))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["20260802_000061"]
+    assert script.get_heads() == ["20260804_000062"]
+    assert script.get_revision("20260804_000062").down_revision == "20260802_000061"
     assert script.get_revision("20260725_000054") is not None

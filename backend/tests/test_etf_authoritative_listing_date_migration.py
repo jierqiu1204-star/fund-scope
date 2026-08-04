@@ -16,12 +16,8 @@ from app.models.entities import (
 )
 
 VERSIONS_DIR = Path(__file__).resolve().parents[1] / "alembic" / "versions"
-BASE_MIGRATION_PATH = (
-    VERSIONS_DIR / "20260726_000055_etf_authoritative_listing_date.py"
-)
-FOLLOWUP_MIGRATION_PATH = (
-    VERSIONS_DIR / "20260727_000056_etf_listing_observation_and_lane_scope.py"
-)
+BASE_MIGRATION_PATH = VERSIONS_DIR / "20260726_000055_etf_authoritative_listing_date.py"
+FOLLOWUP_MIGRATION_PATH = VERSIONS_DIR / "20260727_000056_etf_listing_observation_and_lane_scope.py"
 
 
 def _migration(path: Path, module_name: str):
@@ -99,9 +95,7 @@ def test_authoritative_listing_date_migration_is_nullable_and_reversible() -> No
         base_migration.upgrade()
         followup_migration.upgrade()
         inspector = sa.inspect(connection)
-        column_names = {
-            column["name"] for column in inspector.get_columns("tradable_etfs")
-        }
+        column_names = {column["name"] for column in inspector.get_columns("tradable_etfs")}
         assert {
             "listing_date",
             "listing_date_source",
@@ -109,8 +103,7 @@ def test_authoritative_listing_date_migration_is_nullable_and_reversible() -> No
         } <= column_names
         assert "etf_listing_date_observations" in inspector.get_table_names()
         availability_columns = {
-            column["name"]
-            for column in inspector.get_columns("etf_adjusted_history_availability")
+            column["name"] for column in inspector.get_columns("etf_adjusted_history_availability")
         }
         assert {"scope", "required_calendar_hash"} <= availability_columns
         assert {
@@ -119,9 +112,7 @@ def test_authoritative_listing_date_migration_is_nullable_and_reversible() -> No
             "scope",
             "required_calendar_hash",
         } == set(
-            inspector.get_pk_constraint(
-                "etf_adjusted_history_availability"
-            )["constrained_columns"]
+            inspector.get_pk_constraint("etf_adjusted_history_availability")["constrained_columns"]
         )
 
         followup_migration.downgrade()
@@ -129,13 +120,9 @@ def test_authoritative_listing_date_migration_is_nullable_and_reversible() -> No
         inspector = sa.inspect(connection)
         assert "etf_listing_date_observations" not in inspector.get_table_names()
         assert {"etf_code", "provider_policy_version"} == set(
-            inspector.get_pk_constraint(
-                "etf_adjusted_history_availability"
-            )["constrained_columns"]
+            inspector.get_pk_constraint("etf_adjusted_history_availability")["constrained_columns"]
         )
-        remaining = {
-            column["name"] for column in inspector.get_columns("tradable_etfs")
-        }
+        remaining = {column["name"] for column in inspector.get_columns("tradable_etfs")}
         assert remaining == {"code"}
 
 
@@ -144,10 +131,7 @@ def test_authoritative_listing_date_migration_is_the_single_head() -> None:
     config.set_main_option("script_location", str(VERSIONS_DIR.parent))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["20260729_000057"]
-    assert script.get_revision("20260727_000056").down_revision == (
-        "20260726_000055"
-    )
-    assert script.get_revision("20260726_000055").down_revision == (
-        "20260725_000054"
-    )
+    assert script.get_heads() == ["20260804_000062"]
+    assert script.get_revision("20260804_000062").down_revision == "20260802_000061"
+    assert script.get_revision("20260727_000056").down_revision == ("20260726_000055")
+    assert script.get_revision("20260726_000055").down_revision == ("20260725_000054")
