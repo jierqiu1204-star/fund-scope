@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from dataclasses import replace
 from datetime import date, datetime
 
 import pytest
@@ -274,6 +275,48 @@ async def test_fact_capture_writes_three_tables_and_real_hashes(tmp_path) -> Non
             )
         ).one()
         assert tuple(counts) == (2, 2, 2)
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_new_capture_receipt_does_not_duplicate_an_existing_price_revision(tmp_path) -> None:
+    engine, session_factory = await _factory(tmp_path, "revision-dedup.db")
+    first = _bundle("000001")
+    later_price = replace(
+        _price("000001"),
+        received_at=datetime(2026, 8, 5, 15),
+        fact_hash="",
+    )
+    later = V2CapturedAshareFacts(
+        asset_code="000001",
+        universe_fact=replace(
+            _universe("000001"),
+            snapshot_date=date(2026, 8, 5),
+            effective_at=datetime(2026, 8, 5, 15),
+            received_at=datetime(2026, 8, 5, 15),
+            source_cutoff=datetime(2026, 8, 5, 15),
+            fact_hash="",
+        ),
+        theme_facts=(),
+        adjusted_price_facts=(later_price,),
+    )
+
+    async with session_factory() as session:
+        for manifest_hash, bundle in (("m" * 64, first), ("n" * 64, later)):
+            result = await run_v2_fact_capture_batch(
+                session,
+                manifest_hash=manifest_hash,
+                codes=("000001",),
+                checkpoint=_checkpoint(),
+                fetch_one=lambda _code, value=bundle: _async_bundle(value),
+                lease_owner="worker-revision-dedup",
+            )
+            assert result.checkpoint.status == "complete"
+        count = (
+            await session.execute(text("SELECT COUNT(*) FROM ashare_adjusted_price_facts"))
+        ).scalar_one()
+        assert count == 1
+
     await engine.dispose()
 
 

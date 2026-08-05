@@ -448,7 +448,7 @@ async def persist_ashare_universe_snapshot_batch(
             VALUES (:snapshot_date, :asset_code, :asset_name, :listing_state, :board,
                     :effective_at, :received_at, :provider, :source_cutoff,
                     :exclusion_reason, :fact_hash)
-            ON CONFLICT (fact_hash) DO NOTHING
+            ON CONFLICT DO NOTHING
             """
         ),
         [

@@ -24,6 +24,8 @@ services:
   frontend-static-builder:
     build:
       context: ../frontend
+      args:
+        NEXT_PUBLIC_ETF_LEADER_TACTICS_V2_ENABLED: ${NEXT_PUBLIC_ETF_LEADER_TACTICS_V2_ENABLED:-false}
     command: sh -c "rm -rf /exported/* && cp -R /app/out/. /exported/"
     volumes:
       - frontend-static:/exported

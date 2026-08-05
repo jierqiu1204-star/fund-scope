@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from importlib import import_module
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -54,6 +56,65 @@ from app.services.workflows.etf_publish_readiness import (
     preflight_post_close_etf_publication_readiness,
 )
 from app.services.workflows.intraday_etf import intraday_etf_watch_with_alerts_job
+
+V2_JOB_MODULE = "app.services.workflows.dual_universe_leader_tactics_v2_jobs"
+V2_CAPTURE_JOB_NAME = "dual_universe_leader_tactics_v2_capture"
+V2_MATERIALIZE_JOB_NAME = "dual_universe_leader_tactics_v2_materialize"
+V2_CAPTURE_JOB_ATTRIBUTE = "dual_universe_leader_tactics_v2_capture_job"
+V2_MATERIALIZE_JOB_ATTRIBUTE = "dual_universe_leader_tactics_v2_materialize_job"
+
+
+V2SchedulerJob = Callable[[AsyncSession, Settings], Awaitable[dict[str, Any]]]
+
+
+@dataclass(frozen=True)
+class _V2SchedulerJobContract:
+    """The narrow scheduler contract supplied by the V2 workflow jobs module.
+
+    The provider and materialization coordinator deliberately do not live in the
+    scheduler.  Keeping this import lazy lets the default-off application start
+    without a V2 jobs module, while an accidentally enabled flag fails closed
+    with an actionable configuration error.
+    """
+
+    capture_name: str
+    materialize_name: str
+    capture_job: V2SchedulerJob
+    materialize_job: V2SchedulerJob
+
+
+def _load_v2_scheduler_job_contract() -> _V2SchedulerJobContract:
+    try:
+        module = import_module(V2_JOB_MODULE)
+    except ModuleNotFoundError as exc:
+        if exc.name != V2_JOB_MODULE:
+            raise
+        raise RuntimeError(
+            "V2 scheduler is enabled but the workflow jobs module is unavailable: "
+            f"{V2_JOB_MODULE}"
+        ) from exc
+
+    capture_job = getattr(module, V2_CAPTURE_JOB_ATTRIBUTE, None)
+    materialize_job = getattr(module, V2_MATERIALIZE_JOB_ATTRIBUTE, None)
+    if not callable(capture_job) or not callable(materialize_job):
+        raise RuntimeError(
+            "V2 workflow jobs module must expose callable attributes "
+            f"{V2_CAPTURE_JOB_ATTRIBUTE} and {V2_MATERIALIZE_JOB_ATTRIBUTE}"
+        )
+
+    capture_name = getattr(module, "V2_CAPTURE_JOB_NAME", V2_CAPTURE_JOB_NAME)
+    materialize_name = getattr(module, "V2_MATERIALIZE_JOB_NAME", V2_MATERIALIZE_JOB_NAME)
+    if not isinstance(capture_name, str) or not capture_name.strip():
+        raise RuntimeError("V2 capture job name must be a non-empty string")
+    if not isinstance(materialize_name, str) or not materialize_name.strip():
+        raise RuntimeError("V2 materialize job name must be a non-empty string")
+
+    return _V2SchedulerJobContract(
+        capture_name=capture_name.strip(),
+        materialize_name=materialize_name.strip(),
+        capture_job=capture_job,
+        materialize_job=materialize_job,
+    )
 
 
 async def _run_tracked_job(
@@ -159,6 +220,51 @@ def register_default_jobs(
             settings=settings,
             timeout_seconds=50.0,
         )
+
+    if (
+        settings.etf_leader_tactics_v2_capture_enabled
+        or settings.etf_leader_tactics_v2_materialize_enabled
+    ):
+        v2_jobs = _load_v2_scheduler_job_contract()
+
+        async def dual_universe_v2_capture_tracked(
+            session: AsyncSession,
+        ) -> dict[str, Any]:
+            return await v2_jobs.capture_job(session, settings)
+
+        async def dual_universe_v2_materialize_tracked(
+            session: AsyncSession,
+        ) -> dict[str, Any]:
+            return await v2_jobs.materialize_job(session, settings)
+
+        if settings.etf_leader_tactics_v2_capture_enabled:
+            scheduler.add_job(
+                _run_tracked_job,
+                "cron",
+                args=[db, v2_jobs.capture_name, dual_universe_v2_capture_tracked],
+                day_of_week="mon-fri",
+                hour="21-23",
+                minute="*/2",
+                second=0,
+                id=v2_jobs.capture_name,
+                max_instances=1,
+                coalesce=True,
+                replace_existing=True,
+            )
+        if settings.etf_leader_tactics_v2_materialize_enabled:
+            scheduler.add_job(
+                _run_tracked_job,
+                "cron",
+                args=[db, v2_jobs.materialize_name, dual_universe_v2_materialize_tracked],
+                day_of_week="tue-sat",
+                hour=9,
+                minute=10,
+                second=0,
+                id=v2_jobs.materialize_name,
+                max_instances=1,
+                coalesce=True,
+                replace_existing=True,
+            )
 
     scheduler.add_job(
         _run_tracked_job,

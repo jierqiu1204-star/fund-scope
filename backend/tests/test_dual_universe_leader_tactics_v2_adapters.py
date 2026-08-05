@@ -97,6 +97,31 @@ def test_collector_persists_serial_progress_and_does_not_start_second_worker() -
     assert result.checkpoint.status == "paused"
 
 
+def test_collector_failure_does_not_starve_unseen_codes() -> None:
+    fetched: list[str] = []
+
+    async def fetch_one(code: str) -> None:
+        fetched.append(code)
+
+    result = asyncio.run(
+        run_bounded_batch(
+            ["1", "2", "3", "4", "5", "6"],
+            checkpoint=V2CollectorCheckpoint(
+                cursor=None,
+                batch_size=5,
+                completed_codes=(),
+                status="paused",
+                failed_codes=(("1", "provider unavailable"),),
+            ),
+            fetch_one=fetch_one,
+        )
+    )
+
+    assert fetched == ["2", "3", "4", "5", "6"]
+    assert result.checkpoint.completed_codes == tuple(fetched)
+    assert result.checkpoint.failed_codes == (("1", "provider unavailable"),)
+
+
 @pytest.mark.asyncio
 async def test_adjusted_history_ignores_invalid_revision_before_applying_limit(tmp_path) -> None:
     from sqlalchemy import text

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -122,6 +122,72 @@ class AshareReadinessReport:
         }
 
 
+@dataclass(frozen=True)
+class V2MaterializationReadiness:
+    """Fail-closed decision for daily research materialization.
+
+    The 300-session tier remains a diagnostic/promotion input.  Daily formula
+    evaluation needs 120 sessions for breakout/base-launch and 180 sessions
+    for former-leader repair, so those are the only history tiers admitted to
+    this operational gate.
+    """
+
+    ready: bool
+    reasons: tuple[str, ...]
+    threshold: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ready": self.ready,
+            "reasons": list(self.reasons),
+            "threshold": self.threshold,
+            "research_only": True,
+        }
+
+
+def evaluate_v2_materialization_readiness(
+    report: AshareReadinessReport,
+) -> V2MaterializationReadiness:
+    """Require complete factual inputs before any A-share screen is written."""
+
+    threshold = report.coverage_threshold
+    denominator = report.universe_count
+    reasons: list[str] = []
+
+    def below_threshold(count: int) -> bool:
+        return denominator <= 0 or count / denominator < threshold
+
+    if denominator <= 0:
+        reasons.append("ashare_universe_not_materialized")
+    if below_threshold(report.adjusted_daily_count):
+        reasons.append("insufficient_adjusted_daily_coverage")
+    if below_threshold(report.pit_theme_count):
+        reasons.append("insufficient_pit_theme_coverage")
+
+    history_by_tier = dict(report.history_counts)
+    for required in (120, 180):
+        count = history_by_tier.get(required)
+        if count is None or below_threshold(count):
+            reasons.append(f"insufficient_history_{required}")
+
+    provider_counts = dict(report.provider_health)
+    if not provider_counts or sum(max(0, count) for count in provider_counts.values()) <= 0:
+        reasons.append("provider_health_unavailable")
+    if any(provider not in {"akshare", "eastmoney"} for provider in provider_counts):
+        reasons.append("unsupported_decision_provider")
+    if report.raw_decision_violations:
+        reasons.append("raw_decision_price_violation")
+    if report.non_finite_violations:
+        reasons.append("non_finite_adjusted_input")
+
+    normalized = tuple(dict.fromkeys(reasons))
+    return V2MaterializationReadiness(
+        ready=not normalized,
+        reasons=normalized,
+        threshold=threshold,
+    )
+
+
 def bind_v2_checkpoint_manifest(
     checkpoint: V2CollectorCheckpoint,
     *,
@@ -226,7 +292,29 @@ async def run_v2_fact_capture_batch(
         async with session.begin_nested():
             await persist_ashare_universe_snapshot_batch(session, (bundle.universe_fact,))
             await persist_ashare_theme_membership_batch(session, bundle.theme_facts)
-            await persist_ashare_adjusted_price_batch(session, bundle.adjusted_price_facts)
+            price_facts = bundle.adjusted_price_facts
+            if price_facts:
+                earliest = min(fact.trade_date for fact in price_facts)
+                existing = {
+                    str(value)
+                    for value in (
+                        await session.scalars(
+                            text(
+                                """
+                                SELECT revision_id
+                                FROM ashare_adjusted_price_facts
+                                WHERE asset_code = :asset_code
+                                  AND trade_date >= :earliest
+                                """
+                            ),
+                            {"asset_code": code, "earliest": earliest},
+                        )
+                    ).all()
+                }
+                price_facts = tuple(
+                    fact for fact in price_facts if fact.revision_id not in existing
+                )
+            await persist_ashare_adjusted_price_batch(session, price_facts)
 
     return await run_v2_capture_batch(
         session,
@@ -398,10 +486,15 @@ authoritative_universe AS (
 """
 
 
-def _readiness_params(*, as_of: datetime) -> dict[str, Any]:
+def _readiness_params(
+    *,
+    as_of: datetime,
+    required_trade_date: date | None = None,
+) -> dict[str, Any]:
     return {
         "as_of": as_of,
-        "as_of_date": as_of.date(),
+        "as_of_date": required_trade_date or as_of.date(),
+        "required_trade_date": required_trade_date,
         "eligible": True,
         "historical_only": False,
         "price_basis": "total_return_adjusted",
@@ -412,6 +505,7 @@ def _readiness_params(*, as_of: datetime) -> dict[str, Any]:
 _QUALIFIED_ADJUSTED_FACT_PREDICATE = """
         facts.received_at IS NOT NULL
         AND facts.received_at <= :as_of
+        AND facts.trade_date <= :as_of_date
         AND DATE(facts.received_at) >= facts.trade_date
         AND facts.decision_eligible = :eligible
         AND facts.historical_research_only = :historical_only
@@ -446,10 +540,14 @@ async def read_ashare_readiness(
     *,
     as_of: datetime,
     required_history_tiers: tuple[int, ...] = (61, 120, 180, 300),
+    required_trade_date: date | None = None,
 ) -> AshareReadinessReport:
     """Return bounded readiness metrics from the as-of authoritative PIT pool."""
 
-    params = _readiness_params(as_of=as_of)
+    params = _readiness_params(
+        as_of=as_of,
+        required_trade_date=required_trade_date,
+    )
     universe_row = (
         (
             await session.execute(
@@ -468,7 +566,12 @@ async def read_ashare_readiness(
     universe_count = int(universe_row["count"] or 0)
 
     history_tier_sql = ",\n".join(
-        f"            COALESCE(SUM(CASE WHEN sessions_count >= :history_tier_{index} THEN 1 ELSE 0 END), 0) AS tier_{index}"
+        (
+            "            COALESCE(SUM(CASE WHEN sessions_count >= "
+            f":history_tier_{index} AND (:required_trade_date IS NULL OR "
+            ":required_trade_date = latest_trade_date) THEN 1 ELSE 0 END), 0) "
+            f"AS tier_{index}"
+        )
         for index, _ in enumerate(required_history_tiers)
     )
     history_tier_params = {
@@ -495,12 +598,16 @@ async def read_ashare_readiness(
             {_QUALIFIED_ADJUSTED_FACT_PREDICATE}
         ),
         per_asset AS (
-            SELECT asset_code, COUNT(DISTINCT trade_date) AS sessions_count
+            SELECT asset_code, COUNT(DISTINCT trade_date) AS sessions_count,
+                   MAX(trade_date) AS latest_trade_date
             FROM qualified_adjusted
             GROUP BY asset_code
         ),
         summary AS (
-            SELECT COUNT(*) AS adjusted_count{summary_tier_cte}
+            SELECT COALESCE(SUM(CASE
+                       WHEN :required_trade_date IS NULL
+                            OR latest_trade_date = :required_trade_date
+                       THEN 1 ELSE 0 END), 0) AS adjusted_count{summary_tier_cte}
             FROM per_asset
         ),
         provider_health AS (
@@ -570,6 +677,7 @@ async def read_ashare_readiness(
                   ON universe.asset_code = facts.asset_code
                 WHERE facts.received_at IS NOT NULL
                   AND facts.received_at <= :as_of
+                  AND facts.trade_date <= :as_of_date
                   AND (
                       LOWER(COALESCE(facts.provider, '')) NOT IN ('akshare', 'eastmoney')
                       OR facts.price_basis IS NULL
@@ -601,6 +709,7 @@ async def read_ashare_readiness(
                   ON universe.asset_code = facts.asset_code
                 WHERE facts.received_at IS NOT NULL
                   AND facts.received_at <= :as_of
+                  AND facts.trade_date <= :as_of_date
                   AND (
                       facts.adjusted_open IS NULL OR facts.adjusted_high IS NULL
                       OR facts.adjusted_low IS NULL OR facts.adjusted_close IS NULL
@@ -677,12 +786,62 @@ async def read_ashare_readiness(
     )
 
 
+async def read_ashare_authoritative_assets(
+    session: AsyncSession,
+    *,
+    signal_date: date,
+    as_of: datetime,
+    limit: int = 6_000,
+) -> tuple[tuple[str, str], ...]:
+    """Read one bounded, deterministic A-share universe for screening.
+
+    Both the snapshot date and factual visibility cutoff are enforced so a
+    later universe cannot leak into an earlier signal.
+    """
+
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 6_000:
+        raise ValueError("A-share authoritative asset limit must be between 1 and 6000")
+    result = await session.execute(
+        text(
+            """
+            SELECT asset_code, asset_name
+            FROM (
+                SELECT snapshots.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY asset_code
+                           ORDER BY snapshot_date DESC, effective_at DESC,
+                                    received_at DESC, fact_hash DESC
+                       ) AS snapshot_rank
+                FROM ashare_research_universe_snapshots AS snapshots
+                WHERE snapshot_date <= :signal_date
+                  AND effective_at <= :as_of
+                  AND received_at <= :as_of
+                  AND source_cutoff <= :as_of
+            ) latest_universe
+            WHERE snapshot_rank = 1
+              AND LOWER(listing_state) = 'listed'
+              AND exclusion_reason IS NULL
+            ORDER BY asset_code
+            LIMIT :limit
+            """
+        ),
+        {"signal_date": signal_date, "as_of": as_of, "limit": limit + 1},
+    )
+    rows = tuple((str(row["asset_code"]), str(row["asset_name"])) for row in result.mappings())
+    if len(rows) > limit:
+        raise V2ContractError("A-share authoritative universe exceeds the bounded limit")
+    return rows
+
+
 __all__ = [
     "AshareReadinessReport",
+    "V2MaterializationReadiness",
     "V2CapturedAshareFacts",
     "V2CheckpointContract",
     "bind_v2_checkpoint_manifest",
+    "evaluate_v2_materialization_readiness",
     "materialize_v2_result",
+    "read_ashare_authoritative_assets",
     "read_ashare_readiness",
     "run_v2_capture_batch",
     "run_v2_fact_capture_batch",

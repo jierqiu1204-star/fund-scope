@@ -141,20 +141,21 @@ async def run_bounded_batch(
         normalized = tuple(sorted({str(code).strip() for code in codes if str(code).strip()}))
         completed_codes = set(completed)
         page_limit = max(MIN_BATCH_SIZE, min(MAX_BATCH_SIZE, checkpoint.batch_size))
+        normal_page = tuple(
+            code
+            for code in normalized
+            if (checkpoint.cursor is None or code > checkpoint.cursor)
+            and code not in completed_codes
+            and code not in failed_by_code
+        )[:page_limit]
+        # Finish the deterministic unseen page before retrying failures.  A
+        # provider outage can otherwise fill the retry page and permanently
+        # starve every later code in a large authoritative universe.
         retry_page = tuple(
             code for code in normalized if code in failed_by_code and code not in completed_codes
         )[:page_limit]
-        retry_codes = set(retry_page)
-        normal_page = tuple(
-            code
-            for code in ordered_page(
-                codes, cursor=checkpoint.cursor, batch_size=checkpoint.batch_size
-            )
-            if code not in completed_codes
-            and code not in failed_by_code
-            and code not in retry_codes
-        )
-        page = retry_page + normal_page[: max(0, page_limit - len(retry_page))]
+        page = normal_page if normal_page else retry_page
+        retry_codes = set(retry_page if not normal_page else ())
         failed: list[tuple[str, str]] = []
         last_cursor = checkpoint.cursor
         budget_exhausted = False

@@ -81,6 +81,6 @@
 - [x] 9.3 Run focused backend domain-boundary, PIT, formula, lifecycle, evidence, validation, and API test groups, with every command protected by a hard timeout no greater than 60 seconds.
 - [x] 9.4 Run focused frontend typecheck and leader-evidence tests, with every command protected by a hard timeout no greater than 60 seconds.
 - [x] 9.5 Run Ruff only on changed Python files and run strict OpenSpec validation for this change, each under a hard timeout no greater than 60 seconds.
-- [ ] 9.6 Deploy with collection, screening API, and UI feature flags disabled; verify migrations, health, scheduler non-overlap, resource headroom, and production-state hashes.
+- [x] 9.6 Deploy with collection, screening API, and UI feature flags disabled; verify migrations, health, scheduler non-overlap, resource headroom, and production-state hashes.
 - [ ] 9.7 Enable bounded factual capture first, then research materialization, then the read-only API/UI after readiness checks; record provider health, coverage, candidate counts, unavailable reasons, and rollback commands.
 - [x] 9.8 Confirm that insufficient data remains explicitly research-only and that no candidate can affect rankings, positions, email, or execution before a separate manually approved promotion change.

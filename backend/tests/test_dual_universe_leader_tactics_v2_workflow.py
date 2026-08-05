@@ -12,6 +12,7 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_collector import 
 from app.services.workflows.dual_universe_leader_tactics_v2 import (
     AshareReadinessReport,
     V2CheckpointContract,
+    evaluate_v2_materialization_readiness,
     validate_v2_checkpoint_contract,
 )
 
@@ -54,6 +55,52 @@ def test_readiness_report_keeps_layer_denominators_and_thresholds() -> None:
     assert payload["adjusted_daily"]["coverage"] == 0.95
     assert payload["history_tiers"]["300"]["coverage"] == 0.30
     assert payload["history_tiers"]["300"]["unavailable_reason"] == "insufficient_history"
+
+
+def test_materialization_readiness_requires_formula_history_not_300_day_diagnostic() -> None:
+    report = AshareReadinessReport(
+        as_of=__import__("datetime").datetime(2026, 8, 4, 15),
+        universe_count=100,
+        adjusted_daily_count=95,
+        pit_theme_count=95,
+        history_counts=((61, 100), (120, 95), (180, 95), (300, 10)),
+        provider_health=(("eastmoney", 18_000),),
+        raw_decision_violations=0,
+        non_finite_violations=0,
+        exclusions=(("none", 100),),
+    )
+
+    decision = evaluate_v2_materialization_readiness(report)
+
+    assert decision.ready is True
+    assert decision.reasons == ()
+    assert decision.to_dict()["research_only"] is True
+
+
+def test_materialization_readiness_fails_closed_with_stable_reasons() -> None:
+    report = AshareReadinessReport(
+        as_of=__import__("datetime").datetime(2026, 8, 4, 15),
+        universe_count=100,
+        adjusted_daily_count=94,
+        pit_theme_count=94,
+        history_counts=((120, 95), (180, 94)),
+        provider_health=(("sina", 1),),
+        raw_decision_violations=1,
+        non_finite_violations=2,
+        exclusions=(),
+    )
+
+    decision = evaluate_v2_materialization_readiness(report)
+
+    assert decision.ready is False
+    assert decision.reasons == (
+        "insufficient_adjusted_daily_coverage",
+        "insufficient_pit_theme_coverage",
+        "insufficient_history_180",
+        "unsupported_decision_provider",
+        "raw_decision_price_violation",
+        "non_finite_adjusted_input",
+    )
 
 
 @pytest.mark.asyncio
@@ -233,6 +280,7 @@ async def test_readiness_is_limited_to_as_of_authoritative_pool(tmp_path) -> Non
             session,
             as_of=as_of,
             required_history_tiers=(2,),
+            required_trade_date=__import__("datetime").date(2026, 8, 1),
         )
     event.remove(engine.sync_engine, "before_cursor_execute", count_statement)
     await engine.dispose()
