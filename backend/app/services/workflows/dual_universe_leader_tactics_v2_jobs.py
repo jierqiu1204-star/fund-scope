@@ -403,6 +403,7 @@ async def _capture_ashare(
             "status": "healthy" if not batch.failed else "degraded",
             "batch_failures": batch_failures,
             "error_summary": batch.checkpoint.error_summary,
+            "transport": provider.transport_diagnostics,
         },
         "price_basis": PRICE_BASIS,
         "raw_decision_violations": 0,
