@@ -97,6 +97,29 @@ def ordered_page(
     return after_cursor[: max(MIN_BATCH_SIZE, min(MAX_BATCH_SIZE, batch_size))]
 
 
+def checkpoint_page(
+    codes: Sequence[str], *, checkpoint: V2CollectorCheckpoint
+) -> tuple[str, ...]:
+    """Return the exact unseen-or-retry page consumed by ``run_bounded_batch``."""
+
+    normalized = tuple(sorted({str(code).strip() for code in codes if str(code).strip()}))
+    completed_codes = set(checkpoint.completed_codes)
+    failed_codes = {code for code, _ in checkpoint.failed_codes}
+    page_limit = max(MIN_BATCH_SIZE, min(MAX_BATCH_SIZE, checkpoint.batch_size))
+    normal_page = tuple(
+        code
+        for code in normalized
+        if (checkpoint.cursor is None or code > checkpoint.cursor)
+        and code not in completed_codes
+        and code not in failed_codes
+    )[:page_limit]
+    if normal_page:
+        return normal_page
+    return tuple(
+        code for code in normalized if code in failed_codes and code not in completed_codes
+    )[:page_limit]
+
+
 _PROCESS_LEASE = asyncio.Lock()
 
 
@@ -140,22 +163,15 @@ async def run_bounded_batch(
         failed_by_code = dict(checkpoint.failed_codes)
         normalized = tuple(sorted({str(code).strip() for code in codes if str(code).strip()}))
         completed_codes = set(completed)
-        page_limit = max(MIN_BATCH_SIZE, min(MAX_BATCH_SIZE, checkpoint.batch_size))
         normal_page = tuple(
-            code
-            for code in normalized
-            if (checkpoint.cursor is None or code > checkpoint.cursor)
-            and code not in completed_codes
-            and code not in failed_by_code
-        )[:page_limit]
+            code for code in checkpoint_page(normalized, checkpoint=checkpoint)
+            if code not in failed_by_code
+        )
         # Finish the deterministic unseen page before retrying failures.  A
         # provider outage can otherwise fill the retry page and permanently
         # starve every later code in a large authoritative universe.
-        retry_page = tuple(
-            code for code in normalized if code in failed_by_code and code not in completed_codes
-        )[:page_limit]
-        page = normal_page if normal_page else retry_page
-        retry_codes = set(retry_page if not normal_page else ())
+        page = checkpoint_page(normalized, checkpoint=checkpoint)
+        retry_codes = set(page if not normal_page else ())
         failed: list[tuple[str, str]] = []
         last_cursor = checkpoint.cursor
         budget_exhausted = False
@@ -260,6 +276,7 @@ __all__ = [
     "V2CollectorBatch",
     "V2CollectorCheckpoint",
     "adaptive_batch_size",
+    "checkpoint_page",
     "ordered_page",
     "run_bounded_batch",
 ]

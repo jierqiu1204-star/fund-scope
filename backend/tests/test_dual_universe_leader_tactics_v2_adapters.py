@@ -359,7 +359,7 @@ async def test_batch_asset_reader_is_ordered_and_bounded(tmp_path) -> None:
                              price_basis, provider, adjustment_version, revision_id,
                              received_at, decision_eligible, historical_research_only)
                         VALUES (:id, :asset_code, :trade_date, 10, 11, 9, 10.5,
-                                100, 1000, 0.1, 'total_return_adjusted', 'eastmoney',
+                                100, 1000, 0.1, 'total_return_adjusted', 'tickflow',
                                 'v2', :revision_id, '2026-08-03 10:00:00', 1, 0)
                         """
                     ),

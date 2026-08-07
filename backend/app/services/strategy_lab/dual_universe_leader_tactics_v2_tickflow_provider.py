@@ -1,9 +1,10 @@
 """Bounded TickFlow/BaoStock facts for the A-share V2 research path.
 
-TickFlow supplies the current A-share universe, security metadata and explicit
-backward-adjusted daily OHLCV.  BaoStock supplies only the current industry
-label through a physically bounded child process.  The combined snapshot is
-point-in-time from its actual receipt timestamp onward; it is never backdated.
+TickFlow supplies the current A-share universe, security metadata, SW1 pools
+and explicit backward-adjusted daily OHLCV. BaoStock only supplements symbols
+missing from those pools, through physically bounded pages. The combined
+snapshot is point-in-time from its actual receipt timestamp onward and is never
+backdated.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import json
 import math
 import sys
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
@@ -32,8 +33,12 @@ TICKFLOW_UNIVERSE_ID = "CN_Equity_A"
 TICKFLOW_PROVIDER = "tickflow"
 TICKFLOW_UNIVERSE_SOURCE = "tickflow.free.universes.CN_Equity_A"
 TICKFLOW_ADJUSTMENT_VERSION = "tickflow.free.klines.backward_v1"
+TICKFLOW_SW1_UNIVERSE_PREFIX = "CN_Equity_SW1_"
+TICKFLOW_THEME_SOURCE = "tickflow.free.universes.SW1"
+TICKFLOW_TAXONOMY_VERSION = "tickflow.sw1.current_v1"
 BAOSTOCK_THEME_SOURCE = "baostock.query_stock_industry.current"
 BAOSTOCK_TAXONOMY_VERSION = "baostock.industry.current_v1"
+ASHARE_TAXONOMY_VERSION = "tickflow_sw1_plus_baostock_current_v1"
 TICKFLOW_HEADERS = {
     "Accept": "application/json",
     "Content-Type": "application/json",
@@ -44,6 +49,7 @@ MAX_RESPONSE_BYTES = 8_000_000
 MAX_SUBPROCESS_BYTES = 2_000_000
 MAX_UNIVERSE_ROWS = 6_000
 MAX_INSTRUMENT_BATCH_SIZE = 1_000
+MAX_UNIVERSE_BATCH_IDS = 1_000
 MAX_HISTORY_SESSIONS = 300
 DEFAULT_HISTORY_SESSIONS = 180
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 6.0
@@ -52,7 +58,7 @@ DEFAULT_UNIVERSE_BUDGET_SECONDS = 40.0
 MAX_UNIVERSE_BUDGET_SECONDS = 45.0
 DEFAULT_CODE_BUDGET_SECONDS = 10.0
 MAX_CODE_BUDGET_SECONDS = 20.0
-BAOSTOCK_SUBPROCESS_TIMEOUT_SECONDS = 18.0
+BAOSTOCK_SUBPROCESS_TIMEOUT_SECONDS = 27.0
 
 
 class TickflowAshareProviderError(RuntimeError):
@@ -75,6 +81,44 @@ class TickflowAshareProviderConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class AshareIndustryClassification:
+    name: str
+    group_id: str
+    source: str
+    taxonomy_version: str
+    effective_from: date
+    received_at: datetime
+    confidence: str = "observed_current"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", _required_text(self.name, "industry", max_length=128))
+        object.__setattr__(
+            self, "group_id", _required_text(self.group_id, "industry_group_id", max_length=256)
+        )
+        object.__setattr__(
+            self, "source", _required_text(self.source, "industry_source", max_length=64)
+        )
+        object.__setattr__(
+            self,
+            "taxonomy_version",
+            _required_text(
+                self.taxonomy_version, "industry_taxonomy_version", max_length=128
+            ),
+        )
+        if not isinstance(self.effective_from, date) or isinstance(
+            self.effective_from, datetime
+        ):
+            raise TickflowAshareProviderError("industry_effective_from_invalid")
+        if not isinstance(self.received_at, datetime):
+            raise TickflowAshareProviderError("industry_received_at_invalid")
+        object.__setattr__(
+            self,
+            "confidence",
+            _required_text(self.confidence, "industry_confidence", max_length=32),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class TickflowAshareMember:
     symbol: str
     code: str
@@ -82,6 +126,12 @@ class TickflowAshareMember:
     board: str
     current_industry: str | None
     float_shares: float | None
+    industry_group_id: str | None = None
+    industry_source: str | None = None
+    industry_taxonomy_version: str | None = None
+    industry_effective_from: date | None = None
+    industry_received_at: datetime | None = None
+    industry_confidence: str | None = None
 
     def __post_init__(self) -> None:
         symbol, code, board = _normalise_symbol(self.symbol)
@@ -90,6 +140,18 @@ class TickflowAshareMember:
         name = _required_text(self.name, "name", max_length=256)
         industry = _optional_text(self.current_industry, "current_industry", max_length=128)
         float_shares = _optional_positive_number(self.float_shares, "float_shares")
+        industry_fields = (
+            self.industry_group_id,
+            self.industry_source,
+            self.industry_taxonomy_version,
+            self.industry_effective_from,
+            self.industry_received_at,
+            self.industry_confidence,
+        )
+        if industry is None and any(value is not None for value in industry_fields):
+            raise TickflowAshareProviderError("industry_metadata_without_industry")
+        if industry is not None and any(value is None for value in industry_fields):
+            raise TickflowAshareProviderError("industry_metadata_incomplete")
         object.__setattr__(self, "symbol", symbol)
         object.__setattr__(self, "code", code)
         object.__setattr__(self, "board", board)
@@ -119,7 +181,9 @@ class _ParsedAdjustedBar:
     raw_record: tuple[object, ...]
 
 
-IndustryLoader = Callable[[], Awaitable[Mapping[str, str]]]
+IndustryLoader = Callable[
+    [], Awaitable[Mapping[str, str | AshareIndustryClassification]]
+]
 _CURRENT_UNIVERSE_CACHE: tuple[date, tuple[TickflowAshareMember, ...]] | None = None
 
 
@@ -205,7 +269,7 @@ def _parse_instruments(
     payload: object,
     *,
     expected_symbols: tuple[str, ...],
-    industries: Mapping[str, str],
+    industries: Mapping[str, AshareIndustryClassification],
 ) -> tuple[TickflowAshareMember, ...]:
     rows = _payload_data(payload, "instruments")
     if not isinstance(rows, list) or len(rows) != len(expected_symbols):
@@ -223,14 +287,25 @@ def _parse_instruments(
         ext = row.get("ext")
         if not isinstance(ext, Mapping):
             raise TickflowAshareProviderError("instrument_ext_invalid")
+        classification = industries.get(symbol)
         members.append(
             TickflowAshareMember(
                 symbol=symbol,
                 code=code,
                 name=_required_text(row.get("name"), "name", max_length=256),
                 board=board,
-                current_industry=industries.get(symbol),
+                current_industry=classification.name if classification else None,
                 float_shares=_optional_positive_number(ext.get("float_shares"), "float_shares"),
+                industry_group_id=classification.group_id if classification else None,
+                industry_source=classification.source if classification else None,
+                industry_taxonomy_version=(
+                    classification.taxonomy_version if classification else None
+                ),
+                industry_effective_from=(
+                    classification.effective_from if classification else None
+                ),
+                industry_received_at=classification.received_at if classification else None,
+                industry_confidence=classification.confidence if classification else None,
             )
         )
         seen.add(symbol)
@@ -304,11 +379,44 @@ def _parse_adjusted_history(
     return tuple(parsed[-history_sessions:])
 
 
-async def _load_baostock_industries() -> Mapping[str, str]:
+def _normalise_industry_mapping(
+    mapping: Mapping[str, str | AshareIndustryClassification],
+    *,
+    observed_at: datetime,
+) -> dict[str, AshareIndustryClassification]:
+    industries: dict[str, AshareIndustryClassification] = {}
+    effective_from = observed_at.replace(tzinfo=UTC).astimezone(SHANGHAI).date()
+    for raw_symbol, raw_value in mapping.items():
+        symbol = _normalise_symbol(raw_symbol)[0]
+        classification = (
+            raw_value
+            if isinstance(raw_value, AshareIndustryClassification)
+            else AshareIndustryClassification(
+                name=_required_text(raw_value, "industry", max_length=128),
+                group_id=f"baostock_industry:{raw_value}",
+                source=BAOSTOCK_THEME_SOURCE,
+                taxonomy_version=BAOSTOCK_TAXONOMY_VERSION,
+                effective_from=effective_from,
+                received_at=observed_at,
+            )
+        )
+        previous = industries.setdefault(symbol, classification)
+        if previous != classification:
+            raise TickflowAshareProviderError(f"industry_conflict:{symbol}")
+    return industries
+
+
+async def load_baostock_industries(symbols: tuple[str, ...]) -> Mapping[str, str]:
+    if not 1 <= len(symbols) <= 20:
+        raise TickflowAshareProviderError("baostock_industry_batch_size_invalid")
+    normalized_symbols = tuple(_normalise_symbol(symbol)[0] for symbol in symbols)
+    if len(set(normalized_symbols)) != len(normalized_symbols):
+        raise TickflowAshareProviderError("baostock_industry_duplicate_symbol")
     process = await asyncio.create_subprocess_exec(
         sys.executable,
         "-m",
         "app.services.strategy_lab.dual_universe_leader_tactics_v2_baostock_snapshot",
+        *normalized_symbols,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -337,10 +445,10 @@ async def _load_baostock_industries() -> Mapping[str, str]:
     industries: dict[str, str] = {}
     for raw_symbol, raw_industry in payload.items():
         symbol = _normalise_symbol(raw_symbol)[0]
+        if symbol not in normalized_symbols:
+            raise TickflowAshareProviderError("baostock_industry_unrequested_symbol")
         industry = _required_text(raw_industry, "industry", max_length=128)
         industries[symbol] = industry
-    if not industries:
-        raise TickflowAshareProviderError("baostock_industry_empty")
     return industries
 
 
@@ -357,7 +465,7 @@ class TickflowAshareV2Provider:
         self.config = config or TickflowAshareProviderConfig()
         self._client = client
         self._owns_client = client is None
-        self._industry_loader = industry_loader or _load_baostock_industries
+        self._industry_loader = industry_loader
         self._members: tuple[TickflowAshareMember, ...] | None = None
         self._members_by_code: dict[str, TickflowAshareMember] = {}
         self._received_at: datetime | None = None
@@ -438,6 +546,83 @@ class TickflowAshareV2Provider:
         except ValueError as exc:
             raise TickflowAshareProviderError(f"{kind}_json_invalid") from exc
 
+    async def _fetch_tickflow_sw1_industries(
+        self,
+        *,
+        expected_symbols: tuple[str, ...],
+        observed_at: datetime,
+    ) -> dict[str, AshareIndustryClassification]:
+        list_payload = await self._request_json(
+            "industry_universe_list",
+            "/universes",
+            timeout_seconds=self.config.request_timeout_seconds,
+        )
+        rows = _payload_data(list_payload, "industry_universe_list")
+        if not isinstance(rows, list) or len(rows) > 2_000:
+            raise TickflowAshareProviderError("industry_universe_list_invalid")
+        ids: list[str] = []
+        for row in rows:
+            if not isinstance(row, Mapping):
+                raise TickflowAshareProviderError("industry_universe_row_invalid")
+            universe_id = row.get("id")
+            if isinstance(universe_id, str) and universe_id.startswith(
+                TICKFLOW_SW1_UNIVERSE_PREFIX
+            ):
+                ids.append(universe_id)
+        ids = sorted(set(ids))
+        if not ids or len(ids) > MAX_UNIVERSE_BATCH_IDS:
+            raise TickflowAshareProviderError("industry_universe_ids_invalid")
+        batch_payload = await self._request_json(
+            "industry_universe_batch",
+            "/universes/batch",
+            json_body={"ids": ids},
+            timeout_seconds=self.config.request_timeout_seconds,
+        )
+        pools = _payload_data(batch_payload, "industry_universe_batch")
+        if not isinstance(pools, Mapping) or set(pools) != set(ids):
+            raise TickflowAshareProviderError("industry_universe_batch_partial")
+
+        expected = set(expected_symbols)
+        classifications: dict[str, AshareIndustryClassification] = {}
+        effective_from = observed_at.replace(tzinfo=UTC).astimezone(SHANGHAI).date()
+        for universe_id in ids:
+            pool = pools.get(universe_id)
+            if not isinstance(pool, Mapping) or pool.get("id") != universe_id:
+                raise TickflowAshareProviderError("industry_universe_identity_mismatch")
+            pool_name = _required_text(pool.get("name"), "industry_name", max_length=128)
+            if not pool_name.startswith("SW1"):
+                raise TickflowAshareProviderError("industry_universe_name_invalid")
+            industry = _required_text(
+                pool_name.removeprefix("SW1"), "industry_name", max_length=128
+            )
+            symbols = pool.get("symbols")
+            declared = pool.get("symbol_count")
+            if (
+                not isinstance(symbols, list)
+                or isinstance(declared, bool)
+                or not isinstance(declared, int)
+                or declared != len(symbols)
+            ):
+                raise TickflowAshareProviderError("industry_universe_symbols_invalid")
+            classification = AshareIndustryClassification(
+                name=industry,
+                group_id=f"tickflow_sw1:{industry}",
+                source=TICKFLOW_THEME_SOURCE,
+                taxonomy_version=TICKFLOW_TAXONOMY_VERSION,
+                effective_from=effective_from,
+                received_at=observed_at,
+            )
+            for raw_symbol in symbols:
+                symbol = _normalise_symbol(raw_symbol)[0]
+                if symbol not in expected:
+                    continue
+                previous = classifications.setdefault(symbol, classification)
+                if previous.name != classification.name:
+                    raise TickflowAshareProviderError(
+                        f"industry_universe_conflict:{symbol}"
+                    )
+        return classifications
+
     async def fetch_universe(
         self, *, received_at: datetime
     ) -> tuple[TickflowAshareMember, ...]:
@@ -471,14 +656,25 @@ class TickflowAshareV2Provider:
                 timeout_seconds=self.config.request_timeout_seconds,
             )
             symbols = _parse_universe(universe_payload)
-            try:
-                industries = dict(await self._industry_loader())
-            except TickflowAshareProviderError:
-                raise
-            except Exception as exc:
-                raise TickflowAshareProviderError(
-                    f"industry_loader_failed:{type(exc).__name__}"
-                ) from exc
+            industry_observed_at = datetime.now(UTC).replace(tzinfo=None)
+            if self._industry_loader is None:
+                industries = await self._fetch_tickflow_sw1_industries(
+                    expected_symbols=symbols,
+                    observed_at=industry_observed_at,
+                )
+            else:
+                try:
+                    raw_industries = await self._industry_loader()
+                    industries = _normalise_industry_mapping(
+                        raw_industries,
+                        observed_at=industry_observed_at,
+                    )
+                except TickflowAshareProviderError:
+                    raise
+                except Exception as exc:
+                    raise TickflowAshareProviderError(
+                        f"industry_loader_failed:{type(exc).__name__}"
+                    ) from exc
             members: list[TickflowAshareMember] = []
             for start in range(0, len(symbols), MAX_INSTRUMENT_BATCH_SIZE):
                 batch = symbols[start : start + MAX_INSTRUMENT_BATCH_SIZE]
@@ -509,6 +705,53 @@ class TickflowAshareV2Provider:
         if self._owns_client:
             _CURRENT_UNIVERSE_CACHE = (received_date, members)
         return members
+
+    def apply_industry_supplements(
+        self,
+        supplements: Mapping[str, AshareIndustryClassification],
+    ) -> tuple[TickflowAshareMember, ...]:
+        """Overlay only previously missing classifications on this provider instance."""
+
+        if self._members is None:
+            raise TickflowAshareProviderError("universe_snapshot_required")
+        normalized = _normalise_industry_mapping(
+            supplements,
+            observed_at=datetime.now(UTC).replace(tzinfo=None),
+        )
+        unknown = set(normalized) - {member.symbol for member in self._members}
+        if unknown:
+            raise TickflowAshareProviderError("supplement_not_in_current_universe")
+        updated: list[TickflowAshareMember] = []
+        for member in self._members:
+            supplement = normalized.get(member.symbol)
+            if supplement is None:
+                updated.append(member)
+                continue
+            if member.current_industry is not None:
+                if member.current_industry != supplement.name:
+                    raise TickflowAshareProviderError(
+                        f"supplement_would_replace_observed_industry:{member.symbol}"
+                    )
+                updated.append(member)
+                continue
+            updated.append(
+                replace(
+                    member,
+                    current_industry=supplement.name,
+                    industry_group_id=supplement.group_id,
+                    industry_source=supplement.source,
+                    industry_taxonomy_version=supplement.taxonomy_version,
+                    industry_effective_from=supplement.effective_from,
+                    industry_received_at=supplement.received_at,
+                    industry_confidence=supplement.confidence,
+                )
+            )
+        self._members = tuple(updated)
+        self._members_by_code = {member.code: member for member in self._members}
+        self._industry_count = sum(
+            member.current_industry is not None for member in self._members
+        )
+        return self._members
 
     async def fetch_facts(
         self,
@@ -572,18 +815,27 @@ class TickflowAshareV2Provider:
         )
         theme_facts: tuple[AshareThemeMembershipFact, ...] = ()
         if member.current_industry is not None:
+            if (
+                member.industry_group_id is None
+                or member.industry_source is None
+                or member.industry_taxonomy_version is None
+                or member.industry_effective_from is None
+                or member.industry_received_at is None
+                or member.industry_confidence is None
+            ):
+                raise TickflowAshareProviderError("industry_metadata_incomplete")
             theme_facts = (
                 AshareThemeMembershipFact(
                     asset_code=member.code,
-                    group_id=f"baostock_industry:{member.current_industry}",
+                    group_id=member.industry_group_id,
                     theme=member.current_industry,
                     sector=member.current_industry,
-                    effective_from=signal_date,
+                    effective_from=member.industry_effective_from,
                     effective_to=None,
-                    received_at=universe_received_at,
-                    taxonomy_version=BAOSTOCK_TAXONOMY_VERSION,
-                    source=BAOSTOCK_THEME_SOURCE,
-                    confidence="observed_current",
+                    received_at=member.industry_received_at,
+                    taxonomy_version=member.industry_taxonomy_version,
+                    source=member.industry_source,
+                    confidence=member.industry_confidence,
                     supersedes_fact_hash=None,
                     mapping_kind="historical_pit",
                 ),
@@ -626,14 +878,20 @@ class TickflowAshareV2Provider:
 
 
 __all__ = [
+    "ASHARE_TAXONOMY_VERSION",
+    "AshareIndustryClassification",
     "BAOSTOCK_TAXONOMY_VERSION",
+    "BAOSTOCK_THEME_SOURCE",
     "DEFAULT_HISTORY_SESSIONS",
     "TICKFLOW_ADJUSTMENT_VERSION",
     "TICKFLOW_PROVIDER",
+    "TICKFLOW_TAXONOMY_VERSION",
+    "TICKFLOW_THEME_SOURCE",
     "TICKFLOW_UNIVERSE_SOURCE",
     "TickflowAshareFactBundle",
     "TickflowAshareMember",
     "TickflowAshareProviderConfig",
     "TickflowAshareProviderError",
     "TickflowAshareV2Provider",
+    "load_baostock_industries",
 ]

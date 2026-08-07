@@ -27,7 +27,7 @@ The system SHALL store each A-share theme or sector membership with taxonomy ver
 - **THEN** the security is excluded from theme-relative gates with `missing_pit_theme_membership`
 
 ### Requirement: Decision prices are total-return-adjusted and source governed
-The system SHALL use only finite total-return-adjusted A-share OHLCV from the approved AKShare/Eastmoney decision-data path and SHALL persist trade date, adjustment identity, source, receipt time, and revision identity for every bar used in a signal or outcome.
+The system SHALL use only finite total-return-adjusted A-share OHLCV from an approved AKShare/Eastmoney/TickFlow decision-data path and SHALL persist trade date, adjustment identity, source, receipt time, and revision identity for every bar used in a signal or outcome.
 
 #### Scenario: Approved adjusted history is available
 - **WHEN** an adjusted bar was received by the cutoff and passes finite-value and continuity checks

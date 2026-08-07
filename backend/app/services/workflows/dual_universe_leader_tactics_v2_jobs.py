@@ -35,12 +35,15 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_adapters import (
 )
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_collector import (
     V2CollectorCheckpoint,
+    checkpoint_page,
 )
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_etf_inputs import (
     read_etf_v2_asset_inputs,
 )
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_ingestion import (
+    AshareThemeMembershipFact,
     AshareUniverseSnapshotFact,
+    persist_ashare_theme_membership_batch,
     persist_ashare_universe_snapshot_batch,
 )
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_lifecycle_storage import (
@@ -50,24 +53,30 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_storage import (
     get_v2_materialized_manifest,
 )
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_tickflow_provider import (
+    ASHARE_TAXONOMY_VERSION,
     BAOSTOCK_TAXONOMY_VERSION,
+    BAOSTOCK_THEME_SOURCE,
     TICKFLOW_ADJUSTMENT_VERSION,
     TICKFLOW_PROVIDER,
     TICKFLOW_UNIVERSE_SOURCE,
+    AshareIndustryClassification,
     TickflowAshareMember,
     TickflowAshareProviderError,
     TickflowAshareV2Provider,
+    load_baostock_industries,
 )
 from app.services.strategy_lab.etf_point_in_time_decision_data import (
     latest_ready_etf_decision_data_snapshot,
 )
 from app.services.workflows.dual_universe_leader_tactics_v2 import (
+    ASHARE_V2_COVERAGE_THRESHOLD,
     V2CapturedAshareFacts,
     V2CheckpointContract,
     evaluate_v2_materialization_readiness,
     materialize_v2_result,
     read_ashare_authoritative_assets,
     read_ashare_readiness,
+    run_v2_capture_batch,
     run_v2_fact_capture_batch,
 )
 
@@ -119,6 +128,9 @@ def _capture_manifest_hash(
                     "name": member.name,
                     "board": member.board,
                     "industry": member.current_industry,
+                    "industry_group_id": member.industry_group_id,
+                    "industry_source": member.industry_source,
+                    "industry_taxonomy_version": member.industry_taxonomy_version,
                     "float_shares": member.float_shares,
                 }
                 for member in members
@@ -128,7 +140,7 @@ def _capture_manifest_hash(
             "provider": TICKFLOW_PROVIDER,
             "universe_source": TICKFLOW_UNIVERSE_SOURCE,
             "adjustment_version": TICKFLOW_ADJUSTMENT_VERSION,
-            "taxonomy_version": BAOSTOCK_TAXONOMY_VERSION,
+            "taxonomy_version": ASHARE_TAXONOMY_VERSION,
             "code_version": code_version,
         }
     )
@@ -140,7 +152,7 @@ def _checkpoint_contract(*, manifest_hash: str) -> V2CheckpointContract:
         source_registry_hash=V2_SOURCE_REGISTRY.registry_hash,
         formula_registry_hash=V2_FORMULA_REGISTRY_HASH,
         adjustment_version=TICKFLOW_ADJUSTMENT_VERSION,
-        taxonomy_version=BAOSTOCK_TAXONOMY_VERSION,
+        taxonomy_version=ASHARE_TAXONOMY_VERSION,
         cost_model=(("fee_bps_per_side", 5.0), ("slippage_bps_per_side", 5.0)),
         state_policy="preparing_confirmed_invalidated_v2",
     )
@@ -241,6 +253,280 @@ async def _persist_complete_universe_snapshot(
     await session.commit()
 
 
+def _as_naive_datetime(value: object, field: str) -> datetime:
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    if not isinstance(value, datetime):
+        raise ValueError(f"{field} is not a datetime")
+    return _utc_naive(value)
+
+
+async def _load_persisted_baostock_supplements(
+    session: AsyncSession,
+    *,
+    members: tuple[TickflowAshareMember, ...],
+    signal_date: date,
+    as_of: datetime,
+) -> dict[str, AshareIndustryClassification]:
+    """Read only previously observed current classifications for missing symbols."""
+
+    missing_by_code = {member.code: member for member in members if member.current_industry is None}
+    if not missing_by_code:
+        return {}
+    rows = (
+        (
+            await session.execute(
+                text(
+                    """
+                    SELECT asset_code, group_id, theme, sector, effective_from,
+                           received_at, taxonomy_version, source, confidence
+                    FROM (
+                        SELECT memberships.*,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY asset_code
+                                   ORDER BY received_at DESC, effective_from DESC,
+                                            fact_hash DESC
+                               ) AS membership_rank
+                        FROM ashare_theme_membership_facts AS memberships
+                        WHERE source = :source
+                          AND taxonomy_version = :taxonomy_version
+                          AND effective_from <= :signal_date
+                          AND (effective_to IS NULL OR effective_to >= :signal_date)
+                          AND received_at <= :as_of
+                    ) latest
+                    WHERE membership_rank = 1
+                    ORDER BY asset_code
+                    LIMIT :limit
+                    """
+                ),
+                {
+                    "source": BAOSTOCK_THEME_SOURCE,
+                    "taxonomy_version": BAOSTOCK_TAXONOMY_VERSION,
+                    "signal_date": signal_date,
+                    "as_of": as_of,
+                    "limit": V2_MAX_ASHARE_ASSETS + 1,
+                },
+            )
+        )
+        .mappings()
+        .all()
+    )
+    if len(rows) > V2_MAX_ASHARE_ASSETS:
+        raise ValueError("persisted industry supplement exceeds bounded limit")
+    supplements: dict[str, AshareIndustryClassification] = {}
+    for row in rows:
+        member = missing_by_code.get(str(row["asset_code"]))
+        if member is None:
+            continue
+        industry = str(row["theme"] or row["sector"] or "").strip()
+        if not industry:
+            continue
+        effective_from = row["effective_from"]
+        if isinstance(effective_from, str):
+            effective_from = date.fromisoformat(effective_from[:10])
+        supplements[member.symbol] = AshareIndustryClassification(
+            name=industry,
+            group_id=str(row["group_id"]),
+            source=str(row["source"]),
+            taxonomy_version=str(row["taxonomy_version"]),
+            effective_from=effective_from,
+            received_at=_as_naive_datetime(row["received_at"], "received_at"),
+            confidence=str(row["confidence"]),
+        )
+    return supplements
+
+
+def _industry_bootstrap_manifest_hash(
+    *,
+    signal_date: date,
+    members: tuple[TickflowAshareMember, ...],
+    code_version: str,
+) -> str:
+    return stable_contract_hash(
+        {
+            "schema_version": "dual_universe_leader_tactics_v2_industry_bootstrap_v1",
+            "signal_date": signal_date,
+            "members": [
+                {
+                    "code": member.code,
+                    "symbol": member.symbol,
+                    "tickflow_industry": member.current_industry,
+                    "tickflow_source": member.industry_source,
+                }
+                for member in members
+            ],
+            "taxonomy_version": ASHARE_TAXONOMY_VERSION,
+            "code_version": code_version,
+        }
+    )
+
+
+async def _bootstrap_baostock_industries(
+    session: AsyncSession,
+    *,
+    provider: TickflowAshareV2Provider,
+    baseline_members: tuple[TickflowAshareMember, ...],
+    signal_date: date,
+    code_version: str,
+    budget_seconds: float,
+) -> tuple[tuple[TickflowAshareMember, ...], dict[str, Any]]:
+    """Persist resumable BaoStock supplements until the A-share theme gate passes."""
+
+    started = time.monotonic()
+    as_of = _utc_naive(_local_now())
+    persisted = await _load_persisted_baostock_supplements(
+        session,
+        members=baseline_members,
+        signal_date=signal_date,
+        as_of=as_of,
+    )
+    members = provider.apply_industry_supplements(persisted) if persisted else baseline_members
+    universe_count = len(members)
+    industry_count = sum(member.current_industry is not None for member in members)
+    required_count = int(universe_count * ASHARE_V2_COVERAGE_THRESHOLD + 0.999999)
+    missing_members = tuple(
+        member for member in baseline_members if member.current_industry is None
+    )
+    supplement_codes = tuple(member.code for member in missing_members)
+    members_by_code = {member.code: member for member in missing_members}
+    manifest_hash = _industry_bootstrap_manifest_hash(
+        signal_date=signal_date,
+        members=baseline_members,
+        code_version=code_version,
+    )
+    checkpoint = await load_v2_checkpoint(session, manifest_hash=manifest_hash)
+    if checkpoint is None:
+        checkpoint = V2CollectorCheckpoint(
+            cursor=None,
+            batch_size=20,
+            completed_codes=(),
+            status="paused",
+            manifest_hash=manifest_hash,
+        )
+    contract = _checkpoint_contract(manifest_hash=manifest_hash)
+    last_batch = None
+    queried_count = 0
+    classified_count = 0
+
+    while industry_count < required_count and checkpoint.status != "complete":
+        remaining = budget_seconds - (time.monotonic() - started) - 2.0
+        if remaining < 30.0:
+            break
+        page = checkpoint_page(supplement_codes, checkpoint=checkpoint)
+        if not page:
+            break
+        page_symbols = tuple(members_by_code[code].symbol for code in page)
+        load_state: dict[str, object] = {"attempted": False, "error": None}
+        page_classifications: dict[str, AshareIndustryClassification] = {}
+        page_facts: dict[str, AshareThemeMembershipFact] = {}
+
+        async def fetch_one(
+            code: str,
+            _page_symbols: tuple[str, ...] = page_symbols,
+            _page: tuple[str, ...] = page,
+            _load_state: dict[str, object] = load_state,
+            _page_classifications: dict[str, AshareIndustryClassification] = (
+                page_classifications
+            ),
+            _page_facts: dict[str, AshareThemeMembershipFact] = page_facts,
+        ) -> str:
+            nonlocal queried_count, classified_count
+            if not _load_state["attempted"]:
+                _load_state["attempted"] = True
+                try:
+                    raw = await load_baostock_industries(_page_symbols)
+                    observed_at = _utc_naive(_local_now())
+                    for symbol, industry in raw.items():
+                        member = next(item for item in missing_members if item.symbol == symbol)
+                        classification = AshareIndustryClassification(
+                            name=industry,
+                            group_id=f"baostock_industry:{industry}",
+                            source=BAOSTOCK_THEME_SOURCE,
+                            taxonomy_version=BAOSTOCK_TAXONOMY_VERSION,
+                            effective_from=signal_date,
+                            received_at=observed_at,
+                        )
+                        _page_classifications[symbol] = classification
+                        _page_facts[member.code] = AshareThemeMembershipFact(
+                            asset_code=member.code,
+                            group_id=classification.group_id,
+                            theme=classification.name,
+                            sector=classification.name,
+                            effective_from=classification.effective_from,
+                            effective_to=None,
+                            received_at=classification.received_at,
+                            taxonomy_version=classification.taxonomy_version,
+                            source=classification.source,
+                            confidence=classification.confidence,
+                            supersedes_fact_hash=None,
+                            mapping_kind="historical_pit",
+                        )
+                    queried_count += len(_page)
+                    classified_count += len(_page_facts)
+                except Exception as exc:  # provider failure is checkpoint evidence
+                    _load_state["error"] = exc
+                    raise
+            error = _load_state["error"]
+            if isinstance(error, Exception):
+                raise error
+            fact = _page_facts.get(code)
+            if fact is not None:
+                return fact.fact_hash
+            return stable_contract_hash(
+                {
+                    "schema_version": "baostock_industry_unclassified_v1",
+                    "signal_date": signal_date,
+                    "asset_code": code,
+                    "source": BAOSTOCK_THEME_SOURCE,
+                }
+            )
+
+        async def persist_completed(
+            code: str,
+            _page_facts: dict[str, AshareThemeMembershipFact] = page_facts,
+        ) -> None:
+            fact = _page_facts.get(code)
+            if fact is not None:
+                await persist_ashare_theme_membership_batch(session, (fact,))
+
+        last_batch = await run_v2_capture_batch(
+            session,
+            manifest_hash=manifest_hash,
+            codes=supplement_codes,
+            checkpoint=checkpoint,
+            fetch_one=fetch_one,
+            lease_owner="scheduler-v2-ashare-industry",
+            budget_seconds=min(remaining, 32.0),
+            persist_completed=persist_completed,
+            expected_contract=contract,
+            checkpoint_contract=contract,
+        )
+        checkpoint = last_batch.checkpoint
+        if page_classifications:
+            members = provider.apply_industry_supplements(page_classifications)
+            industry_count = sum(member.current_industry is not None for member in members)
+        if last_batch.stopped_reason in {"database_lease_busy", "single_worker_lease_busy"}:
+            break
+
+    coverage = industry_count / universe_count if universe_count else 0.0
+    return members, {
+        "manifest_hash": manifest_hash,
+        "universe_count": universe_count,
+        "industry_count": industry_count,
+        "coverage": coverage,
+        "threshold": ASHARE_V2_COVERAGE_THRESHOLD,
+        "required_count": required_count,
+        "queried_count": queried_count,
+        "classified_count": classified_count,
+        "checkpoint_status": checkpoint.status,
+        "completed_count": len(checkpoint.completed_codes),
+        "failed_count": len(checkpoint.failed_codes),
+        "batch_size_next": checkpoint.batch_size,
+        "stopped_reason": last_batch.stopped_reason if last_batch else "coverage_check",
+        "error_summary": checkpoint.error_summary,
+    }
+
+
 async def _capture_ashare(
     session: AsyncSession,
     *,
@@ -322,10 +608,46 @@ async def _capture_ashare(
     started = time.monotonic()
     provider_received_at = local_now
     async with TickflowAshareV2Provider() as provider:
-        members = await provider.fetch_universe(received_at=provider_received_at)
-        database_received_at = _utc_naive(_local_now())
-        if len(members) > V2_MAX_ASHARE_ASSETS:
+        baseline_members = await provider.fetch_universe(received_at=provider_received_at)
+        if len(baseline_members) > V2_MAX_ASHARE_ASSETS:
             raise TickflowAshareProviderError("universe_exceeds_operational_limit")
+        remaining = timeout_seconds - (time.monotonic() - started) - 2.0
+        if remaining <= 0:
+            return {
+                "status": "waiting",
+                "job_status": "partial",
+                "signal_date": signal_date.isoformat(),
+                "unavailable_reason": "leader_tactics_v2_universe_bootstrap_used_budget",
+                "universe_count": len(baseline_members),
+                "research_only": True,
+            }
+        members, industry_bootstrap = await _bootstrap_baostock_industries(
+            session,
+            provider=provider,
+            baseline_members=baseline_members,
+            signal_date=signal_date,
+            code_version=code_version,
+            budget_seconds=remaining,
+        )
+        if industry_bootstrap["coverage"] < ASHARE_V2_COVERAGE_THRESHOLD:
+            return {
+                "status": "partial",
+                "job_status": "partial",
+                "signal_date": signal_date.isoformat(),
+                "unavailable_reason": "insufficient_pit_theme_bootstrap_coverage",
+                "industry_bootstrap": industry_bootstrap,
+                "provider_health": {
+                    "provider": TICKFLOW_PROVIDER,
+                    "status": "degraded"
+                    if industry_bootstrap["failed_count"]
+                    else "healthy",
+                    "transport": provider.transport_diagnostics,
+                },
+                "research_only": True,
+                "notification_provenance": "none",
+                "execution_provenance": "none",
+            }
+        database_received_at = _utc_naive(_local_now())
         manifest_hash = _capture_manifest_hash(
             signal_date=signal_date,
             members=members,
@@ -353,8 +675,9 @@ async def _capture_ashare(
                 "job_status": "partial",
                 "signal_date": signal_date.isoformat(),
                 "manifest_hash": manifest_hash,
-                "unavailable_reason": "leader_tactics_v2_universe_bootstrap_used_budget",
+                "unavailable_reason": "leader_tactics_v2_industry_bootstrap_used_budget",
                 "universe_count": len(members),
+                "industry_bootstrap": industry_bootstrap,
                 "research_only": True,
             }
         contract = _checkpoint_contract(manifest_hash=manifest_hash)
@@ -429,6 +752,7 @@ async def _capture_ashare(
             "error_summary": batch.checkpoint.error_summary,
             "transport": provider.transport_diagnostics,
         },
+        "industry_bootstrap": industry_bootstrap,
         "price_basis": PRICE_BASIS,
         "raw_decision_violations": 0,
         "research_only": True,

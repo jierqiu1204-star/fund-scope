@@ -23,7 +23,7 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
     V2PITMembership,
 )
 
-APPROVED_ASHARE_PROVIDERS = frozenset({"akshare", "eastmoney"})
+APPROVED_ASHARE_PROVIDERS = frozenset({"akshare", "eastmoney", "tickflow"})
 FORBIDDEN_RAW_PROVIDERS = frozenset({"sina", "efinance", "tencent"})
 
 
@@ -254,7 +254,7 @@ async def read_ashare_adjusted_bars(
                   AND decision_eligible = :eligible
                   AND historical_research_only = :historical_only
                   AND price_basis = :price_basis
-                  AND LOWER(provider) IN ('akshare', 'eastmoney')
+                  AND LOWER(provider) IN ('akshare', 'eastmoney', 'tickflow')
                   AND adjustment_version IS NOT NULL
                   AND TRIM(adjustment_version) <> ''
                   AND adjusted_open > 0
@@ -457,7 +457,7 @@ async def read_ashare_asset_inputs(
                               AND decision_eligible = :eligible
                               AND historical_research_only = :historical_only
                               AND price_basis = :price_basis
-                              AND LOWER(provider) IN ('akshare', 'eastmoney')
+                              AND LOWER(provider) IN ('akshare', 'eastmoney', 'tickflow')
                               AND adjustment_version IS NOT NULL
                               AND TRIM(adjustment_version) <> ''
                               AND adjusted_open > 0

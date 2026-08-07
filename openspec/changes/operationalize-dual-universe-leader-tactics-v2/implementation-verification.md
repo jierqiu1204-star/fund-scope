@@ -14,6 +14,10 @@
   adaptive 5–20 batches, a hard maximum 55-second continuation budget, and
   durable success/failure checkpoint payloads. It is not enabled for
   production capture yet.
+- Replaced the blocking all-market BaoStock industry request with a primary
+  TickFlow SW1 batch plus resumable BaoStock pages of at most 20 missing
+  symbols. TickFlow adjusted bars are now admitted by the A-share read and
+  readiness contracts; no ETF ranking threshold or publication input changed.
 - Added a stable unavailable-reason registry with exact numerator/denominator
   availability gates on the summary surface, and wired replay/promotion failures
   through that contract.

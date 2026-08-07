@@ -28,6 +28,13 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_lifecycle_storage
     CHECKPOINT_SCHEMA_VERSION,
     load_v2_checkpoint,
 )
+from app.services.strategy_lab.dual_universe_leader_tactics_v2_tickflow_provider import (
+    TICKFLOW_TAXONOMY_VERSION,
+    TICKFLOW_THEME_SOURCE,
+    TickflowAshareMember,
+    TickflowAshareV2Provider,
+)
+from app.services.workflows import dual_universe_leader_tactics_v2_jobs as jobs
 from app.services.workflows.dual_universe_leader_tactics_v2 import (
     V2CapturedAshareFacts,
     V2CheckpointContract,
@@ -275,6 +282,66 @@ async def test_fact_capture_writes_three_tables_and_real_hashes(tmp_path) -> Non
             )
         ).one()
         assert tuple(counts) == (2, 2, 2)
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_industry_bootstrap_persists_bounded_supplements_and_reaches_gate(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    engine, session_factory = await _factory(tmp_path, "industry-bootstrap.db")
+    observed_at = datetime(2026, 8, 7, 12)
+    members: list[TickflowAshareMember] = []
+    for index in range(10):
+        code = f"{index + 1:06d}"
+        classified = index < 8
+        members.append(
+            TickflowAshareMember(
+                symbol=f"{code}.SZ",
+                code=code,
+                name=f"测试{code}",
+                board="SZ",
+                current_industry="软件" if classified else None,
+                float_shares=1_000_000,
+                industry_group_id="tickflow_sw1:软件" if classified else None,
+                industry_source=TICKFLOW_THEME_SOURCE if classified else None,
+                industry_taxonomy_version=(
+                    TICKFLOW_TAXONOMY_VERSION if classified else None
+                ),
+                industry_effective_from=date(2026, 8, 7) if classified else None,
+                industry_received_at=observed_at if classified else None,
+                industry_confidence="observed_current" if classified else None,
+            )
+        )
+
+    provider = TickflowAshareV2Provider(industry_loader=lambda: None)  # type: ignore[arg-type]
+    provider._members = tuple(members)
+    provider._members_by_code = {member.code: member for member in members}
+
+    async def industries(symbols: tuple[str, ...]) -> dict[str, str]:
+        assert symbols == ("000009.SZ", "000010.SZ")
+        return {symbol: "计算机" for symbol in symbols}
+
+    monkeypatch.setattr(jobs, "load_baostock_industries", industries)
+    async with session_factory() as session:
+        completed, evidence = await jobs._bootstrap_baostock_industries(
+            session,
+            provider=provider,
+            baseline_members=tuple(members),
+            signal_date=date(2026, 8, 7),
+            code_version="test-code-version",
+            budget_seconds=40.0,
+        )
+        persisted_count = await session.scalar(
+            text("SELECT COUNT(*) FROM ashare_theme_membership_facts")
+        )
+
+    assert evidence["coverage"] == 1.0
+    assert evidence["queried_count"] == 2
+    assert evidence["classified_count"] == 2
+    assert persisted_count == 2
+    assert all(member.current_industry is not None for member in completed)
     await engine.dispose()
 
 

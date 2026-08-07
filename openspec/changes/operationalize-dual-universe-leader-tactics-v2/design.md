@@ -80,6 +80,15 @@ The V2 endpoint uses enumerated universe/formula/state filters, an explicit `as_
 
 The front end defaults to ETF for compatibility, stores filters in URL state where practical, cancels stale requests, and never falls back across universes. Production ranking and V2 research remain visually separate.
 
+### 10. Bootstrap current A-share classification in two bounded layers
+
+TickFlow SW1 universe batches provide the primary current classification. A
+single BaoStock child process supplements at most 20 still-unclassified symbols
+per page under a durable database checkpoint. Classification pages are
+persisted from their factual receipt time and never backdated. Screening remains
+unavailable until the A-share-only 90-percent theme gate passes; the ETF ranking
+pool, thresholds, tables, and publication path are not inputs to this bootstrap.
+
 ## Risks / Trade-offs
 
 - [Historical A-share theme membership is sparse] → Exclude unknown PIT memberships, expose coverage honestly, and accumulate factual forward snapshots; do not infer from today's theme pool.

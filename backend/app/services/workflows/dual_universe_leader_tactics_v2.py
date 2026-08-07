@@ -511,7 +511,7 @@ _QUALIFIED_ADJUSTED_FACT_PREDICATE = """
         AND facts.decision_eligible = :eligible
         AND facts.historical_research_only = :historical_only
         AND facts.price_basis = :price_basis
-        AND LOWER(facts.provider) IN ('akshare', 'eastmoney')
+        AND LOWER(facts.provider) IN ('akshare', 'eastmoney', 'tickflow')
         AND facts.adjustment_version IS NOT NULL
         AND TRIM(facts.adjustment_version) <> ''
         AND facts.adjusted_open > 0
@@ -680,7 +680,9 @@ async def read_ashare_readiness(
                   AND facts.received_at <= :as_of
                   AND facts.trade_date <= :as_of_date
                   AND (
-                      LOWER(COALESCE(facts.provider, '')) NOT IN ('akshare', 'eastmoney')
+                      LOWER(COALESCE(facts.provider, '')) NOT IN (
+                          'akshare', 'eastmoney', 'tickflow'
+                      )
                       OR facts.price_basis IS NULL
                       OR facts.price_basis <> :price_basis
                       OR facts.adjustment_version IS NULL
