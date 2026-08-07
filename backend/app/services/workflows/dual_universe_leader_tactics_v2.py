@@ -263,6 +263,7 @@ async def run_v2_fact_capture_batch(
     fetch_one: Callable[[str], Awaitable[V2CapturedAshareFacts]],
     lease_owner: str,
     budget_seconds: float = MAX_CONTINUATION_SECONDS,
+    provider_cooldown_seconds: float = 0.25,
     expected_contract: V2CheckpointContract | None = None,
     checkpoint_contract: V2CheckpointContract | None = None,
 ) -> V2CollectorBatch:
@@ -325,6 +326,7 @@ async def run_v2_fact_capture_batch(
         fetch_one=fetch_bundle,
         lease_owner=lease_owner,
         budget_seconds=budget_seconds,
+        provider_cooldown_seconds=provider_cooldown_seconds,
         persist_completed=persist_completed,
         expected_contract=expected_contract,
         checkpoint_contract=checkpoint_contract,
@@ -340,6 +342,7 @@ async def run_v2_capture_batch(
     fetch_one: Any,
     lease_owner: str,
     budget_seconds: float = MAX_CONTINUATION_SECONDS,
+    provider_cooldown_seconds: float = 0.25,
     persist_completed: Callable[[str], Awaitable[None]] | None = None,
     expected_contract: V2CheckpointContract | None = None,
     checkpoint_contract: V2CheckpointContract | None = None,
@@ -417,6 +420,7 @@ async def run_v2_capture_batch(
             checkpoint=checkpoint,
             fetch_one=fetch_one,
             budget_seconds=collector_budget_seconds,
+            provider_cooldown_seconds=provider_cooldown_seconds,
         )
         if persist_completed is not None:
             completed_before = set(checkpoint.completed_codes)

@@ -752,20 +752,48 @@ async def _capture_ashare(
         codes = tuple(member.code for member in members)
         batch = None
         batch_failures = 0
+        prefetched_page: tuple[str, ...] = ()
+        prefetched_bundles: dict[str, V2CapturedAshareFacts] = {}
+        prefetched_failures: dict[str, str] = {}
+        prefetch_error: Exception | None = None
 
         async def fetch_one(code: str) -> V2CapturedAshareFacts:
-            facts = await provider.fetch_facts(
-                members_by_code[code],
-                signal_date=signal_date,
-                received_at=provider_received_at,
-                history_sessions=REPAIR_HISTORY,
-            )
-            return V2CapturedAshareFacts(
-                asset_code=facts.asset_code,
-                universe_fact=facts.universe_fact,
-                theme_facts=facts.theme_facts,
-                adjusted_price_facts=facts.adjusted_price_facts,
-            )
+            nonlocal prefetched_page, prefetched_bundles, prefetched_failures
+            nonlocal prefetch_error
+            page = checkpoint_page(codes, checkpoint=checkpoint)
+            if page != prefetched_page:
+                prefetched_page = page
+                prefetched_bundles = {}
+                prefetched_failures = {}
+                prefetch_error = None
+                try:
+                    loaded = await provider.fetch_fact_batch(
+                        tuple(members_by_code[item] for item in page),
+                        signal_date=signal_date,
+                        received_at=provider_received_at,
+                        history_sessions=REPAIR_HISTORY,
+                    )
+                    prefetched_failures = dict(loaded.failures)
+                    prefetched_bundles = {
+                        item: V2CapturedAshareFacts(
+                            asset_code=facts.asset_code,
+                            universe_fact=facts.universe_fact,
+                            theme_facts=facts.theme_facts,
+                            adjusted_price_facts=facts.adjusted_price_facts,
+                        )
+                        for item, facts in loaded.bundles.items()
+                    }
+                except Exception as exc:  # provider page failure is retryable evidence
+                    prefetch_error = exc
+            if prefetch_error is not None:
+                raise prefetch_error
+            failure = prefetched_failures.get(code)
+            if failure is not None:
+                raise TickflowAshareProviderError(failure)
+            facts = prefetched_bundles.get(code)
+            if facts is None:
+                raise TickflowAshareProviderError("adjusted_history_batch_result_missing")
+            return facts
 
         # Reuse the same serial provider connection and durable checkpoint for
         # as many 5-20 security pages as fit in this one hard-bounded job.  This
@@ -780,6 +808,7 @@ async def _capture_ashare(
                 fetch_one=fetch_one,
                 lease_owner="scheduler-v2-ashare-capture",
                 budget_seconds=min(remaining, V2_WORK_SECONDS),
+                provider_cooldown_seconds=0.0,
                 expected_contract=contract,
                 checkpoint_contract=contract,
             )

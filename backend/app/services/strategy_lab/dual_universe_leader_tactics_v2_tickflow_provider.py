@@ -191,6 +191,14 @@ class TickflowAshareFactBundle:
 
 
 @dataclass(frozen=True, slots=True)
+class TickflowAshareFactBatchResult:
+    """One official batch response split into usable facts and per-code failures."""
+
+    bundles: Mapping[str, TickflowAshareFactBundle]
+    failures: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class _ParsedAdjustedBar:
     trade_date: date
     adjusted_open: float
@@ -900,55 +908,46 @@ class TickflowAshareV2Provider:
         )
         return self._members
 
-    async def fetch_facts(
+    def _validate_fact_request(
         self,
-        member: TickflowAshareMember,
+        members: tuple[TickflowAshareMember, ...],
         *,
         signal_date: date,
         received_at: datetime,
-        history_sessions: int = DEFAULT_HISTORY_SESSIONS,
-    ) -> TickflowAshareFactBundle:
-        received_at = _validate_received_at(received_at)
+        history_sessions: int,
+    ) -> None:
+        _validate_received_at(received_at)
         if signal_date > received_at.astimezone(SHANGHAI).date():
             raise TickflowAshareProviderError("signal_date_after_receipt")
         if not isinstance(history_sessions, int) or isinstance(history_sessions, bool):
             raise TickflowAshareProviderError("history_sessions_invalid")
         if not 1 <= history_sessions <= MAX_HISTORY_SESSIONS:
             raise TickflowAshareProviderError("history_sessions_out_of_range")
+        if not members or len(members) > 20:
+            raise TickflowAshareProviderError("history_batch_size_invalid")
         if self._members is None or self._received_at != received_at:
             raise TickflowAshareProviderError("universe_snapshot_required")
         if self._universe_observed_at is None:
             raise TickflowAshareProviderError("universe_receipt_missing")
-        if self._members_by_code.get(member.code) != member:
-            raise TickflowAshareProviderError("member_not_from_current_universe")
+        codes: set[str] = set()
+        for member in members:
+            if member.code in codes:
+                raise TickflowAshareProviderError("history_batch_duplicate_code")
+            codes.add(member.code)
+            if self._members_by_code.get(member.code) != member:
+                raise TickflowAshareProviderError("member_not_from_current_universe")
 
-        end_time = int(
-            datetime.combine(signal_date, datetime.min.time(), tzinfo=SHANGHAI).timestamp()
-            * 1000
-        )
-        payload = await self._request_json(
-            "adjusted_history",
-            "/klines",
-            params={
-                "symbol": member.symbol,
-                "period": "1d",
-                "count": history_sessions,
-                "end_time": end_time,
-                "adjust": "backward",
-            },
-            timeout_seconds=self.config.code_budget_seconds,
-        )
-        parsed = _parse_adjusted_history(
-            payload,
-            signal_date=signal_date,
-            history_sessions=history_sessions,
-            float_shares=member.float_shares,
-        )
-        if not parsed:
-            raise TickflowAshareProviderError("adjusted_history_empty")
-
+    def _build_fact_bundle(
+        self,
+        member: TickflowAshareMember,
+        *,
+        signal_date: date,
+        parsed: tuple[_ParsedAdjustedBar, ...],
+        price_received_at: datetime,
+    ) -> TickflowAshareFactBundle:
+        if self._universe_observed_at is None:
+            raise TickflowAshareProviderError("universe_receipt_missing")
         universe_received_at = self._universe_observed_at
-        price_received_at = datetime.now(UTC).replace(tzinfo=None)
         universe_fact = AshareUniverseSnapshotFact(
             snapshot_date=signal_date,
             asset_code=member.code,
@@ -1023,6 +1022,123 @@ class TickflowAshareV2Provider:
             adjusted_price_facts=price_facts,
         )
 
+    async def fetch_fact_batch(
+        self,
+        members: tuple[TickflowAshareMember, ...],
+        *,
+        signal_date: date,
+        received_at: datetime,
+        history_sessions: int = DEFAULT_HISTORY_SESSIONS,
+    ) -> TickflowAshareFactBatchResult:
+        """Fetch 1-20 symbols in one official TickFlow batch request."""
+
+        self._validate_fact_request(
+            members,
+            signal_date=signal_date,
+            received_at=received_at,
+            history_sessions=history_sessions,
+        )
+        end_time = int(
+            datetime.combine(signal_date, datetime.min.time(), tzinfo=SHANGHAI).timestamp()
+            * 1000
+        )
+        payload = await self._request_json(
+            "adjusted_history_batch",
+            "/klines/batch",
+            params={
+                "symbols": ",".join(member.symbol for member in members),
+                "period": "1d",
+                "count": history_sessions,
+                "end_time": end_time,
+                "adjust": "backward",
+            },
+            timeout_seconds=self.config.code_budget_seconds,
+        )
+        rows = _payload_data(payload, "adjusted_history_batch")
+        if not isinstance(rows, Mapping):
+            raise TickflowAshareProviderError("adjusted_history_batch_payload_invalid")
+        expected_symbols = {member.symbol for member in members}
+        unknown_symbols = set(rows) - expected_symbols
+        if unknown_symbols:
+            raise TickflowAshareProviderError("adjusted_history_batch_contains_unknown_symbol")
+
+        price_received_at = datetime.now(UTC).replace(tzinfo=None)
+        bundles: dict[str, TickflowAshareFactBundle] = {}
+        failures: list[tuple[str, str]] = []
+        for member in members:
+            raw = rows.get(member.symbol)
+            if raw is None:
+                failures.append((member.code, "adjusted_history_batch_result_missing"))
+                continue
+            try:
+                parsed = _parse_adjusted_history(
+                    {"data": raw},
+                    signal_date=signal_date,
+                    history_sessions=history_sessions,
+                    float_shares=member.float_shares,
+                )
+                if not parsed:
+                    raise TickflowAshareProviderError("adjusted_history_empty")
+                bundles[member.code] = self._build_fact_bundle(
+                    member,
+                    signal_date=signal_date,
+                    parsed=parsed,
+                    price_received_at=price_received_at,
+                )
+            except TickflowAshareProviderError as exc:
+                failures.append((member.code, str(exc)[:500]))
+        return TickflowAshareFactBatchResult(
+            bundles=bundles,
+            failures=tuple(failures),
+        )
+
+    async def fetch_facts(
+        self,
+        member: TickflowAshareMember,
+        *,
+        signal_date: date,
+        received_at: datetime,
+        history_sessions: int = DEFAULT_HISTORY_SESSIONS,
+    ) -> TickflowAshareFactBundle:
+        self._validate_fact_request(
+            (member,),
+            signal_date=signal_date,
+            received_at=received_at,
+            history_sessions=history_sessions,
+        )
+
+        end_time = int(
+            datetime.combine(signal_date, datetime.min.time(), tzinfo=SHANGHAI).timestamp()
+            * 1000
+        )
+        payload = await self._request_json(
+            "adjusted_history",
+            "/klines",
+            params={
+                "symbol": member.symbol,
+                "period": "1d",
+                "count": history_sessions,
+                "end_time": end_time,
+                "adjust": "backward",
+            },
+            timeout_seconds=self.config.code_budget_seconds,
+        )
+        parsed = _parse_adjusted_history(
+            payload,
+            signal_date=signal_date,
+            history_sessions=history_sessions,
+            float_shares=member.float_shares,
+        )
+        if not parsed:
+            raise TickflowAshareProviderError("adjusted_history_empty")
+
+        return self._build_fact_bundle(
+            member,
+            signal_date=signal_date,
+            parsed=parsed,
+            price_received_at=datetime.now(UTC).replace(tzinfo=None),
+        )
+
 
 __all__ = [
     "ASHARE_TAXONOMY_VERSION",
@@ -1041,6 +1157,7 @@ __all__ = [
     "TICKFLOW_THEME_SOURCE",
     "TICKFLOW_UNIVERSE_SOURCE",
     "TickflowAshareFactBundle",
+    "TickflowAshareFactBatchResult",
     "TickflowAshareMember",
     "TickflowAshareProviderConfig",
     "TickflowAshareProviderError",

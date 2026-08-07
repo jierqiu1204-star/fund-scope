@@ -267,6 +267,67 @@ async def test_provider_batches_tickflow_sw1_as_primary_current_classification(
 
 
 @pytest.mark.asyncio
+async def test_provider_batch_fetch_uses_one_request_and_isolates_missing_symbol(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(provider_module, "_CURRENT_UNIVERSE_CACHE", None)
+    batch_requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/universes/CN_Equity_A"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "id": "CN_Equity_A",
+                        "symbol_count": 2,
+                        "symbols": ["600001.SH", "000001.SZ"],
+                    }
+                },
+            )
+        if request.url.path.endswith("/instruments"):
+            payload = json.loads(request.content)
+            rows = {
+                "600001.SH": _instrument("600001.SH", "浦发测试"),
+                "000001.SZ": _instrument("000001.SZ", "平安测试"),
+            }
+            return httpx.Response(200, json={"data": [rows[s] for s in payload["symbols"]]})
+        if request.url.path.endswith("/klines/batch"):
+            batch_requests.append(request)
+            assert request.url.params["symbols"] == "000001.SZ,600001.SH"
+            assert request.url.params["adjust"] == "backward"
+            return httpx.Response(
+                200,
+                json={"data": {"000001.SZ": _history_payload()["data"]}},
+            )
+        raise AssertionError(request.url)
+
+    async def industries():
+        return {}
+
+    async with httpx.AsyncClient(
+        base_url=TICKFLOW_BASE_URL,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        async with TickflowAshareV2Provider(
+            client=client,
+            industry_loader=industries,
+        ) as provider:
+            members = await provider.fetch_universe(received_at=RECEIVED_AT)
+            result = await provider.fetch_fact_batch(
+                members,
+                signal_date=date(2026, 8, 7),
+                received_at=RECEIVED_AT,
+                history_sessions=2,
+            )
+
+    assert set(result.bundles) == {"000001"}
+    assert result.failures == (("600001", "adjusted_history_batch_result_missing"),)
+    assert len(result.bundles["000001"].adjusted_price_facts) == 2
+    assert len(batch_requests) == 1
+
+
+@pytest.mark.asyncio
 async def test_provider_fails_closed_on_partial_instrument_metadata(monkeypatch) -> None:
     monkeypatch.setattr(provider_module, "_CURRENT_UNIVERSE_CACHE", None)
 
