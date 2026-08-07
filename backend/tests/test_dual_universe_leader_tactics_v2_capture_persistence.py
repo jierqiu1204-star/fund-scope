@@ -31,6 +31,7 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_lifecycle_storage
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_tickflow_provider import (
     TICKFLOW_TAXONOMY_VERSION,
     TICKFLOW_THEME_SOURCE,
+    BaoStockIndustryBatchResult,
     TickflowAshareMember,
     TickflowAshareV2Provider,
 )
@@ -342,6 +343,67 @@ async def test_industry_bootstrap_persists_bounded_supplements_and_reaches_gate(
     assert evidence["classified_count"] == 2
     assert persisted_count == 2
     assert all(member.current_industry is not None for member in completed)
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_industry_bootstrap_persists_partial_subprocess_progress(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    engine, session_factory = await _factory(tmp_path, "industry-partial.db")
+    observed_at = datetime(2026, 8, 7, 12)
+    members = tuple(
+        TickflowAshareMember(
+            symbol=f"{index + 1:06d}.SZ",
+            code=f"{index + 1:06d}",
+            name=f"测试{index + 1:06d}",
+            board="SZ",
+            current_industry="软件" if index < 8 else None,
+            float_shares=1_000_000,
+            industry_group_id="tickflow_sw1:软件" if index < 8 else None,
+            industry_source=TICKFLOW_THEME_SOURCE if index < 8 else None,
+            industry_taxonomy_version=TICKFLOW_TAXONOMY_VERSION if index < 8 else None,
+            industry_effective_from=date(2026, 8, 7) if index < 8 else None,
+            industry_received_at=observed_at if index < 8 else None,
+            industry_confidence="observed_current" if index < 8 else None,
+        )
+        for index in range(10)
+    )
+    provider = TickflowAshareV2Provider(industry_loader=lambda: None)  # type: ignore[arg-type]
+    provider._members = members
+    provider._members_by_code = {member.code: member for member in members}
+
+    async def industries(_: tuple[str, ...]) -> BaoStockIndustryBatchResult:
+        return BaoStockIndustryBatchResult(
+            industries={"000009.SZ": "计算机"},
+            completed_symbols=("000009.SZ",),
+            failures=(("000010.SZ", "baostock_industry_failed:returncode=-14"),),
+        )
+
+    monkeypatch.setattr(jobs, "load_baostock_industries", industries)
+    async with session_factory() as session:
+        completed, evidence = await jobs._bootstrap_baostock_industries(
+            session,
+            provider=provider,
+            baseline_members=members,
+            signal_date=date(2026, 8, 7),
+            code_version="test-code-version",
+            budget_seconds=40.0,
+        )
+        rows = (
+            await session.execute(
+                text("SELECT asset_code, source FROM ashare_theme_membership_facts")
+            )
+        ).all()
+
+    assert evidence["coverage"] == 0.9
+    assert evidence["queried_count"] == 1
+    assert evidence["classified_count"] == 1
+    assert evidence["completed_count"] == 1
+    assert evidence["failed_count"] == 1
+    assert rows == [("000009", "baostock.query_stock_industry.current")]
+    assert sum(member.current_industry is not None for member in completed) == 9
     await engine.dispose()
 
 

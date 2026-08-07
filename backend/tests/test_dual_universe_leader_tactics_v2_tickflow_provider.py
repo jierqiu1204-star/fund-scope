@@ -18,12 +18,32 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_tickflow_provider
     TICKFLOW_TAXONOMY_VERSION,
     TICKFLOW_THEME_SOURCE,
     AshareIndustryClassification,
+    BaoStockIndustryBatchResult,
     TickflowAshareProviderError,
     TickflowAshareV2Provider,
 )
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 RECEIVED_AT = datetime(2026, 8, 7, 20, 0, tzinfo=SHANGHAI)
+
+
+def test_baostock_parser_preserves_completed_rows_when_later_symbol_times_out() -> None:
+    result = provider_module._parse_baostock_industry_output(
+        stdout=(
+            b'{"industry": "bank", "symbol": "600001.SH"}\n'
+            b'{"industry": null, "symbol": "000001.SZ"}\n'
+        ),
+        stderr=b"",
+        returncode=-14,
+        requested_symbols=("600001.SH", "000001.SZ", "000002.SZ"),
+    )
+
+    assert isinstance(result, BaoStockIndustryBatchResult)
+    assert result.industries == {"600001.SH": "bank"}
+    assert result.completed_symbols == ("600001.SH", "000001.SZ")
+    assert result.failures == (
+        ("000002.SZ", "baostock_industry_failed:returncode=-14"),
+    )
 
 
 def _instrument(symbol: str, name: str, *, float_shares: float | None = 1_000_000) -> dict:

@@ -150,6 +150,35 @@ async def test_failed_code_is_retried_and_cleared_after_transient_recovery() -> 
 
 
 @pytest.mark.asyncio
+async def test_provider_failures_shrink_the_next_page_to_the_safe_minimum() -> None:
+    codes = tuple(f"{index:06d}" for index in range(20))
+
+    async def fail(_: str) -> None:
+        raise OSError("provider page timeout")
+
+    first = await run_bounded_batch(
+        codes,
+        checkpoint=V2CollectorCheckpoint(
+            cursor=None,
+            batch_size=20,
+            completed_codes=(),
+            status="paused",
+        ),
+        fetch_one=fail,
+        provider_cooldown_seconds=0,
+    )
+    second = await run_bounded_batch(
+        codes,
+        checkpoint=first.checkpoint,
+        fetch_one=fail,
+        provider_cooldown_seconds=0,
+    )
+
+    assert first.checkpoint.batch_size == 10
+    assert second.checkpoint.batch_size == 5
+
+
+@pytest.mark.asyncio
 async def test_cooldown_does_not_start_a_fetch_after_budget_is_exhausted() -> None:
     fetched: list[str] = []
 

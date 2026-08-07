@@ -14,7 +14,7 @@ import io
 import json
 import signal
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import baostock as bs
@@ -42,7 +42,11 @@ def _normalise_symbol(value: object) -> tuple[str, str | None]:
     return f"{code}.{exchange}", provider_code
 
 
-def load_current_industries(symbols: Sequence[str]) -> dict[str, str]:
+def load_current_industries(
+    symbols: Sequence[str],
+    *,
+    on_completed: Callable[[str, str | None], None] | None = None,
+) -> dict[str, str]:
     """Return one bounded current BaoStock industry page.
 
     The caller owns the durable cursor.  Beijing-exchange symbols are accepted
@@ -66,12 +70,15 @@ def load_current_industries(symbols: Sequence[str]) -> dict[str, str]:
     try:
         for requested_symbol, provider_code in normalized:
             if provider_code is None:
+                if on_completed is not None:
+                    on_completed(requested_symbol, None)
                 continue
             query = bs.query_stock_industry(code=provider_code)
             if query.error_code != "0":
                 raise BaoStockSnapshotError(
                     f"industry_query_failed:{requested_symbol}:{query.error_code}"
                 )
+            observed_industry: str | None = None
             while query.next():
                 row: list[Any] = query.get_row_data()
                 # BaoStock fields are updateDate, code, code_name, industry,
@@ -90,6 +97,9 @@ def load_current_industries(symbols: Sequence[str]) -> dict[str, str]:
                 previous = industries.setdefault(row_symbol, industry)
                 if previous != industry:
                     raise BaoStockSnapshotError(f"industry_conflict:{row_symbol}")
+                observed_industry = industry
+            if on_completed is not None:
+                on_completed(requested_symbol, observed_industry)
     finally:
         with contextlib.redirect_stdout(provider_output):
             bs.logout()
@@ -98,13 +108,20 @@ def load_current_industries(symbols: Sequence[str]) -> dict[str, str]:
 
 def main() -> None:
     signal.alarm(MAX_SNAPSHOT_SECONDS)
-    print(
-        json.dumps(
-            load_current_industries(sys.argv[1:]),
-            ensure_ascii=False,
-            sort_keys=True,
+
+    def emit_completed(symbol: str, industry: str | None) -> None:
+        # One flushed record per completed symbol preserves factual progress if
+        # a later BaoStock query hangs until the subprocess alarm fires.
+        print(
+            json.dumps(
+                {"symbol": symbol, "industry": industry},
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            flush=True,
         )
-    )
+
+    load_current_industries(sys.argv[1:], on_completed=emit_completed)
 
 
 if __name__ == "__main__":

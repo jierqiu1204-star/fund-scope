@@ -60,6 +60,7 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_tickflow_provider
     TICKFLOW_PROVIDER,
     TICKFLOW_UNIVERSE_SOURCE,
     AshareIndustryClassification,
+    BaoStockIndustryBatchResult,
     TickflowAshareMember,
     TickflowAshareProviderError,
     TickflowAshareV2Provider,
@@ -419,6 +420,8 @@ async def _bootstrap_baostock_industries(
         load_state: dict[str, object] = {"attempted": False, "error": None}
         page_classifications: dict[str, AshareIndustryClassification] = {}
         page_facts: dict[str, AshareThemeMembershipFact] = {}
+        page_completed_symbols: set[str] = set()
+        page_failures: dict[str, str] = {}
 
         async def fetch_one(
             code: str,
@@ -429,12 +432,21 @@ async def _bootstrap_baostock_industries(
                 page_classifications
             ),
             _page_facts: dict[str, AshareThemeMembershipFact] = page_facts,
+            _page_completed_symbols: set[str] = page_completed_symbols,
+            _page_failures: dict[str, str] = page_failures,
         ) -> str:
             nonlocal queried_count, classified_count
             if not _load_state["attempted"]:
                 _load_state["attempted"] = True
                 try:
-                    raw = await load_baostock_industries(_page_symbols)
+                    loaded = await load_baostock_industries(_page_symbols)
+                    if isinstance(loaded, BaoStockIndustryBatchResult):
+                        raw = loaded.industries
+                        _page_completed_symbols.update(loaded.completed_symbols)
+                        _page_failures.update(dict(loaded.failures))
+                    else:  # compatibility for injected test/provider adapters
+                        raw = loaded
+                        _page_completed_symbols.update(_page_symbols)
                     observed_at = _utc_naive(_local_now())
                     for symbol, industry in raw.items():
                         member = next(item for item in missing_members if item.symbol == symbol)
@@ -461,7 +473,7 @@ async def _bootstrap_baostock_industries(
                             supersedes_fact_hash=None,
                             mapping_kind="historical_pit",
                         )
-                    queried_count += len(_page)
+                    queried_count += len(_page_completed_symbols)
                     classified_count += len(_page_facts)
                 except Exception as exc:  # provider failure is checkpoint evidence
                     _load_state["error"] = exc
@@ -469,6 +481,12 @@ async def _bootstrap_baostock_industries(
             error = _load_state["error"]
             if isinstance(error, Exception):
                 raise error
+            member = members_by_code[code]
+            symbol_failure = _page_failures.get(member.symbol)
+            if symbol_failure is not None:
+                raise TickflowAshareProviderError(symbol_failure)
+            if member.symbol not in _page_completed_symbols:
+                raise TickflowAshareProviderError("baostock_industry_result_missing")
             fact = _page_facts.get(code)
             if fact is not None:
                 return fact.fact_hash

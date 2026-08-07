@@ -239,6 +239,7 @@ async def run_bounded_batch(
         next_size = adaptive_batch_size(
             requested=checkpoint.batch_size,
             elapsed_seconds=elapsed / max(1, len(page)),
+            memory_pressure=bool(failed),
         )
         failed_codes = tuple(sorted(failed_by_code.items()))
         remaining = any(

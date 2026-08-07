@@ -119,6 +119,15 @@ class AshareIndustryClassification:
 
 
 @dataclass(frozen=True, slots=True)
+class BaoStockIndustryBatchResult:
+    """Completed and retryable portions of one bounded subprocess page."""
+
+    industries: Mapping[str, str]
+    completed_symbols: tuple[str, ...]
+    failures: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class TickflowAshareMember:
     symbol: str
     code: str
@@ -406,7 +415,55 @@ def _normalise_industry_mapping(
     return industries
 
 
-async def load_baostock_industries(symbols: tuple[str, ...]) -> Mapping[str, str]:
+def _parse_baostock_industry_output(
+    *,
+    stdout: bytes,
+    stderr: bytes,
+    returncode: int,
+    requested_symbols: tuple[str, ...],
+) -> BaoStockIndustryBatchResult:
+    if len(stdout) > MAX_SUBPROCESS_BYTES:
+        raise TickflowAshareProviderError("baostock_industry_response_too_large")
+    completed: list[str] = []
+    industries: dict[str, str] = {}
+    requested = set(requested_symbols)
+    for raw_line in stdout.splitlines():
+        try:
+            record = json.loads(raw_line)
+        except ValueError as exc:
+            raise TickflowAshareProviderError("baostock_industry_json_invalid") from exc
+        if not isinstance(record, Mapping) or set(record) != {"symbol", "industry"}:
+            raise TickflowAshareProviderError("baostock_industry_payload_invalid")
+        symbol = _normalise_symbol(record["symbol"])[0]
+        if symbol not in requested:
+            raise TickflowAshareProviderError("baostock_industry_unrequested_symbol")
+        if symbol in completed:
+            raise TickflowAshareProviderError("baostock_industry_duplicate_result")
+        completed.append(symbol)
+        raw_industry = record["industry"]
+        if raw_industry is not None:
+            industries[symbol] = _required_text(raw_industry, "industry", max_length=128)
+
+    unreported = tuple(symbol for symbol in requested_symbols if symbol not in completed)
+    if returncode == 0 and unreported:
+        raise TickflowAshareProviderError("baostock_industry_response_incomplete")
+    summary_lines = stderr.decode("utf-8", errors="replace").strip().splitlines()[-1:]
+    error_summary = "".join(summary_lines) or f"returncode={returncode}"
+    failures = (
+        tuple((symbol, f"baostock_industry_failed:{error_summary[:200]}") for symbol in unreported)
+        if returncode != 0
+        else ()
+    )
+    return BaoStockIndustryBatchResult(
+        industries=industries,
+        completed_symbols=tuple(completed),
+        failures=failures,
+    )
+
+
+async def load_baostock_industries(
+    symbols: tuple[str, ...],
+) -> BaoStockIndustryBatchResult:
     if not 1 <= len(symbols) <= 20:
         raise TickflowAshareProviderError("baostock_industry_batch_size_invalid")
     normalized_symbols = tuple(_normalise_symbol(symbol)[0] for symbol in symbols)
@@ -428,28 +485,16 @@ async def load_baostock_industries(symbols: tuple[str, ...]) -> Mapping[str, str
         process.kill()
         await process.wait()
         raise TickflowAshareProviderError("baostock_industry_timeout") from exc
-    if process.returncode != 0:
-        summary = stderr.decode("utf-8", errors="replace").strip().splitlines()[-1:]
-        error_summary = "".join(summary) or f"returncode={process.returncode}"
-        raise TickflowAshareProviderError(
-            f"baostock_industry_failed:{error_summary[:200]}"
-        )
-    if len(stdout) > MAX_SUBPROCESS_BYTES:
-        raise TickflowAshareProviderError("baostock_industry_response_too_large")
-    try:
-        payload = json.loads(stdout)
-    except ValueError as exc:
-        raise TickflowAshareProviderError("baostock_industry_json_invalid") from exc
-    if not isinstance(payload, Mapping):
-        raise TickflowAshareProviderError("baostock_industry_payload_invalid")
-    industries: dict[str, str] = {}
-    for raw_symbol, raw_industry in payload.items():
-        symbol = _normalise_symbol(raw_symbol)[0]
-        if symbol not in normalized_symbols:
-            raise TickflowAshareProviderError("baostock_industry_unrequested_symbol")
-        industry = _required_text(raw_industry, "industry", max_length=128)
-        industries[symbol] = industry
-    return industries
+    except asyncio.CancelledError:
+        process.kill()
+        await process.wait()
+        raise
+    return _parse_baostock_industry_output(
+        stdout=stdout,
+        stderr=stderr,
+        returncode=int(process.returncode or 0),
+        requested_symbols=normalized_symbols,
+    )
 
 
 class TickflowAshareV2Provider:
@@ -880,6 +925,7 @@ class TickflowAshareV2Provider:
 __all__ = [
     "ASHARE_TAXONOMY_VERSION",
     "AshareIndustryClassification",
+    "BaoStockIndustryBatchResult",
     "BAOSTOCK_TAXONOMY_VERSION",
     "BAOSTOCK_THEME_SOURCE",
     "DEFAULT_HISTORY_SESSIONS",
