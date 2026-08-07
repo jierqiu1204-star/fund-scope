@@ -11,9 +11,10 @@ from app.services.workflows import dual_universe_leader_tactics_v2_jobs as jobs
 from app.services.workflows.dual_universe_leader_tactics_v2 import AshareReadinessReport
 
 
-def _settings(*, enabled: bool = True) -> Settings:
+def _settings(*, enabled: bool = True, etf_enabled: bool = False) -> Settings:
     settings = Settings(_env_file=None)
     settings.etf_leader_tactics_v2_materialize_enabled = enabled
+    settings.etf_leader_tactics_v2_etf_materialize_enabled = etf_enabled
     return settings
 
 
@@ -185,7 +186,7 @@ async def test_etf_materialization_is_default_off_without_database_work(monkeypa
 
     result = await jobs.dual_universe_leader_tactics_v2_etf_materialize_job(
         object(),  # type: ignore[arg-type]
-        _settings(enabled=False),
+        _settings(etf_enabled=False),
     )
 
     assert result["status"] == "skipped"
@@ -245,7 +246,7 @@ async def test_etf_materialization_reads_persisted_pit_inputs_and_writes_manifes
 
     result = await jobs.dual_universe_leader_tactics_v2_etf_materialize_job(
         object(),  # type: ignore[arg-type]
-        _settings(),
+        _settings(etf_enabled=True),
         now=datetime(2026, 8, 5, 9, 10),
     )
 
@@ -295,7 +296,7 @@ async def test_etf_materialization_history_gate_stops_before_screen(monkeypatch)
 
     result = await jobs.dual_universe_leader_tactics_v2_etf_materialize_job(
         object(),  # type: ignore[arg-type]
-        _settings(),
+        _settings(etf_enabled=True),
         now=datetime(2026, 8, 5, 9, 10),
     )
 

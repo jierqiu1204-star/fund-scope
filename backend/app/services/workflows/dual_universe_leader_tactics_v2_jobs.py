@@ -1182,10 +1182,10 @@ async def dual_universe_leader_tactics_v2_etf_materialize_job(
 ) -> dict[str, Any]:
     """Materialize ETF V2 evidence from persisted PIT facts without provider work."""
 
-    if not settings.etf_leader_tactics_v2_materialize_enabled:
+    if not settings.etf_leader_tactics_v2_etf_materialize_enabled:
         return {
             "status": "skipped",
-            "reason": "leader_tactics_v2_materialization_disabled",
+            "reason": "leader_tactics_v2_etf_materialization_disabled",
             "research_only": True,
         }
     if timeout_seconds <= 0 or timeout_seconds > V2_JOB_TIMEOUT_SECONDS:

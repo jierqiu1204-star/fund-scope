@@ -239,6 +239,7 @@ def register_default_jobs(
     if (
         settings.etf_leader_tactics_v2_capture_enabled
         or settings.etf_leader_tactics_v2_materialize_enabled
+        or settings.etf_leader_tactics_v2_etf_materialize_enabled
     ):
         v2_jobs = _load_v2_scheduler_job_contract()
 
@@ -271,7 +272,7 @@ def register_default_jobs(
                 coalesce=True,
                 replace_existing=True,
             )
-        if settings.etf_leader_tactics_v2_materialize_enabled:
+        if settings.etf_leader_tactics_v2_etf_materialize_enabled:
             scheduler.add_job(
                 _run_tracked_job,
                 "cron",
@@ -289,6 +290,7 @@ def register_default_jobs(
                 coalesce=True,
                 replace_existing=True,
             )
+        if settings.etf_leader_tactics_v2_materialize_enabled:
             scheduler.add_job(
                 _run_tracked_job,
                 "cron",

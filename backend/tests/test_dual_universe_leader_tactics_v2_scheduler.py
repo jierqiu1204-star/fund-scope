@@ -32,6 +32,7 @@ def _trigger_field(job: object, name: str) -> str:
 def test_v2_scheduler_is_default_off_and_does_not_import_workflow_jobs(app, monkeypatch) -> None:
     app.state.settings.etf_leader_tactics_v2_capture_enabled = False
     app.state.settings.etf_leader_tactics_v2_materialize_enabled = False
+    app.state.settings.etf_leader_tactics_v2_etf_materialize_enabled = False
     app.state.settings.etf_leader_tactics_v2_api_enabled = True
 
     def unexpected_loader() -> object:
@@ -49,18 +50,17 @@ def test_v2_scheduler_is_default_off_and_does_not_import_workflow_jobs(app, monk
 
 
 @pytest.mark.parametrize(
-    ("capture_enabled", "materialize_enabled", "expected"),
+    ("capture_enabled", "materialize_enabled", "etf_materialize_enabled", "expected"),
     [
-        (True, False, {scheduler_module.V2_CAPTURE_JOB_NAME}),
+        (True, False, False, {scheduler_module.V2_CAPTURE_JOB_NAME}),
         (
             False,
             True,
-            {
-                scheduler_module.V2_MATERIALIZE_JOB_NAME,
-                scheduler_module.V2_ETF_MATERIALIZE_JOB_NAME,
-            },
+            False,
+            {scheduler_module.V2_MATERIALIZE_JOB_NAME},
         ),
         (
+            True,
             True,
             True,
             {
@@ -69,6 +69,12 @@ def test_v2_scheduler_is_default_off_and_does_not_import_workflow_jobs(app, monk
                 scheduler_module.V2_ETF_MATERIALIZE_JOB_NAME,
             },
         ),
+        (
+            False,
+            False,
+            True,
+            {scheduler_module.V2_ETF_MATERIALIZE_JOB_NAME},
+        ),
     ],
 )
 def test_v2_scheduler_registers_only_enabled_stages(
@@ -76,10 +82,14 @@ def test_v2_scheduler_registers_only_enabled_stages(
     monkeypatch: pytest.MonkeyPatch,
     capture_enabled: bool,
     materialize_enabled: bool,
+    etf_materialize_enabled: bool,
     expected: set[str],
 ) -> None:
     app.state.settings.etf_leader_tactics_v2_capture_enabled = capture_enabled
     app.state.settings.etf_leader_tactics_v2_materialize_enabled = materialize_enabled
+    app.state.settings.etf_leader_tactics_v2_etf_materialize_enabled = (
+        etf_materialize_enabled
+    )
     contract = scheduler_module._V2SchedulerJobContract(
         capture_name=scheduler_module.V2_CAPTURE_JOB_NAME,
         materialize_name=scheduler_module.V2_MATERIALIZE_JOB_NAME,
@@ -134,6 +144,7 @@ def test_v2_scheduler_registers_only_enabled_stages(
 def test_v2_scheduler_fails_closed_if_enabled_jobs_module_is_missing(app, monkeypatch) -> None:
     app.state.settings.etf_leader_tactics_v2_capture_enabled = True
     app.state.settings.etf_leader_tactics_v2_materialize_enabled = False
+    app.state.settings.etf_leader_tactics_v2_etf_materialize_enabled = False
 
     def missing_module(_module_name: str) -> object:
         raise ModuleNotFoundError(
@@ -148,7 +159,7 @@ def test_v2_scheduler_fails_closed_if_enabled_jobs_module_is_missing(app, monkey
         scheduler_module.register_default_jobs(scheduler, app.state.db, app.state.settings)
 
 
-def test_v2_frontend_flag_is_explicitly_false_by_default_and_wired_to_both_compose_files() -> None:
+def test_v2_staged_ashare_rollout_is_wired_without_etf_materialization() -> None:
     root = Path(__file__).resolve().parents[2]
     dockerfile = (root / "frontend/Dockerfile").read_text(encoding="utf-8")
     standard_compose = (root / "deploy/docker-compose.yml").read_text(encoding="utf-8")
@@ -163,5 +174,7 @@ def test_v2_frontend_flag_is_explicitly_false_by_default_and_wired_to_both_compo
     expected_arg = "NEXT_PUBLIC_ETF_LEADER_TACTICS_V2_ENABLED: ${NEXT_PUBLIC_ETF_LEADER_TACTICS_V2_ENABLED:-false}"
     assert expected_arg in standard_compose
     assert expected_arg in ip_compose
-    assert "ETF_LEADER_TACTICS_V2_CAPTURE_ENABLED=false" in tracked_env
-    assert "ETF_LEADER_TACTICS_V2_MATERIALIZE_ENABLED=false" in tracked_env
+    assert "ETF_LEADER_TACTICS_V2_API_ENABLED=true" in tracked_env
+    assert "ETF_LEADER_TACTICS_V2_CAPTURE_ENABLED=true" in tracked_env
+    assert "ETF_LEADER_TACTICS_V2_MATERIALIZE_ENABLED=true" in tracked_env
+    assert "ETF_LEADER_TACTICS_V2_ETF_MATERIALIZE_ENABLED=false" in tracked_env
