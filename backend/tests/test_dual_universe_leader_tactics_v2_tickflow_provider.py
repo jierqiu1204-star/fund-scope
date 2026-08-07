@@ -117,6 +117,49 @@ def _history_payload() -> dict:
     }
 
 
+def test_provider_removes_industries_not_effective_by_signal_date() -> None:
+    provider = TickflowAshareV2Provider()
+    members = (
+        provider_module.TickflowAshareMember(
+            symbol="000001.SZ",
+            code="000001",
+            name="历史可见",
+            board="SZ",
+            current_industry="银行",
+            float_shares=1_000_000,
+            industry_group_id="tickflow_sw1:银行",
+            industry_source=TICKFLOW_THEME_SOURCE,
+            industry_taxonomy_version=TICKFLOW_TAXONOMY_VERSION,
+            industry_effective_from=date(2026, 8, 7),
+            industry_received_at=RECEIVED_AT,
+            industry_confidence="observed_current",
+        ),
+        provider_module.TickflowAshareMember(
+            symbol="000002.SZ",
+            code="000002",
+            name="次日才可见",
+            board="SZ",
+            current_industry="软件",
+            float_shares=1_000_000,
+            industry_group_id="tickflow_sw1:软件",
+            industry_source=TICKFLOW_THEME_SOURCE,
+            industry_taxonomy_version=TICKFLOW_TAXONOMY_VERSION,
+            industry_effective_from=date(2026, 8, 8),
+            industry_received_at=datetime(2026, 8, 8, 0, 1, tzinfo=SHANGHAI),
+            industry_confidence="observed_current",
+        ),
+    )
+    provider._members = members
+    provider._members_by_code = {member.code: member for member in members}
+
+    restricted = provider.restrict_industries_to_signal_date(date(2026, 8, 7))
+
+    assert restricted[0].current_industry == "银行"
+    assert restricted[1].current_industry is None
+    assert restricted[1].industry_effective_from is None
+    assert provider.transport_diagnostics["industry_count"] == 1
+
+
 @pytest.mark.asyncio
 async def test_provider_combines_complete_tickflow_universe_baostock_theme_and_adjusted_bars(
     monkeypatch,

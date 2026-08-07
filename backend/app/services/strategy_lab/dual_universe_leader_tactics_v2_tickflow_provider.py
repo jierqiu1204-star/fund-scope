@@ -908,6 +908,42 @@ class TickflowAshareV2Provider:
         )
         return self._members
 
+    def restrict_industries_to_signal_date(
+        self,
+        signal_date: date,
+    ) -> tuple[TickflowAshareMember, ...]:
+        """Remove current classifications that were not effective by the signal date."""
+
+        if self._members is None:
+            raise TickflowAshareProviderError("universe_snapshot_required")
+        updated: list[TickflowAshareMember] = []
+        for member in self._members:
+            if (
+                member.current_industry is None
+                or member.industry_effective_from is None
+                or member.industry_effective_from <= signal_date
+            ):
+                updated.append(member)
+                continue
+            updated.append(
+                replace(
+                    member,
+                    current_industry=None,
+                    industry_group_id=None,
+                    industry_source=None,
+                    industry_taxonomy_version=None,
+                    industry_effective_from=None,
+                    industry_received_at=None,
+                    industry_confidence=None,
+                )
+            )
+        self._members = tuple(updated)
+        self._members_by_code = {member.code: member for member in self._members}
+        self._industry_count = sum(
+            member.current_industry is not None for member in self._members
+        )
+        return self._members
+
     def _validate_fact_request(
         self,
         members: tuple[TickflowAshareMember, ...],

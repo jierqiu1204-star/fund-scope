@@ -392,11 +392,16 @@ async def _bootstrap_baostock_industries(
     signal_date: date,
     code_version: str,
     budget_seconds: float,
+    allow_new_supplements: bool = False,
 ) -> tuple[tuple[TickflowAshareMember, ...], dict[str, Any]]:
     """Apply official BSE facts, then resume bounded BaoStock supplements."""
 
     started = time.monotonic()
-    as_of = _utc_naive(_local_now())
+    actual_as_of = _utc_naive(_local_now())
+    signal_end = _utc_naive(
+        datetime.combine(signal_date, datetime.max.time(), tzinfo=_SHANGHAI)
+    )
+    as_of = min(actual_as_of, signal_end)
     persisted = await _load_persisted_industry_supplements(
         session,
         members=baseline_members,
@@ -404,11 +409,14 @@ async def _bootstrap_baostock_industries(
         as_of=as_of,
     )
     members = provider.apply_industry_supplements(persisted) if persisted else baseline_members
-    capco_received_at = _utc_naive(_local_now())
-    capco_supplements = load_capco_bse_industries(
-        members,
-        signal_date=signal_date,
-        received_at=capco_received_at,
+    capco_supplements = (
+        load_capco_bse_industries(
+            members,
+            signal_date=signal_date,
+            received_at=actual_as_of,
+        )
+        if allow_new_supplements
+        else {}
     )
     if capco_supplements:
         member_by_symbol = {member.symbol: member for member in members}
@@ -457,7 +465,11 @@ async def _bootstrap_baostock_industries(
     queried_count = 0
     classified_count = 0
 
-    while industry_count < required_count and checkpoint.status != "complete":
+    while (
+        allow_new_supplements
+        and industry_count < required_count
+        and checkpoint.status != "complete"
+    ):
         remaining = budget_seconds - (time.monotonic() - started) - 2.0
         if remaining < 30.0:
             break
@@ -589,7 +601,14 @@ async def _bootstrap_baostock_industries(
         "completed_count": len(checkpoint.completed_codes),
         "failed_count": len(checkpoint.failed_codes),
         "batch_size_next": checkpoint.batch_size,
-        "stopped_reason": last_batch.stopped_reason if last_batch else "coverage_check",
+        "stopped_reason": (
+            last_batch.stopped_reason
+            if last_batch
+            else "historical_signal_no_new_theme_backfill"
+            if not allow_new_supplements and coverage < ASHARE_V2_COVERAGE_THRESHOLD
+            else "coverage_check"
+        ),
+        "receipt_cutoff": as_of.isoformat(),
         "error_summary": checkpoint.error_summary,
     }
 
@@ -676,6 +695,7 @@ async def _capture_ashare(
     provider_received_at = local_now
     async with TickflowAshareV2Provider() as provider:
         baseline_members = await provider.fetch_universe(received_at=provider_received_at)
+        baseline_members = provider.restrict_industries_to_signal_date(signal_date)
         if len(baseline_members) > V2_MAX_ASHARE_ASSETS:
             raise TickflowAshareProviderError("universe_exceeds_operational_limit")
         remaining = timeout_seconds - (time.monotonic() - started) - 2.0
@@ -695,6 +715,7 @@ async def _capture_ashare(
             signal_date=signal_date,
             code_version=code_version,
             budget_seconds=remaining,
+            allow_new_supplements=signal_date == local_now.date(),
         )
         if industry_bootstrap["coverage"] < ASHARE_V2_COVERAGE_THRESHOLD:
             return {

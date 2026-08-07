@@ -294,6 +294,11 @@ async def test_industry_bootstrap_persists_bounded_supplements_and_reaches_gate(
 ) -> None:
     engine, session_factory = await _factory(tmp_path, "industry-bootstrap.db")
     observed_at = datetime(2026, 8, 7, 12)
+    monkeypatch.setattr(
+        jobs,
+        "_local_now",
+        lambda: datetime(2026, 8, 7, 12, tzinfo=jobs._SHANGHAI),
+    )
     members: list[TickflowAshareMember] = []
     for index in range(10):
         code = f"{index + 1:06d}"
@@ -334,6 +339,7 @@ async def test_industry_bootstrap_persists_bounded_supplements_and_reaches_gate(
             signal_date=date(2026, 8, 7),
             code_version="test-code-version",
             budget_seconds=40.0,
+            allow_new_supplements=True,
         )
         persisted_count = await session.scalar(
             text("SELECT COUNT(*) FROM ashare_theme_membership_facts")
@@ -354,6 +360,11 @@ async def test_industry_bootstrap_persists_partial_subprocess_progress(
 ) -> None:
     engine, session_factory = await _factory(tmp_path, "industry-partial.db")
     observed_at = datetime(2026, 8, 7, 12)
+    monkeypatch.setattr(
+        jobs,
+        "_local_now",
+        lambda: datetime(2026, 8, 7, 12, tzinfo=jobs._SHANGHAI),
+    )
     members = tuple(
         TickflowAshareMember(
             symbol=f"{index + 1:06d}.SZ",
@@ -391,6 +402,7 @@ async def test_industry_bootstrap_persists_partial_subprocess_progress(
             signal_date=date(2026, 8, 7),
             code_version="test-code-version",
             budget_seconds=40.0,
+            allow_new_supplements=True,
         )
         rows = (
             await session.execute(
@@ -415,6 +427,11 @@ async def test_industry_bootstrap_uses_official_capco_bse_snapshot_before_baosto
 ) -> None:
     engine, session_factory = await _factory(tmp_path, "industry-capco.db")
     observed_at = datetime(2026, 8, 7, 12)
+    monkeypatch.setattr(
+        jobs,
+        "_local_now",
+        lambda: datetime(2026, 8, 7, 12, tzinfo=jobs._SHANGHAI),
+    )
     members: list[TickflowAshareMember] = []
     for index in range(8):
         code = f"{index + 1:06d}"
@@ -470,6 +487,7 @@ async def test_industry_bootstrap_uses_official_capco_bse_snapshot_before_baosto
             signal_date=date(2026, 8, 7),
             code_version="test-code-version",
             budget_seconds=40.0,
+            allow_new_supplements=True,
         )
         row = (
             await session.execute(
@@ -491,6 +509,7 @@ async def test_industry_bootstrap_uses_official_capco_bse_snapshot_before_baosto
             signal_date=date(2026, 8, 7),
             code_version="test-code-version",
             budget_seconds=40.0,
+            allow_new_supplements=True,
         )
         persisted_count = await session.scalar(
             text("SELECT COUNT(*) FROM ashare_theme_membership_facts")
@@ -506,6 +525,72 @@ async def test_industry_bootstrap_uses_official_capco_bse_snapshot_before_baosto
     assert str(row[2])[:10] == "2026-08-07"
     assert str(row[3])[:10] == "2026-08-07"
     assert sum(member.current_industry is not None for member in completed) == 9
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_historical_signal_industry_bootstrap_does_not_create_new_supplements(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    engine, session_factory = await _factory(tmp_path, "historical-industry-bootstrap.db")
+    observed_at = datetime(2026, 8, 7, 12)
+    members = tuple(
+        TickflowAshareMember(
+            symbol=f"{index + 1:06d}.SZ",
+            code=f"{index + 1:06d}",
+            name=f"测试{index + 1:06d}",
+            board="SZ",
+            current_industry="软件" if index < 8 else None,
+            float_shares=1_000_000,
+            industry_group_id="tickflow_sw1:软件" if index < 8 else None,
+            industry_source=TICKFLOW_THEME_SOURCE if index < 8 else None,
+            industry_taxonomy_version=TICKFLOW_TAXONOMY_VERSION if index < 8 else None,
+            industry_effective_from=date(2026, 8, 7) if index < 8 else None,
+            industry_received_at=observed_at if index < 8 else None,
+            industry_confidence="observed_current" if index < 8 else None,
+        )
+        for index in range(10)
+    )
+    provider = TickflowAshareV2Provider(industry_loader=lambda: None)  # type: ignore[arg-type]
+    provider._members = members
+    provider._members_by_code = {member.code: member for member in members}
+
+    def unexpected_capco(*_args, **_kwargs):
+        raise AssertionError("historical signal must not mint CAPCO receipt evidence")
+
+    async def unexpected_baostock(*_args, **_kwargs):
+        raise AssertionError("historical signal must not query BaoStock")
+
+    monkeypatch.setattr(jobs, "load_capco_bse_industries", unexpected_capco)
+    monkeypatch.setattr(jobs, "load_baostock_industries", unexpected_baostock)
+    monkeypatch.setattr(
+        jobs,
+        "_local_now",
+        lambda: datetime(2026, 8, 8, 0, 10, tzinfo=jobs._SHANGHAI),
+    )
+
+    async with session_factory() as session:
+        completed, evidence = await jobs._bootstrap_baostock_industries(
+            session,
+            provider=provider,
+            baseline_members=members,
+            signal_date=date(2026, 8, 7),
+            code_version="test-code-version",
+            budget_seconds=40.0,
+            allow_new_supplements=False,
+        )
+        persisted_count = await session.scalar(
+            text("SELECT COUNT(*) FROM ashare_theme_membership_facts")
+        )
+
+    assert evidence["coverage"] == 0.8
+    assert evidence["capco_classified_count"] == 0
+    assert evidence["queried_count"] == 0
+    assert evidence["stopped_reason"] == "historical_signal_no_new_theme_backfill"
+    assert evidence["receipt_cutoff"].startswith("2026-08-07T15:59:59")
+    assert persisted_count == 0
+    assert completed == members
     await engine.dispose()
 
 
