@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import event, select, text
 
 from app.models.entities import (
     AdjustedPriceRevisionImmutableError,
@@ -52,9 +52,7 @@ def _values(
         "pct_change": 0.0,
         "raw_price_basis": "raw_ohlc",
         "research_adjusted_value": adjusted_close if decision_eligible else None,
-        "research_price_basis": (
-            "total_return_adjusted" if decision_eligible else None
-        ),
+        "research_price_basis": ("total_return_adjusted" if decision_eligible else None),
         "data_provider": provider,
         "provider_version": provider_version if decision_eligible else None,
         "source_timestamp": observed_at,
@@ -326,7 +324,10 @@ async def test_replay_input_binds_selected_revision_hashes(app) -> None:
     assert [item.asset_code for item in initial.eligible_inputs] == [code]
     assert [item.asset_code for item in later.eligible_inputs] == [code]
     assert len(initial.eligible_inputs[0].revision_hashes) == 61
-    assert initial.eligible_inputs[0].revision_hashes[-1] != later.eligible_inputs[0].revision_hashes[-1]
+    assert (
+        initial.eligible_inputs[0].revision_hashes[-1]
+        != later.eligible_inputs[0].revision_hashes[-1]
+    )
     assert initial.eligible_inputs[0].series_hash != later.eligible_inputs[0].series_hash
 
 
@@ -360,6 +361,60 @@ async def test_revision_pit_lookup_uses_the_declared_index(app) -> None:
         ).all()
 
     assert any(
-        "ix_etf_adjusted_price_revisions_pit_lookup" in " ".join(map(str, row))
-        for row in plan
+        "ix_etf_adjusted_price_revisions_pit_lookup" in " ".join(map(str, row)) for row in plan
     )
+
+
+@pytest.mark.asyncio
+async def test_cutoff_selector_batches_multiple_codes_in_one_statement(app) -> None:
+    codes = ("510811", "510812")
+    trade_date = date(2026, 7, 10)
+    observed_at = datetime(2026, 7, 10, 6, 0)
+
+    async with app.state.db.session() as session:
+        session.add_all([_etf(code) for code in codes])
+        await session.commit()
+        for code in codes:
+            await persist_etf_price_history_page(
+                session,
+                etf_code=code,
+                rows=[
+                    (
+                        trade_date,
+                        _values(adjusted_close=1.2, observed_at=observed_at),
+                    )
+                ],
+            )
+        await session.commit()
+
+        statement_count = 0
+
+        def count_statement(*args: object) -> None:
+            nonlocal statement_count
+            statement = str(args[2])
+            if "FROM etf_adjusted_price_revisions" in statement:
+                statement_count += 1
+
+        event.listen(
+            app.state.db.engine.sync_engine,
+            "before_cursor_execute",
+            count_statement,
+        )
+        try:
+            rows = await etf_adjusted_daily_facts_on_or_before(
+                session,
+                etf_codes=codes,
+                replay_date=trade_date,
+                rows_per_code=1,
+                max_source_rows=2,
+                decision_cutoff=datetime(2026, 7, 10, 7, 0),
+            )
+        finally:
+            event.remove(
+                app.state.db.engine.sync_engine,
+                "before_cursor_execute",
+                count_statement,
+            )
+
+    assert [row.etf_code for row in rows] == list(codes)
+    assert statement_count == 1

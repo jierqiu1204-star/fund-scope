@@ -21,11 +21,13 @@ from app.core.config import Settings
 from app.models.entities import JobRun
 from app.services.etf_research_evidence import stable_contract_hash
 from app.services.intraday_etf.exchange_calendar import is_trading_day
+from app.services.short_research.coverage_policy import ETF_COMPLETE_SCORE_COVERAGE
 from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
     PRICE_BASIS,
     REPAIR_HISTORY,
     V2_FORMULA_REGISTRY_HASH,
     V2_SOURCE_REGISTRY,
+    V2ContractError,
     screen_dual_universe,
 )
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_adapters import (
@@ -42,12 +44,21 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_eastmoney_provide
     EastmoneyAshareProviderError,
     EastmoneyAshareV2Provider,
 )
+from app.services.strategy_lab.dual_universe_leader_tactics_v2_etf_inputs import (
+    read_etf_v2_asset_inputs,
+)
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_ingestion import (
     AshareUniverseSnapshotFact,
     persist_ashare_universe_snapshot_batch,
 )
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_lifecycle_storage import (
     load_v2_checkpoint,
+)
+from app.services.strategy_lab.dual_universe_leader_tactics_v2_storage import (
+    get_v2_materialized_manifest,
+)
+from app.services.strategy_lab.etf_point_in_time_decision_data import (
+    latest_ready_etf_decision_data_snapshot,
 )
 from app.services.workflows.dual_universe_leader_tactics_v2 import (
     V2CapturedAshareFacts,
@@ -61,6 +72,7 @@ from app.services.workflows.dual_universe_leader_tactics_v2 import (
 
 V2_CAPTURE_JOB_NAME = "dual_universe_leader_tactics_v2_capture"
 V2_MATERIALIZE_JOB_NAME = "dual_universe_leader_tactics_v2_materialize"
+V2_ETF_MATERIALIZE_JOB_NAME = "dual_universe_leader_tactics_v2_materialize_etf"
 V2_JOB_TIMEOUT_SECONDS = 55.0
 V2_WORK_SECONDS = 52.0
 V2_MIN_MATERIALIZATION_HEADROOM_BYTES = 768 * 1024 * 1024
@@ -130,9 +142,10 @@ async def _prior_ashare_members(
     as_of: datetime,
 ) -> dict[str, tuple[str, str | None]]:
     rows = (
-        await session.execute(
-            text(
-                """
+        (
+            await session.execute(
+                text(
+                    """
                 SELECT asset_code, asset_name, board
                 FROM (
                     SELECT snapshots.*,
@@ -150,20 +163,20 @@ async def _prior_ashare_members(
                 ORDER BY asset_code
                 LIMIT :limit
                 """
-            ),
-            {
-                "signal_date": signal_date,
-                "as_of": as_of,
-                "limit": V2_MAX_ASHARE_ASSETS + 1,
-            },
+                ),
+                {
+                    "signal_date": signal_date,
+                    "as_of": as_of,
+                    "limit": V2_MAX_ASHARE_ASSETS + 1,
+                },
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
     if len(rows) > V2_MAX_ASHARE_ASSETS:
         raise ValueError("prior A-share universe exceeds the bounded limit")
-    return {
-        str(row["asset_code"]): (str(row["asset_name"]), row["board"])
-        for row in rows
-    }
+    return {str(row["asset_code"]): (str(row["asset_name"]), row["board"]) for row in rows}
 
 
 async def _persist_complete_universe_snapshot(
@@ -242,13 +255,13 @@ async def _capture_ashare(
 
     previous_runs = (
         await session.scalars(
-        select(JobRun.details_json)
-        .where(
-            JobRun.job_name == V2_CAPTURE_JOB_NAME,
-            JobRun.status == "success",
-        )
-        .order_by(JobRun.id.desc())
-        .limit(10)
+            select(JobRun.details_json)
+            .where(
+                JobRun.job_name == V2_CAPTURE_JOB_NAME,
+                JobRun.status == "success",
+            )
+            .order_by(JobRun.id.desc())
+            .limit(10)
         )
     ).all()
     previous = next(
@@ -444,10 +457,140 @@ def available_memory_bytes() -> int | None:
                 break
     except (OSError, ValueError, IndexError):
         pass
-    candidates = tuple(
-        value for value in (cgroup_available, host_available) if value is not None
-    )
+    candidates = tuple(value for value in (cgroup_available, host_available) if value is not None)
     return min(candidates) if candidates else None
+
+
+def _same_datetime(left: object, right: datetime) -> bool:
+    if isinstance(left, str):
+        try:
+            left = datetime.fromisoformat(left)
+        except ValueError:
+            return False
+    if not isinstance(left, datetime):
+        return False
+    return _utc_naive(left) == _utc_naive(right)
+
+
+async def _materialize_etf(
+    session: AsyncSession,
+    *,
+    settings: Settings,
+    local_as_of: datetime,
+) -> dict[str, Any]:
+    snapshot = await latest_ready_etf_decision_data_snapshot(session, as_of=local_as_of)
+    if snapshot is None:
+        return {
+            "status": "waiting",
+            "job_status": "partial",
+            "unavailable_reason": "etf_decision_data_snapshot_unavailable",
+            "research_only": True,
+        }
+    code_version = settings.etf_leader_tactics_v2_code_version.strip()
+    if not code_version:
+        return {
+            "status": "failed",
+            "job_status": "failed",
+            "job_message": "leader_tactics_v2_code_version_missing",
+            "research_only": True,
+        }
+    decision_cutoff = snapshot.decision_cutoff
+    persisted_cutoff = _utc_naive(decision_cutoff)
+    existing = await get_v2_materialized_manifest(
+        session,
+        universe="etf",
+        as_of=persisted_cutoff,
+    )
+    if (
+        existing is not None
+        and _same_datetime(existing["decision_cutoff"], persisted_cutoff)
+        and str(existing["code_version"]) == code_version
+    ):
+        return {
+            "status": "skipped",
+            "reason": "leader_tactics_v2_etf_already_materialized",
+            "signal_date": snapshot.trade_date.isoformat(),
+            "manifest_hash": str(existing["manifest_hash"]),
+            "research_only": True,
+        }
+
+    headroom = available_memory_bytes()
+    if headroom is not None and headroom < V2_MIN_MATERIALIZATION_HEADROOM_BYTES:
+        return {
+            "status": "waiting",
+            "job_status": "partial",
+            "signal_date": snapshot.trade_date.isoformat(),
+            "unavailable_reason": "insufficient_materialization_memory_headroom",
+            "available_memory_bytes": headroom,
+            "required_memory_bytes": V2_MIN_MATERIALIZATION_HEADROOM_BYTES,
+            "research_only": True,
+        }
+    bundle = await read_etf_v2_asset_inputs(
+        session,
+        replay_date=snapshot.trade_date,
+        decision_cutoff=snapshot.decision_cutoff,
+    )
+    readiness = bundle.readiness_dict(threshold=ETF_COMPLETE_SCORE_COVERAGE)
+    provider_health = snapshot.provider_health or bundle.provider_health
+    readiness["adjusted_data_provider_availability"] = readiness.pop(
+        "provider_health",
+        dict(bundle.provider_health),
+    )
+    readiness["provider_health"] = dict(provider_health)
+    readiness["decision_data_snapshot"] = snapshot.evidence_dict()
+    history_120_coverage = (
+        bundle.adjusted_120_count / bundle.universe_count if bundle.universe_count else 0.0
+    )
+    reasons: list[str] = []
+    if bundle.universe_count <= 0:
+        reasons.append("etf_authoritative_universe_unavailable")
+    if history_120_coverage < ETF_COMPLETE_SCORE_COVERAGE:
+        reasons.append("insufficient_etf_history_120_coverage")
+    if not bundle.provider_health:
+        reasons.append("provider_health_unavailable")
+    if bundle.raw_decision_violations:
+        reasons.append("raw_decision_price_violation")
+    if bundle.non_finite_violations:
+        reasons.append("non_finite_adjusted_input")
+    if reasons:
+        return {
+            "status": "waiting",
+            "job_status": "partial",
+            "signal_date": snapshot.trade_date.isoformat(),
+            "unavailable_reason": reasons[0],
+            "unavailable_reasons": reasons,
+            "readiness": readiness,
+            "decision_data_snapshot_id": snapshot.snapshot_id,
+            "research_only": True,
+        }
+
+    result = screen_dual_universe(
+        bundle.inputs,
+        code_version=code_version,
+        provider_health=provider_health,
+    )
+    manifest_hash = await materialize_v2_result(
+        session,
+        result,
+        enabled=True,
+        code_version=code_version,
+    )
+    qualifying = result.qualifying
+    return {
+        "status": "materialized",
+        "signal_date": snapshot.trade_date.isoformat(),
+        "manifest_hash": manifest_hash,
+        "decision_data_snapshot_id": snapshot.snapshot_id,
+        "universe_count": bundle.universe_count,
+        "observation_count": len(result.observations),
+        "candidate_count": len(qualifying),
+        "candidate_codes": sorted({item.asset_code for item in qualifying}),
+        "readiness": readiness,
+        "available_memory_bytes": headroom,
+        "research_only": True,
+        "notification_provenance": "none",
+        "execution_provenance": "none",
+    }
 
 
 async def _latest_visible_ashare_signal_date(
@@ -578,6 +721,52 @@ async def _materialize_ashare(
     }
 
 
+async def dual_universe_leader_tactics_v2_etf_materialize_job(
+    session: AsyncSession,
+    settings: Settings,
+    *,
+    now: datetime | None = None,
+    timeout_seconds: float = V2_JOB_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """Materialize ETF V2 evidence from persisted PIT facts without provider work."""
+
+    if not settings.etf_leader_tactics_v2_materialize_enabled:
+        return {
+            "status": "skipped",
+            "reason": "leader_tactics_v2_materialization_disabled",
+            "research_only": True,
+        }
+    if timeout_seconds <= 0 or timeout_seconds > V2_JOB_TIMEOUT_SECONDS:
+        raise ValueError("V2 materialization timeout must be in (0, 55] seconds")
+    try:
+        return await asyncio.wait_for(
+            _materialize_etf(
+                session,
+                settings=settings,
+                local_as_of=_local_now(now),
+            ),
+            timeout=min(V2_WORK_SECONDS, timeout_seconds),
+        )
+    except TimeoutError:
+        await session.rollback()
+        return {
+            "status": "waiting",
+            "job_status": "partial",
+            "unavailable_reason": "leader_tactics_v2_etf_materialization_timeout",
+            "timeout_seconds": min(V2_WORK_SECONDS, timeout_seconds),
+            "research_only": True,
+        }
+    except (V2ContractError, ValueError) as exc:
+        await session.rollback()
+        return {
+            "status": "waiting",
+            "job_status": "partial",
+            "unavailable_reason": "leader_tactics_v2_etf_inputs_incompatible",
+            "error_summary": f"{type(exc).__name__}: {exc}"[:500],
+            "research_only": True,
+        }
+
+
 async def dual_universe_leader_tactics_v2_materialize_job(
     session: AsyncSession,
     settings: Settings,
@@ -666,8 +855,10 @@ async def dual_universe_leader_tactics_v2_capture_job(
 
 __all__ = [
     "V2_CAPTURE_JOB_NAME",
+    "V2_ETF_MATERIALIZE_JOB_NAME",
     "V2_MATERIALIZE_JOB_NAME",
     "available_memory_bytes",
     "dual_universe_leader_tactics_v2_capture_job",
+    "dual_universe_leader_tactics_v2_etf_materialize_job",
     "dual_universe_leader_tactics_v2_materialize_job",
 ]

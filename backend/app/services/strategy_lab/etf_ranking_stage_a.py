@@ -28,12 +28,12 @@ from app.services.tracked_positions.lifecycle import (
 )
 
 from .etf_action_replay.artifact_store import ReplayArtifactStore
-from .etf_ranking_replay_inputs import (
+from .etf_point_in_time_decision_data import (
     MAX_CODES_PER_REPLAY_INPUT_PAGE,
     PointInTimeAdjustedSeries,
     PointInTimeRankingInputSnapshot,
     ReplayInputExclusion,
-    load_point_in_time_ranking_inputs,
+    load_point_in_time_etf_decision_inputs,
 )
 
 STAGE_A_SCHEMA_VERSION = "etf-ranking-stage-a-v1"
@@ -1262,7 +1262,7 @@ async def run_stage_a_loader_job(
     decision_cutoffs: tuple[tuple[date, datetime], ...],
     max_codes_per_page: int = MAX_CODES_PER_REPLAY_INPUT_PAGE,
     loader: Callable[..., Awaitable[PointInTimeRankingInputSnapshot]] = (
-        load_point_in_time_ranking_inputs
+        load_point_in_time_etf_decision_inputs
     ),
     peak_rss_reader: Callable[[], int] = _default_peak_rss_reader,
 ) -> StageAContinuationProgress:

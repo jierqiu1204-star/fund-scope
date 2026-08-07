@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from importlib import import_module
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -60,8 +60,10 @@ from app.services.workflows.intraday_etf import intraday_etf_watch_with_alerts_j
 V2_JOB_MODULE = "app.services.workflows.dual_universe_leader_tactics_v2_jobs"
 V2_CAPTURE_JOB_NAME = "dual_universe_leader_tactics_v2_capture"
 V2_MATERIALIZE_JOB_NAME = "dual_universe_leader_tactics_v2_materialize"
+V2_ETF_MATERIALIZE_JOB_NAME = "dual_universe_leader_tactics_v2_materialize_etf"
 V2_CAPTURE_JOB_ATTRIBUTE = "dual_universe_leader_tactics_v2_capture_job"
 V2_MATERIALIZE_JOB_ATTRIBUTE = "dual_universe_leader_tactics_v2_materialize_job"
+V2_ETF_MATERIALIZE_JOB_ATTRIBUTE = "dual_universe_leader_tactics_v2_etf_materialize_job"
 
 
 V2SchedulerJob = Callable[[AsyncSession, Settings], Awaitable[dict[str, Any]]]
@@ -79,8 +81,10 @@ class _V2SchedulerJobContract:
 
     capture_name: str
     materialize_name: str
+    etf_materialize_name: str
     capture_job: V2SchedulerJob
     materialize_job: V2SchedulerJob
+    etf_materialize_job: V2SchedulerJob
 
 
 def _load_v2_scheduler_job_contract() -> _V2SchedulerJobContract:
@@ -90,30 +94,40 @@ def _load_v2_scheduler_job_contract() -> _V2SchedulerJobContract:
         if exc.name != V2_JOB_MODULE:
             raise
         raise RuntimeError(
-            "V2 scheduler is enabled but the workflow jobs module is unavailable: "
-            f"{V2_JOB_MODULE}"
+            f"V2 scheduler is enabled but the workflow jobs module is unavailable: {V2_JOB_MODULE}"
         ) from exc
 
     capture_job = getattr(module, V2_CAPTURE_JOB_ATTRIBUTE, None)
     materialize_job = getattr(module, V2_MATERIALIZE_JOB_ATTRIBUTE, None)
-    if not callable(capture_job) or not callable(materialize_job):
+    etf_materialize_job = getattr(module, V2_ETF_MATERIALIZE_JOB_ATTRIBUTE, None)
+    if not all(callable(job) for job in (capture_job, materialize_job, etf_materialize_job)):
         raise RuntimeError(
             "V2 workflow jobs module must expose callable attributes "
-            f"{V2_CAPTURE_JOB_ATTRIBUTE} and {V2_MATERIALIZE_JOB_ATTRIBUTE}"
+            f"{V2_CAPTURE_JOB_ATTRIBUTE}, {V2_MATERIALIZE_JOB_ATTRIBUTE}, and "
+            f"{V2_ETF_MATERIALIZE_JOB_ATTRIBUTE}"
         )
 
     capture_name = getattr(module, "V2_CAPTURE_JOB_NAME", V2_CAPTURE_JOB_NAME)
     materialize_name = getattr(module, "V2_MATERIALIZE_JOB_NAME", V2_MATERIALIZE_JOB_NAME)
+    etf_materialize_name = getattr(
+        module,
+        "V2_ETF_MATERIALIZE_JOB_NAME",
+        V2_ETF_MATERIALIZE_JOB_NAME,
+    )
     if not isinstance(capture_name, str) or not capture_name.strip():
         raise RuntimeError("V2 capture job name must be a non-empty string")
     if not isinstance(materialize_name, str) or not materialize_name.strip():
         raise RuntimeError("V2 materialize job name must be a non-empty string")
+    if not isinstance(etf_materialize_name, str) or not etf_materialize_name.strip():
+        raise RuntimeError("V2 ETF materialize job name must be a non-empty string")
 
     return _V2SchedulerJobContract(
         capture_name=capture_name.strip(),
         materialize_name=materialize_name.strip(),
-        capture_job=capture_job,
-        materialize_job=materialize_job,
+        etf_materialize_name=etf_materialize_name.strip(),
+        capture_job=cast(V2SchedulerJob, capture_job),
+        materialize_job=cast(V2SchedulerJob, materialize_job),
+        etf_materialize_job=cast(V2SchedulerJob, etf_materialize_job),
     )
 
 
@@ -166,7 +180,9 @@ def register_default_jobs(
         return await daily_tracked_position_alerts_job(session, settings)
 
     async def intraday_etf_watch_tracked(session: AsyncSession) -> dict[str, Any]:
-        return await intraday_etf_watch_with_alerts_job(session, settings=settings, run_type="scheduled")
+        return await intraday_etf_watch_with_alerts_job(
+            session, settings=settings, run_type="scheduled"
+        )
 
     async def post_close_etf_adjusted_sync_preflight(
         session: AsyncSession,
@@ -201,8 +217,7 @@ def register_default_jobs(
             }
         trade_date, _decision_cutoff = context
         code_version = (
-            settings.etf_pit_code_version.strip()
-            or settings.readiness_deploy_artifact.strip()
+            settings.etf_pit_code_version.strip() or settings.readiness_deploy_artifact.strip()
         )
         decision = await preflight_production_pit_capture(
             session,
@@ -237,6 +252,11 @@ def register_default_jobs(
         ) -> dict[str, Any]:
             return await v2_jobs.materialize_job(session, settings)
 
+        async def dual_universe_v2_etf_materialize_tracked(
+            session: AsyncSession,
+        ) -> dict[str, Any]:
+            return await v2_jobs.etf_materialize_job(session, settings)
+
         if settings.etf_leader_tactics_v2_capture_enabled:
             scheduler.add_job(
                 _run_tracked_job,
@@ -255,10 +275,27 @@ def register_default_jobs(
             scheduler.add_job(
                 _run_tracked_job,
                 "cron",
-                args=[db, v2_jobs.materialize_name, dual_universe_v2_materialize_tracked],
+                args=[
+                    db,
+                    v2_jobs.etf_materialize_name,
+                    dual_universe_v2_etf_materialize_tracked,
+                ],
                 day_of_week="tue-sat",
                 hour=9,
                 minute=10,
+                second=0,
+                id=v2_jobs.etf_materialize_name,
+                max_instances=1,
+                coalesce=True,
+                replace_existing=True,
+            )
+            scheduler.add_job(
+                _run_tracked_job,
+                "cron",
+                args=[db, v2_jobs.materialize_name, dual_universe_v2_materialize_tracked],
+                day_of_week="tue-sat",
+                hour=9,
+                minute=12,
                 second=0,
                 id=v2_jobs.materialize_name,
                 max_instances=1,

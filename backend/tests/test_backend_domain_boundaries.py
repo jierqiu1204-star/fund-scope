@@ -135,3 +135,29 @@ def test_etf_catalyst_shadow_cannot_import_production_decision_domains() -> None
     )
     for path in (ROOT / "etf_catalyst_shadow").glob("*.py"):
         _assert_no_forbidden_imports(path, forbidden)
+
+
+def test_v2_etf_screen_consumes_neutral_data_not_ranking_outputs() -> None:
+    job_path = ROOT / "workflows" / "dual_universe_leader_tactics_v2_jobs.py"
+    input_path = ROOT / "strategy_lab" / "dual_universe_leader_tactics_v2_etf_inputs.py"
+    ranking_path = ROOT / "strategy_lab" / "etf_ranking_stage_a.py"
+
+    _assert_no_forbidden_imports(
+        job_path,
+        (
+            "EtfPitCaptureSource",
+            "ShortResearchSignalRun",
+            "ShortResearchSignalItem",
+        ),
+    )
+    _assert_no_forbidden_imports(
+        input_path,
+        (
+            "etf_ranking_replay_inputs",
+            "load_point_in_time_ranking_inputs",
+        ),
+    )
+    _assert_no_forbidden_imports(
+        ranking_path,
+        ("etf_ranking_replay_inputs",),
+    )

@@ -243,15 +243,13 @@ async def etf_adjusted_daily_facts_on_or_before(
         EtfPriceHistory.source_timestamp.label("source_timestamp"),
         EtfPriceHistory.adjustment_version.label("adjustment_version"),
         EtfPriceHistory.decision_eligible.label("decision_eligible"),
-        EtfPriceHistory.decision_ineligibility_reason.label(
-            "decision_ineligibility_reason"
-        ),
+        EtfPriceHistory.decision_ineligibility_reason.label("decision_ineligibility_reason"),
     )
     rows: list[Any] = []
     cutoff = _utc_naive(decision_cutoff) if decision_cutoff is not None else None
     accepted_pairs = _compatible_adjusted_provider_pairs(compatible_provider_versions)
-    for code in codes:
-        if cutoff is None:
+    if cutoff is None:
+        for code in codes:
             result = await session.execute(
                 select(*columns)
                 .where(
@@ -261,88 +259,93 @@ async def etf_adjusted_daily_facts_on_or_before(
                 .order_by(EtfPriceHistory.trade_date.desc(), EtfPriceHistory.id.desc())
                 .limit(rows_per_code)
             )
-        elif not accepted_pairs:
-            continue
-        else:
-            provider_compatibility = or_(
-                *(
-                    and_(
-                        func.lower(EtfAdjustedPriceRevision.data_provider) == provider,
-                        EtfAdjustedPriceRevision.provider_version == version,
-                        EtfAdjustedPriceRevision.adjustment_version == version,
-                    )
-                    for provider, version in accepted_pairs
+            rows.extend(reversed(result.mappings().all()))
+    elif accepted_pairs:
+        provider_compatibility = or_(
+            *(
+                and_(
+                    func.lower(EtfAdjustedPriceRevision.data_provider) == provider,
+                    EtfAdjustedPriceRevision.provider_version == version,
+                    EtfAdjustedPriceRevision.adjustment_version == version,
                 )
+                for provider, version in accepted_pairs
             )
-            ranked_revisions = (
-                select(
-                    EtfAdjustedPriceRevision.etf_code.label("etf_code"),
-                    EtfAdjustedPriceRevision.trade_date.label("trade_date"),
-                    EtfAdjustedPriceRevision.open.label("raw_open"),
-                    EtfAdjustedPriceRevision.high.label("raw_high"),
-                    EtfAdjustedPriceRevision.low.label("raw_low"),
-                    EtfAdjustedPriceRevision.close.label("raw_close"),
-                    EtfAdjustedPriceRevision.volume.label("volume"),
-                    EtfAdjustedPriceRevision.turnover.label("turnover"),
-                    EtfAdjustedPriceRevision.raw_price_basis.label("raw_price_basis"),
-                    EtfAdjustedPriceRevision.research_adjusted_value.label(
-                        "adjusted_close"
+        )
+        visible_revisions = (
+            select(
+                EtfAdjustedPriceRevision.etf_code.label("etf_code"),
+                EtfAdjustedPriceRevision.trade_date.label("trade_date"),
+                EtfAdjustedPriceRevision.open.label("raw_open"),
+                EtfAdjustedPriceRevision.high.label("raw_high"),
+                EtfAdjustedPriceRevision.low.label("raw_low"),
+                EtfAdjustedPriceRevision.close.label("raw_close"),
+                EtfAdjustedPriceRevision.volume.label("volume"),
+                EtfAdjustedPriceRevision.turnover.label("turnover"),
+                EtfAdjustedPriceRevision.raw_price_basis.label("raw_price_basis"),
+                EtfAdjustedPriceRevision.research_adjusted_value.label("adjusted_close"),
+                EtfAdjustedPriceRevision.research_price_basis.label("research_price_basis"),
+                EtfAdjustedPriceRevision.data_provider.label("data_provider"),
+                EtfAdjustedPriceRevision.provider_version.label("provider_version"),
+                EtfAdjustedPriceRevision.source_timestamp.label("source_timestamp"),
+                EtfAdjustedPriceRevision.adjustment_version.label("adjustment_version"),
+                EtfAdjustedPriceRevision.decision_eligible.label("decision_eligible"),
+                EtfAdjustedPriceRevision.decision_ineligibility_reason.label(
+                    "decision_ineligibility_reason"
+                ),
+                EtfAdjustedPriceRevision.revision_hash.label("revision_hash"),
+                EtfAdjustedPriceRevision.first_seen_at.label("first_seen_at"),
+                EtfAdjustedPriceRevision.observed_at.label("observed_at"),
+                EtfAdjustedPriceRevision.id.label("revision_id"),
+                func.row_number()
+                .over(
+                    partition_by=(
+                        EtfAdjustedPriceRevision.etf_code,
+                        EtfAdjustedPriceRevision.trade_date,
                     ),
-                    EtfAdjustedPriceRevision.research_price_basis.label(
-                        "research_price_basis"
+                    order_by=(
+                        EtfAdjustedPriceRevision.first_seen_at.desc(),
+                        EtfAdjustedPriceRevision.observed_at.desc(),
+                        EtfAdjustedPriceRevision.id.desc(),
                     ),
-                    EtfAdjustedPriceRevision.data_provider.label("data_provider"),
-                    EtfAdjustedPriceRevision.provider_version.label("provider_version"),
-                    EtfAdjustedPriceRevision.source_timestamp.label("source_timestamp"),
-                    EtfAdjustedPriceRevision.adjustment_version.label(
-                        "adjustment_version"
-                    ),
-                    EtfAdjustedPriceRevision.decision_eligible.label(
-                        "decision_eligible"
-                    ),
-                    EtfAdjustedPriceRevision.decision_ineligibility_reason.label(
-                        "decision_ineligibility_reason"
-                    ),
-                    EtfAdjustedPriceRevision.revision_hash.label("revision_hash"),
-                    EtfAdjustedPriceRevision.first_seen_at.label("first_seen_at"),
-                    EtfAdjustedPriceRevision.observed_at.label("observed_at"),
-                    EtfAdjustedPriceRevision.id.label("revision_id"),
-                    func.row_number()
-                    .over(
-                        partition_by=(
-                            EtfAdjustedPriceRevision.etf_code,
-                            EtfAdjustedPriceRevision.trade_date,
-                        ),
-                        order_by=(
-                            EtfAdjustedPriceRevision.first_seen_at.desc(),
-                            EtfAdjustedPriceRevision.observed_at.desc(),
-                            EtfAdjustedPriceRevision.id.desc(),
-                        ),
-                    )
-                    .label("revision_rank"),
                 )
-                .where(
-                    EtfAdjustedPriceRevision.etf_code == code,
-                    EtfAdjustedPriceRevision.trade_date <= replay_date,
-                    EtfAdjustedPriceRevision.first_seen_at <= cutoff,
-                    EtfAdjustedPriceRevision.observed_at <= cutoff,
-                    EtfAdjustedPriceRevision.decision_eligible.is_(True),
-                    EtfAdjustedPriceRevision.research_price_basis
-                    == "total_return_adjusted",
-                    provider_compatibility,
-                )
-                .subquery()
+                .label("revision_rank"),
             )
-            result = await session.execute(
-                select(ranked_revisions)
-                .where(ranked_revisions.c.revision_rank == 1)
-                .order_by(
-                    ranked_revisions.c.trade_date.desc(),
-                    ranked_revisions.c.revision_id.desc(),
-                )
-                .limit(rows_per_code)
+            .where(
+                EtfAdjustedPriceRevision.etf_code.in_(codes),
+                EtfAdjustedPriceRevision.trade_date <= replay_date,
+                EtfAdjustedPriceRevision.first_seen_at <= cutoff,
+                EtfAdjustedPriceRevision.observed_at <= cutoff,
+                EtfAdjustedPriceRevision.decision_eligible.is_(True),
+                EtfAdjustedPriceRevision.research_price_basis == "total_return_adjusted",
+                provider_compatibility,
             )
-        rows.extend(reversed(result.mappings().all()))
+            .subquery()
+        )
+        latest_by_session = (
+            select(visible_revisions).where(visible_revisions.c.revision_rank == 1).subquery()
+        )
+        ranked_sessions = select(
+            latest_by_session,
+            func.row_number()
+            .over(
+                partition_by=latest_by_session.c.etf_code,
+                order_by=(
+                    latest_by_session.c.trade_date.desc(),
+                    latest_by_session.c.revision_id.desc(),
+                ),
+            )
+            .label("session_rank"),
+        ).subquery()
+        result = await session.execute(
+            select(ranked_sessions)
+            .where(ranked_sessions.c.session_rank <= rows_per_code)
+            .order_by(
+                ranked_sessions.c.etf_code.asc(),
+                ranked_sessions.c.trade_date.asc(),
+                ranked_sessions.c.revision_id.asc(),
+            )
+        )
+        rows.extend(result.mappings().all())
     return tuple(
         EtfAdjustedDailyFact(
             etf_code=row["etf_code"],
@@ -384,6 +387,7 @@ async def etf_adjusted_source_watermark(
     if not codes:
         return EtfAdjustedSourceWatermark(0, None, None)
     cutoff = _utc_naive(decision_cutoff) if decision_cutoff is not None else None
+    row: Any
     if cutoff is None:
         row = (
             await session.execute(
@@ -398,9 +402,7 @@ async def etf_adjusted_source_watermark(
             )
         ).one()
     else:
-        accepted_pairs = _compatible_adjusted_provider_pairs(
-            compatible_provider_versions
-        )
+        accepted_pairs = _compatible_adjusted_provider_pairs(compatible_provider_versions)
         if not accepted_pairs:
             return EtfAdjustedSourceWatermark(0, None, None)
         provider_compatibility = or_(
@@ -425,8 +427,7 @@ async def etf_adjusted_source_watermark(
                     EtfAdjustedPriceRevision.first_seen_at <= cutoff,
                     EtfAdjustedPriceRevision.observed_at <= cutoff,
                     EtfAdjustedPriceRevision.decision_eligible.is_(True),
-                    EtfAdjustedPriceRevision.research_price_basis
-                    == "total_return_adjusted",
+                    EtfAdjustedPriceRevision.research_price_basis == "total_return_adjusted",
                     provider_compatibility,
                 )
             )

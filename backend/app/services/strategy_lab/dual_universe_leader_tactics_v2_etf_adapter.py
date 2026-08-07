@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
@@ -49,7 +49,7 @@ def etf_series_to_v2_asset(
     *,
     asset_name: str,
     source_cutoff: datetime,
-    membership: V2PITMembership,
+    membership: V2PITMembership | None,
 ) -> V2AssetInput:
     """Map a proven ETF replay series without invoking a provider.
 
@@ -61,6 +61,11 @@ def etf_series_to_v2_asset(
     bars: list[V2AdjustedBar] = []
     reasons: list[str] = []
     provenance = series.provenance
+    observed_at = series.latest_source_timestamp
+    if source_cutoff.tzinfo is None and observed_at.tzinfo is not None:
+        observed_at = observed_at.astimezone(UTC).replace(tzinfo=None)
+    elif source_cutoff.tzinfo is not None and observed_at.tzinfo is None:
+        observed_at = observed_at.replace(tzinfo=UTC)
     if provenance.price_basis != PRICE_BASIS:
         reasons.append("wrong_price_basis")
     if series.synchronized_after_cutoff:
@@ -85,7 +90,7 @@ def etf_series_to_v2_asset(
                 volume=float(item.volume),
                 amount=float(amount),
                 turnover=float(amount),
-                observed_at=series.latest_source_timestamp,
+                observed_at=observed_at,
                 provider=str(provenance.provider),
                 adjustment_version=str(provenance.adjustment_version),
                 decision_eligible=not reasons,

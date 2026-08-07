@@ -18,6 +18,13 @@ async def _fake_materialize(_session: AsyncSession, _settings: Settings) -> dict
     return {"status": "materialize_stub"}
 
 
+async def _fake_etf_materialize(
+    _session: AsyncSession,
+    _settings: Settings,
+) -> dict[str, Any]:
+    return {"status": "etf_materialize_stub"}
+
+
 def _trigger_field(job: object, name: str) -> str:
     return str(next(field for field in job.trigger.fields if field.name == name))
 
@@ -38,17 +45,30 @@ def test_v2_scheduler_is_default_off_and_does_not_import_workflow_jobs(app, monk
     job_ids = {job.id for job in scheduler.get_jobs()}
     assert scheduler_module.V2_CAPTURE_JOB_NAME not in job_ids
     assert scheduler_module.V2_MATERIALIZE_JOB_NAME not in job_ids
+    assert scheduler_module.V2_ETF_MATERIALIZE_JOB_NAME not in job_ids
 
 
 @pytest.mark.parametrize(
     ("capture_enabled", "materialize_enabled", "expected"),
     [
         (True, False, {scheduler_module.V2_CAPTURE_JOB_NAME}),
-        (False, True, {scheduler_module.V2_MATERIALIZE_JOB_NAME}),
-        (True, True, {
-            scheduler_module.V2_CAPTURE_JOB_NAME,
-            scheduler_module.V2_MATERIALIZE_JOB_NAME,
-        }),
+        (
+            False,
+            True,
+            {
+                scheduler_module.V2_MATERIALIZE_JOB_NAME,
+                scheduler_module.V2_ETF_MATERIALIZE_JOB_NAME,
+            },
+        ),
+        (
+            True,
+            True,
+            {
+                scheduler_module.V2_CAPTURE_JOB_NAME,
+                scheduler_module.V2_MATERIALIZE_JOB_NAME,
+                scheduler_module.V2_ETF_MATERIALIZE_JOB_NAME,
+            },
+        ),
     ],
 )
 def test_v2_scheduler_registers_only_enabled_stages(
@@ -63,8 +83,10 @@ def test_v2_scheduler_registers_only_enabled_stages(
     contract = scheduler_module._V2SchedulerJobContract(
         capture_name=scheduler_module.V2_CAPTURE_JOB_NAME,
         materialize_name=scheduler_module.V2_MATERIALIZE_JOB_NAME,
+        etf_materialize_name=scheduler_module.V2_ETF_MATERIALIZE_JOB_NAME,
         capture_job=_fake_capture,
         materialize_job=_fake_materialize,
+        etf_materialize_job=_fake_etf_materialize,
     )
     monkeypatch.setattr(scheduler_module, "_load_v2_scheduler_job_contract", lambda: contract)
     scheduler = scheduler_module.build_scheduler("Asia/Shanghai")
@@ -74,9 +96,11 @@ def test_v2_scheduler_registers_only_enabled_stages(
     v2_jobs = {
         job.id: job
         for job in scheduler.get_jobs()
-        if job.id in {
+        if job.id
+        in {
             scheduler_module.V2_CAPTURE_JOB_NAME,
             scheduler_module.V2_MATERIALIZE_JOB_NAME,
+            scheduler_module.V2_ETF_MATERIALIZE_JOB_NAME,
         }
     }
     assert set(v2_jobs) == expected
@@ -92,11 +116,18 @@ def test_v2_scheduler_registers_only_enabled_stages(
         assert _trigger_field(capture, "minute") == "*/2"
         assert _trigger_field(capture, "second") == "0"
 
+    etf_materialize = v2_jobs.get(scheduler_module.V2_ETF_MATERIALIZE_JOB_NAME)
+    if etf_materialize is not None:
+        assert _trigger_field(etf_materialize, "day_of_week") == "tue-sat"
+        assert _trigger_field(etf_materialize, "hour") == "9"
+        assert _trigger_field(etf_materialize, "minute") == "10"
+        assert _trigger_field(etf_materialize, "second") == "0"
+
     materialize = v2_jobs.get(scheduler_module.V2_MATERIALIZE_JOB_NAME)
     if materialize is not None:
         assert _trigger_field(materialize, "day_of_week") == "tue-sat"
         assert _trigger_field(materialize, "hour") == "9"
-        assert _trigger_field(materialize, "minute") == "10"
+        assert _trigger_field(materialize, "minute") == "12"
         assert _trigger_field(materialize, "second") == "0"
 
 
@@ -125,7 +156,10 @@ def test_v2_frontend_flag_is_explicitly_false_by_default_and_wired_to_both_compo
     tracked_env = (root / "deploy/etf-research.env").read_text(encoding="utf-8")
 
     assert "ARG NEXT_PUBLIC_ETF_LEADER_TACTICS_V2_ENABLED=false" in dockerfile
-    assert "ENV NEXT_PUBLIC_ETF_LEADER_TACTICS_V2_ENABLED=$NEXT_PUBLIC_ETF_LEADER_TACTICS_V2_ENABLED" in dockerfile
+    assert (
+        "ENV NEXT_PUBLIC_ETF_LEADER_TACTICS_V2_ENABLED=$NEXT_PUBLIC_ETF_LEADER_TACTICS_V2_ENABLED"
+        in dockerfile
+    )
     expected_arg = "NEXT_PUBLIC_ETF_LEADER_TACTICS_V2_ENABLED: ${NEXT_PUBLIC_ETF_LEADER_TACTICS_V2_ENABLED:-false}"
     assert expected_arg in standard_compose
     assert expected_arg in ip_compose

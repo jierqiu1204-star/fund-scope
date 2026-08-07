@@ -1,4 +1,8 @@
-"""Read-only point-in-time inputs for Strategy Lab ETF ranking replay."""
+"""Legacy implementation of shared point-in-time ETF decision inputs.
+
+New consumers should import the neutral ``etf_point_in_time_decision_data``
+interface. Compatibility exports remain here for existing replay callers.
+"""
 
 from __future__ import annotations
 
@@ -150,9 +154,7 @@ def _metadata_payload(item: PointInTimeEtfMetadata) -> dict[str, Any]:
         "taxonomy_provider_version": item.taxonomy_provider_version,
         "taxonomy_rule_version": item.taxonomy_rule_version,
         "taxonomy_observed_at": (
-            item.taxonomy_observed_at.isoformat()
-            if item.taxonomy_observed_at is not None
-            else None
+            item.taxonomy_observed_at.isoformat() if item.taxonomy_observed_at is not None else None
         ),
         "taxonomy_evidence_hash": item.taxonomy_evidence_hash,
         "taxonomy_fact_hash": item.taxonomy_fact_hash,
@@ -181,40 +183,48 @@ def _bar_payload(item: AdjustedOhlcvBar) -> dict[str, Any]:
     }
 
 
-def _series_from_rows(
+def build_point_in_time_adjusted_series(
     *,
     metadata: PointInTimeEtfMetadata,
     rows: list[market_data.EtfAdjustedDailyFact],
     decision_cutoff: datetime,
-    required_history_sessions: int,
+    minimum_history_sessions: int,
+    maximum_history_sessions: int,
 ) -> PointInTimeAdjustedSeries | ReplayInputExclusion:
-    window = rows[-required_history_sessions:]
-    if (
-        len(window) != required_history_sessions
-        or window[-1].trade_date != metadata.eligible_at
-    ):
+    """Build one bounded PIT series while retaining optional deeper history."""
+
+    if not REQUIRED_BAR_COUNT <= minimum_history_sessions <= maximum_history_sessions:
+        raise ValueError("history bounds must satisfy REQUIRED_BAR_COUNT <= minimum <= maximum")
+    if maximum_history_sessions > MAX_REPLAY_HISTORY_SESSIONS:
+        raise ValueError(f"maximum_history_sessions cannot exceed {MAX_REPLAY_HISTORY_SESSIONS}")
+    window = rows[-maximum_history_sessions:]
+    if len(window) < minimum_history_sessions or window[-1].trade_date != metadata.eligible_at:
         return ReplayInputExclusion(
             metadata.asset_code,
             ReplayInputExclusionReason.STALE_OR_INELIGIBLE_ADJUSTED_INPUT,
-            f"requires {required_history_sessions} rows ending at replay_date",
+            (f"requires at least {minimum_history_sessions} rows ending at replay_date"),
         )
     provider_names = {str(row.data_provider or "").strip().lower() for row in window}
-    if any(
-        any(marker in provider for marker in _RAW_OR_FALLBACK_PROVIDER_MARKERS)
-        for provider in provider_names
-    ) or any(
+    if (
         any(
-            marker in str(row.raw_price_basis or "").strip().lower()
-            for marker in ("sina", "efinance", "fallback")
+            any(marker in provider for marker in _RAW_OR_FALLBACK_PROVIDER_MARKERS)
+            for provider in provider_names
         )
-        for row in window
-    ) or any(
-        row.research_price_basis != PRICE_BASIS
-        and (
-            row.research_price_basis in {None, "raw", "raw_ohlc"}
-            or row.decision_ineligibility_reason == "missing_total_return_provenance"
+        or any(
+            any(
+                marker in str(row.raw_price_basis or "").strip().lower()
+                for marker in ("sina", "efinance", "fallback")
+            )
+            for row in window
         )
-        for row in window
+        or any(
+            row.research_price_basis != PRICE_BASIS
+            and (
+                row.research_price_basis in {None, "raw", "raw_ohlc"}
+                or row.decision_ineligibility_reason == "missing_total_return_provenance"
+            )
+            for row in window
+        )
     ):
         return ReplayInputExclusion(
             metadata.asset_code,
@@ -222,8 +232,7 @@ def _series_from_rows(
             "raw or fallback provider data cannot become replay decision evidence",
         )
     provider_versions = {
-        (str(row.data_provider or "").lower(), str(row.adjustment_version or ""))
-        for row in window
+        (str(row.data_provider or "").lower(), str(row.adjustment_version or "")) for row in window
     }
     if len(provider_versions) != 1:
         return ReplayInputExclusion(
@@ -288,11 +297,10 @@ def _series_from_rows(
                 "daily row is not an exchange weekday session",
             )
         assert row.adjusted_close is not None
-        if (
-            float(row.raw_high)
-            < max(float(row.raw_open), float(row.raw_close), float(row.raw_low))
-            or float(row.raw_low)
-            > min(float(row.raw_open), float(row.raw_close), float(row.raw_high))
+        if float(row.raw_high) < max(
+            float(row.raw_open), float(row.raw_close), float(row.raw_low)
+        ) or float(row.raw_low) > min(
+            float(row.raw_open), float(row.raw_close), float(row.raw_high)
         ):
             return ReplayInputExclusion(
                 metadata.asset_code,
@@ -356,6 +364,22 @@ def _series_from_rows(
     )
 
 
+def _series_from_rows(
+    *,
+    metadata: PointInTimeEtfMetadata,
+    rows: list[market_data.EtfAdjustedDailyFact],
+    decision_cutoff: datetime,
+    required_history_sessions: int,
+) -> PointInTimeAdjustedSeries | ReplayInputExclusion:
+    return build_point_in_time_adjusted_series(
+        metadata=metadata,
+        rows=rows,
+        decision_cutoff=decision_cutoff,
+        minimum_history_sessions=required_history_sessions,
+        maximum_history_sessions=required_history_sessions,
+    )
+
+
 async def load_point_in_time_ranking_inputs(
     session: AsyncSession,
     *,
@@ -376,13 +400,9 @@ async def load_point_in_time_ranking_inputs(
         or local_cutoff.time().replace(tzinfo=None) < _DAILY_BAR_AVAILABLE_AT
         or replay_date.weekday() >= 5
     ):
-        raise ValueError(
-            "decision_cutoff must identify a completed Shanghai trading session"
-        )
+        raise ValueError("decision_cutoff must identify a completed Shanghai trading session")
     if max_codes < 1 or max_codes > MAX_CODES_PER_REPLAY_INPUT_PAGE:
-        raise ValueError(
-            f"max_codes must be between 1 and {MAX_CODES_PER_REPLAY_INPUT_PAGE}"
-        )
+        raise ValueError(f"max_codes must be between 1 and {MAX_CODES_PER_REPLAY_INPUT_PAGE}")
     if not REQUIRED_BAR_COUNT <= required_history_sessions <= MAX_REPLAY_HISTORY_SESSIONS:
         raise ValueError(
             "required_history_sessions must be between "
@@ -464,8 +484,7 @@ async def load_point_in_time_ranking_inputs(
                 membership_fact_hash=fact.fact_hash,
                 tracked_underlying_id=(
                     underlying_fact.tracked_underlying_id
-                    if underlying_fact is not None
-                    and underlying_fact.identity_state == "resolved"
+                    if underlying_fact is not None and underlying_fact.identity_state == "resolved"
                     else None
                 ),
                 membership_known_at=fact_known_at,
@@ -473,53 +492,33 @@ async def load_point_in_time_ranking_inputs(
                 membership_ingested_at=_utc(fact.created_at),
                 eligible_from=fact.effective_from,
                 eligible_at=replay_date,
-                taxonomy_bucket=(
-                    taxonomy_fact.asset_bucket if taxonomy_fact is not None else None
-                ),
-                taxonomy_source=(
-                    taxonomy_fact.source if taxonomy_fact is not None else None
-                ),
+                taxonomy_bucket=(taxonomy_fact.asset_bucket if taxonomy_fact is not None else None),
+                taxonomy_source=(taxonomy_fact.source if taxonomy_fact is not None else None),
                 taxonomy_provider_version=(
-                    taxonomy_fact.provider_version
-                    if taxonomy_fact is not None
-                    else None
+                    taxonomy_fact.provider_version if taxonomy_fact is not None else None
                 ),
                 taxonomy_rule_version=(
                     taxonomy_fact.rule_version if taxonomy_fact is not None else None
                 ),
                 taxonomy_observed_at=(
-                    _utc(taxonomy_fact.observed_at)
-                    if taxonomy_fact is not None
-                    else None
+                    _utc(taxonomy_fact.observed_at) if taxonomy_fact is not None else None
                 ),
                 taxonomy_evidence_hash=(
                     taxonomy_fact.evidence_hash if taxonomy_fact is not None else None
                 ),
-                taxonomy_fact_hash=(
-                    taxonomy_fact.fact_hash if taxonomy_fact is not None else None
-                ),
-                underlying_source=(
-                    underlying_fact.source if underlying_fact is not None else None
-                ),
+                taxonomy_fact_hash=(taxonomy_fact.fact_hash if taxonomy_fact is not None else None),
+                underlying_source=(underlying_fact.source if underlying_fact is not None else None),
                 underlying_provider_version=(
-                    underlying_fact.provider_version
-                    if underlying_fact is not None
-                    else None
+                    underlying_fact.provider_version if underlying_fact is not None else None
                 ),
                 underlying_rule_version=(
-                    underlying_fact.rule_version
-                    if underlying_fact is not None
-                    else None
+                    underlying_fact.rule_version if underlying_fact is not None else None
                 ),
                 underlying_observed_at=(
-                    _utc(underlying_fact.observed_at)
-                    if underlying_fact is not None
-                    else None
+                    _utc(underlying_fact.observed_at) if underlying_fact is not None else None
                 ),
                 underlying_evidence_hash=(
-                    underlying_fact.evidence_hash
-                    if underlying_fact is not None
-                    else None
+                    underlying_fact.evidence_hash if underlying_fact is not None else None
                 ),
                 underlying_fact_hash=(
                     underlying_fact.fact_hash if underlying_fact is not None else None
@@ -538,9 +537,7 @@ async def load_point_in_time_ranking_inputs(
     universe_tuple = tuple(universe)
     universe_hash = _hash([_metadata_payload(item) for item in universe_tuple])
     remaining_universe = tuple(
-        item
-        for item in universe_tuple
-        if code_after is None or item.asset_code > code_after
+        item for item in universe_tuple if code_after is None or item.asset_code > code_after
     )
     page_universe = remaining_universe[:max_codes]
     has_more = len(remaining_universe) > len(page_universe)
@@ -553,9 +550,7 @@ async def load_point_in_time_ranking_inputs(
         rows_per_code=required_history_sessions,
         max_source_rows=max_source_rows,
         decision_cutoff=cutoff,
-        compatible_provider_versions=tuple(
-            sorted(_PROVEN_MULTIPLICATIVE_ADJUSTMENTS)
-        ),
+        compatible_provider_versions=tuple(sorted(_PROVEN_MULTIPLICATIVE_ADJUSTMENTS)),
     )
     prices_by_code: dict[str, list[market_data.EtfAdjustedDailyFact]] = defaultdict(list)
     for row in price_facts:
@@ -582,9 +577,7 @@ async def load_point_in_time_ranking_inputs(
         etf_codes=tuple(item.asset_code for item in universe_tuple),
         replay_date=replay_date,
         decision_cutoff=cutoff,
-        compatible_provider_versions=tuple(
-            sorted(_PROVEN_MULTIPLICATIVE_ADJUSTMENTS)
-        ),
+        compatible_provider_versions=tuple(sorted(_PROVEN_MULTIPLICATIVE_ADJUSTMENTS)),
     )
     source_snapshot_hash = _hash(
         {
