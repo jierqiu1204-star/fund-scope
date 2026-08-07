@@ -12,6 +12,8 @@ from app.services.strategy_lab import (
 )
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_tickflow_provider import (
     BAOSTOCK_TAXONOMY_VERSION,
+    CAPCO_TAXONOMY_VERSION,
+    CAPCO_THEME_SOURCE,
     TICKFLOW_ADJUSTMENT_VERSION,
     TICKFLOW_BASE_URL,
     TICKFLOW_PROVIDER,
@@ -21,10 +23,48 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_tickflow_provider
     BaoStockIndustryBatchResult,
     TickflowAshareProviderError,
     TickflowAshareV2Provider,
+    load_capco_bse_industries,
 )
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 RECEIVED_AT = datetime(2026, 8, 7, 20, 0, tzinfo=SHANGHAI)
+
+
+def test_capco_snapshot_only_supplements_missing_bse_members_at_real_receipt() -> None:
+    members = (
+        provider_module.TickflowAshareMember(
+            symbol="920169.BJ",
+            code="920169",
+            name="七丰精工",
+            board="BSE",
+            current_industry=None,
+            float_shares=1_000_000,
+        ),
+        provider_module.TickflowAshareMember(
+            symbol="000001.SZ",
+            code="000001",
+            name="平安银行",
+            board="SZ",
+            current_industry=None,
+            float_shares=1_000_000,
+        ),
+    )
+
+    result = load_capco_bse_industries(
+        members,
+        signal_date=date(2026, 8, 7),
+        received_at=RECEIVED_AT,
+    )
+
+    assert set(result) == {"920169.BJ"}
+    classification = result["920169.BJ"]
+    assert classification.name == "通用设备制造业"
+    assert classification.group_id == "capco_division:34"
+    assert classification.source == CAPCO_THEME_SOURCE
+    assert classification.taxonomy_version == CAPCO_TAXONOMY_VERSION
+    assert classification.effective_from == date(2026, 8, 7)
+    assert classification.received_at == RECEIVED_AT
+    assert classification.confidence == "official_frozen_snapshot"
 
 
 def test_baostock_parser_preserves_completed_rows_when_later_symbol_times_out() -> None:

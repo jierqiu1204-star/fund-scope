@@ -29,6 +29,7 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_lifecycle_storage
     load_v2_checkpoint,
 )
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_tickflow_provider import (
+    CAPCO_THEME_SOURCE,
     TICKFLOW_TAXONOMY_VERSION,
     TICKFLOW_THEME_SOURCE,
     BaoStockIndustryBatchResult,
@@ -403,6 +404,107 @@ async def test_industry_bootstrap_persists_partial_subprocess_progress(
     assert evidence["completed_count"] == 1
     assert evidence["failed_count"] == 1
     assert rows == [("000009", "baostock.query_stock_industry.current")]
+    assert sum(member.current_industry is not None for member in completed) == 9
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_industry_bootstrap_uses_official_capco_bse_snapshot_before_baostock(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    engine, session_factory = await _factory(tmp_path, "industry-capco.db")
+    observed_at = datetime(2026, 8, 7, 12)
+    members: list[TickflowAshareMember] = []
+    for index in range(8):
+        code = f"{index + 1:06d}"
+        members.append(
+            TickflowAshareMember(
+                symbol=f"{code}.SZ",
+                code=code,
+                name=f"测试{code}",
+                board="SZ",
+                current_industry="软件",
+                float_shares=1_000_000,
+                industry_group_id="tickflow_sw1:软件",
+                industry_source=TICKFLOW_THEME_SOURCE,
+                industry_taxonomy_version=TICKFLOW_TAXONOMY_VERSION,
+                industry_effective_from=date(2026, 8, 7),
+                industry_received_at=observed_at,
+                industry_confidence="observed_current",
+            )
+        )
+    members.extend(
+        (
+            TickflowAshareMember(
+                symbol="920169.BJ",
+                code="920169",
+                name="七丰精工",
+                board="BSE",
+                current_industry=None,
+                float_shares=1_000_000,
+            ),
+            TickflowAshareMember(
+                symbol="000010.SZ",
+                code="000010",
+                name="测试000010",
+                board="SZ",
+                current_industry=None,
+                float_shares=1_000_000,
+            ),
+        )
+    )
+    provider = TickflowAshareV2Provider(industry_loader=lambda: None)  # type: ignore[arg-type]
+    provider._members = tuple(members)
+    provider._members_by_code = {member.code: member for member in members}
+
+    async def unexpected_baostock(_: tuple[str, ...]) -> dict[str, str]:
+        raise AssertionError("90% gate should pass before BaoStock provider work")
+
+    monkeypatch.setattr(jobs, "load_baostock_industries", unexpected_baostock)
+    async with session_factory() as session:
+        completed, evidence = await jobs._bootstrap_baostock_industries(
+            session,
+            provider=provider,
+            baseline_members=tuple(members),
+            signal_date=date(2026, 8, 7),
+            code_version="test-code-version",
+            budget_seconds=40.0,
+        )
+        row = (
+            await session.execute(
+                text(
+                    "SELECT asset_code, source, effective_from, received_at "
+                    "FROM ashare_theme_membership_facts"
+                )
+            )
+        ).one()
+        repeated_provider = TickflowAshareV2Provider(
+            industry_loader=lambda: None  # type: ignore[arg-type]
+        )
+        repeated_provider._members = tuple(members)
+        repeated_provider._members_by_code = {member.code: member for member in members}
+        _, repeated_evidence = await jobs._bootstrap_baostock_industries(
+            session,
+            provider=repeated_provider,
+            baseline_members=tuple(members),
+            signal_date=date(2026, 8, 7),
+            code_version="test-code-version",
+            budget_seconds=40.0,
+        )
+        persisted_count = await session.scalar(
+            text("SELECT COUNT(*) FROM ashare_theme_membership_facts")
+        )
+
+    assert evidence["coverage"] == 0.9
+    assert evidence["capco_classified_count"] == 1
+    assert evidence["queried_count"] == 0
+    assert repeated_evidence["capco_classified_count"] == 0
+    assert persisted_count == 1
+    assert row[0] == "920169"
+    assert row[1] == CAPCO_THEME_SOURCE
+    assert str(row[2])[:10] == "2026-08-07"
+    assert str(row[3])[:10] == "2026-08-07"
     assert sum(member.current_industry is not None for member in completed) == 9
     await engine.dispose()
 

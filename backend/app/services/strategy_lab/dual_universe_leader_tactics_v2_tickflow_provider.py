@@ -10,12 +10,15 @@ backdated.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import sys
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
+from functools import lru_cache
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -38,7 +41,17 @@ TICKFLOW_THEME_SOURCE = "tickflow.free.universes.SW1"
 TICKFLOW_TAXONOMY_VERSION = "tickflow.sw1.current_v1"
 BAOSTOCK_THEME_SOURCE = "baostock.query_stock_industry.current"
 BAOSTOCK_TAXONOMY_VERSION = "baostock.industry.current_v1"
-ASHARE_TAXONOMY_VERSION = "tickflow_sw1_plus_baostock_current_v1"
+CAPCO_THEME_SOURCE = "capco.2025_h2.listed_company_industry"
+CAPCO_TAXONOMY_VERSION = "capco.listed_company_industry.2025_h2"
+CAPCO_SOURCE_DOCUMENT_SHA256 = (
+    "b1d0140572b20de11cd62ca478edb4da6e229928b216116df6345b3c2e461f58"
+)
+CAPCO_ENTRIES_SHA256 = (
+    "18988c33a803edcc5f746085fb607b65ea3b86030ee2d5afeb5d7ce87d3ba359"
+)
+ASHARE_TAXONOMY_VERSION = (
+    "tickflow_sw1_plus_baostock_current_plus_capco_2025_h2_v1"
+)
 TICKFLOW_HEADERS = {
     "Accept": "application/json",
     "Content-Type": "application/json",
@@ -194,6 +207,9 @@ IndustryLoader = Callable[
     [], Awaitable[Mapping[str, str | AshareIndustryClassification]]
 ]
 _CURRENT_UNIVERSE_CACHE: tuple[date, tuple[TickflowAshareMember, ...]] | None = None
+_CAPCO_BSE_DATA_PATH = (
+    Path(__file__).with_name("data") / "capco_2025_h2_bse_industries.json"
+)
 
 
 def _required_text(value: object, field: str, *, max_length: int) -> str:
@@ -246,6 +262,92 @@ def _validate_received_at(received_at: datetime) -> datetime:
     if received_at.tzinfo is None or received_at.utcoffset() is None:
         raise TickflowAshareProviderError("received_at_must_be_timezone_aware")
     return received_at
+
+
+@lru_cache(maxsize=1)
+def _load_capco_bse_snapshot() -> dict[str, tuple[str, str, str]]:
+    """Load and validate the vendored official CAPCO BSE classification."""
+
+    try:
+        payload = json.loads(_CAPCO_BSE_DATA_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise TickflowAshareProviderError("capco_snapshot_unavailable") from exc
+    if not isinstance(payload, Mapping):
+        raise TickflowAshareProviderError("capco_snapshot_invalid")
+    if (
+        payload.get("schema_version") != "fundscope.capco_bse_industry_snapshot.v1"
+        or payload.get("source") != CAPCO_THEME_SOURCE
+        or payload.get("source_document_sha256") != CAPCO_SOURCE_DOCUMENT_SHA256
+        or payload.get("entries_sha256") != CAPCO_ENTRIES_SHA256
+    ):
+        raise TickflowAshareProviderError("capco_snapshot_identity_invalid")
+    entries = payload.get("entries")
+    if not isinstance(entries, list) or len(entries) != 285:
+        raise TickflowAshareProviderError("capco_snapshot_entries_invalid")
+    canonical_entries = json.dumps(
+        entries,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if hashlib.sha256(canonical_entries).hexdigest() != CAPCO_ENTRIES_SHA256:
+        raise TickflowAshareProviderError("capco_snapshot_hash_mismatch")
+
+    parsed: dict[str, tuple[str, str, str]] = {}
+    for row in entries:
+        if not isinstance(row, Mapping):
+            raise TickflowAshareProviderError("capco_snapshot_row_invalid")
+        code = _required_text(row.get("code"), "capco_code", max_length=6)
+        if len(code) != 6 or not code.startswith("920") or not code.isdigit():
+            raise TickflowAshareProviderError("capco_code_invalid")
+        name = _required_text(row.get("name"), "capco_name", max_length=64)
+        division_code = _required_text(
+            row.get("division_code"), "capco_division_code", max_length=4
+        )
+        division_name = _required_text(
+            row.get("division_name"), "capco_division_name", max_length=128
+        )
+        if code in parsed:
+            raise TickflowAshareProviderError("capco_snapshot_duplicate_code")
+        parsed[code] = (name, division_code, division_name)
+    return parsed
+
+
+def load_capco_bse_industries(
+    members: tuple[TickflowAshareMember, ...],
+    *,
+    signal_date: date,
+    received_at: datetime,
+) -> dict[str, AshareIndustryClassification]:
+    """Return official frozen classifications only for missing BSE members.
+
+    The source period is historical metadata, but the facts become visible only
+    at this run's real receipt time and are never backdated.
+    """
+
+    if not isinstance(signal_date, date) or isinstance(signal_date, datetime):
+        raise TickflowAshareProviderError("capco_signal_date_invalid")
+    if not isinstance(received_at, datetime):
+        raise TickflowAshareProviderError("capco_received_at_invalid")
+    snapshot = _load_capco_bse_snapshot()
+    classifications: dict[str, AshareIndustryClassification] = {}
+    for member in members:
+        if member.board != "BSE" or member.current_industry is not None:
+            continue
+        entry = snapshot.get(member.code)
+        if entry is None:
+            continue
+        _name, division_code, division_name = entry
+        classifications[member.symbol] = AshareIndustryClassification(
+            name=division_name,
+            group_id=f"capco_division:{division_code}",
+            source=CAPCO_THEME_SOURCE,
+            taxonomy_version=CAPCO_TAXONOMY_VERSION,
+            effective_from=signal_date,
+            received_at=received_at,
+            confidence="official_frozen_snapshot",
+        )
+    return classifications
 
 
 def _payload_data(payload: object, kind: str) -> object:
@@ -928,6 +1030,10 @@ __all__ = [
     "BaoStockIndustryBatchResult",
     "BAOSTOCK_TAXONOMY_VERSION",
     "BAOSTOCK_THEME_SOURCE",
+    "CAPCO_ENTRIES_SHA256",
+    "CAPCO_SOURCE_DOCUMENT_SHA256",
+    "CAPCO_TAXONOMY_VERSION",
+    "CAPCO_THEME_SOURCE",
     "DEFAULT_HISTORY_SESSIONS",
     "TICKFLOW_ADJUSTMENT_VERSION",
     "TICKFLOW_PROVIDER",
@@ -940,4 +1046,5 @@ __all__ = [
     "TickflowAshareProviderError",
     "TickflowAshareV2Provider",
     "load_baostock_industries",
+    "load_capco_bse_industries",
 ]

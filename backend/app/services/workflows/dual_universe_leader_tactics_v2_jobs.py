@@ -56,6 +56,8 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_tickflow_provider
     ASHARE_TAXONOMY_VERSION,
     BAOSTOCK_TAXONOMY_VERSION,
     BAOSTOCK_THEME_SOURCE,
+    CAPCO_TAXONOMY_VERSION,
+    CAPCO_THEME_SOURCE,
     TICKFLOW_ADJUSTMENT_VERSION,
     TICKFLOW_PROVIDER,
     TICKFLOW_UNIVERSE_SOURCE,
@@ -65,6 +67,7 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_tickflow_provider
     TickflowAshareProviderError,
     TickflowAshareV2Provider,
     load_baostock_industries,
+    load_capco_bse_industries,
 )
 from app.services.strategy_lab.etf_point_in_time_decision_data import (
     latest_ready_etf_decision_data_snapshot,
@@ -262,14 +265,14 @@ def _as_naive_datetime(value: object, field: str) -> datetime:
     return _utc_naive(value)
 
 
-async def _load_persisted_baostock_supplements(
+async def _load_persisted_industry_supplements(
     session: AsyncSession,
     *,
     members: tuple[TickflowAshareMember, ...],
     signal_date: date,
     as_of: datetime,
 ) -> dict[str, AshareIndustryClassification]:
-    """Read only previously observed current classifications for missing symbols."""
+    """Read only previously received supplements for currently missing symbols."""
 
     missing_by_code = {member.code: member for member in members if member.current_industry is None}
     if not missing_by_code:
@@ -289,8 +292,16 @@ async def _load_persisted_baostock_supplements(
                                             fact_hash DESC
                                ) AS membership_rank
                         FROM ashare_theme_membership_facts AS memberships
-                        WHERE source = :source
-                          AND taxonomy_version = :taxonomy_version
+                        WHERE (
+                                (
+                                    source = :baostock_source
+                                    AND taxonomy_version = :baostock_taxonomy_version
+                                )
+                                OR (
+                                    source = :capco_source
+                                    AND taxonomy_version = :capco_taxonomy_version
+                                )
+                              )
                           AND effective_from <= :signal_date
                           AND (effective_to IS NULL OR effective_to >= :signal_date)
                           AND received_at <= :as_of
@@ -301,8 +312,10 @@ async def _load_persisted_baostock_supplements(
                     """
                 ),
                 {
-                    "source": BAOSTOCK_THEME_SOURCE,
-                    "taxonomy_version": BAOSTOCK_TAXONOMY_VERSION,
+                    "baostock_source": BAOSTOCK_THEME_SOURCE,
+                    "baostock_taxonomy_version": BAOSTOCK_TAXONOMY_VERSION,
+                    "capco_source": CAPCO_THEME_SOURCE,
+                    "capco_taxonomy_version": CAPCO_TAXONOMY_VERSION,
                     "signal_date": signal_date,
                     "as_of": as_of,
                     "limit": V2_MAX_ASHARE_ASSETS + 1,
@@ -371,23 +384,49 @@ async def _bootstrap_baostock_industries(
     code_version: str,
     budget_seconds: float,
 ) -> tuple[tuple[TickflowAshareMember, ...], dict[str, Any]]:
-    """Persist resumable BaoStock supplements until the A-share theme gate passes."""
+    """Apply official BSE facts, then resume bounded BaoStock supplements."""
 
     started = time.monotonic()
     as_of = _utc_naive(_local_now())
-    persisted = await _load_persisted_baostock_supplements(
+    persisted = await _load_persisted_industry_supplements(
         session,
         members=baseline_members,
         signal_date=signal_date,
         as_of=as_of,
     )
     members = provider.apply_industry_supplements(persisted) if persisted else baseline_members
+    capco_received_at = _utc_naive(_local_now())
+    capco_supplements = load_capco_bse_industries(
+        members,
+        signal_date=signal_date,
+        received_at=capco_received_at,
+    )
+    if capco_supplements:
+        member_by_symbol = {member.symbol: member for member in members}
+        capco_facts = tuple(
+            AshareThemeMembershipFact(
+                asset_code=member_by_symbol[symbol].code,
+                group_id=classification.group_id,
+                theme=classification.name,
+                sector=classification.name,
+                effective_from=classification.effective_from,
+                effective_to=None,
+                received_at=classification.received_at,
+                taxonomy_version=CAPCO_TAXONOMY_VERSION,
+                source=CAPCO_THEME_SOURCE,
+                confidence=classification.confidence,
+                supersedes_fact_hash=None,
+                mapping_kind="historical_pit",
+            )
+            for symbol, classification in sorted(capco_supplements.items())
+        )
+        await persist_ashare_theme_membership_batch(session, capco_facts)
+        await session.commit()
+        members = provider.apply_industry_supplements(capco_supplements)
     universe_count = len(members)
     industry_count = sum(member.current_industry is not None for member in members)
     required_count = int(universe_count * ASHARE_V2_COVERAGE_THRESHOLD + 0.999999)
-    missing_members = tuple(
-        member for member in baseline_members if member.current_industry is None
-    )
+    missing_members = tuple(member for member in members if member.current_industry is None)
     supplement_codes = tuple(member.code for member in missing_members)
     members_by_code = {member.code: member for member in missing_members}
     manifest_hash = _industry_bootstrap_manifest_hash(
@@ -536,6 +575,7 @@ async def _bootstrap_baostock_industries(
         "required_count": required_count,
         "queried_count": queried_count,
         "classified_count": classified_count,
+        "capco_classified_count": len(capco_supplements),
         "checkpoint_status": checkpoint.status,
         "completed_count": len(checkpoint.completed_codes),
         "failed_count": len(checkpoint.failed_codes),
