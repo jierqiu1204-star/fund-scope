@@ -500,6 +500,7 @@ def _readiness_params(
         "as_of": as_of,
         "as_of_date": required_trade_date or as_of.date(),
         "required_trade_date": required_trade_date,
+        "required_trade_date_absent": required_trade_date is None,
         "eligible": True,
         "historical_only": False,
         "price_basis": "total_return_adjusted",
@@ -573,8 +574,9 @@ async def read_ashare_readiness(
     history_tier_sql = ",\n".join(
         (
             "            COALESCE(SUM(CASE WHEN sessions_count >= "
-            f":history_tier_{index} AND (:required_trade_date IS NULL OR "
-            ":required_trade_date = latest_trade_date) THEN 1 ELSE 0 END), 0) "
+            f":history_tier_{index} AND (:required_trade_date_absent OR "
+            ":required_trade_date = latest_trade_date) "
+            "THEN 1 ELSE 0 END), 0) "
             f"AS tier_{index}"
         )
         for index, _ in enumerate(required_history_tiers)
@@ -610,7 +612,7 @@ async def read_ashare_readiness(
         ),
         summary AS (
             SELECT COALESCE(SUM(CASE
-                       WHEN :required_trade_date IS NULL
+                       WHEN :required_trade_date_absent
                             OR latest_trade_date = :required_trade_date
                        THEN 1 ELSE 0 END), 0) AS adjusted_count{summary_tier_cte}
             FROM per_asset
