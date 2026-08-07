@@ -110,9 +110,18 @@ def _local_now(value: datetime | None = None) -> datetime:
 
 
 def _capture_signal_date(local_now: datetime) -> date | None:
-    if local_now.hour < 15 or not is_trading_day(local_now.date()):
-        return None
-    return local_now.date()
+    if is_trading_day(local_now.date()):
+        if local_now.hour < 15:
+            return None
+        return local_now.date()
+    candidate = local_now.date() - timedelta(days=1)
+    for _ in range(15):
+        if is_trading_day(candidate):
+            return candidate
+        candidate -= timedelta(days=1)
+    # The verified exchange calendar does not cover the required lookback.
+    # Fail closed instead of inferring a historical session.
+    return None
 
 
 def _capture_manifest_hash(

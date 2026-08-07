@@ -46,6 +46,12 @@ def _etf_decision_snapshot() -> EtfDecisionDataSnapshot:
         provider_health=(("eastmoney", "healthy"),),
     )
 
+
+def test_capture_signal_date_continues_last_closed_session_without_backdating() -> None:
+    assert jobs._capture_signal_date(datetime(2026, 8, 7, 14, 59)) is None
+    assert jobs._capture_signal_date(datetime(2026, 8, 7, 15, 0)) == date(2026, 8, 7)
+    assert jobs._capture_signal_date(datetime(2026, 8, 8, 0, 1)) == date(2026, 8, 7)
+
 @pytest.mark.asyncio
 async def test_materialization_job_is_default_off_without_database_work(monkeypatch) -> None:
     monkeypatch.setattr(
