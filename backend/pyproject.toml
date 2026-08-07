@@ -11,6 +11,7 @@ dependencies = [
   "alembic>=1.15.2",
   "apscheduler>=3.10.4",
   "asyncpg>=0.30.0",
+  "baostock>=0.9.3",
   "beautifulsoup4>=4.13.3",
   "efinance>=0.5.8",
   "fastapi>=0.115.12",

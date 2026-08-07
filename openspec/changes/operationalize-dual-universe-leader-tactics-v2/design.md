@@ -72,6 +72,8 @@ One leased worker processes deterministic pages. It starts between 5 and 20 asse
 
 Formula calculation, lifecycle reduction, and API reads operate only on persisted data and do not trigger providers. This isolates slow external calls from the user-facing path and avoids overlapping sync storms.
 
+For the production A-share research path, TickFlow's free API supplies the current `CN_Equity_A` universe, instrument metadata, and explicit backward-adjusted daily bars. BaoStock supplies only a current industry snapshot in a physically terminable child process. Both are stamped from their factual receipt time and cannot be backdated. The A-share research materialization threshold is 90 percent, reflecting the separately measured current-industry coverage; this exception does not change any ETF publication or comprehensive-ranking threshold.
+
 ### 9. Extend the existing evidence workbench through a bounded read API
 
 The V2 endpoint uses enumerated universe/formula/state filters, an explicit `as_of`, stable cursor pagination, deterministic sorting, and capped page size. A summary envelope returns per-layer coverage, candidate/exclusion counts, availability reasons, registry identity, and manifest hash. Candidate details return gate facts and transition history.

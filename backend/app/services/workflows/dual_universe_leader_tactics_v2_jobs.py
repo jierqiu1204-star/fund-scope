@@ -36,14 +36,6 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_adapters import (
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_collector import (
     V2CollectorCheckpoint,
 )
-from app.services.strategy_lab.dual_universe_leader_tactics_v2_eastmoney_provider import (
-    EASTMONEY_ADJUSTMENT_VERSION,
-    EASTMONEY_PROVIDER,
-    EASTMONEY_TAXONOMY_VERSION,
-    AshareUniverseMember,
-    EastmoneyAshareProviderError,
-    EastmoneyAshareV2Provider,
-)
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_etf_inputs import (
     read_etf_v2_asset_inputs,
 )
@@ -56,6 +48,15 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_lifecycle_storage
 )
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_storage import (
     get_v2_materialized_manifest,
+)
+from app.services.strategy_lab.dual_universe_leader_tactics_v2_tickflow_provider import (
+    BAOSTOCK_TAXONOMY_VERSION,
+    TICKFLOW_ADJUSTMENT_VERSION,
+    TICKFLOW_PROVIDER,
+    TICKFLOW_UNIVERSE_SOURCE,
+    TickflowAshareMember,
+    TickflowAshareProviderError,
+    TickflowAshareV2Provider,
 )
 from app.services.strategy_lab.etf_point_in_time_decision_data import (
     latest_ready_etf_decision_data_snapshot,
@@ -104,7 +105,7 @@ def _capture_signal_date(local_now: datetime) -> date | None:
 def _capture_manifest_hash(
     *,
     signal_date: date,
-    members: tuple[AshareUniverseMember, ...],
+    members: tuple[TickflowAshareMember, ...],
     code_version: str,
 ) -> str:
     return stable_contract_hash(
@@ -112,12 +113,22 @@ def _capture_manifest_hash(
             "schema_version": "dual_universe_leader_tactics_v2_capture_manifest_v1",
             "signal_date": signal_date,
             "universe": "ashare",
-            "asset_codes": [member.code for member in members],
+            "members": [
+                {
+                    "code": member.code,
+                    "name": member.name,
+                    "board": member.board,
+                    "industry": member.current_industry,
+                    "float_shares": member.float_shares,
+                }
+                for member in members
+            ],
             "source_registry_hash": V2_SOURCE_REGISTRY.registry_hash,
             "formula_registry_hash": V2_FORMULA_REGISTRY_HASH,
-            "provider": EASTMONEY_PROVIDER,
-            "adjustment_version": EASTMONEY_ADJUSTMENT_VERSION,
-            "taxonomy_version": EASTMONEY_TAXONOMY_VERSION,
+            "provider": TICKFLOW_PROVIDER,
+            "universe_source": TICKFLOW_UNIVERSE_SOURCE,
+            "adjustment_version": TICKFLOW_ADJUSTMENT_VERSION,
+            "taxonomy_version": BAOSTOCK_TAXONOMY_VERSION,
             "code_version": code_version,
         }
     )
@@ -128,8 +139,8 @@ def _checkpoint_contract(*, manifest_hash: str) -> V2CheckpointContract:
         manifest_hash=manifest_hash,
         source_registry_hash=V2_SOURCE_REGISTRY.registry_hash,
         formula_registry_hash=V2_FORMULA_REGISTRY_HASH,
-        adjustment_version=EASTMONEY_ADJUSTMENT_VERSION,
-        taxonomy_version=EASTMONEY_TAXONOMY_VERSION,
+        adjustment_version=TICKFLOW_ADJUSTMENT_VERSION,
+        taxonomy_version=BAOSTOCK_TAXONOMY_VERSION,
         cost_model=(("fee_bps_per_side", 5.0), ("slippage_bps_per_side", 5.0)),
         state_policy="preparing_confirmed_invalidated_v2",
     )
@@ -183,7 +194,7 @@ async def _persist_complete_universe_snapshot(
     session: AsyncSession,
     *,
     signal_date: date,
-    members: tuple[AshareUniverseMember, ...],
+    members: tuple[TickflowAshareMember, ...],
     received_at: datetime,
 ) -> None:
     current = {member.code: member for member in members}
@@ -201,7 +212,7 @@ async def _persist_complete_universe_snapshot(
             board=member.board,
             effective_at=received_at,
             received_at=received_at,
-            provider=EASTMONEY_PROVIDER,
+            provider=TICKFLOW_PROVIDER,
             source_cutoff=received_at,
         )
         for member in members
@@ -215,7 +226,7 @@ async def _persist_complete_universe_snapshot(
             board=board,
             effective_at=received_at,
             received_at=received_at,
-            provider=EASTMONEY_PROVIDER,
+            provider=TICKFLOW_PROVIDER,
             source_cutoff=received_at,
             exclusion_reason="absent_from_authoritative_snapshot",
         )
@@ -297,7 +308,7 @@ async def _capture_ashare(
     ).all()
     if any(
         isinstance(details, dict)
-        and details.get("unavailable_reason") == "leader_tactics_v2_eastmoney_unavailable"
+        and details.get("unavailable_reason") == "leader_tactics_v2_tickflow_unavailable"
         for details in recent_failures
     ):
         return {
@@ -310,11 +321,11 @@ async def _capture_ashare(
 
     started = time.monotonic()
     provider_received_at = local_now
-    database_received_at = _utc_naive(local_now)
-    async with EastmoneyAshareV2Provider() as provider:
+    async with TickflowAshareV2Provider() as provider:
         members = await provider.fetch_universe(received_at=provider_received_at)
+        database_received_at = _utc_naive(_local_now())
         if len(members) > V2_MAX_ASHARE_ASSETS:
-            raise EastmoneyAshareProviderError("universe_exceeds_operational_limit")
+            raise TickflowAshareProviderError("universe_exceeds_operational_limit")
         manifest_hash = _capture_manifest_hash(
             signal_date=signal_date,
             members=members,
@@ -412,7 +423,7 @@ async def _capture_ashare(
         "batch_size_next": batch.checkpoint.batch_size,
         "stopped_reason": batch.stopped_reason,
         "provider_health": {
-            "provider": EASTMONEY_PROVIDER,
+            "provider": TICKFLOW_PROVIDER,
             "status": "healthy" if not batch.failed else "degraded",
             "batch_failures": batch_failures,
             "error_summary": batch.checkpoint.error_summary,
@@ -808,7 +819,7 @@ async def dual_universe_leader_tactics_v2_capture_job(
     now: datetime | None = None,
     timeout_seconds: float = V2_JOB_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
-    """Capture one bounded serial page of factual Eastmoney A-share inputs."""
+    """Capture bounded serial pages of factual TickFlow/BaoStock A-share inputs."""
 
     if not settings.etf_leader_tactics_v2_capture_enabled:
         return {
@@ -838,14 +849,14 @@ async def dual_universe_leader_tactics_v2_capture_job(
             "timeout_seconds": min(V2_WORK_SECONDS, timeout_seconds),
             "research_only": True,
         }
-    except EastmoneyAshareProviderError as exc:
+    except TickflowAshareProviderError as exc:
         await session.rollback()
         return {
             "status": "waiting",
             "job_status": "partial",
-            "unavailable_reason": "leader_tactics_v2_eastmoney_unavailable",
+            "unavailable_reason": "leader_tactics_v2_tickflow_unavailable",
             "provider_health": {
-                "provider": EASTMONEY_PROVIDER,
+                "provider": TICKFLOW_PROVIDER,
                 "status": "unavailable",
                 "error_summary": f"{type(exc).__name__}: {exc}"[:500],
             },

@@ -29,7 +29,7 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_boundary import (
 )
 
 INGESTION_SCHEMA_VERSION = "dual_universe_leader_tactics_v2_ashare_ingestion_v1"
-APPROVED_PROVIDERS = frozenset({"akshare", "eastmoney"})
+APPROVED_PROVIDERS = frozenset({"akshare", "eastmoney", "tickflow"})
 FORBIDDEN_RAW_PROVIDERS = frozenset({"sina", "efinance", "tencent"})
 MAX_FACT_BATCH_SIZE = 500
 
@@ -123,7 +123,7 @@ class AshareUniverseSnapshotFact:
         provider = _normalise_provider(self.provider)
         if provider not in APPROVED_PROVIDERS:
             raise V2ContractError(
-                "authoritative universe facts require an akshare/eastmoney provider"
+                "authoritative universe facts require an approved adjusted-data provider"
             )
         exclusion_reason = _optional_text(self.exclusion_reason, "exclusion_reason")
         if effective_at > received_at:
@@ -344,7 +344,7 @@ class AshareAdjustedPriceFact:
         if decision_eligible:
             if provider not in APPROVED_PROVIDERS:
                 raise V2ContractError(
-                    "only akshare/eastmoney adjusted facts may be decision eligible"
+                    "only approved adjusted facts may be decision eligible"
                 )
             if price_basis != PRICE_BASIS:
                 raise V2ContractError(

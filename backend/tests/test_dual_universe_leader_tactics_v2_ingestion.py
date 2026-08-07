@@ -182,6 +182,7 @@ def first_payload(fact: AshareAdjustedPriceFact) -> dict[str, object]:
 
 
 def test_price_governance_is_fail_closed() -> None:
+    assert _price(provider="tickflow", decision_eligible=True).provider == "tickflow"
     unknown_receipt = _price(received_at=None, decision_eligible=True)
     assert unknown_receipt.historical_research_only is True
     assert unknown_receipt.decision_eligible is False
@@ -204,6 +205,7 @@ def test_price_governance_is_fail_closed() -> None:
 def test_universe_and_membership_governance_is_fail_closed() -> None:
     assert _theme().mapping_kind == "historical_pit"
     assert _universe(provider="eastmoney").provider == "eastmoney"
+    assert _universe(provider="tickflow").provider == "tickflow"
     with pytest.raises(V2ContractError, match="mapping_kind must be historical_pit"):
         _theme(mapping_kind="theme")
     with pytest.raises(V2ContractError, match="authoritative universe"):

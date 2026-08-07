@@ -93,3 +93,22 @@ positions, alerts, email, SMTP, or execution state.
   checkpoint, skips completed sessions, and cools down for 30 minutes after an
   Eastmoney provider failure. Materialization, API, and UI remain disabled
   until exact-date factual coverage reaches 95%.
+
+## A-share provider recovery note (2026-08-07)
+
+- Eastmoney `push2` returned reproducible empty/remote-protocol responses from
+  the VPS, the local command-line route, and the in-app browser; one bounded
+  production capture failed closed without writing decision facts.
+- A bounded production-network probe verified TickFlow's current
+  `CN_Equity_A` universe at 5,540 unique securities, complete instrument
+  metadata for all 5,540, and explicit backward-adjusted A-share daily bars.
+- BaoStock's current industry snapshot covered 5,203 of those 5,540 securities
+  (93.92 percent). The operational A-share research threshold is therefore the
+  previously approved 90 percent, while all ETF publication and ranking
+  thresholds remain unchanged. Missing industry rows remain explicit
+  exclusions and cannot be backfilled to an earlier cutoff.
+- BaoStock runs only in a physically terminable child process; TickFlow HTTP
+  work remains serial. The 5-20-security adaptive checkpoint and 55-second hard
+  continuation bounds are unchanged. Deployment, factual capture completion,
+  and production A-share materialization remain part of task 9.7 and are not
+  claimed by this note.

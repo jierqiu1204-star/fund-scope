@@ -69,7 +69,7 @@ async def test_materialization_gate_stops_before_full_cross_section(monkeypatch)
         return date(2026, 8, 4)
 
     async def readiness(*_args, **_kwargs):
-        return _readiness(eligible=94)
+        return _readiness(eligible=89)
 
     async def unexpected_assets(*_args, **_kwargs):
         raise AssertionError("full cross-section must not load below readiness")

@@ -81,9 +81,9 @@ def test_materialization_readiness_fails_closed_with_stable_reasons() -> None:
     report = AshareReadinessReport(
         as_of=__import__("datetime").datetime(2026, 8, 4, 15),
         universe_count=100,
-        adjusted_daily_count=94,
-        pit_theme_count=94,
-        history_counts=((120, 95), (180, 94)),
+        adjusted_daily_count=89,
+        pit_theme_count=89,
+        history_counts=((120, 90), (180, 89)),
         provider_health=(("sina", 1),),
         raw_decision_violations=1,
         non_finite_violations=2,
@@ -101,6 +101,25 @@ def test_materialization_readiness_fails_closed_with_stable_reasons() -> None:
         "raw_decision_price_violation",
         "non_finite_adjusted_input",
     )
+
+
+def test_materialization_readiness_accepts_tickflow_at_approved_ashare_threshold() -> None:
+    report = AshareReadinessReport(
+        as_of=__import__("datetime").datetime(2026, 8, 7, 20),
+        universe_count=100,
+        adjusted_daily_count=90,
+        pit_theme_count=90,
+        history_counts=((120, 90), (180, 90)),
+        provider_health=(("tickflow", 16_200),),
+        raw_decision_violations=0,
+        non_finite_violations=0,
+        exclusions=(),
+    )
+
+    decision = evaluate_v2_materialization_readiness(report)
+
+    assert report.coverage_threshold == 0.90
+    assert decision.ready is True
 
 
 @pytest.mark.asyncio

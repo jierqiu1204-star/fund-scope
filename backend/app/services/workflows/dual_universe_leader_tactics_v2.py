@@ -43,6 +43,7 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_storage import (
 )
 
 WORKFLOW_FINALIZATION_RESERVE_SECONDS = 2.0
+ASHARE_V2_COVERAGE_THRESHOLD = 0.90
 
 
 @dataclass(frozen=True)
@@ -67,7 +68,7 @@ class AshareReadinessReport:
     raw_decision_violations: int
     non_finite_violations: int
     exclusions: tuple[tuple[str, int], ...]
-    coverage_threshold: float = 0.95
+    coverage_threshold: float = ASHARE_V2_COVERAGE_THRESHOLD
 
     def to_dict(self) -> dict[str, Any]:
         denominator = max(1, self.universe_count)
@@ -173,7 +174,7 @@ def evaluate_v2_materialization_readiness(
     provider_counts = dict(report.provider_health)
     if not provider_counts or sum(max(0, count) for count in provider_counts.values()) <= 0:
         reasons.append("provider_health_unavailable")
-    if any(provider not in {"akshare", "eastmoney"} for provider in provider_counts):
+    if any(provider not in {"akshare", "eastmoney", "tickflow"} for provider in provider_counts):
         reasons.append("unsupported_decision_provider")
     if report.raw_decision_violations:
         reasons.append("raw_decision_price_violation")
