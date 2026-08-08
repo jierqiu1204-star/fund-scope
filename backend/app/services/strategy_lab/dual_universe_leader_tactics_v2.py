@@ -1147,7 +1147,7 @@ def screen_dual_universe(
                     candidate_reasons.append("prior_leadership_gate_failed")
                 if drawdown is None or not -0.50 <= drawdown <= -0.30:
                     candidate_reasons.append("drawdown_band_failed")
-                if item.bars and not (
+                if len(item.bars) < 2 or not (
                     item.bars[-1].adjusted_close > item.bars[-1].adjusted_open
                     and item.bars[-1].adjusted_close > item.bars[-2].adjusted_close
                 ):

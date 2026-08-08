@@ -292,3 +292,15 @@ def test_post_close_lifecycle_ignores_bars_before_next_eligible_session() -> Non
     assert transitions[0].transition_date == decision_date
     assert transitions[0].reason == "formula_passed_for_post_close_watchlist"
     assert all(item.to_state != STATE_CONFIRMED for item in transitions)
+
+def test_single_bar_asset_is_excluded_without_index_error() -> None:
+    item = _asset("510098")
+    one_bar = replace(item, bars=(item.bars[-1],))
+    result = screen_dual_universe((one_bar,))
+    reasons = {
+        reason
+        for row in result.observations
+        for reason in row.exclusion_reasons
+    }
+    assert "insufficient_adjusted_history" in reasons
+    assert "positive_stabilization_failed" in reasons

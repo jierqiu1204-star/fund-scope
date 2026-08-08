@@ -346,8 +346,8 @@ async def read_ashare_asset_inputs(
     asset or an unbounded intermediate result.
     """
 
-    if not 1 <= page_size <= 100:
-        raise ValueError("A-share input page_size must be between 1 and 100")
+    if not 1 <= page_size <= 500:
+        raise ValueError("A-share input page_size must be between 1 and 500")
     if not 1 <= history_limit <= 300:
         raise ValueError("A-share history limit must be between 1 and 300")
 

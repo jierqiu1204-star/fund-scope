@@ -94,6 +94,7 @@ V2_WORK_SECONDS = 52.0
 V2_MIN_MATERIALIZATION_HEADROOM_BYTES = 768 * 1024 * 1024
 V2_MAX_ASHARE_ASSETS = 6_000
 V2_UNIVERSE_PERSIST_PAGE_SIZE = 500
+V2_ASHARE_INPUT_PAGE_SIZE = 250
 V2_PROVIDER_FAILURE_COOLDOWN_MINUTES = 30
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 
@@ -1152,7 +1153,7 @@ async def _materialize_ashare(
         signal_date=signal_date,
         source_cutoff=as_of,
         history_limit=REPAIR_HISTORY,
-        page_size=100,
+        page_size=V2_ASHARE_INPUT_PAGE_SIZE,
         decision_mode=decision_mode,
         membership_evaluation_date=decision_date,
         next_eligible_date=next_eligible_date,
