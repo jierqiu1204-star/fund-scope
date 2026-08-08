@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 import math
 import time
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta
 from datetime import time as dt_time
 
@@ -264,6 +264,19 @@ def test_incremental_input_hash_and_manifest_are_batch_order_independent() -> No
         input_hash=first.input_hash,
     )
     assert manifest.input_hash_schema_version == V2_INPUT_HASH_SCHEMA_VERSION
+
+
+def test_hot_path_canonical_payloads_match_dataclass_contract() -> None:
+    membership = _membership()
+    expected_membership = asdict(membership)
+    expected_membership.pop("fact_hash")
+    assert membership.canonical_payload() == expected_membership
+
+    items = tuple(_asset(f"510{index:03d}") for index in range(1, 7))
+    observation = screen_dual_universe(items).observations[0]
+    expected_observation = asdict(observation)
+    expected_observation.pop("feature_hash")
+    assert observation.canonical_payload() == expected_observation
 
 
 def test_screen_validates_each_assets_membership_and_bars_once(monkeypatch) -> None:

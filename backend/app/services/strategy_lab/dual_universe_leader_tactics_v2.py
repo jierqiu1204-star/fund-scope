@@ -15,7 +15,6 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime
-from statistics import mean
 from typing import Any, Literal
 
 from app.services.etf_research_evidence import stable_contract_hash
@@ -106,7 +105,10 @@ def _mean_finite(values: Sequence[object]) -> float | None:
     parsed = [value for raw in values if (value := _finite(raw)) is not None]
     if not parsed:
         return None
-    result = mean(parsed)
+    # ``statistics.mean`` promotes float inputs through its exact-ratio path.
+    # Formula inputs are already finite floats, so fsum preserves numerical
+    # stability without allocating Fraction intermediates for every MA/ATR.
+    result = math.fsum(parsed) / len(parsed)
     return result if math.isfinite(result) else None
 
 
@@ -350,9 +352,21 @@ class V2PITMembership:
     fact_hash: str = ""
 
     def canonical_payload(self) -> dict[str, Any]:
-        payload = asdict(self)
-        payload.pop("fact_hash")
-        return payload
+        # Avoid dataclasses.asdict's recursive deepcopy in the cross-section
+        # hot path while retaining the exact canonical field contract.
+        return {
+            "group_id": self.group_id,
+            "effective_from": self.effective_from,
+            "effective_to": self.effective_to,
+            "observed_at": self.observed_at,
+            "mapping_kind": self.mapping_kind,
+            "taxonomy_version": self.taxonomy_version,
+            "theme": self.theme,
+            "sector": self.sector,
+            "tracked_index": self.tracked_index,
+            "clone_group": self.clone_group,
+            "issuer": self.issuer,
+        }
 
 
 @dataclass(frozen=True)
@@ -393,9 +407,27 @@ class V2CandidateObservation:
     feature_hash: str
 
     def canonical_payload(self) -> dict[str, Any]:
-        payload = asdict(self)
-        payload.pop("feature_hash")
-        return payload
+        # Keep this payload byte-for-byte compatible with ``asdict(self)``
+        # minus feature_hash, without recursively deepcopying every gate fact.
+        return {
+            "universe": self.universe,
+            "asset_code": self.asset_code,
+            "asset_name": self.asset_name,
+            "signal_date": self.signal_date,
+            "formula_id": self.formula_id,
+            "state": self.state,
+            "availability": self.availability,
+            "qualifies": self.qualifies,
+            "score": self.score,
+            "gate_facts": self.gate_facts,
+            "exclusion_reasons": self.exclusion_reasons,
+            "source_cutoff": self.source_cutoff,
+            "theme": self.theme,
+            "sector": self.sector,
+            "tracked_index": self.tracked_index,
+            "clone_group": self.clone_group,
+            "issuer": self.issuer,
+        }
 
 
 @dataclass(frozen=True)
@@ -592,12 +624,13 @@ def _bar_reasons(item: V2AssetInput, required_history: int) -> list[str]:
     reasons: set[str] = set()
     if len(item.bars) < required_history:
         reasons.add("insufficient_adjusted_history")
-    dates = tuple(bar.trade_date for bar in item.bars)
-    if dates != tuple(sorted(set(dates))):
-        reasons.add("adjusted_history_not_canonical")
     if not item.bars or item.bars[-1].trade_date != item.signal_date:
         reasons.add("adjusted_history_not_current_to_signal")
+    previous_date: date | None = None
     for bar in item.bars:
+        if previous_date is not None and bar.trade_date <= previous_date:
+            reasons.add("adjusted_history_not_canonical")
+        previous_date = bar.trade_date
         values = (
             bar.adjusted_open,
             bar.adjusted_high,
@@ -623,13 +656,14 @@ def _bar_reasons(item: V2AssetInput, required_history: int) -> list[str]:
             reasons.add("adjusted_bar_received_before_trade_date")
         if bar.observed_at > item.source_cutoff:
             reasons.add("adjusted_bar_received_after_cutoff")
-        if any(
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(float(value))
-            for value in values
-        ):
-            reasons.add("non_finite_adjusted_input")
+        for value in values:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+            ):
+                reasons.add("non_finite_adjusted_input")
+                break
         if (
             bar.adjusted_open <= 0
             or bar.adjusted_high <= 0
