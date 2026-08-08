@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
 import math
 import time
@@ -8,6 +9,7 @@ from datetime import date, datetime, timedelta
 from datetime import time as dt_time
 
 from app.services.etf_research_evidence import stable_contract_hash
+from app.services.strategy_lab import dual_universe_leader_tactics_v2 as v2_engine
 from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
     BASE_LAUNCH_V2,
     FORMER_LEADER_REPAIR_V2,
@@ -17,8 +19,10 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
     V2AssetInput,
     V2CandidateObservation,
     V2PITMembership,
+    _append_input_hash_value,
     _group_component_percentiles,
     _prior_leadership_index,
+    _update_input_hash,
     derive_lifecycle,
     screen_dual_universe,
 )
@@ -254,3 +258,47 @@ def test_incremental_input_hash_and_manifest_are_batch_order_independent() -> No
     assert first.input_hash == second.input_hash
     assert first.manifest_hash == second.manifest_hash
     assert first.observations == second.observations
+
+
+def test_buffered_hash_updates_preserve_the_legacy_byte_stream() -> None:
+    values = (
+        None,
+        datetime(2026, 8, 8, 12, 30),
+        date(2026, 8, 7),
+        True,
+        120,
+        1.25,
+        "tickflow",
+    )
+    scalar_digest = hashlib.sha256()
+    buffered_digest = hashlib.sha256()
+    buffered = bytearray()
+    for value in values:
+        _update_input_hash(scalar_digest, value)
+        _append_input_hash_value(buffered, value)
+    buffered_digest.update(buffered)
+    assert buffered_digest.hexdigest() == scalar_digest.hexdigest()
+
+
+def test_screen_validates_each_assets_membership_and_bars_once(monkeypatch) -> None:
+    items = tuple(_asset(f"510{index:03d}") for index in range(1, 7))
+    original_membership = v2_engine._membership_reasons
+    original_bars = v2_engine._bar_reasons
+    membership_calls = 0
+    bar_calls = 0
+
+    def counted_membership(item: V2AssetInput) -> list[str]:
+        nonlocal membership_calls
+        membership_calls += 1
+        return original_membership(item)
+
+    def counted_bars(item: V2AssetInput, required_history: int) -> list[str]:
+        nonlocal bar_calls
+        bar_calls += 1
+        return original_bars(item, required_history)
+
+    monkeypatch.setattr(v2_engine, "_membership_reasons", counted_membership)
+    monkeypatch.setattr(v2_engine, "_bar_reasons", counted_bars)
+    screen_dual_universe(items)
+    assert membership_calls == len(items)
+    assert bar_calls == len(items)

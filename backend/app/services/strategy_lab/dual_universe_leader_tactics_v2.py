@@ -683,6 +683,8 @@ def _group_key(item: V2AssetInput) -> str | None:
 
 def _clone_representatives(
     items: Sequence[V2AssetInput],
+    *,
+    standard_reasons: Mapping[str, Sequence[str]] | None = None,
 ) -> tuple[set[str], set[str]]:
     representatives: set[str] = set()
     excluded: set[str] = set()
@@ -698,7 +700,13 @@ def _clone_representatives(
         # An invalid clone must never displace a valid representative.  This
         # also keeps a bad amount/price row from changing the peer universe.
         valid_items = [
-            item for item in clone_items if not _base_input_reasons(item, STANDARD_HISTORY)
+            item
+            for item in clone_items
+            if not (
+                standard_reasons.get(item.asset_code, ())
+                if standard_reasons is not None
+                else _base_input_reasons(item, STANDARD_HISTORY)
+            )
         ]
         if not valid_items:
             excluded.update(item.asset_code for item in clone_items)
@@ -878,9 +886,7 @@ def _group_component_percentiles(
     return ranked
 
 
-def _update_input_hash(hasher: Any, value: object) -> None:
-    """Feed a length-delimited scalar without materializing a JSON payload."""
-
+def _encoded_input_hash_value(value: object) -> bytes:
     if value is None:
         text = "none:"
     elif isinstance(value, datetime):
@@ -893,18 +899,37 @@ def _update_input_hash(hasher: Any, value: object) -> None:
         text = f"number:{type(value).__name__}:{value!r}"
     else:
         text = f"string:{str(value)}"
-    encoded = text.encode("utf-8")
+    return text.encode("utf-8")
+
+
+def _append_input_hash_value(buffer: bytearray, value: object) -> None:
+    encoded = _encoded_input_hash_value(value)
+    buffer.extend(len(encoded).to_bytes(8, "big"))
+    buffer.extend(encoded)
+
+
+def _update_input_hash(hasher: Any, value: object) -> None:
+    """Feed one length-delimited scalar into a digest."""
+
+    encoded = _encoded_input_hash_value(value)
     hasher.update(len(encoded).to_bytes(8, "big"))
     hasher.update(encoded)
 
 
 def _incremental_input_hash(items: Sequence[V2AssetInput]) -> str:
-    """Hash sorted factual inputs in one pass with O(1) payload memory."""
+    """Hash factual inputs with one bounded byte buffer per asset.
+
+    Hash digests are independent of update chunk boundaries.  Buffering one
+    asset preserves the exact byte stream and manifest identity while avoiding
+    millions of tiny Python-to-OpenSSL calls.  Memory remains bounded by one
+    asset's capped history rather than the full universe.
+    """
 
     hasher = hashlib.sha256()
     _update_input_hash(hasher, V2_SCHEMA_VERSION)
     _update_input_hash(hasher, "inputs-v2-layered")
     for item in items:
+        item_bytes = bytearray()
         for value in (
             item.universe,
             item.asset_code,
@@ -916,13 +941,13 @@ def _incremental_input_hash(items: Sequence[V2AssetInput]) -> str:
             item.membership_evaluation_date,
             item.next_eligible_date,
         ):
-            _update_input_hash(hasher, value)
+            _append_input_hash_value(item_bytes, value)
         for reason in sorted(item.input_unavailable_reasons):
-            _update_input_hash(hasher, reason)
-        _update_input_hash(hasher, "membership")
+            _append_input_hash_value(item_bytes, reason)
+        _append_input_hash_value(item_bytes, "membership")
         membership = item.membership
         if membership is None:
-            _update_input_hash(hasher, None)
+            _append_input_hash_value(item_bytes, None)
         else:
             for value in (
                 membership.group_id,
@@ -938,9 +963,9 @@ def _incremental_input_hash(items: Sequence[V2AssetInput]) -> str:
                 membership.issuer,
                 membership.fact_hash,
             ):
-                _update_input_hash(hasher, value)
-        _update_input_hash(hasher, "bars")
-        _update_input_hash(hasher, len(item.bars))
+                _append_input_hash_value(item_bytes, value)
+        _append_input_hash_value(item_bytes, "bars")
+        _append_input_hash_value(item_bytes, len(item.bars))
         for bar in item.bars:
             for value in (
                 bar.trade_date,
@@ -958,7 +983,8 @@ def _incremental_input_hash(items: Sequence[V2AssetInput]) -> str:
                 bar.price_basis,
                 bar.revision_id,
             ):
-                _update_input_hash(hasher, value)
+                _append_input_hash_value(item_bytes, value)
+        hasher.update(item_bytes)
     return hasher.hexdigest()
 
 
@@ -1059,11 +1085,36 @@ def screen_dual_universe(
     if len({item.asset_code for item in items}) != len(items):
         raise V2ContractError("screen input asset codes must be unique")
     ordered = tuple(sorted(items, key=lambda item: item.asset_code))
-    representatives, clone_excluded = _clone_representatives(ordered)
+    membership_reasons = {
+        item.asset_code: tuple(_membership_reasons(item)) for item in ordered
+    }
+    intrinsic_bar_reasons = {
+        item.asset_code: tuple(_bar_reasons(item, 0)) for item in ordered
+    }
+
+    def cached_base_reasons(item: V2AssetInput, required_history: int) -> tuple[str, ...]:
+        reasons = set(membership_reasons[item.asset_code])
+        reasons.update(intrinsic_bar_reasons[item.asset_code])
+        if len(item.bars) < required_history:
+            reasons.add("insufficient_adjusted_history")
+        return tuple(sorted(reasons))
+
+    standard_reasons = {
+        item.asset_code: cached_base_reasons(item, STANDARD_HISTORY)
+        for item in ordered
+    }
+    repair_reasons = {
+        item.asset_code: cached_base_reasons(item, REPAIR_HISTORY)
+        for item in ordered
+    }
+    representatives, clone_excluded = _clone_representatives(
+        ordered,
+        standard_reasons=standard_reasons,
+    )
     eligible_standard = tuple(
         item
         for item in ordered
-        if item.asset_code in representatives and not _base_input_reasons(item, STANDARD_HISTORY)
+        if item.asset_code in representatives and not standard_reasons[item.asset_code]
     )
     hot_1, hot_5, hot_breadth = _theme_features(eligible_standard, representatives)
     return_20_pct, return_5_pct, turnover_pct, peer_counts = _peer_features(
@@ -1080,7 +1131,7 @@ def screen_dual_universe(
     for item in ordered:
         group = _group_key(item)
         group_peers = peers_by_group.get(group or "", [])
-        reasons = _base_input_reasons(item, STANDARD_HISTORY)
+        reasons = list(standard_reasons[item.asset_code])
         hot_score = None
         core_score = None
         if group:
@@ -1109,7 +1160,7 @@ def screen_dual_universe(
             facts = dict(common_facts)
             raw_score_values: dict[str, float | None] = {}
             if formula_id == FORMER_LEADER_REPAIR_V2:
-                candidate_reasons = _base_input_reasons(item, REPAIR_HISTORY)
+                candidate_reasons = list(repair_reasons[item.asset_code])
                 prior = _prior_leadership(item, group_peers, precomputed=prior_leadership)
                 atr5 = _atr(item, 5)
                 atr20 = _atr(item, 20)
@@ -1250,7 +1301,7 @@ def screen_dual_universe(
             (item, details)
             for item, details in rows
             if item.asset_code in representatives
-            and not _base_input_reasons(item, STANDARD_HISTORY)
+            and not standard_reasons[item.asset_code]
         ]
         component_percentiles[formula_id] = _group_component_percentiles(
             eligible_rows,
@@ -1328,9 +1379,15 @@ def screen_dual_universe(
                 _observation(
                     item=item,
                     formula_id=formula_id,
-                    availability="unavailable"
-                    if _base_input_reasons(item, required_history[formula_id])
-                    else "available",
+                    availability=(
+                        "unavailable"
+                        if (
+                            repair_reasons[item.asset_code]
+                            if required_history[formula_id] == REPAIR_HISTORY
+                            else standard_reasons[item.asset_code]
+                        )
+                        else "available"
+                    ),
                     qualifies=qualifies,
                     score=score,
                     gate_facts=facts,
