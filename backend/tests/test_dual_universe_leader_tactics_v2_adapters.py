@@ -5,6 +5,7 @@ from datetime import date, datetime
 
 import pytest
 
+from app.services.etf_research_evidence import stable_contract_hash
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_adapters import (
     adjusted_fact_exclusion_reason,
     ashare_price_fact_to_bar,
@@ -235,6 +236,38 @@ def test_membership_adapter_normalizes_sqlite_text_dates() -> None:
     assert membership.observed_at == datetime(2026, 8, 2, 12)
 
 
+def test_membership_adapter_preserves_ingestion_fact_hash_contract() -> None:
+    from app.services.strategy_lab.dual_universe_leader_tactics_v2_adapters import (
+        ashare_membership_to_v2,
+    )
+    from app.services.strategy_lab.dual_universe_leader_tactics_v2_ingestion import (
+        AshareThemeMembershipFact,
+    )
+
+    fact = AshareThemeMembershipFact(
+        asset_code="000001",
+        group_id="sw1:technology",
+        theme="AI",
+        sector="technology",
+        effective_from=date(2026, 8, 8),
+        effective_to=None,
+        received_at=datetime(2026, 8, 8, 10),
+        taxonomy_version="tickflow-v2",
+        source="tickflow",
+        confidence="provider",
+        supersedes_fact_hash=None,
+        mapping_kind="historical_pit",
+    )
+    membership = ashare_membership_to_v2(
+        {**fact.canonical_payload(), "fact_hash": fact.fact_hash}
+    )
+
+    assert membership.source_asset_code == fact.asset_code
+    assert stable_contract_hash(
+        membership.fact_identity_payload(asset_code=fact.asset_code)
+    ) == fact.fact_hash
+
+
 @pytest.mark.asyncio
 async def test_batch_asset_reader_is_ordered_and_bounded(tmp_path) -> None:
     from sqlalchemy import event, text
@@ -279,6 +312,9 @@ async def test_batch_asset_reader_is_ordered_and_bounded(tmp_path) -> None:
                     effective_to DATE,
                     received_at DATETIME NOT NULL,
                     taxonomy_version TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    confidence TEXT NOT NULL,
+                    supersedes_fact_hash TEXT,
                     mapping_kind TEXT NOT NULL,
                     tracked_index TEXT,
                     clone_group TEXT,
@@ -340,11 +376,13 @@ async def test_batch_asset_reader_is_ordered_and_bounded(tmp_path) -> None:
                     """
                     INSERT INTO ashare_theme_membership_facts
                         (id, asset_code, group_id, theme, sector, effective_from,
-                         effective_to, received_at, taxonomy_version, mapping_kind,
-                         tracked_index, clone_group, issuer, fact_hash)
+                         effective_to, received_at, taxonomy_version, source,
+                         confidence, supersedes_fact_hash, mapping_kind, tracked_index,
+                         clone_group, issuer, fact_hash)
                     VALUES (:id, :asset_code, 'ai', 'AI', 'tech', '2026-01-01',
-                            NULL, '2026-08-03 10:00:00', 'v2', 'historical_pit',
-                            NULL, NULL, NULL, :fact_hash)
+                            NULL, '2026-08-03 10:00:00', 'v2', 'tickflow',
+                            'provider', NULL, 'historical_pit', NULL, NULL, NULL,
+                            :fact_hash)
                     """
                 ),
                 {

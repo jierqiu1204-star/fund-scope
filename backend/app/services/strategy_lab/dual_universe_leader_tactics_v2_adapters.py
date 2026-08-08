@@ -17,6 +17,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
+    ASHARE_MEMBERSHIP_FACT_HASH_CONTRACT,
     PRICE_BASIS,
     V2AdjustedBar,
     V2AssetInput,
@@ -141,6 +142,11 @@ def ashare_membership_to_v2(row: dict[str, Any]) -> V2PITMembership:
         clone_group=row.get("clone_group"),
         issuer=row.get("issuer"),
         fact_hash=str(row["fact_hash"]),
+        fact_hash_contract=ASHARE_MEMBERSHIP_FACT_HASH_CONTRACT,
+        source_asset_code=str(row.get("asset_code") or "") or None,
+        source=str(row.get("source") or "") or None,
+        confidence=str(row.get("confidence") or "") or None,
+        supersedes_fact_hash=row.get("supersedes_fact_hash"),
     )
 
 
@@ -202,7 +208,8 @@ async def read_ashare_pit_membership(
             """
             SELECT group_id, theme, sector, effective_from, effective_to,
                    received_at, taxonomy_version, mapping_kind, tracked_index,
-                   clone_group, issuer, fact_hash
+                   clone_group, issuer, fact_hash, asset_code, source,
+                   confidence, supersedes_fact_hash
             FROM ashare_theme_membership_facts
             WHERE asset_code = :asset_code
               AND effective_from <= :signal_date
@@ -410,7 +417,8 @@ async def read_ashare_asset_inputs(
                 f"""
                 SELECT asset_code, group_id, theme, sector, effective_from, effective_to,
                        received_at, taxonomy_version, mapping_kind, tracked_index,
-                       clone_group, issuer, fact_hash
+                       clone_group, issuer, fact_hash, source, confidence,
+                       supersedes_fact_hash
                 FROM (
                     SELECT memberships.*,
                            ROW_NUMBER() OVER (

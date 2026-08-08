@@ -25,6 +25,9 @@ V2_SOURCE_REGISTRY_VERSION = "leader_tactics_source_registry_v2"
 V2_FORMULA_REGISTRY_VERSION = "leader_tactics_formula_registry_v2"
 V2_LIFECYCLE_VERSION = "leader_tactics_lifecycle_v2"
 V2_INPUT_HASH_SCHEMA_VERSION = "leader_tactics_v2_input_hash_v3"
+ASHARE_MEMBERSHIP_FACT_HASH_CONTRACT = (
+    "dual_universe_leader_tactics_v2_ashare_ingestion_v1"
+)
 
 UNIVERSE_ETF = "etf"
 UNIVERSE_ASHARE = "ashare"
@@ -351,6 +354,11 @@ class V2PITMembership:
     clone_group: str | None = None
     issuer: str | None = None
     fact_hash: str = ""
+    fact_hash_contract: str = "v2_membership"
+    source_asset_code: str | None = None
+    source: str | None = None
+    confidence: str | None = None
+    supersedes_fact_hash: str | None = None
 
     def canonical_payload(self) -> dict[str, Any]:
         # Avoid dataclasses.asdict's recursive deepcopy in the cross-section
@@ -364,6 +372,29 @@ class V2PITMembership:
             "taxonomy_version": self.taxonomy_version,
             "theme": self.theme,
             "sector": self.sector,
+            "tracked_index": self.tracked_index,
+            "clone_group": self.clone_group,
+            "issuer": self.issuer,
+        }
+
+    def fact_identity_payload(self, *, asset_code: str) -> dict[str, Any]:
+        if self.fact_hash_contract != ASHARE_MEMBERSHIP_FACT_HASH_CONTRACT:
+            return self.canonical_payload()
+        return {
+            "schema_version": ASHARE_MEMBERSHIP_FACT_HASH_CONTRACT,
+            "fact_type": "ashare_theme_membership",
+            "asset_code": self.source_asset_code or asset_code,
+            "group_id": self.group_id,
+            "theme": self.theme,
+            "sector": self.sector,
+            "effective_from": self.effective_from,
+            "effective_to": self.effective_to,
+            "received_at": self.observed_at,
+            "taxonomy_version": self.taxonomy_version,
+            "source": self.source,
+            "confidence": self.confidence,
+            "supersedes_fact_hash": self.supersedes_fact_hash,
+            "mapping_kind": self.mapping_kind,
             "tracked_index": self.tracked_index,
             "clone_group": self.clone_group,
             "issuer": self.issuer,
@@ -616,7 +647,9 @@ def _membership_reasons(item: V2AssetInput) -> list[str]:
         reasons.append("membership_received_after_cutoff")
     if not membership.fact_hash:
         reasons.append("missing_membership_fact_hash")
-    elif membership.fact_hash != stable_contract_hash(membership.canonical_payload()):
+    elif membership.fact_hash != stable_contract_hash(
+        membership.fact_identity_payload(asset_code=item.asset_code)
+    ):
         reasons.append("membership_fact_hash_mismatch")
     return sorted(set(reasons))
 
@@ -964,6 +997,11 @@ def _incremental_input_hash(items: Sequence[V2AssetInput]) -> str:
                 membership.clone_group,
                 membership.issuer,
                 membership.fact_hash,
+                membership.fact_hash_contract,
+                membership.source_asset_code,
+                membership.source,
+                membership.confidence,
+                membership.supersedes_fact_hash,
             ),
         )
         encoded_metadata = json.dumps(

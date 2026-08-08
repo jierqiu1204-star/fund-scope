@@ -283,7 +283,15 @@ def test_incremental_input_hash_uses_persisted_bar_fact_identity() -> None:
 def test_hot_path_canonical_payloads_match_dataclass_contract() -> None:
     membership = _membership()
     expected_membership = asdict(membership)
-    expected_membership.pop("fact_hash")
+    for derived_field in (
+        "fact_hash",
+        "fact_hash_contract",
+        "source_asset_code",
+        "source",
+        "confidence",
+        "supersedes_fact_hash",
+    ):
+        expected_membership.pop(derived_field)
     assert membership.canonical_payload() == expected_membership
 
     items = tuple(_asset(f"510{index:03d}") for index in range(1, 7))
