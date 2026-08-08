@@ -82,5 +82,43 @@
 - [x] 9.4 Run focused frontend typecheck and leader-evidence tests, with every command protected by a hard timeout no greater than 60 seconds.
 - [x] 9.5 Run Ruff only on changed Python files and run strict OpenSpec validation for this change, each under a hard timeout no greater than 60 seconds.
 - [x] 9.6 Deploy with collection, screening API, and UI feature flags disabled; verify migrations, health, scheduler non-overlap, resource headroom, and production-state hashes.
-- [ ] 9.7 Enable bounded factual capture first, then research materialization, then the read-only API/UI after readiness checks; record provider health, coverage, candidate counts, unavailable reasons, and rollback commands.
+- [x] 9.7 Enable bounded factual capture first, then research materialization, then the read-only API/UI after readiness checks; record provider health, coverage, candidate counts, unavailable reasons, and rollback commands.
+  - Production acceptance, 2026-08-08 Asia/Shanghai: deployed commit
+    `6786d5ba996b46fb586cecf1ece7034a8f0401e9`; `/api/health` reported
+    `app=ok` and `db=ok`. Capture, A-share materialization, API, and UI were
+    enabled in that order; ETF V2 materialization remained disabled.
+  - Friday feature session `2026-08-07` was materialized on decision date
+    `2026-08-08` as `post_close_watchlist`, with next eligible session
+    `2026-08-10`. Manifest
+    `4dd60f0e5b82426025c47f20d3e59af14f8b46fa95ec7b7af0e5e91e3f59c10d`
+    contains 5,540 assets and 16,620 observations: 15,700 available and 126
+    qualifying, all under `former_leader_repair_proxy_v2`; breakout and base
+    launch each had zero qualifying observations. The prior incompatible
+    membership-hash manifest remains append-only audit evidence and is not the
+    newest API-selected manifest.
+  - Readiness at the accepted cutoff: authoritative universe 5,540/5,540
+    (100%); adjusted daily 5,534/5,540 (99.89%); 61 sessions 5,497/5,540
+    (99.22%); 120 sessions 5,455/5,540 (98.47%); 180 sessions 5,420/5,540
+    (97.83%); factual PIT theme 5,273/5,540 (95.18%). TickFlow supplied
+    986,341 qualified adjusted facts and was healthy; raw decision violations
+    and non-finite violations were both zero. The 300-session layer remains
+    explicitly `insufficient_history` and economic validation remains
+    `economic_validation_not_materialized`; neither is substituted by fallback
+    data or represented as promotion evidence.
+  - Production-code read projection returned `materialized_only`, stable
+    pagination, explicit feature/membership/next-eligible dates,
+    `research_only=true`, `production_mutation_allowed=false`, and
+    notification/execution provenance `none`. Independent backend API/storage
+    tests, frontend interaction tests, and domain-boundary tests passed. Host
+    headroom was approximately 2.3 GiB available RAM; no provider call or ETF
+    ranking, allocation, position, alert, SMTP, or execution mutation occurred.
+  - Rollback retains append-only evidence and disables only V2 paths. Set
+    `ETF_LEADER_TACTICS_V2_CAPTURE_ENABLED=false`,
+    `ETF_LEADER_TACTICS_V2_MATERIALIZE_ENABLED=false`,
+    `ETF_LEADER_TACTICS_V2_API_ENABLED=false`, and
+    `NEXT_PUBLIC_ETF_LEADER_TACTICS_V2_ENABLED=false`; keep
+    `ETF_LEADER_TACTICS_V2_ETF_MATERIALIZE_ENABLED=false`, then rebuild/restart
+    the backend and frontend with the deployed compose file. For code/schema
+    rollback, use the matching `/var/backups/fundscope/rollback-metadata-*.txt`
+    and its verified database dump rather than deleting research facts.
 - [x] 9.8 Confirm that insufficient data remains explicitly research-only and that no candidate can affect rankings, positions, email, or execution before a separate manually approved promotion change.
