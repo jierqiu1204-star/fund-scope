@@ -39,6 +39,10 @@ STATE_CONFIRMED = "confirmed"
 STATE_INVALIDATED = "invalidated"
 LIFECYCLE_STATES = (STATE_PREPARING, STATE_CONFIRMED, STATE_INVALIDATED)
 
+SESSION_PIT_MODE = "session_pit"
+POST_CLOSE_WATCHLIST_MODE = "post_close_watchlist"
+DECISION_MODES = (SESSION_PIT_MODE, POST_CLOSE_WATCHLIST_MODE)
+
 PRICE_BASIS = "total_return_adjusted"
 FORBIDDEN_DECISION_PROVIDERS = frozenset({"sina", "efinance"})
 MINIMUM_PEER_COUNT = 5
@@ -360,6 +364,9 @@ class V2AssetInput:
     membership: V2PITMembership | None
     baseline_score: float | None = None
     input_unavailable_reasons: tuple[str, ...] = ()
+    decision_mode: Literal["session_pit", "post_close_watchlist"] = SESSION_PIT_MODE
+    membership_evaluation_date: date | None = None
+    next_eligible_date: date | None = None
 
 
 @dataclass(frozen=True)
@@ -540,6 +547,18 @@ def validate_runtime_contract(
 def _membership_reasons(item: V2AssetInput) -> list[str]:
     membership = item.membership
     reasons = list(item.input_unavailable_reasons)
+    membership_date = item.membership_evaluation_date or item.signal_date
+    if item.decision_mode not in DECISION_MODES:
+        reasons.append("decision_mode_unsupported")
+    elif item.decision_mode == SESSION_PIT_MODE:
+        if membership_date != item.signal_date:
+            reasons.append("session_pit_membership_date_mismatch")
+    elif (
+        membership_date < item.signal_date
+        or item.next_eligible_date is None
+        or item.next_eligible_date <= item.signal_date
+    ):
+        reasons.append("post_close_watchlist_timing_invalid")
     if item.universe not in SUPPORTED_UNIVERSES:
         reasons.append("universe_unsupported")
     if not item.asset_code.strip():
@@ -551,9 +570,9 @@ def _membership_reasons(item: V2AssetInput) -> list[str]:
         reasons.append("missing_pit_peer_group")
     if membership.mapping_kind != "historical_pit":
         reasons.append("taxonomy_not_point_in_time")
-    if membership.effective_from > item.signal_date:
+    if membership.effective_from > membership_date:
         reasons.append("membership_effective_after_signal")
-    if membership.effective_to is not None and membership.effective_to < item.signal_date:
+    if membership.effective_to is not None and membership.effective_to < membership_date:
         reasons.append("membership_expired_before_signal")
     if membership.observed_at > item.source_cutoff:
         reasons.append("membership_received_after_cutoff")
@@ -893,6 +912,9 @@ def _incremental_input_hash(items: Sequence[V2AssetInput]) -> str:
             item.signal_date,
             item.source_cutoff,
             item.baseline_score,
+            item.decision_mode,
+            item.membership_evaluation_date,
+            item.next_eligible_date,
         ):
             _update_input_hash(hasher, value)
         for reason in sorted(item.input_unavailable_reasons):
@@ -957,6 +979,18 @@ def _observation(
 ) -> V2CandidateObservation:
     reasons = tuple(sorted(set(exclusion_reasons)))
     facts = dict(gate_facts)
+    membership_date = item.membership_evaluation_date or item.signal_date
+    facts.update(
+        {
+            "decision_mode": item.decision_mode,
+            "feature_trade_date": item.signal_date.isoformat(),
+            "membership_evaluation_date": membership_date.isoformat(),
+            "next_eligible_date": (
+                item.next_eligible_date.isoformat() if item.next_eligible_date else None
+            ),
+            "historical_validation_eligible": item.decision_mode == SESSION_PIT_MODE,
+        }
+    )
     if clone_excluded:
         facts["clone_representative"] = False
     draft = V2CandidateObservation(
@@ -1009,8 +1043,16 @@ def screen_dual_universe(
     universes = {item.universe for item in items}
     dates = {item.signal_date for item in items}
     cutoffs = {item.source_cutoff for item in items}
-    if len(universes) != 1 or len(dates) != 1 or len(cutoffs) != 1:
-        raise V2ContractError("screen inputs must share universe, signal date and cutoff")
+    modes = {item.decision_mode for item in items}
+    membership_dates = {item.membership_evaluation_date or item.signal_date for item in items}
+    next_eligible_dates = {item.next_eligible_date for item in items}
+    if any(
+        len(values) != 1
+        for values in (universes, dates, cutoffs, modes, membership_dates, next_eligible_dates)
+    ):
+        raise V2ContractError(
+            "screen inputs must share universe, signal date, cutoff and decision timing"
+        )
     universe = next(iter(universes))
     if universe not in SUPPORTED_UNIVERSES:
         raise V2ContractError("unsupported screening universe")
@@ -1358,6 +1400,23 @@ def derive_lifecycle(
     if visible_through is not None and visible_through < observation.signal_date:
         raise V2ContractError("lifecycle visible-through precedes signal date")
 
+    gate_facts = dict(observation.gate_facts)
+    decision_mode = str(gate_facts.get("decision_mode") or SESSION_PIT_MODE)
+    if decision_mode not in DECISION_MODES:
+        raise V2ContractError("lifecycle decision mode is unsupported")
+    transition_start = observation.signal_date
+    next_eligible_date: date | None = None
+    if decision_mode == POST_CLOSE_WATCHLIST_MODE:
+        try:
+            transition_start = date.fromisoformat(
+                str(gate_facts["membership_evaluation_date"])
+            )
+            next_eligible_date = date.fromisoformat(str(gate_facts["next_eligible_date"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise V2ContractError("post-close lifecycle timing is incomplete") from exc
+        if transition_start < observation.signal_date or next_eligible_date <= observation.signal_date:
+            raise V2ContractError("post-close lifecycle timing is invalid")
+
     ordered = tuple(sorted(signal_bars, key=lambda bar: bar.trade_date))
     signal_index = next(
         (index for index, bar in enumerate(ordered) if bar.trade_date == observation.signal_date),
@@ -1396,13 +1455,17 @@ def derive_lifecycle(
         signal_date=observation.signal_date,
         from_state=None,
         to_state=STATE_PREPARING,
-        transition_date=observation.signal_date,
+        transition_date=transition_start,
         signal_high=signal_bar.adjusted_high,
         adjusted_close=signal_bar.adjusted_close,
         adjusted_ma5=_mean_finite([bar.adjusted_close for bar in signal_visible[-5:]]),
         simulated_execution_date=None,
         execution_model="research_state_only",
-        reason="formula_passed_at_signal_cutoff",
+        reason=(
+            "formula_passed_for_post_close_watchlist"
+            if decision_mode == POST_CLOSE_WATCHLIST_MODE
+            else "formula_passed_at_signal_cutoff"
+        ),
         transition_hash="pending",
     )
     transitions.append(replace(preparing, transition_hash=_transition_hash(preparing)))
@@ -1413,6 +1476,7 @@ def derive_lifecycle(
         bar
         for bar in ordered[signal_index + 1 :]
         if bar.trade_date > observation.signal_date
+        and (next_eligible_date is None or bar.trade_date >= next_eligible_date)
         and (visible_through is None or bar.trade_date <= visible_through)
         and is_qualified_visible(bar, cutoff=evaluation_cutoff)
     )

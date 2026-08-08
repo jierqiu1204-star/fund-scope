@@ -102,7 +102,9 @@ export function LeaderTacticsV2Panel() {
         </div>
         <div className="flex flex-wrap gap-2 text-xs text-ink/65">
           <span className="rounded-full border border-border px-2.5 py-1">
-            {LEADER_TACTICS_V2_RESEARCH_COPY.source}
+            {firstPage?.ranking_source_kind === "post_close_watchlist"
+              ? "来源：盘后观察榜"
+              : LEADER_TACTICS_V2_RESEARCH_COPY.source}
           </span>
           <span className="rounded-full border border-border px-2.5 py-1">
             {LEADER_TACTICS_V2_RESEARCH_COPY.notification}
@@ -230,6 +232,14 @@ export function LeaderTacticsV2Panel() {
               决策截止：{firstPage?.manifest_decision_cutoff ?? "暂无"} · 覆盖：
               {summary.coverage}
             </p>
+            {firstPage?.decision_mode === "post_close_watchlist" ? (
+              <p className="mt-1">
+                盘后观察榜：特征日 {firstPage.feature_trade_date ?? "暂无"} ·
+                成员评估日 {firstPage.membership_evaluation_date ?? "暂无"} ·
+                最早可评估交易日 {firstPage.next_eligible_date ?? "暂无"} ·
+                不计入历史 PIT 验证
+              </p>
+            ) : null}
             {exclusionEntries.length ? (
               <p className="mt-1">
                 排除证据：

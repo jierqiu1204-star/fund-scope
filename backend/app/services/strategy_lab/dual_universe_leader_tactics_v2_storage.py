@@ -411,6 +411,12 @@ async def persist_v2_screen_result(
                     "research_only": True,
                     "notification_provenance": "none",
                     "execution_provenance": "none",
+                    "decision_mode": dict(observation.gate_facts).get(
+                        "decision_mode", "session_pit"
+                    ),
+                    "historical_validation_eligible": dict(observation.gate_facts).get(
+                        "historical_validation_eligible", True
+                    ),
                 }
             ),
             "feature_hash": observation.feature_hash,
@@ -510,6 +516,11 @@ async def read_v2_candidates(
             "as_of": as_of,
             "manifest_hash": None,
             "manifest_decision_cutoff": None,
+            "decision_mode": None,
+            "feature_trade_date": None,
+            "membership_evaluation_date": None,
+            "next_eligible_date": None,
+            "historical_validation_eligible": None,
             "candidates": [],
             "next_cursor": None,
             "has_more": False,
@@ -531,6 +542,37 @@ async def read_v2_candidates(
         }
 
     manifest_hash = str(manifest["manifest_hash"])
+    timing_row = (
+        (
+            await session.execute(
+                text(
+                    """
+                    SELECT signal_date, gate_facts_json
+                    FROM leader_tactics_v2_candidate_observations
+                    WHERE manifest_hash = :manifest_hash
+                      AND universe = :universe
+                    ORDER BY id ASC
+                    LIMIT 1
+                    """
+                ),
+                {"manifest_hash": manifest_hash, "universe": universe},
+            )
+        )
+        .mappings()
+        .first()
+    )
+    timing_facts = (
+        _decode_json(timing_row["gate_facts_json"], {}) if timing_row is not None else {}
+    )
+    decision_mode = str(timing_facts.get("decision_mode") or "session_pit")
+    ranking_source_kind = (
+        "post_close_watchlist"
+        if decision_mode == "post_close_watchlist"
+        else "research_replay"
+    )
+    feature_trade_date = timing_facts.get("feature_trade_date")
+    if feature_trade_date is None and timing_row is not None:
+        feature_trade_date = str(timing_row["signal_date"])
     decoded_cursor = _decode_cursor(cursor) if cursor else None
     if decoded_cursor is not None and decoded_cursor["manifest_hash"] != manifest_hash:
         raise ValueError("cursor belongs to a different materialized manifest")
@@ -681,6 +723,13 @@ async def read_v2_candidates(
         "as_of": as_of,
         "manifest_hash": manifest_hash,
         "manifest_decision_cutoff": str(manifest["decision_cutoff"]),
+        "decision_mode": decision_mode,
+        "feature_trade_date": feature_trade_date,
+        "membership_evaluation_date": timing_facts.get("membership_evaluation_date"),
+        "next_eligible_date": timing_facts.get("next_eligible_date"),
+        "historical_validation_eligible": timing_facts.get(
+            "historical_validation_eligible", True
+        ),
         "candidates": candidates,
         "next_cursor": next_cursor,
         "has_more": has_more,
@@ -694,7 +743,7 @@ async def read_v2_candidates(
             "exclusion_counts": dict(sorted(exclusion_counts.items())),
             "manifest_hash": manifest_hash,
         },
-        "ranking_source_kind": "research_replay",
+        "ranking_source_kind": ranking_source_kind,
         "notification_provenance": "none",
         "execution_provenance": "none",
         "research_only": True,

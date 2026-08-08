@@ -9,6 +9,7 @@ from app.services.etf_research_evidence import stable_contract_hash
 from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
     BREAKOUT_V2,
     FORMER_LEADER_REPAIR_V2,
+    POST_CLOSE_WATCHLIST_MODE,
     STATE_CONFIRMED,
     STATE_INVALIDATED,
     STATE_PREPARING,
@@ -22,6 +23,9 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
     derive_lifecycle,
     screen_dual_universe,
     validate_runtime_contract,
+)
+from app.services.strategy_lab.dual_universe_leader_tactics_v2_replay import (
+    build_v2_replay_selection,
 )
 
 
@@ -172,4 +176,119 @@ def test_lifecycle_uses_later_eligible_daily_close_and_next_close_for_exit() -> 
     assert transitions[-1].to_state == STATE_INVALIDATED
     assert transitions[-1].simulated_execution_date == signal_day + timedelta(days=3)
     assert transitions[-1].execution_model == "next_eligible_adjusted_close_with_costs"
+    assert all(item.to_state != STATE_CONFIRMED for item in transitions)
+
+
+def test_post_close_watchlist_accepts_current_membership_but_stays_out_of_replay() -> None:
+    signal_item = _asset("510099")
+    decision_date = signal_item.signal_date + timedelta(days=1)
+    late_draft = replace(
+        _membership(),
+        effective_from=decision_date,
+        observed_at=datetime.combine(decision_date, time(9)),
+        fact_hash="",
+    )
+    late_membership = replace(
+        late_draft,
+        fact_hash=stable_contract_hash(late_draft.canonical_payload()),
+    )
+    session_pit = replace(
+        signal_item,
+        membership=late_membership,
+        source_cutoff=datetime.combine(decision_date, time(10)),
+    )
+    session_result = screen_dual_universe((session_pit,))
+    assert "membership_effective_after_signal" in {
+        reason
+        for row in session_result.observations
+        for reason in row.exclusion_reasons
+    }
+
+    watchlist = replace(
+        session_pit,
+        decision_mode=POST_CLOSE_WATCHLIST_MODE,
+        membership_evaluation_date=decision_date,
+        next_eligible_date=decision_date + timedelta(days=2),
+    )
+    watchlist_result = screen_dual_universe((watchlist,))
+    assert "membership_effective_after_signal" not in {
+        reason
+        for row in watchlist_result.observations
+        for reason in row.exclusion_reasons
+    }
+    facts = dict(watchlist_result.observations[0].gate_facts)
+    assert facts["feature_trade_date"] == signal_item.signal_date.isoformat()
+    assert facts["membership_evaluation_date"] == decision_date.isoformat()
+    assert facts["historical_validation_eligible"] is False
+    with pytest.raises(ValueError, match="post_close_watchlist_not_historical_pit"):
+        build_v2_replay_selection(
+            watchlist_result,
+            formula_id=BREAKOUT_V2,
+            replay_run_key="must-not-enter-pit-replay",
+        )
+
+
+def test_post_close_lifecycle_ignores_bars_before_next_eligible_session() -> None:
+    signal_date = date(2026, 8, 7)
+    decision_date = date(2026, 8, 8)
+    next_eligible_date = date(2026, 8, 10)
+    trade_dates = (
+        date(2026, 8, 3),
+        date(2026, 8, 4),
+        date(2026, 8, 5),
+        date(2026, 8, 6),
+        signal_date,
+        decision_date,
+        next_eligible_date,
+    )
+    closes = (98.0, 99.0, 99.5, 100.0, 100.0, 120.0, 95.0)
+    bars = tuple(
+        V2AdjustedBar(
+            trade_date=trade_date,
+            adjusted_open=close - 0.2,
+            adjusted_high=close + 0.2,
+            adjusted_low=close - 0.4,
+            adjusted_close=close,
+            volume=1000.0,
+            amount=100000.0,
+            turnover=100000.0,
+            observed_at=datetime.combine(trade_date, time(15)),
+            provider="eastmoney",
+            adjustment_version="total-return-v1",
+            revision_id=f"post-close-{trade_date.isoformat()}",
+        )
+        for trade_date, close in zip(trade_dates, closes, strict=True)
+    )
+    observation = V2CandidateObservation(
+        universe="ashare",
+        asset_code="000001",
+        asset_name="sample",
+        signal_date=signal_date,
+        formula_id=BREAKOUT_V2,
+        state=STATE_PREPARING,
+        availability="available",
+        qualifies=True,
+        score=0.9,
+        gate_facts=(
+            ("decision_mode", POST_CLOSE_WATCHLIST_MODE),
+            ("membership_evaluation_date", decision_date.isoformat()),
+            ("next_eligible_date", next_eligible_date.isoformat()),
+        ),
+        exclusion_reasons=(),
+        source_cutoff=datetime.combine(decision_date, time(16)),
+        theme="AI",
+        sector="technology",
+        tracked_index=None,
+        clone_group=None,
+        issuer=None,
+        feature_hash="f" * 64,
+    )
+    transitions = derive_lifecycle(
+        observation=observation,
+        signal_bars=bars,
+        evaluation_cutoff=datetime.combine(next_eligible_date, time(16)),
+        visible_through=next_eligible_date,
+    )
+    assert transitions[0].transition_date == decision_date
+    assert transitions[0].reason == "formula_passed_for_post_close_watchlist"
     assert all(item.to_state != STATE_CONFIRMED for item in transitions)

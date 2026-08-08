@@ -50,11 +50,16 @@ class LeaderTacticsV2CandidatesOut(BaseModel):
     as_of: str | None = None
     manifest_hash: str | None = None
     manifest_decision_cutoff: str | None = None
+    decision_mode: Literal["session_pit", "post_close_watchlist"] | None = None
+    feature_trade_date: date | None = None
+    membership_evaluation_date: date | None = None
+    next_eligible_date: date | None = None
+    historical_validation_eligible: bool | None = None
     candidates: list[LeaderTacticsV2CandidateOut]
     next_cursor: str | None = None
     has_more: bool
     summary: LeaderTacticsV2SummaryOut
-    ranking_source_kind: Literal["research_replay"]
+    ranking_source_kind: Literal["research_replay", "post_close_watchlist"]
     notification_provenance: Literal["none"]
     execution_provenance: Literal["none"]
     research_only: Literal[True]

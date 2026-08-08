@@ -495,10 +495,12 @@ def _readiness_params(
     *,
     as_of: datetime,
     required_trade_date: date | None = None,
+    membership_date: date | None = None,
 ) -> dict[str, Any]:
     return {
         "as_of": as_of,
         "as_of_date": required_trade_date or as_of.date(),
+        "membership_date": membership_date or required_trade_date or as_of.date(),
         "required_trade_date": required_trade_date,
         "required_trade_date_absent": required_trade_date is None,
         "eligible": True,
@@ -547,12 +549,14 @@ async def read_ashare_readiness(
     as_of: datetime,
     required_history_tiers: tuple[int, ...] = (61, 120, 180, 300),
     required_trade_date: date | None = None,
+    membership_date: date | None = None,
 ) -> AshareReadinessReport:
     """Return bounded readiness metrics from the as-of authoritative PIT pool."""
 
     params = _readiness_params(
         as_of=as_of,
         required_trade_date=required_trade_date,
+        membership_date=membership_date,
     )
     universe_row = (
         (
@@ -658,10 +662,10 @@ async def read_ashare_readiness(
                     JOIN authoritative_universe AS universe
                       ON universe.asset_code = memberships.asset_code
                     WHERE memberships.received_at <= :as_of
-                      AND memberships.effective_from <= :as_of_date
+                      AND memberships.effective_from <= :membership_date
                       AND (
                           memberships.effective_to IS NULL
-                          OR memberships.effective_to >= :as_of_date
+                          OR memberships.effective_to >= :membership_date
                       )
                 ) valid_memberships
                 """

@@ -334,6 +334,9 @@ async def read_ashare_asset_inputs(
     source_cutoff: datetime,
     history_limit: int = 180,
     page_size: int = 100,
+    decision_mode: str = "session_pit",
+    membership_evaluation_date: date | None = None,
+    next_eligible_date: date | None = None,
 ) -> tuple[V2AssetInput, ...]:
     """Build ordered A-share inputs with three bounded queries per code page.
 
@@ -356,6 +359,7 @@ async def read_ashare_asset_inputs(
         raise ValueError("A-share asset codes must be unique")
 
     signal_end = datetime.combine(signal_date, datetime.max.time())
+    membership_date = membership_evaluation_date or signal_date
     result_inputs: list[V2AssetInput] = []
     for page in _asset_code_pages(requested, page_size=page_size):
         page_codes = tuple(code for code, _ in page)
@@ -363,6 +367,7 @@ async def read_ashare_asset_inputs(
         base_params: dict[str, Any] = {
             "signal_end": signal_end,
             "signal_date": signal_date,
+            "membership_date": membership_date,
             "source_cutoff": source_cutoff,
             "eligible": True,
             "historical_only": False,
@@ -414,8 +419,8 @@ async def read_ashare_asset_inputs(
                            ) AS membership_rank
                     FROM ashare_theme_membership_facts AS memberships
                     WHERE asset_code IN ({code_sql})
-                      AND effective_from <= :signal_date
-                      AND (effective_to IS NULL OR effective_to >= :signal_date)
+                      AND effective_from <= :membership_date
+                      AND (effective_to IS NULL OR effective_to >= :membership_date)
                       AND received_at <= :source_cutoff
                 ) latest_membership
                 WHERE membership_rank = 1
@@ -529,6 +534,9 @@ async def read_ashare_asset_inputs(
                     bars=tuple(reversed(bars_by_code.get(code, ()))),
                     membership=membership_by_code.get(code),
                     input_unavailable_reasons=tuple(sorted(set(input_reasons))),
+                    decision_mode=decision_mode,
+                    membership_evaluation_date=membership_date,
+                    next_eligible_date=next_eligible_date,
                 )
             )
     return tuple(result_inputs)
@@ -542,6 +550,9 @@ async def read_ashare_asset_input(
     signal_date: date,
     source_cutoff: datetime,
     history_limit: int = 180,
+    decision_mode: str = "session_pit",
+    membership_evaluation_date: date | None = None,
+    next_eligible_date: date | None = None,
 ) -> V2AssetInput:
     """Build one A-share V2 input using the bounded batch reader."""
 
@@ -552,6 +563,9 @@ async def read_ashare_asset_input(
         source_cutoff=source_cutoff,
         history_limit=history_limit,
         page_size=1,
+        decision_mode=decision_mode,
+        membership_evaluation_date=membership_evaluation_date,
+        next_eligible_date=next_eligible_date,
     )
     return inputs[0]
 

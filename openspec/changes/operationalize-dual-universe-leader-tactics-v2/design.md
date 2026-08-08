@@ -111,3 +111,13 @@ pool, thresholds, tables, and publication path are not inputs to this bootstrap.
 7. Keep all production ranking, notification, and execution paths unchanged. Any later promotion requires a separate OpenSpec change and manual approval.
 
 Rollback disables the V2 scheduler, API route, and UI flag while retaining append-only research facts for audit. Because storage and routes are additive and production state is never mutated, rollback does not require restoring rankings or positions.
+
+### 11. Separate feature date from a post-close watchlist decision
+
+When the latest complete adjusted bars belong to an earlier trading session, the system may
+materialize a current research watchlist using those bars and memberships factually visible at
+the current decision cutoff. Such a run is labelled `post_close_watchlist`, records the feature
+trade date, membership evaluation date, decision cutoff, and next eligible exchange session,
+and is not a historical PIT signal. Its lifecycle cannot consume a bar before the next eligible
+session, and replay/promotion adapters reject it. This permits a weekend watchlist without
+backdating newly received classifications or contaminating the frozen PIT evidence.

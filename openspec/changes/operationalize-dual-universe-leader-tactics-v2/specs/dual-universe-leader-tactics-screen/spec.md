@@ -93,3 +93,20 @@ The read-only screen API SHALL accept `universe=etf|ashare`, `formula=all|breako
 #### Scenario: No eligible result exists
 - **WHEN** filters are valid but data, coverage, formula, or state conditions produce no candidates
 - **THEN** the response returns an empty result with counts and a stable reason rather than silently falling back to another universe or formula
+
+### Requirement: Post-close watchlists preserve causal time boundaries
+
+The system MAY screen the latest complete adjusted trading session after that session has
+closed, but SHALL identify the result as `post_close_watchlist`, use only memberships visible
+at the actual decision cutoff, record the next eligible exchange session, and exclude the run
+from historical PIT replay and promotion evidence.
+
+#### Scenario: Weekend screen uses Friday prices
+
+- **WHEN** a Saturday decision uses Friday total-return-adjusted bars and a membership first
+  visible by Saturday
+- **THEN** the system records Friday as the feature trade date and Saturday as the membership
+  evaluation date
+- **AND** it labels the result `post_close_watchlist` with Monday as the next eligible session
+- **AND** no Saturday or earlier bar can confirm or invalidate the candidate after creation
+- **AND** the run is rejected by historical PIT replay and promotion paths

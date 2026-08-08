@@ -20,11 +20,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.models.entities import JobRun
 from app.services.etf_research_evidence import stable_contract_hash
-from app.services.intraday_etf.exchange_calendar import is_trading_day
+from app.services.intraday_etf.exchange_calendar import is_trading_day, next_trading_day
 from app.services.short_research.coverage_policy import ETF_COMPLETE_SCORE_COVERAGE
 from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
+    POST_CLOSE_WATCHLIST_MODE,
     PRICE_BASIS,
     REPAIR_HISTORY,
+    SESSION_PIT_MODE,
     V2_FORMULA_REGISTRY_HASH,
     V2_SOURCE_REGISTRY,
     V2ContractError,
@@ -1075,6 +1077,7 @@ async def _materialize_ashare(
     *,
     settings: Settings,
     as_of: datetime,
+    decision_date: date,
 ) -> dict[str, Any]:
     signal_date = await _latest_visible_ashare_signal_date(session, as_of=as_of)
     if signal_date is None:
@@ -1085,10 +1088,21 @@ async def _materialize_ashare(
             "research_only": True,
         }
 
+    if decision_date < signal_date:
+        raise V2ContractError("decision date precedes feature trade date")
+    decision_mode = (
+        POST_CLOSE_WATCHLIST_MODE if decision_date > signal_date else SESSION_PIT_MODE
+    )
+    next_eligible_date = (
+        next_trading_day(decision_date)
+        if decision_mode == POST_CLOSE_WATCHLIST_MODE
+        else None
+    )
     readiness = await read_ashare_readiness(
         session,
         as_of=as_of,
         required_trade_date=signal_date,
+        membership_date=decision_date,
     )
     decision = evaluate_v2_materialization_readiness(readiness)
     if not decision.ready:
@@ -1139,6 +1153,9 @@ async def _materialize_ashare(
         source_cutoff=as_of,
         history_limit=REPAIR_HISTORY,
         page_size=100,
+        decision_mode=decision_mode,
+        membership_evaluation_date=decision_date,
+        next_eligible_date=next_eligible_date,
     )
     provider_health = tuple(
         (provider, "healthy" if count > 0 else "unavailable")
@@ -1159,6 +1176,11 @@ async def _materialize_ashare(
     return {
         "status": "materialized",
         "signal_date": signal_date.isoformat(),
+        "decision_mode": decision_mode,
+        "decision_date": decision_date.isoformat(),
+        "next_eligible_date": (
+            next_eligible_date.isoformat() if next_eligible_date else None
+        ),
         "manifest_hash": manifest_hash,
         "universe_count": len(inputs),
         "observation_count": len(result.observations),
@@ -1236,10 +1258,16 @@ async def dual_universe_leader_tactics_v2_materialize_job(
         }
     if timeout_seconds <= 0 or timeout_seconds > V2_JOB_TIMEOUT_SECONDS:
         raise ValueError("V2 materialization timeout must be in (0, 55] seconds")
-    as_of = _utc_naive(_local_now(now))
+    local_as_of = _local_now(now)
+    as_of = _utc_naive(local_as_of)
     try:
         return await asyncio.wait_for(
-            _materialize_ashare(session, settings=settings, as_of=as_of),
+            _materialize_ashare(
+                session,
+                settings=settings,
+                as_of=as_of,
+                decision_date=local_as_of.date(),
+            ),
             timeout=min(V2_WORK_SECONDS, timeout_seconds),
         )
     except TimeoutError:

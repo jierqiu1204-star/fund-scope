@@ -10,6 +10,7 @@ from statistics import mean
 
 from app.services.etf_research_evidence import stable_contract_hash
 from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
+    POST_CLOSE_WATCHLIST_MODE,
     V2_CANDIDATE_IDS,
     V2_FORMULA_REGISTRY_HASH,
     V2ScreenResult,
@@ -70,6 +71,11 @@ def build_v2_replay_selection(
         raise ValueError("formula_id is not a frozen V2 candidate")
     if not replay_run_key.strip():
         raise ValueError("replay_run_key is required")
+    if any(
+        dict(row.gate_facts).get("decision_mode") == POST_CLOSE_WATCHLIST_MODE
+        for row in result.observations
+    ):
+        raise ValueError("post_close_watchlist_not_historical_pit")
     rows = sorted(
         (
             row

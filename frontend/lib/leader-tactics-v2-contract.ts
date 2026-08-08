@@ -40,6 +40,11 @@ export type CandidatesResponse = {
   as_of: string | null;
   manifest_hash: string | null;
   manifest_decision_cutoff: string | null;
+  decision_mode: "session_pit" | "post_close_watchlist" | null;
+  feature_trade_date: string | null;
+  membership_evaluation_date: string | null;
+  next_eligible_date: string | null;
+  historical_validation_eligible: boolean | null;
   candidates: Candidate[];
   next_cursor: string | null;
   has_more: boolean;
@@ -53,7 +58,7 @@ export type CandidatesResponse = {
     exclusion_counts: Record<string, number>;
     manifest_hash: string | null;
   };
-  ranking_source_kind: "research_replay";
+  ranking_source_kind: "research_replay" | "post_close_watchlist";
   notification_provenance: "none";
   execution_provenance: "none";
   research_only: true;
@@ -150,11 +155,23 @@ export function assertLeaderTacticsV2PageContract(
     throw new Error("leader-tactics-v2 response is not research-only");
   }
   if (
-    page.ranking_source_kind !== "research_replay" ||
+    !["research_replay", "post_close_watchlist"].includes(
+      page.ranking_source_kind
+    ) ||
     page.notification_provenance !== "none" ||
     page.execution_provenance !== "none"
   ) {
     throw new Error("leader-tactics-v2 response has invalid provenance");
+  }
+  if (
+    page.ranking_source_kind === "post_close_watchlist" &&
+    (page.decision_mode !== "post_close_watchlist" ||
+      !page.feature_trade_date ||
+      !page.membership_evaluation_date ||
+      !page.next_eligible_date ||
+      page.historical_validation_eligible !== false)
+  ) {
+    throw new Error("leader-tactics-v2 post-close timing is incomplete");
   }
   if (containsRawPriceField(page)) {
     throw new Error("leader-tactics-v2 response contains a raw-price fallback");

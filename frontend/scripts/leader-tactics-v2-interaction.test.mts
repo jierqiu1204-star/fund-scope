@@ -58,6 +58,11 @@ function page(overrides: Partial<CandidatesResponse> = {}): CandidatesResponse {
     as_of: "2026-08-03",
     manifest_hash: "manifest-1",
     manifest_decision_cutoff: "2026-08-03T15:00:00",
+    decision_mode: "session_pit",
+    feature_trade_date: "2026-08-03",
+    membership_evaluation_date: "2026-08-03",
+    next_eligible_date: null,
+    historical_validation_eligible: true,
     candidates: [candidate()],
     next_cursor: "cursor-2",
     has_more: true,
@@ -236,5 +241,28 @@ test("cancelled requests never accept a late response", async () => {
     request,
     (error: unknown) =>
       error instanceof DOMException && error.name === "AbortError"
+  );
+});
+
+test("post-close watchlists require explicit non-PIT timing provenance", () => {
+  const postClose = page({
+    ranking_source_kind: "post_close_watchlist",
+    decision_mode: "post_close_watchlist",
+    feature_trade_date: "2026-08-07",
+    membership_evaluation_date: "2026-08-08",
+    next_eligible_date: "2026-08-10",
+    historical_validation_eligible: false
+  });
+  assert.equal(
+    assertLeaderTacticsV2PageContract(postClose, filters),
+    postClose
+  );
+  assert.throws(
+    () =>
+      assertLeaderTacticsV2PageContract(
+        { ...postClose, next_eligible_date: null },
+        filters
+      ),
+    /post-close timing is incomplete/
   );
 });

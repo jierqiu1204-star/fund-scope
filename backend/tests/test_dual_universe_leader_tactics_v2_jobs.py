@@ -132,19 +132,26 @@ async def test_ready_materialization_reads_persisted_facts_and_writes_one_manife
         qualifying=observations,
     )
     calls: list[str] = []
+    captured: dict[str, object] = {}
 
     async def signal_date(*_args, **_kwargs):
         return date(2026, 8, 4)
 
-    async def readiness(*_args, **_kwargs):
+    async def readiness(*_args, **kwargs):
+        captured["membership_date"] = kwargs.get("membership_date")
         return _readiness()
 
     async def read_assets(*_args, **_kwargs):
         calls.append("assets")
         return assets
 
-    async def read_inputs(*_args, **_kwargs):
+    async def read_inputs(*_args, **kwargs):
         calls.append("inputs")
+        captured["decision_mode"] = kwargs.get("decision_mode")
+        captured["membership_evaluation_date"] = kwargs.get(
+            "membership_evaluation_date"
+        )
+        captured["next_eligible_date"] = kwargs.get("next_eligible_date")
         return inputs
 
     def screen(*_args, **_kwargs):
@@ -172,6 +179,15 @@ async def test_ready_materialization_reads_persisted_facts_and_writes_one_manife
     assert calls == ["assets", "inputs", "screen", "persist"]
     assert result["status"] == "materialized"
     assert result["candidate_codes"] == ["000001"]
+    assert result["decision_mode"] == "post_close_watchlist"
+    assert result["decision_date"] == "2026-08-05"
+    assert result["next_eligible_date"] == "2026-08-06"
+    assert captured == {
+        "membership_date": date(2026, 8, 5),
+        "decision_mode": "post_close_watchlist",
+        "membership_evaluation_date": date(2026, 8, 5),
+        "next_eligible_date": date(2026, 8, 6),
+    }
     assert result["notification_provenance"] == "none"
     assert result["execution_provenance"] == "none"
 
