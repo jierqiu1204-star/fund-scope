@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import inspect
 import math
 import time
@@ -15,15 +14,14 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
     FORMER_LEADER_REPAIR_V2,
     STATE_CONFIRMED,
     STATE_INVALIDATED,
+    V2_INPUT_HASH_SCHEMA_VERSION,
     V2AdjustedBar,
     V2AssetInput,
     V2CandidateObservation,
     V2PITMembership,
-    _append_input_hash_value,
-    _append_input_hash_values,
     _group_component_percentiles,
     _prior_leadership_index,
-    _update_input_hash,
+    build_v2_manifest,
     derive_lifecycle,
     screen_dual_universe,
 )
@@ -259,32 +257,13 @@ def test_incremental_input_hash_and_manifest_are_batch_order_independent() -> No
     assert first.input_hash == second.input_hash
     assert first.manifest_hash == second.manifest_hash
     assert first.observations == second.observations
-
-
-def test_buffered_hash_updates_preserve_the_legacy_byte_stream() -> None:
-    values = (
-        None,
-        datetime(2026, 8, 8, 12, 30),
-        date(2026, 8, 7),
-        True,
-        120,
-        1.25,
-        "tickflow",
+    manifest = build_v2_manifest(
+        universe=first.universe,
+        decision_cutoff=first.source_cutoff,
+        data_receipt_cutoff=first.source_cutoff,
+        input_hash=first.input_hash,
     )
-    scalar_digest = hashlib.sha256()
-    buffered_digest = hashlib.sha256()
-    buffered = bytearray()
-    for value in values:
-        _update_input_hash(scalar_digest, value)
-        _append_input_hash_value(buffered, value)
-    buffered_digest.update(buffered)
-    assert buffered_digest.hexdigest() == scalar_digest.hexdigest()
-
-    batch_buffer = bytearray()
-    batch_digest = hashlib.sha256()
-    _append_input_hash_values(batch_buffer, values)
-    batch_digest.update(batch_buffer)
-    assert batch_digest.hexdigest() == scalar_digest.hexdigest()
+    assert manifest.input_hash_schema_version == V2_INPUT_HASH_SCHEMA_VERSION
 
 
 def test_screen_validates_each_assets_membership_and_bars_once(monkeypatch) -> None:

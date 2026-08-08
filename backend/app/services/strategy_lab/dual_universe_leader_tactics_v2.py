@@ -9,12 +9,12 @@ mutation.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime
-from itertools import chain
 from statistics import mean
 from typing import Any, Literal
 
@@ -25,6 +25,7 @@ V2_EXPERIMENT_FAMILY = "leader_tactics_shadow_v2"
 V2_SOURCE_REGISTRY_VERSION = "leader_tactics_source_registry_v2"
 V2_FORMULA_REGISTRY_VERSION = "leader_tactics_formula_registry_v2"
 V2_LIFECYCLE_VERSION = "leader_tactics_lifecycle_v2"
+V2_INPUT_HASH_SCHEMA_VERSION = "leader_tactics_v2_input_hash_v2"
 
 UNIVERSE_ETF = "etf"
 UNIVERSE_ASHARE = "ashare"
@@ -315,7 +316,7 @@ V2_FORMULA_REGISTRY_HASH = stable_contract_hash(
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class V2AdjustedBar:
     trade_date: date
     adjusted_open: float
@@ -448,6 +449,7 @@ class V2ResearchManifest:
     holdout_identity: str
     research_only: bool
     manifest_hash: str
+    input_hash_schema_version: str = V2_INPUT_HASH_SCHEMA_VERSION
     formula_ids: tuple[str, ...] = V2_CANDIDATE_IDS
     adjustment_version: str = PRICE_BASIS
     taxonomy_version: str = "pit_theme_taxonomy_v2"
@@ -481,6 +483,8 @@ class V2ResearchManifest:
             raise V2ContractError("manifest candidate set is not frozen")
         if self.adjustment_version != PRICE_BASIS:
             raise V2ContractError("manifest adjustment basis is incompatible")
+        if self.input_hash_schema_version != V2_INPUT_HASH_SCHEMA_VERSION:
+            raise V2ContractError("manifest input hash schema is incompatible")
         if not self.code_version.strip() or not self.holdout_identity.strip():
             raise V2ContractError("manifest code and holdout identity are required")
         if self.research_only is not True:
@@ -585,14 +589,14 @@ def _membership_reasons(item: V2AssetInput) -> list[str]:
 
 
 def _bar_reasons(item: V2AssetInput, required_history: int) -> list[str]:
-    reasons: list[str] = []
+    reasons: set[str] = set()
     if len(item.bars) < required_history:
-        reasons.append("insufficient_adjusted_history")
+        reasons.add("insufficient_adjusted_history")
     dates = tuple(bar.trade_date for bar in item.bars)
     if dates != tuple(sorted(set(dates))):
-        reasons.append("adjusted_history_not_canonical")
+        reasons.add("adjusted_history_not_canonical")
     if not item.bars or item.bars[-1].trade_date != item.signal_date:
-        reasons.append("adjusted_history_not_current_to_signal")
+        reasons.add("adjusted_history_not_current_to_signal")
     for bar in item.bars:
         values = (
             bar.adjusted_open,
@@ -604,23 +608,28 @@ def _bar_reasons(item: V2AssetInput, required_history: int) -> list[str]:
             bar.turnover,
         )
         if not bar.decision_eligible:
-            reasons.append("adjusted_bar_not_decision_eligible")
+            reasons.add("adjusted_bar_not_decision_eligible")
         if bar.price_basis != PRICE_BASIS:
-            reasons.append("wrong_price_basis")
+            reasons.add("wrong_price_basis")
         if bar.provider.strip().lower() in FORBIDDEN_DECISION_PROVIDERS:
-            reasons.append("forbidden_raw_price_provider")
+            reasons.add("forbidden_raw_price_provider")
         if (
             not bar.provider.strip()
             or not bar.adjustment_version.strip()
             or not bar.revision_id.strip()
         ):
-            reasons.append("missing_adjusted_provenance")
+            reasons.add("missing_adjusted_provenance")
         if bar.observed_at.date() < bar.trade_date:
-            reasons.append("adjusted_bar_received_before_trade_date")
+            reasons.add("adjusted_bar_received_before_trade_date")
         if bar.observed_at > item.source_cutoff:
-            reasons.append("adjusted_bar_received_after_cutoff")
-        if any(_finite(value) is None for value in values):
-            reasons.append("non_finite_adjusted_input")
+            reasons.add("adjusted_bar_received_after_cutoff")
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            for value in values
+        ):
+            reasons.add("non_finite_adjusted_input")
         if (
             bar.adjusted_open <= 0
             or bar.adjusted_high <= 0
@@ -632,8 +641,8 @@ def _bar_reasons(item: V2AssetInput, required_history: int) -> list[str]:
             or bar.adjusted_high < max(bar.adjusted_open, bar.adjusted_close)
             or bar.adjusted_low > min(bar.adjusted_open, bar.adjusted_close)
         ):
-            reasons.append("invalid_adjusted_ohlcv")
-    return sorted(set(reasons))
+            reasons.add("invalid_adjusted_ohlcv")
+    return sorted(reasons)
 
 
 def _bars_by_date(item: V2AssetInput) -> dict[date, V2AdjustedBar]:
@@ -887,73 +896,14 @@ def _group_component_percentiles(
     return ranked
 
 
-def _encoded_input_hash_value(value: object) -> bytes:
-    if value is None:
-        text = "none:"
-    elif isinstance(value, datetime):
-        text = f"datetime:{value.isoformat()}"
-    elif isinstance(value, date):
-        text = f"date:{value.isoformat()}"
-    elif isinstance(value, bool):
-        text = f"bool:{value!r}"
-    elif isinstance(value, (int, float)):
-        text = f"number:{type(value).__name__}:{value!r}"
-    else:
-        text = f"string:{str(value)}"
-    return text.encode("utf-8")
-
-
-def _append_input_hash_value(buffer: bytearray, value: object) -> None:
-    encoded = _encoded_input_hash_value(value)
-    buffer.extend(len(encoded).to_bytes(8, "big"))
-    buffer.extend(encoded)
-
-
-def _append_input_hash_values(buffer: bytearray, values: Iterable[object]) -> None:
-    """Append the legacy scalar encoding without one helper call per field."""
-
-    extend = buffer.extend
-    for value in values:
-        if value is None:
-            text = "none:"
-        elif isinstance(value, datetime):
-            text = f"datetime:{value.isoformat()}"
-        elif isinstance(value, date):
-            text = f"date:{value.isoformat()}"
-        elif isinstance(value, bool):
-            text = f"bool:{value!r}"
-        elif isinstance(value, (int, float)):
-            text = f"number:{type(value).__name__}:{value!r}"
-        else:
-            text = f"string:{str(value)}"
-        encoded = text.encode("utf-8")
-        extend(len(encoded).to_bytes(8, "big"))
-        extend(encoded)
-
-
-def _update_input_hash(hasher: Any, value: object) -> None:
-    """Feed one length-delimited scalar into a digest."""
-
-    encoded = _encoded_input_hash_value(value)
-    hasher.update(len(encoded).to_bytes(8, "big"))
-    hasher.update(encoded)
-
-
 def _incremental_input_hash(items: Sequence[V2AssetInput]) -> str:
-    """Hash factual inputs with one bounded byte buffer per asset.
-
-    Hash digests are independent of update chunk boundaries.  Buffering one
-    asset preserves the exact byte stream and manifest identity while avoiding
-    millions of tiny Python-to-OpenSSL calls.  Memory remains bounded by one
-    asset's capped history rather than the full universe.
-    """
+    """Hash canonical factual inputs with one bounded payload per asset."""
 
     hasher = hashlib.sha256()
-    _update_input_hash(hasher, V2_SCHEMA_VERSION)
-    _update_input_hash(hasher, "inputs-v2-layered")
+    hasher.update(V2_INPUT_HASH_SCHEMA_VERSION.encode("utf-8"))
     for item in items:
-        item_bytes = bytearray()
-        header_values = (
+        membership = item.membership
+        payload = (
             item.universe,
             item.asset_code,
             item.asset_name,
@@ -963,12 +913,10 @@ def _incremental_input_hash(items: Sequence[V2AssetInput]) -> str:
             item.decision_mode,
             item.membership_evaluation_date,
             item.next_eligible_date,
-        )
-        membership = item.membership
-        if membership is None:
-            membership_values: tuple[object, ...] = (None,)
-        else:
-            membership_values = (
+            sorted(item.input_unavailable_reasons),
+            None
+            if membership is None
+            else (
                 membership.group_id,
                 membership.effective_from,
                 membership.effective_to,
@@ -981,38 +929,37 @@ def _incremental_input_hash(items: Sequence[V2AssetInput]) -> str:
                 membership.clone_group,
                 membership.issuer,
                 membership.fact_hash,
-            )
-        bar_values = chain.from_iterable(
-            (
-                bar.trade_date,
-                bar.adjusted_open,
-                bar.adjusted_high,
-                bar.adjusted_low,
-                bar.adjusted_close,
-                bar.volume,
-                bar.amount,
-                bar.turnover,
-                bar.observed_at,
-                bar.provider,
-                bar.adjustment_version,
-                bar.decision_eligible,
-                bar.price_basis,
-                bar.revision_id,
-            )
-            for bar in item.bars
-        )
-        _append_input_hash_values(
-            item_bytes,
-            chain(
-                header_values,
-                sorted(item.input_unavailable_reasons),
-                ("membership",),
-                membership_values,
-                ("bars", len(item.bars)),
-                bar_values,
             ),
+            [
+                (
+                    bar.trade_date,
+                    bar.adjusted_open,
+                    bar.adjusted_high,
+                    bar.adjusted_low,
+                    bar.adjusted_close,
+                    bar.volume,
+                    bar.amount,
+                    bar.turnover,
+                    bar.observed_at,
+                    bar.provider,
+                    bar.adjustment_version,
+                    bar.decision_eligible,
+                    bar.price_basis,
+                    bar.revision_id,
+                )
+                for bar in item.bars
+            ],
         )
-        hasher.update(item_bytes)
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=lambda value: value.isoformat()
+            if isinstance(value, (date, datetime))
+            else str(value),
+        ).encode("utf-8")
+        hasher.update(len(encoded).to_bytes(8, "big"))
+        hasher.update(encoded)
     return hasher.hexdigest()
 
 
