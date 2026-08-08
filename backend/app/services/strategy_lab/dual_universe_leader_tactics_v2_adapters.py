@@ -182,6 +182,7 @@ def ashare_price_fact_to_bar(row: dict[str, Any]) -> tuple[V2AdjustedBar | None,
             decision_eligible=True,
             price_basis=PRICE_BASIS,
             revision_id=str(row["revision_id"]),
+            fact_hash=str(row.get("fact_hash") or ""),
         ),
         None,
     )
@@ -239,7 +240,7 @@ async def read_ashare_adjusted_bars(
             SELECT trade_date, adjusted_open, adjusted_high, adjusted_low,
                    adjusted_close, volume, amount, turnover, price_basis,
                    provider, adjustment_version, revision_id, received_at,
-                   decision_eligible, historical_research_only
+                   decision_eligible, historical_research_only, fact_hash
             FROM (
                 SELECT facts.*,
                        ROW_NUMBER() OVER (
@@ -439,7 +440,8 @@ async def read_ashare_asset_inputs(
                 SELECT asset_code, trade_date, adjusted_open, adjusted_high,
                        adjusted_low, adjusted_close, volume, amount, turnover,
                        price_basis, provider, adjustment_version, revision_id,
-                       received_at, decision_eligible, historical_research_only
+                       received_at, decision_eligible, historical_research_only,
+                       fact_hash
                 FROM (
                     SELECT qualified_facts.*,
                            ROW_NUMBER() OVER (

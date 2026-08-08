@@ -151,9 +151,11 @@ async def test_adjusted_history_ignores_invalid_revision_before_applying_limit(t
                     provider TEXT NOT NULL,
                     adjustment_version TEXT,
                     revision_id TEXT NOT NULL,
-                    received_at DATETIME,
-                    decision_eligible BOOLEAN NOT NULL,
-                    historical_research_only BOOLEAN NOT NULL
+                        received_at DATETIME,
+                        decision_eligible BOOLEAN NOT NULL,
+                        historical_research_only BOOLEAN NOT NULL,
+                        fact_hash TEXT NOT NULL DEFAULT
+                            '0000000000000000000000000000000000000000000000000000000000000000'
                 )
                 """
             )
@@ -304,9 +306,11 @@ async def test_batch_asset_reader_is_ordered_and_bounded(tmp_path) -> None:
                     provider TEXT NOT NULL,
                     adjustment_version TEXT,
                     revision_id TEXT NOT NULL,
-                    received_at DATETIME,
-                    decision_eligible BOOLEAN NOT NULL,
-                    historical_research_only BOOLEAN NOT NULL
+                        received_at DATETIME,
+                        decision_eligible BOOLEAN NOT NULL,
+                        historical_research_only BOOLEAN NOT NULL,
+                        fact_hash TEXT NOT NULL DEFAULT
+                            '0000000000000000000000000000000000000000000000000000000000000000'
                 )
                 """
             )

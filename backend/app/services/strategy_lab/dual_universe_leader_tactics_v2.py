@@ -24,7 +24,7 @@ V2_EXPERIMENT_FAMILY = "leader_tactics_shadow_v2"
 V2_SOURCE_REGISTRY_VERSION = "leader_tactics_source_registry_v2"
 V2_FORMULA_REGISTRY_VERSION = "leader_tactics_formula_registry_v2"
 V2_LIFECYCLE_VERSION = "leader_tactics_lifecycle_v2"
-V2_INPUT_HASH_SCHEMA_VERSION = "leader_tactics_v2_input_hash_v2"
+V2_INPUT_HASH_SCHEMA_VERSION = "leader_tactics_v2_input_hash_v3"
 
 UNIVERSE_ETF = "etf"
 UNIVERSE_ASHARE = "ashare"
@@ -334,6 +334,7 @@ class V2AdjustedBar:
     decision_eligible: bool = True
     price_basis: str = PRICE_BASIS
     revision_id: str = ""
+    fact_hash: str = ""
 
 
 @dataclass(frozen=True)
@@ -931,13 +932,13 @@ def _group_component_percentiles(
 
 
 def _incremental_input_hash(items: Sequence[V2AssetInput]) -> str:
-    """Hash canonical factual inputs with one bounded payload per asset."""
+    """Hash canonical factual inputs with bounded, content-addressed bar identity."""
 
     hasher = hashlib.sha256()
     hasher.update(V2_INPUT_HASH_SCHEMA_VERSION.encode("utf-8"))
     for item in items:
         membership = item.membership
-        payload = (
+        metadata = (
             item.universe,
             item.asset_code,
             item.asset_name,
@@ -964,36 +965,73 @@ def _incremental_input_hash(items: Sequence[V2AssetInput]) -> str:
                 membership.issuer,
                 membership.fact_hash,
             ),
-            [
-                (
-                    bar.trade_date,
-                    bar.adjusted_open,
-                    bar.adjusted_high,
-                    bar.adjusted_low,
-                    bar.adjusted_close,
-                    bar.volume,
-                    bar.amount,
-                    bar.turnover,
-                    bar.observed_at,
-                    bar.provider,
-                    bar.adjustment_version,
-                    bar.decision_eligible,
-                    bar.price_basis,
-                    bar.revision_id,
-                )
-                for bar in item.bars
-            ],
         )
-        encoded = json.dumps(
-            payload,
+        encoded_metadata = json.dumps(
+            metadata,
             ensure_ascii=False,
             separators=(",", ":"),
             default=lambda value: value.isoformat()
             if isinstance(value, (date, datetime))
             else str(value),
         ).encode("utf-8")
-        hasher.update(len(encoded).to_bytes(8, "big"))
-        hasher.update(encoded)
+        hasher.update(len(encoded_metadata).to_bytes(8, "big"))
+        hasher.update(encoded_metadata)
+
+        encoded_fact_hashes: list[bytes] = []
+        for bar in item.bars:
+            value = bar.fact_hash
+            if len(value) != 64 or value != value.lower():
+                break
+            try:
+                encoded = bytes.fromhex(value)
+            except ValueError:
+                break
+            if len(encoded) != 32:
+                break
+            encoded_fact_hashes.append(encoded)
+        if encoded_fact_hashes and len(encoded_fact_hashes) == len(item.bars):
+            # Persisted fact hashes are generated from every adjusted OHLCV,
+            # receipt and provenance field at ingestion. Reusing that content
+            # identity avoids serializing roughly one million bars per run.
+            hasher.update(b"H")
+            hasher.update(len(encoded_fact_hashes).to_bytes(4, "big"))
+            for value in encoded_fact_hashes:
+                hasher.update(value)
+            continue
+
+        # Synthetic/legacy callers without verified fact identity retain a
+        # full-field fallback so no input becomes invisible to the manifest.
+        hasher.update(b"F")
+        bar_payload = [
+            (
+                bar.trade_date,
+                bar.adjusted_open,
+                bar.adjusted_high,
+                bar.adjusted_low,
+                bar.adjusted_close,
+                bar.volume,
+                bar.amount,
+                bar.turnover,
+                bar.observed_at,
+                bar.provider,
+                bar.adjustment_version,
+                bar.decision_eligible,
+                bar.price_basis,
+                bar.revision_id,
+                bar.fact_hash,
+            )
+            for bar in item.bars
+        ]
+        encoded_bars = json.dumps(
+            bar_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=lambda value: value.isoformat()
+            if isinstance(value, (date, datetime))
+            else str(value),
+        ).encode("utf-8")
+        hasher.update(len(encoded_bars).to_bytes(8, "big"))
+        hasher.update(encoded_bars)
     return hasher.hexdigest()
 
 

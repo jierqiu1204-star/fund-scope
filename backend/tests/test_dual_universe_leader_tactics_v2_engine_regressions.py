@@ -266,6 +266,20 @@ def test_incremental_input_hash_and_manifest_are_batch_order_independent() -> No
     assert manifest.input_hash_schema_version == V2_INPUT_HASH_SCHEMA_VERSION
 
 
+def test_incremental_input_hash_uses_persisted_bar_fact_identity() -> None:
+    bars = tuple(
+        replace(bar, fact_hash=f"{index + 1:064x}")
+        for index, bar in enumerate(_bars())
+    )
+    revised = (*bars[:-1], replace(bars[-1], fact_hash="f" * 64))
+
+    first = screen_dual_universe((_asset("510001", bars=bars),))
+    second = screen_dual_universe((_asset("510001", bars=revised),))
+
+    assert first.input_hash != second.input_hash
+    assert first.manifest_hash != second.manifest_hash
+
+
 def test_hot_path_canonical_payloads_match_dataclass_contract() -> None:
     membership = _membership()
     expected_membership = asdict(membership)
