@@ -11,9 +11,10 @@ from __future__ import annotations
 import hashlib
 import math
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime
+from itertools import chain
 from statistics import mean
 from typing import Any, Literal
 
@@ -908,6 +909,28 @@ def _append_input_hash_value(buffer: bytearray, value: object) -> None:
     buffer.extend(encoded)
 
 
+def _append_input_hash_values(buffer: bytearray, values: Iterable[object]) -> None:
+    """Append the legacy scalar encoding without one helper call per field."""
+
+    extend = buffer.extend
+    for value in values:
+        if value is None:
+            text = "none:"
+        elif isinstance(value, datetime):
+            text = f"datetime:{value.isoformat()}"
+        elif isinstance(value, date):
+            text = f"date:{value.isoformat()}"
+        elif isinstance(value, bool):
+            text = f"bool:{value!r}"
+        elif isinstance(value, (int, float)):
+            text = f"number:{type(value).__name__}:{value!r}"
+        else:
+            text = f"string:{str(value)}"
+        encoded = text.encode("utf-8")
+        extend(len(encoded).to_bytes(8, "big"))
+        extend(encoded)
+
+
 def _update_input_hash(hasher: Any, value: object) -> None:
     """Feed one length-delimited scalar into a digest."""
 
@@ -930,7 +953,7 @@ def _incremental_input_hash(items: Sequence[V2AssetInput]) -> str:
     _update_input_hash(hasher, "inputs-v2-layered")
     for item in items:
         item_bytes = bytearray()
-        for value in (
+        header_values = (
             item.universe,
             item.asset_code,
             item.asset_name,
@@ -940,16 +963,12 @@ def _incremental_input_hash(items: Sequence[V2AssetInput]) -> str:
             item.decision_mode,
             item.membership_evaluation_date,
             item.next_eligible_date,
-        ):
-            _append_input_hash_value(item_bytes, value)
-        for reason in sorted(item.input_unavailable_reasons):
-            _append_input_hash_value(item_bytes, reason)
-        _append_input_hash_value(item_bytes, "membership")
+        )
         membership = item.membership
         if membership is None:
-            _append_input_hash_value(item_bytes, None)
+            membership_values: tuple[object, ...] = (None,)
         else:
-            for value in (
+            membership_values = (
                 membership.group_id,
                 membership.effective_from,
                 membership.effective_to,
@@ -962,12 +981,9 @@ def _incremental_input_hash(items: Sequence[V2AssetInput]) -> str:
                 membership.clone_group,
                 membership.issuer,
                 membership.fact_hash,
-            ):
-                _append_input_hash_value(item_bytes, value)
-        _append_input_hash_value(item_bytes, "bars")
-        _append_input_hash_value(item_bytes, len(item.bars))
-        for bar in item.bars:
-            for value in (
+            )
+        bar_values = chain.from_iterable(
+            (
                 bar.trade_date,
                 bar.adjusted_open,
                 bar.adjusted_high,
@@ -982,8 +998,20 @@ def _incremental_input_hash(items: Sequence[V2AssetInput]) -> str:
                 bar.decision_eligible,
                 bar.price_basis,
                 bar.revision_id,
-            ):
-                _append_input_hash_value(item_bytes, value)
+            )
+            for bar in item.bars
+        )
+        _append_input_hash_values(
+            item_bytes,
+            chain(
+                header_values,
+                sorted(item.input_unavailable_reasons),
+                ("membership",),
+                membership_values,
+                ("bars", len(item.bars)),
+                bar_values,
+            ),
+        )
         hasher.update(item_bytes)
     return hasher.hexdigest()
 

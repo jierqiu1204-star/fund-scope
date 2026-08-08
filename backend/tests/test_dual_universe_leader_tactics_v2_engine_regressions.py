@@ -20,6 +20,7 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
     V2CandidateObservation,
     V2PITMembership,
     _append_input_hash_value,
+    _append_input_hash_values,
     _group_component_percentiles,
     _prior_leadership_index,
     _update_input_hash,
@@ -278,6 +279,12 @@ def test_buffered_hash_updates_preserve_the_legacy_byte_stream() -> None:
         _append_input_hash_value(buffered, value)
     buffered_digest.update(buffered)
     assert buffered_digest.hexdigest() == scalar_digest.hexdigest()
+
+    batch_buffer = bytearray()
+    batch_digest = hashlib.sha256()
+    _append_input_hash_values(batch_buffer, values)
+    batch_digest.update(batch_buffer)
+    assert batch_digest.hexdigest() == scalar_digest.hexdigest()
 
 
 def test_screen_validates_each_assets_membership_and_bars_once(monkeypatch) -> None:
