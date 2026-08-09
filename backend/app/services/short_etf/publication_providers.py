@@ -14,6 +14,7 @@ from app.services.short_etf.data import PriceHistoryRows, ProviderFetchResult
 
 PUBLICATION_PROVIDER_POLICY_VERSION = "adjusted-provider-policy-v2"
 MAX_PROVIDER_ATTEMPT_SECONDS = 6.0
+PROVIDER_CLOSE_TIMEOUT_SECONDS = 2.0
 PROVIDER_COOLDOWN_SECONDS = 300
 ACCEPTED_ADJUSTED_PROVIDER_VERSIONS = {
     "tickflow": data.TICKFLOW_BACKWARD_ADJUSTMENT_VERSION,
@@ -136,10 +137,22 @@ class PublicationAdjustedHistoryFetcher:
         return self
 
     async def __aexit__(self, *_args: object) -> None:
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
+        client = self._client
+        self._client = None
         self._providers = ()
+        if client is None:
+            return
+        try:
+            await asyncio.wait_for(
+                client.aclose(),
+                timeout=PROVIDER_CLOSE_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            # Provider transports have their own request deadlines, but a
+            # peer can still stall connection teardown. The fetcher is
+            # single-slice scoped, so fail closed by discarding the pool
+            # instead of allowing cleanup to overrun the process budget.
+            return
 
     def _require_client(self) -> httpx.AsyncClient:
         if self._client is None:

@@ -5,7 +5,7 @@ from datetime import date
 
 import pytest
 
-from app.services.short_etf import data
+from app.services.short_etf import data, publication_providers
 from app.services.short_etf.publication_providers import (
     PublicationAdjustedHistoryFetcher,
     PublicationProviderError,
@@ -106,6 +106,35 @@ async def test_whole_chain_outer_timeout_would_prevent_same_fallback() -> None:
     with pytest.raises(TimeoutError):
         await asyncio.wait_for(legacy_chain(), timeout=0.01)
     assert fallback_called is False
+
+
+@pytest.mark.asyncio
+async def test_provider_pool_close_has_a_hard_timeout(monkeypatch) -> None:
+    close_cancelled = False
+
+    class HangingClient:
+        async def aclose(self) -> None:
+            nonlocal close_cancelled
+            try:
+                await asyncio.Event().wait()
+            finally:
+                close_cancelled = True
+
+    monkeypatch.setattr(
+        publication_providers,
+        "PROVIDER_CLOSE_TIMEOUT_SECONDS",
+        0.01,
+    )
+    fetcher = PublicationAdjustedHistoryFetcher(
+        providers=(("tickflow", lambda *_args: asyncio.sleep(0, result=[])),),
+    )
+    fetcher._client = HangingClient()  # type: ignore[assignment]
+
+    await asyncio.wait_for(fetcher.__aexit__(), timeout=0.1)
+
+    assert close_cancelled is True
+    assert fetcher._client is None
+    assert fetcher._providers == ()
 
 
 @pytest.mark.asyncio
