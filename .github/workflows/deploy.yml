@@ -94,8 +94,22 @@ jobs:
               printf '%s' unrecorded
             fi
           )
-
           cd "$deploy_dir/deploy"
+          fqdn=
+          if [ "$COMPOSE_FILE" = docker-compose.yml ]; then
+            test -f "$deploy_dir/deploy/.env"
+            fqdn=$(sed -n 's/^FQDN=//p' "$deploy_dir/deploy/.env" | tail -n 1)
+            case "$fqdn" in
+              ""|.*|*.|*[!A-Za-z0-9.-]*)
+                echo "Missing or invalid FQDN in deploy/.env" >&2
+                exit 1
+                ;;
+            esac
+            timeout 55 sudo docker compose -f "$COMPOSE_FILE" run --rm --no-deps \
+              --entrypoint sh certbot -c \
+              "test -s /etc/letsencrypt/live/$fqdn/fullchain.pem && test -s /etc/letsencrypt/live/$fqdn/privkey.pem"
+          fi
+
           sudo docker compose -f "$COMPOSE_FILE" up -d postgres
           postgres_ready=false
           for attempt in $(seq 1 20); do
@@ -185,11 +199,19 @@ jobs:
           sudo docker compose -f "$COMPOSE_FILE" up -d backend
           sudo docker compose -f "$COMPOSE_FILE" up -d --no-deps nginx
           health_payload=$(
-            timeout 60 sh -c '
+            COMPOSE_FILE="$COMPOSE_FILE" FQDN="$fqdn" timeout 60 sh -c '
               for attempt in $(seq 1 10); do
-                if payload=$(curl --fail --silent --show-error \
-                  --connect-timeout 3 --max-time 5 \
-                  http://127.0.0.1/api/health); then
+                if [ "$COMPOSE_FILE" = docker-compose.yml ]; then
+                  payload=$(curl --fail --silent --show-error \
+                    --connect-timeout 3 --max-time 5 \
+                    --resolve "$FQDN:443:127.0.0.1" \
+                    "https://$FQDN/api/health") || payload=
+                else
+                  payload=$(curl --fail --silent --show-error \
+                    --connect-timeout 3 --max-time 5 \
+                    http://127.0.0.1/api/health) || payload=
+                fi
+                if [ -n "$payload" ]; then
                   printf "%s" "$payload"
                   exit 0
                 fi

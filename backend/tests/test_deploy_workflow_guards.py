@@ -175,3 +175,38 @@ def test_deploy_checks_single_head_before_migration_and_health_afterward() -> No
     assert 'test "$deployed_revision_count" -eq 1' in workflow
     assert 'test "$deployed_schema_head" = "$candidate_schema_head"' in workflow
     assert "http://127.0.0.1/api/health" in workflow
+
+
+def test_ip_deploy_can_bootstrap_acme_without_exposing_certificate_keys() -> None:
+    compose = _read_repository_file("deploy/docker-compose.ip.yml")
+    nginx = _read_repository_file("deploy/nginx-ip-http.conf")
+    init_script = _read_repository_file("deploy/certbot-init.sh")
+
+    assert "certbot-var:/var/www/certbot:ro" in compose
+    assert "certbot-etc:/etc/letsencrypt" in compose
+    assert "location /.well-known/acme-challenge/" in nginx
+    assert "root /var/www/certbot;" in nginx
+    assert "COMPOSE_FILE=${COMPOSE_FILE:-docker-compose.ip.yml}" in init_script
+    assert "TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-55}" in init_script
+    assert 'timeout "${TIMEOUT_SECONDS}s" docker compose' in init_script
+    assert "--non-interactive --agree-tos --keep-until-expiring" in init_script
+
+
+def test_domain_deploy_requires_certificate_and_checks_real_tls_health() -> None:
+    workflow = _read_repository_file(".github/workflows/deploy.yml")
+
+    assert 'if [ "$COMPOSE_FILE" = docker-compose.yml ]; then' in workflow
+    assert "test -s /etc/letsencrypt/live/$fqdn/fullchain.pem" in workflow
+    assert "test -s /etc/letsencrypt/live/$fqdn/privkey.pem" in workflow
+    assert '--resolve "$FQDN:443:127.0.0.1"' in workflow
+    assert '"https://$FQDN/api/health"' in workflow
+
+
+def test_certificate_renewal_is_bounded_and_reload_is_separate() -> None:
+    renew_script = _read_repository_file("deploy/certbot-renew.sh")
+    installer = _read_repository_file("deploy/install-certbot-renewal.sh")
+
+    assert "TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-55}" in renew_script
+    assert 'timeout "${TIMEOUT_SECONDS}s" docker compose' in renew_script
+    assert "timeout 10s docker compose" in renew_script
+    assert "flock -n /run/lock/fundscope-certbot-renew.lock" in installer

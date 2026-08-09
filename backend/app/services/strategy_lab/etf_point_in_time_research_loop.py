@@ -29,13 +29,13 @@ from app.services.etf_research_evidence import (
     OPERATIONAL_REENTRY_RULE_VERSION,
     stable_contract_hash,
 )
-from app.services.short_research.daily_reconstructable import (
-    PRICE_BASIS,
-    daily_reconstructable_manifest,
-)
 from app.services.short_research.coverage_policy import (
     ETF_COMPLETE_SCORE_COVERAGE,
     ETF_DAILY_DECISION_MIN_COVERAGE,
+)
+from app.services.short_research.daily_reconstructable import (
+    PRICE_BASIS,
+    daily_reconstructable_manifest,
 )
 from app.services.short_research.ranking_surfaces import actionable_rank_manifest
 from app.services.strategy_lab.etf_ranking_candidates import (

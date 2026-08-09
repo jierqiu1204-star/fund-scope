@@ -16,8 +16,8 @@ public IP before buying or configuring a domain, use `README-ip.md` instead.
 Create these files on the deployment host. Do not commit private values.
 
 - `/srv/fundscope/.env`: copy from `.env.example` and replace database, OpenAI, SMTP, JWT, and bootstrap admin placeholders.
-- `POSTGRES_PASSWORD`: export in the shell or provide through a host-level environment file before running Compose.
-- `FQDN`: export the public hostname used by nginx and Certbot.
+- `POSTGRES_PASSWORD`: set it in `/srv/fundscope/deploy/.env`.
+- `FQDN`: set the public hostname in `/srv/fundscope/deploy/.env` for nginx and Certbot.
 
 ## GitHub Actions Runner
 
@@ -68,7 +68,8 @@ Optional GitHub Actions repository variables:
 
 1. Clone the repository to `/srv/fundscope`.
 2. Copy `.env.example` to `.env` and replace placeholder values.
-3. Export `POSTGRES_PASSWORD=<strong-password>` and `FQDN=<your-domain>`.
+3. Set `POSTGRES_PASSWORD=<strong-password>` and `FQDN=<your-domain>` in
+   `/srv/fundscope/deploy/.env`.
 4. Ensure `.env` contains the application login settings:
 
    ```bash
@@ -79,25 +80,35 @@ Optional GitHub Actions repository variables:
    AUTH_BOOTSTRAP_ADMIN_PASSWORD=<qje-login-password>
    ```
 
-5. Build and start the local stack:
+5. Bootstrap HTTP with the IP Compose file. This keeps the application online
+   while serving the ACME challenge from the shared Certbot volume:
 
    ```bash
-   docker compose up -d --build
+   docker compose -f docker-compose.ip.yml up -d --build
    ```
 
 6. Issue the first TLS certificate:
 
    ```bash
-   ./certbot-init.sh <domain>
+   CERTBOT_EMAIL=<email> ./certbot-init.sh <domain>
    ```
 
-7. Run migrations:
+7. Only after certificate issuance succeeds, switch to the domain stack and
+   install bounded daily renewal:
 
    ```bash
-   docker compose exec backend alembic upgrade head
+   docker compose -f docker-compose.ip.yml down --remove-orphans
+   docker compose -f docker-compose.yml up -d
+   sudo ./install-certbot-renewal.sh
    ```
 
-8. Visit `/login`, log in as the bootstrap admin, then open `/onboarding` if default data still needs seeding.
+8. Run migrations:
+
+   ```bash
+   docker compose -f docker-compose.yml exec backend alembic upgrade head
+   ```
+
+9. Visit `/login`, log in as the bootstrap admin, then open `/onboarding` if default data still needs seeding.
 
 ## Local Compose Verification
 

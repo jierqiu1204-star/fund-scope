@@ -41,9 +41,18 @@ services:
     volumes:
       - ./nginx-ip-http.conf:/etc/nginx/conf.d/default.conf:ro
       - frontend-static:/usr/share/nginx/html:ro
+      - certbot-var:/var/www/certbot:ro
     restart: unless-stopped
+
+  certbot:
+    image: certbot/certbot
+    volumes:
+      - certbot-etc:/etc/letsencrypt
+      - certbot-var:/var/www/certbot
 
 volumes:
   postgres-data:
   frontend-static:
   research-artifacts:
+  certbot-etc:
+  certbot-var:
