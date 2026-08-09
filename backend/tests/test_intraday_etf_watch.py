@@ -10,9 +10,11 @@ import pytest
 from sqlalchemy import func, select
 
 from app.models.entities import (
+    EtfIntradayCleanupCheckpoint,
     EtfIntradayDailySummary,
     EtfIntradayLatestQuote,
     EtfIntradayQuote,
+    EtfIntradayQuoteEvidenceRef,
     EtfLabelOutcome,
     EtfPriceHistory,
     ShortResearchSignalItem,
@@ -25,6 +27,7 @@ from app.models.entities import (
     utcnow,
 )
 from app.services.intraday_etf import service as intraday_service
+from app.services.intraday_etf.evidence import intraday_quote_evidence_hash
 from app.services.intraday_etf.exchange_calendar import (
     is_trading_day,
     market_session,
@@ -2383,15 +2386,150 @@ async def test_intraday_cleanup_summarizes_and_deletes_old_raw_quotes(app) -> No
             )
         await session.commit()
 
-        result = await summarize_and_cleanup_intraday_quotes(session, retention_trading_days=2)
+        result = await summarize_and_cleanup_intraday_quotes(
+            session,
+            retention_trading_days=2,
+            evidence_seal_complete=True,
+        )
         raw_count = await session.scalar(select(func.count()).select_from(EtfIntradayQuote))
         summary_count = await session.scalar(select(func.count()).select_from(EtfIntradayDailySummary))
+        first_summary = await session.scalar(
+            select(EtfIntradayDailySummary).where(
+                EtfIntradayDailySummary.trade_date == date(2026, 6, 10)
+            )
+        )
 
     assert result["cutoff_date"] == "2026-06-12"
     assert result["summarized_groups"] == 2
     assert result["deleted_rows"] == 4
     assert raw_count == 4
     assert summary_count == 2
+    assert first_summary is not None
+    assert first_summary.total_volume == 2000
+    assert first_summary.total_turnover == 20_000
+    assert first_summary.summary_json["volume_semantics"] == "max_cumulative_snapshot"
+
+
+@pytest.mark.asyncio
+async def test_intraday_cleanup_fails_closed_until_evidence_seal_is_complete(app) -> None:
+    async with app.state.db.session() as session:
+        session.add(_etf("510004"))
+        await session.flush()
+        for offset in range(3):
+            trade_date = date(2026, 6, 10 + offset)
+            session.add(
+                EtfIntradayQuote(
+                    etf_code="510004",
+                    quote_time=datetime(2026, 6, 10 + offset, 14, 50),
+                    trade_date=trade_date,
+                    latest_price=1.0 + offset,
+                )
+            )
+        await session.commit()
+
+        result = await summarize_and_cleanup_intraday_quotes(
+            session,
+            retention_trading_days=1,
+        )
+        raw_count = await session.scalar(select(func.count()).select_from(EtfIntradayQuote))
+
+    assert result["job_status"] == "partial"
+    assert result["unavailable_reason"] == "intraday_quote_evidence_seal_incomplete"
+    assert result["deleted_rows"] == 0
+    assert raw_count == 3
+
+
+@pytest.mark.asyncio
+async def test_intraday_cleanup_never_deletes_protected_quote_and_persists_checkpoint(app) -> None:
+    async with app.state.db.session() as session:
+        session.add(_etf("510005"))
+        await session.flush()
+        protected_quote: EtfIntradayQuote | None = None
+        for offset in range(4):
+            trade_date = date(2026, 6, 10 + offset)
+            first = EtfIntradayQuote(
+                etf_code="510005",
+                quote_time=datetime(2026, 6, 10 + offset, 9, 31),
+                trade_date=trade_date,
+                latest_price=1.0 + offset,
+            )
+            session.add_all(
+                [
+                    first,
+                    EtfIntradayQuote(
+                        etf_code="510005",
+                        quote_time=datetime(2026, 6, 10 + offset, 14, 59),
+                        trade_date=trade_date,
+                        latest_price=1.1 + offset,
+                    ),
+                ]
+            )
+            if offset == 0:
+                protected_quote = first
+        await session.flush()
+        assert protected_quote is not None
+        session.add(
+            EtfIntradayQuoteEvidenceRef(
+                quote_id=protected_quote.id,
+                owner_kind="published_snapshot",
+                owner_id=1,
+                asset_code="510005",
+                evidence_purpose="actionable_ranking_input",
+                evidence_state="protected",
+                quote_hash=intraday_quote_evidence_hash(protected_quote),
+                decision_cutoff=datetime(2026, 6, 10, 15, 0),
+                receipt_cutoff=datetime(2026, 6, 10, 15, 1),
+            )
+        )
+        await session.commit()
+
+        result = await summarize_and_cleanup_intraday_quotes(
+            session,
+            retention_trading_days=2,
+            batch_size=4,
+            evidence_seal_complete=True,
+        )
+        remaining_ids = set(
+            await session.scalars(select(EtfIntradayQuote.id))
+        )
+        checkpoint = await session.get(EtfIntradayCleanupCheckpoint, 1)
+
+    assert result["deleted_rows"] == 3
+    assert protected_quote.id in remaining_ids
+    assert checkpoint is not None
+    assert checkpoint.status == "advanced"
+    assert checkpoint.last_trade_date == date(2026, 6, 11)
+    assert checkpoint.last_etf_code == "510005"
+    assert checkpoint.deleted_rows_total == 3
+
+
+@pytest.mark.asyncio
+async def test_intraday_cleanup_rejects_non_positive_price_without_deleting(app) -> None:
+    async with app.state.db.session() as session:
+        session.add(_etf("510006"))
+        await session.flush()
+        for offset, price in enumerate((-1.0, 1.1, 1.2)):
+            session.add(
+                EtfIntradayQuote(
+                    etf_code="510006",
+                    quote_time=datetime(2026, 6, 10 + offset, 14, 50),
+                    trade_date=date(2026, 6, 10 + offset),
+                    latest_price=price,
+                )
+            )
+        await session.commit()
+
+        result = await summarize_and_cleanup_intraday_quotes(
+            session,
+            retention_trading_days=1,
+            evidence_seal_complete=True,
+        )
+        raw_count = await session.scalar(select(func.count()).select_from(EtfIntradayQuote))
+
+    assert result["job_status"] == "partial"
+    assert result["unavailable_reason"] == "intraday_cleanup_invalid_price"
+    assert result["deleted_rows"] == 0
+    assert raw_count == 3
 
 
 
@@ -2636,6 +2774,3 @@ async def test_diverged_quote_does_not_drive_live_ranking_or_tracked_email(clien
     if alert is not None:
         assert alert.email_status == "skipped"
     assert sent == []
-
-
-

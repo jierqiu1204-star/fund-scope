@@ -8,7 +8,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db_session
 from app.models.entities import JobRun, NewsItem, NewsSummary
-from app.services.intraday_etf.jobs import intraday_etf_cleanup_job
 from app.services.job_runner import run_job, start_background_job
 from app.services.jobs import (
     daily_asset_recommendations_job,
@@ -55,6 +54,7 @@ from app.services.short_research.jobs import (
 )
 from app.services.strategy_lab.jobs import daily_strategy_paper_job
 from app.services.tracked_positions.jobs import daily_tracked_position_alerts_job
+from app.services.workflows.etf_intraday_retention import intraday_etf_retention_job
 from app.services.workflows.etf_leader_tactics_shadow import (
     continue_etf_leader_tactics_shadow_job,
 )
@@ -420,7 +420,7 @@ async def run_job_by_name(
         return await run_job(
             request.app.state.db.session,
             job_name,
-            lambda tracked_session: intraday_etf_cleanup_job(tracked_session),
+            lambda tracked_session: intraday_etf_retention_job(tracked_session),
         )
     if job_name == "news_summary_backfill":
         return await run_job(

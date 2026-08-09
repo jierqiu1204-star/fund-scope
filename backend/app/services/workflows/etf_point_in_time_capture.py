@@ -23,10 +23,15 @@ from app.models.entities import (
     EtfFactorExperimentCheckpoint,
     EtfPitCaptureSource,
     JobRun,
+    ShortResearchSignalItem,
     ShortResearchSignalRun,
     utcnow,
 )
 from app.services.etf_research_evidence import RankingSourceKind, stable_contract_hash
+from app.services.intraday_etf.evidence import (
+    PIT_CAPTURE_SOURCE_OWNER,
+    seal_intraday_quote_evidence,
+)
 from app.services.short_research.coverage_policy import (
     evaluate_persisted_etf_readiness,
     persisted_etf_complete_coverage_allowed,
@@ -144,6 +149,7 @@ PIT_UNAVAILABLE_MANIFEST_LEASE = "pit_manifest_lease_active"
 PIT_UNAVAILABLE_DISABLED = "pit_capture_disabled"
 PIT_UNAVAILABLE_CODE_VERSION = "pit_code_version_missing"
 PIT_UNAVAILABLE_PROVIDER_HEALTH_CONTEXT = "pit_provider_health_context_missing"
+PIT_UNAVAILABLE_QUOTE_EVIDENCE = "pit_intraday_quote_evidence_incomplete"
 PIT_UNAVAILABLE_CADENCE = "pit_capture_cadence_not_due"
 PIT_UNAVAILABLE_COMPLETE = "pit_source_research_loop_complete"
 PIT_UNAVAILABLE_NO_SESSION = "pit_no_completed_trading_session"
@@ -680,6 +686,32 @@ def _captured_source_is_valid(source: EtfPitCaptureSource) -> bool:
     )
 
 
+async def _seal_pit_source_quote_evidence(
+    session: AsyncSession,
+    source: EtfPitCaptureSource,
+) -> bool:
+    codes = (
+        await session.scalars(
+            select(ShortResearchSignalItem.asset_code)
+            .where(
+                ShortResearchSignalItem.run_id == source.source_signal_run_id,
+                ShortResearchSignalItem.asset_type == "etf",
+            )
+            .order_by(ShortResearchSignalItem.asset_code.asc())
+        )
+    ).all()
+    result = await seal_intraday_quote_evidence(
+        session,
+        owner_kind=PIT_CAPTURE_SOURCE_OWNER,
+        owner_id=source.id,
+        asset_codes=codes,
+        trade_date=source.as_of_trade_date,
+        decision_cutoff=source.market_decision_cutoff,
+        receipt_cutoff=source.data_receipt_cutoff,
+    )
+    return result["complete"] is True
+
+
 async def capture_complete_pit_source(
     session: AsyncSession,
     *,
@@ -757,6 +789,13 @@ async def capture_complete_pit_source(
                 source=None,
                 created=False,
             )
+        if not await _seal_pit_source_quote_evidence(session, existing):
+            return PitSourceCaptureResult(
+                state="unavailable",
+                unavailable_reason=PIT_UNAVAILABLE_QUOTE_EVIDENCE,
+                source=None,
+                created=False,
+            )
         return PitSourceCaptureResult(
             state="captured",
             unavailable_reason=None,
@@ -811,10 +850,24 @@ async def capture_complete_pit_source(
                 source=None,
                 created=False,
             )
+        if not await _seal_pit_source_quote_evidence(session, existing):
+            return PitSourceCaptureResult(
+                state="unavailable",
+                unavailable_reason=PIT_UNAVAILABLE_QUOTE_EVIDENCE,
+                source=None,
+                created=False,
+            )
         return PitSourceCaptureResult(
             state="captured",
             unavailable_reason=None,
             source=existing,
+            created=False,
+        )
+    if not await _seal_pit_source_quote_evidence(session, source):
+        return PitSourceCaptureResult(
+            state="unavailable",
+            unavailable_reason=PIT_UNAVAILABLE_QUOTE_EVIDENCE,
+            source=None,
             created=False,
         )
     return PitSourceCaptureResult(

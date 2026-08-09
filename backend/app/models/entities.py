@@ -90,6 +90,10 @@ class PitCaptureSourceImmutableError(ValueError):
     pass
 
 
+class IntradayQuoteEvidenceImmutableError(ValueError):
+    pass
+
+
 class AdjustedPriceRevisionImmutableError(ValueError):
     pass
 
@@ -766,6 +770,55 @@ class EtfIntradayQuote(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class EtfIntradayQuoteEvidenceRef(Base):
+    """Immutable reference to the exact intraday input used by a decision artifact."""
+
+    __tablename__ = "etf_intraday_quote_evidence_refs"
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_kind",
+            "owner_id",
+            "asset_code",
+            "evidence_purpose",
+            name="uq_etf_intraday_quote_evidence_owner",
+        ),
+        CheckConstraint(
+            "evidence_state IN ('protected', 'unavailable')",
+            name="ck_etf_intraday_quote_evidence_state",
+        ),
+        CheckConstraint(
+            "(evidence_state = 'protected' AND quote_id IS NOT NULL "
+            "AND quote_hash IS NOT NULL AND unavailable_reason IS NULL) OR "
+            "(evidence_state = 'unavailable' AND quote_id IS NULL "
+            "AND quote_hash IS NULL AND unavailable_reason IS NOT NULL)",
+            name="ck_etf_intraday_quote_evidence_payload",
+        ),
+        SaIndex("ix_etf_intraday_quote_evidence_quote_id", "quote_id"),
+        SaIndex(
+            "ix_etf_intraday_quote_evidence_owner_lookup",
+            "owner_kind",
+            "owner_id",
+            "evidence_purpose",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    quote_id: Mapped[int | None] = mapped_column(
+        ForeignKey("etf_intraday_quotes.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    owner_kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    owner_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    asset_code: Mapped[str] = mapped_column(String(32), nullable=False)
+    evidence_purpose: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    quote_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    decision_cutoff: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    receipt_cutoff: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    unavailable_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    protected_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class EtfIntradayLatestQuote(Base):
     __tablename__ = "etf_intraday_latest_quotes"
     __table_args__ = (SaIndex("ix_etf_intraday_latest_quotes_quote_time", "quote_time"),)
@@ -809,6 +862,20 @@ class EtfIntradayDailySummary(Base):
     source: Mapped[str | None] = mapped_column(String(64), nullable=True)
     summary_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class EtfIntradayCleanupCheckpoint(Base):
+    __tablename__ = "etf_intraday_cleanup_checkpoints"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    cutoff_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    last_trade_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    last_etf_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="idle")
+    deleted_rows_total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    summarized_groups_total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    details_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
@@ -3368,6 +3435,10 @@ def _prevent_published_snapshot_mutation(session: Session, _flush_context: objec
     if not isinstance(authorized_run_ids, set):
         authorized_run_ids = set()
     for instance in session.dirty:
+        if isinstance(instance, EtfIntradayQuoteEvidenceRef):
+            raise IntradayQuoteEvidenceImmutableError(
+                "intraday quote evidence references are immutable"
+            )
         if isinstance(instance, EtfCanonicalPublicationRegistry):
             if _changed_fields(instance, _CANONICAL_PUBLICATION_FROZEN_FIELDS):
                 raise CanonicalPublicationImmutableError(
@@ -3485,6 +3556,10 @@ def _prevent_published_snapshot_mutation(session: Session, _flush_context: objec
         if isinstance(instance, ShortResearchSignalItem):
             item_run_ids.add(instance.run_id)
     for instance in session.deleted:
+        if isinstance(instance, EtfIntradayQuoteEvidenceRef):
+            raise IntradayQuoteEvidenceImmutableError(
+                "intraday quote evidence references cannot be deleted"
+            )
         if isinstance(instance, EtfAdjustedPriceRevision):
             raise AdjustedPriceRevisionImmutableError(
                 "adjusted price revisions cannot be deleted"

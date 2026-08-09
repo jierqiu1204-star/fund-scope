@@ -8,6 +8,7 @@ from sqlalchemy import event, select
 from sqlalchemy.orm import Session
 
 from app.models.entities import (
+    EtfIntradayQuoteEvidenceRef,
     EtfPriceHistory,
     EtfUniverseMembership,
     ShortResearchSignalItem,
@@ -92,7 +93,10 @@ async def _seed_publishable_run(
         run = ShortResearchSignalRun(
             status="success",
             as_of_date=date(2026, 1, 2),
-            config_json={"scope": "fixture"},
+            config_json={
+                "scope": "fixture",
+                "market_decision_cutoff": datetime(2026, 1, 2, 15, 0).isoformat(),
+            },
             summary_json={
                 "item_count": len(score_item_codes),
                 "coverage": {
@@ -199,6 +203,46 @@ async def test_full_snapshot_publication_is_idempotent_and_marks_run_published(a
                 "excluded": [],
             },
         }
+        evidence_rows = (
+            await session.scalars(
+                select(EtfIntradayQuoteEvidenceRef).where(
+                    EtfIntradayQuoteEvidenceRef.owner_kind == "published_snapshot",
+                    EtfIntradayQuoteEvidenceRef.owner_id == run_id,
+                )
+            )
+        ).all()
+        assert len(evidence_rows) == 2
+        assert {row.evidence_state for row in evidence_rows} == {"unavailable"}
+        assert {row.unavailable_reason for row in evidence_rows} == {
+            "no_quote_at_cutoff"
+        }
+
+
+@pytest.mark.asyncio
+async def test_snapshot_publication_requires_factual_market_decision_cutoff(app) -> None:
+    run_id = await _seed_publishable_run(app)
+    async with app.state.db.session() as session:
+        run = await session.get(ShortResearchSignalRun, run_id)
+        assert run is not None
+        items = (
+            await session.scalars(
+                select(ShortResearchSignalItem)
+                .where(ShortResearchSignalItem.run_id == run_id)
+                .order_by(ShortResearchSignalItem.global_rank.asc())
+            )
+        ).all()
+        run.config_json = {"scope": "fixture"}
+        run.summary_json = {
+            **run.summary_json,
+            "draft_seal": snapshot_publication.build_snapshot_draft_seal(run, items),
+        }
+        await session.commit()
+
+        with pytest.raises(
+            SnapshotPublicationError,
+            match="market decision cutoff is required",
+        ):
+            await publish_full_snapshot(session, run_id=run_id)
 
 
 @pytest.mark.asyncio

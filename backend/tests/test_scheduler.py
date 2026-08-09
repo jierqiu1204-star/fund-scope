@@ -178,7 +178,7 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     assert trigger_field(etf_exit_signal_credibility, "minute") == "30"
     assert trigger_field(etf_exit_hyperopt, "hour") == "23"
     assert trigger_field(etf_exit_hyperopt, "minute") == "45"
-    assert trigger_field(intraday_etf_cleanup, "hour") == "15"
+    assert trigger_field(intraday_etf_cleanup, "hour") == "3"
     assert trigger_field(intraday_etf_cleanup, "minute") == "20"
     assert "daily_short_etf_data" not in job_ids
     assert "daily_short_etf_signals" not in job_ids

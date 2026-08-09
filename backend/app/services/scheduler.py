@@ -11,7 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.core.db import DatabaseManager
-from app.services.intraday_etf.jobs import intraday_etf_cleanup_job
 from app.services.job_runner import run_job
 from app.services.jobs import (
     daily_asset_recommendations_job,
@@ -45,6 +44,7 @@ from app.services.short_research.jobs import (
 )
 from app.services.strategy_lab.jobs import daily_strategy_paper_job
 from app.services.tracked_positions.jobs import daily_tracked_position_alerts_job
+from app.services.workflows.etf_intraday_retention import intraday_etf_retention_job
 from app.services.workflows.etf_leader_tactics_shadow import (
     LEADER_CONTINUATION_JOB_NAME,
     continue_etf_leader_tactics_shadow_job,
@@ -478,11 +478,13 @@ def register_default_jobs(
     scheduler.add_job(
         _run_tracked_job,
         "cron",
-        args=[db, "intraday_etf_cleanup", intraday_etf_cleanup_job],
-        day_of_week="mon-fri",
-        hour=15,
+        args=[db, "intraday_etf_cleanup", intraday_etf_retention_job],
+        day_of_week="mon-sun",
+        hour=3,
         minute=20,
         id="intraday_etf_cleanup",
+        max_instances=1,
+        coalesce=True,
         replace_existing=True,
     )
     scheduler.add_job(

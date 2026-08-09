@@ -9,15 +9,17 @@ from typing import Any, cast
 
 import akshare as ak
 import httpx
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, exists, func, select, text, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.market_data import RELIABILITY_STALE, quote_reliability_from_consensus
 from app.models.entities import (
+    EtfIntradayCleanupCheckpoint,
     EtfIntradayDailySummary,
     EtfIntradayLatestQuote,
     EtfIntradayQuote,
+    EtfIntradayQuoteEvidenceRef,
     IntradayEtfWatchRun,
     TradableEtf,
     utcnow,
@@ -65,6 +67,11 @@ PAGE_POLL_SECONDS = 30
 TOP_SIGNAL_LIMIT = 20
 LIVE_RANKING_LIMIT_DEFAULT = 50
 LIVE_RANKING_LIMIT_MAX = 200
+INTRADAY_CLEANUP_BATCH_SIZE = 2_000
+INTRADAY_CLEANUP_BATCH_SIZE_MAX = 5_000
+INTRADAY_CLEANUP_GROUP_SCAN_LIMIT = 64
+INTRADAY_CLEANUP_PROTECTED_ROW_ALLOWANCE = 1_000
+INTRADAY_CLEANUP_ADVISORY_LOCK_KEY = 2_026_081_001
 SOURCE_ALL_ETF = "all_etf"
 _PROVIDER_FAILURE_COUNT = 0
 _PROVIDER_BACKOFF_UNTIL: datetime | None = None
@@ -1088,13 +1095,17 @@ async def summarize_and_cleanup_intraday_quotes(
     session: AsyncSession,
     *,
     retention_trading_days: int = 60,
+    batch_size: int = INTRADAY_CLEANUP_BATCH_SIZE,
+    evidence_seal_complete: bool = False,
 ) -> dict[str, Any]:
     safe_days = max(1, retention_trading_days)
+    safe_batch_size = max(1, min(INTRADAY_CLEANUP_BATCH_SIZE_MAX, batch_size))
     trade_dates = (
         await session.scalars(
             select(EtfIntradayQuote.trade_date)
             .distinct()
             .order_by(EtfIntradayQuote.trade_date.desc())
+            .limit(safe_days + 1)
         )
     ).all()
     if len(trade_dates) <= safe_days:
@@ -1103,81 +1114,285 @@ async def summarize_and_cleanup_intraday_quotes(
             "cutoff_date": None,
             "summarized_groups": 0,
             "deleted_rows": 0,
+            "batch_size": safe_batch_size,
             "message": "盘中明细未超过保留窗口，无需清理。",
         }
 
     cutoff_date = trade_dates[safe_days - 1]
-    group_rows = (
+    if not evidence_seal_complete:
+        return {
+            "job_status": "partial",
+            "job_message": "盘中决策证据尚未完成封存，清理保持关闭。",
+            "retention_trading_days": safe_days,
+            "cutoff_date": cutoff_date.isoformat(),
+            "summarized_groups": 0,
+            "deleted_rows": 0,
+            "batch_size": safe_batch_size,
+            "unavailable_reason": "intraday_quote_evidence_seal_incomplete",
+            "message": "盘中决策证据尚未完成封存，未删除任何明细。",
+        }
+
+    if session.get_bind().dialect.name == "postgresql":
+        await session.execute(text("SET LOCAL statement_timeout = '45s'"))
+        await session.execute(text("SET LOCAL lock_timeout = '2s'"))
+        lock_acquired = bool(
+            await session.scalar(
+                text("SELECT pg_try_advisory_xact_lock(:lock_key)").bindparams(
+                    lock_key=INTRADAY_CLEANUP_ADVISORY_LOCK_KEY
+                )
+            )
+        )
+        if not lock_acquired:
+            await session.rollback()
+            return {
+                "job_status": "partial",
+                "job_message": "另一个盘中明细清理切片正在运行。",
+                "retention_trading_days": safe_days,
+                "cutoff_date": cutoff_date.isoformat(),
+                "summarized_groups": 0,
+                "deleted_rows": 0,
+                "batch_size": safe_batch_size,
+                "unavailable_reason": "intraday_cleanup_lock_busy",
+                "message": "清理锁被占用，本次安全跳过。",
+            }
+
+    protected_ref_exists = exists(
+        select(EtfIntradayQuoteEvidenceRef.id).where(
+            EtfIntradayQuoteEvidenceRef.quote_id == EtfIntradayQuote.id
+        )
+    )
+    candidate_groups = (
         await session.execute(
             select(
                 EtfIntradayQuote.etf_code.label("etf_code"),
                 EtfIntradayQuote.trade_date.label("trade_date"),
-                func.count(EtfIntradayQuote.id).label("quote_count"),
-                func.min(EtfIntradayQuote.quote_time).label("first_quote_time"),
-                func.max(EtfIntradayQuote.quote_time).label("last_quote_time"),
-                func.min(EtfIntradayQuote.latest_price).label("low_price"),
-                func.max(EtfIntradayQuote.latest_price).label("high_price"),
-                func.sum(EtfIntradayQuote.volume).label("total_volume"),
-                func.sum(EtfIntradayQuote.turnover).label("total_turnover"),
+                func.count(EtfIntradayQuote.id).label("unprotected_count"),
             )
-            .where(EtfIntradayQuote.trade_date < cutoff_date)
+            .where(
+                EtfIntradayQuote.trade_date < cutoff_date,
+                ~protected_ref_exists,
+            )
             .group_by(EtfIntradayQuote.etf_code, EtfIntradayQuote.trade_date)
+            .order_by(
+                EtfIntradayQuote.trade_date.asc(),
+                EtfIntradayQuote.etf_code.asc(),
+            )
+            .limit(INTRADAY_CLEANUP_GROUP_SCAN_LIMIT)
         )
     ).all()
+    if not candidate_groups:
+        checkpoint = await session.get(EtfIntradayCleanupCheckpoint, 1)
+        if checkpoint is None:
+            checkpoint = EtfIntradayCleanupCheckpoint(id=1)
+            session.add(checkpoint)
+        checkpoint.cutoff_date = cutoff_date
+        checkpoint.status = "complete"
+        checkpoint.details_json = {
+            "retention_trading_days": safe_days,
+            "batch_size": safe_batch_size,
+            "message": "no_unprotected_rows_before_cutoff",
+        }
+        checkpoint.updated_at = utcnow()
+        await session.commit()
+        return {
+            "retention_trading_days": safe_days,
+            "cutoff_date": cutoff_date.isoformat(),
+            "summarized_groups": 0,
+            "deleted_rows": 0,
+            "batch_size": safe_batch_size,
+            "message": "超过保留窗口的明细均受证据保护，无可清理行。",
+        }
 
-    summarized = 0
-    for row in group_rows:
-        first_quote = await session.scalar(
-            select(EtfIntradayQuote)
-            .where(
-                EtfIntradayQuote.etf_code == row.etf_code,
-                EtfIntradayQuote.trade_date == row.trade_date,
+    selected_groups: list[tuple[str, date]] = []
+    selected_unprotected_count = 0
+    for row in candidate_groups:
+        group_count = int(row.unprotected_count or 0)
+        if group_count <= 0:
+            continue
+        if group_count > safe_batch_size and not selected_groups:
+            await session.rollback()
+            return {
+                "job_status": "partial",
+                "job_message": "最旧 ETF 日内分组超过单批上限。",
+                "retention_trading_days": safe_days,
+                "cutoff_date": cutoff_date.isoformat(),
+                "summarized_groups": 0,
+                "deleted_rows": 0,
+                "batch_size": safe_batch_size,
+                "oversized_group": {
+                    "asset_code": row.etf_code,
+                    "trade_date": row.trade_date.isoformat(),
+                    "row_count": group_count,
+                },
+                "message": "发现异常超大日内分组，本次未删除。",
+            }
+        if selected_unprotected_count + group_count > safe_batch_size:
+            break
+        selected_groups.append((row.etf_code, row.trade_date))
+        selected_unprotected_count += group_count
+
+    group_filter = tuple_(
+        EtfIntradayQuote.etf_code,
+        EtfIntradayQuote.trade_date,
+    ).in_(selected_groups)
+    quote_rows = (
+        await session.execute(
+            select(
+                EtfIntradayQuote.id,
+                EtfIntradayQuote.etf_code,
+                EtfIntradayQuote.trade_date,
+                EtfIntradayQuote.quote_time,
+                EtfIntradayQuote.latest_price,
+                EtfIntradayQuote.volume,
+                EtfIntradayQuote.turnover,
+                EtfIntradayQuote.source,
             )
-            .order_by(EtfIntradayQuote.quote_time.asc(), EtfIntradayQuote.id.asc())
-        )
-        last_quote = await session.scalar(
-            select(EtfIntradayQuote)
-            .where(
-                EtfIntradayQuote.etf_code == row.etf_code,
-                EtfIntradayQuote.trade_date == row.trade_date,
+            .where(group_filter)
+            .order_by(
+                EtfIntradayQuote.etf_code.asc(),
+                EtfIntradayQuote.trade_date.asc(),
+                EtfIntradayQuote.quote_time.asc(),
+                EtfIntradayQuote.id.asc(),
             )
-            .order_by(EtfIntradayQuote.quote_time.desc(), EtfIntradayQuote.id.desc())
+            .limit(safe_batch_size + INTRADAY_CLEANUP_PROTECTED_ROW_ALLOWANCE + 1)
         )
-        existing = await session.scalar(
+    ).all()
+    if len(quote_rows) > safe_batch_size + INTRADAY_CLEANUP_PROTECTED_ROW_ALLOWANCE:
+        await session.rollback()
+        return {
+            "job_status": "partial",
+            "job_message": "受保护行使日内分组超过内存上限。",
+            "retention_trading_days": safe_days,
+            "cutoff_date": cutoff_date.isoformat(),
+            "summarized_groups": 0,
+            "deleted_rows": 0,
+            "batch_size": safe_batch_size,
+            "unavailable_reason": "intraday_cleanup_group_memory_bound_exceeded",
+            "message": "日内分组超过内存上限，本次未删除。",
+        }
+
+    rows_by_group: dict[tuple[str, date], list[Any]] = {}
+    for row in quote_rows:
+        rows_by_group.setdefault((row.etf_code, row.trade_date), []).append(row)
+    existing_summaries = (
+        await session.scalars(
             select(EtfIntradayDailySummary).where(
-                EtfIntradayDailySummary.etf_code == row.etf_code,
-                EtfIntradayDailySummary.trade_date == row.trade_date,
+                tuple_(
+                    EtfIntradayDailySummary.etf_code,
+                    EtfIntradayDailySummary.trade_date,
+                ).in_(selected_groups)
             )
         )
-        summary = existing or EtfIntradayDailySummary(etf_code=row.etf_code, trade_date=row.trade_date)
-        summary.quote_count = int(row.quote_count or 0)
-        summary.first_quote_time = row.first_quote_time
-        summary.last_quote_time = row.last_quote_time
-        summary.open_price = first_quote.latest_price if first_quote is not None else None
-        summary.close_price = last_quote.latest_price if last_quote is not None else None
-        summary.low_price = float(row.low_price) if row.low_price is not None else None
-        summary.high_price = float(row.high_price) if row.high_price is not None else None
-        summary.total_volume = float(row.total_volume) if row.total_volume is not None else None
-        summary.total_turnover = float(row.total_turnover) if row.total_turnover is not None else None
-        summary.source = last_quote.source if last_quote is not None else None
+    ).all()
+    summary_by_group = {
+        (row.etf_code, row.trade_date): row for row in existing_summaries
+    }
+    for group_key in selected_groups:
+        group_quotes = rows_by_group[group_key]
+        first_quote = group_quotes[0]
+        last_quote = group_quotes[-1]
+        prices = [
+            float(row.latest_price)
+            for row in group_quotes
+            if isfinite(float(row.latest_price)) and float(row.latest_price) > 0
+        ]
+        if len(prices) != len(group_quotes):
+            await session.rollback()
+            return {
+                "job_status": "partial",
+                "job_message": "日内分组包含非有限或非正价格。",
+                "retention_trading_days": safe_days,
+                "cutoff_date": cutoff_date.isoformat(),
+                "summarized_groups": 0,
+                "deleted_rows": 0,
+                "batch_size": safe_batch_size,
+                "unavailable_reason": "intraday_cleanup_invalid_price",
+                "blocked_group": {
+                    "asset_code": group_key[0],
+                    "trade_date": group_key[1].isoformat(),
+                },
+                "message": "价格证据异常，本次未删除任何明细。",
+            }
+        volume_values = [
+            float(row.volume)
+            for row in group_quotes
+            if row.volume is not None and isfinite(float(row.volume))
+        ]
+        turnover_values = [
+            float(row.turnover)
+            for row in group_quotes
+            if row.turnover is not None and isfinite(float(row.turnover))
+        ]
+        existing = summary_by_group.get(group_key)
+        summary = existing or EtfIntradayDailySummary(
+            etf_code=group_key[0],
+            trade_date=group_key[1],
+        )
+        summary.quote_count = len(group_quotes)
+        summary.first_quote_time = first_quote.quote_time
+        summary.last_quote_time = last_quote.quote_time
+        summary.open_price = float(first_quote.latest_price)
+        summary.close_price = float(last_quote.latest_price)
+        summary.low_price = min(prices)
+        summary.high_price = max(prices)
+        summary.total_volume = max(volume_values) if volume_values else None
+        summary.total_turnover = max(turnover_values) if turnover_values else None
+        summary.source = last_quote.source
         summary.summary_json = {
             "retention_trading_days": safe_days,
             "source": "raw_intraday_cleanup",
             "display_only": True,
+            "volume_semantics": "max_cumulative_snapshot",
+            "turnover_semantics": "max_cumulative_snapshot",
+            "decision_evidence_source": False,
         }
         if existing is None:
             session.add(summary)
-        summarized += 1
 
-    delete_result = await session.execute(delete(EtfIntradayQuote).where(EtfIntradayQuote.trade_date < cutoff_date))
+    delete_result = await session.execute(
+        delete(EtfIntradayQuote).where(
+            EtfIntradayQuote.trade_date < cutoff_date,
+            group_filter,
+            ~exists(
+                select(EtfIntradayQuoteEvidenceRef.id).where(
+                    EtfIntradayQuoteEvidenceRef.quote_id == EtfIntradayQuote.id
+                )
+            ),
+        )
+    )
     deleted_rows = int(getattr(delete_result, "rowcount", 0) or 0)
+    checkpoint = await session.get(EtfIntradayCleanupCheckpoint, 1)
+    if checkpoint is None:
+        checkpoint = EtfIntradayCleanupCheckpoint(id=1)
+        session.add(checkpoint)
+    checkpoint.cutoff_date = cutoff_date
+    checkpoint.last_trade_date = selected_groups[-1][1]
+    checkpoint.last_etf_code = selected_groups[-1][0]
+    checkpoint.status = "advanced"
+    checkpoint.deleted_rows_total = int(checkpoint.deleted_rows_total or 0) + deleted_rows
+    checkpoint.summarized_groups_total = int(
+        checkpoint.summarized_groups_total or 0
+    ) + len(selected_groups)
+    checkpoint.details_json = {
+        "retention_trading_days": safe_days,
+        "batch_size": safe_batch_size,
+        "selected_unprotected_count": selected_unprotected_count,
+        "selected_group_count": len(selected_groups),
+        "protected_rows_loaded": len(quote_rows) - selected_unprotected_count,
+    }
+    checkpoint.updated_at = utcnow()
     await session.commit()
     return {
         "retention_trading_days": safe_days,
         "cutoff_date": cutoff_date.isoformat(),
-        "summarized_groups": summarized,
+        "summarized_groups": len(selected_groups),
         "deleted_rows": deleted_rows,
-        "message": "已汇总并清理超过保留窗口的 ETF 盘中明细。",
+        "batch_size": safe_batch_size,
+        "checkpoint": {
+            "last_trade_date": selected_groups[-1][1].isoformat(),
+            "last_etf_code": selected_groups[-1][0],
+        },
+        "message": "已完成一个有界 ETF 盘中明细清理切片。",
     }
 
 async def watch_status(session: AsyncSession) -> IntradayEtfWatchStatusOut:
@@ -1213,6 +1428,3 @@ async def watch_status(session: AsyncSession) -> IntradayEtfWatchStatusOut:
             for item in watchlist.items
         ],
     )
-
-
-

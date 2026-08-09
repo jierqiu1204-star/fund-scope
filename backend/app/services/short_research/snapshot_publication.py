@@ -15,6 +15,10 @@ from app.models.entities import (
     authorize_snapshot_publication,
     utcnow,
 )
+from app.services.intraday_etf.evidence import (
+    PUBLISHED_SNAPSHOT_OWNER,
+    seal_intraday_quote_evidence,
+)
 from app.services.market_data import etf_adjusted_price_provenance_issue
 from app.services.short_research.coverage_policy import (
     evaluate_etf_readiness,
@@ -67,6 +71,18 @@ _REQUIRED_IDENTITY_FIELDS = (
 )
 
 _DRAFT_SEAL_VERSION = "etf-ranking-draft-v1"
+
+
+def _market_decision_cutoff(run: ShortResearchSignalRun) -> datetime | None:
+    value = (run.config_json or {}).get("market_decision_cutoff")
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 def _summary_without_draft_seal(summary: Mapping[str, object] | None) -> dict[str, object]:
@@ -321,6 +337,22 @@ async def publish_full_snapshot(session: AsyncSession, *, run_id: int) -> ShortR
         ).all()
         _validate_publishable(run, items, decision_data_codes=set(barrier.included_codes))
         _verify_snapshot_draft_seal(run, items)
+        market_decision_cutoff = _market_decision_cutoff(run)
+        if market_decision_cutoff is None:
+            raise SnapshotPublicationError(
+                "market decision cutoff is required for intraday evidence sealing"
+            )
+        evidence_seal = await seal_intraday_quote_evidence(
+            session,
+            owner_kind=PUBLISHED_SNAPSHOT_OWNER,
+            owner_id=run.id,
+            asset_codes=[item.asset_code for item in items],
+            trade_date=run.as_of_trade_date,
+            decision_cutoff=market_decision_cutoff,
+            receipt_cutoff=run.data_cutoff,
+        )
+        if evidence_seal["complete"] is not True:
+            raise SnapshotPublicationError("intraday quote evidence seal is incomplete")
         with authorize_snapshot_publication(session.sync_session, run_id=run.id):
             run.publication_state = "published"
             run.published_at = utcnow()

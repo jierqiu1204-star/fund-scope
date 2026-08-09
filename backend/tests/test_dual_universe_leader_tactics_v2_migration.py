@@ -28,7 +28,7 @@ def test_v2_migration_is_the_linear_head() -> None:
     config.set_main_option("script_location", str(VERSIONS_DIR.parent))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["20260809_000063"]
+    assert script.get_heads() == ["20260810_000064"]
     revision = script.get_revision("20260809_000063")
     assert revision is not None
     assert revision.down_revision == "20260804_000062"
