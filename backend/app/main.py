@@ -30,9 +30,17 @@ from app.api.routes.valuation import router as valuation_router
 from app.core.auth import ensure_bootstrap_admin, require_approved_user, require_super_admin
 from app.core.config import Settings, get_settings
 from app.core.db import DatabaseManager
+from app.services.job_runner import reconcile_interrupted_job_runs
 from app.services.scheduler import build_scheduler, register_default_jobs
 
 logger = logging.getLogger(__name__)
+
+_LEADER_TACTICS_JOB_NAMES = (
+    "dual_universe_leader_tactics_v2_capture",
+    "dual_universe_leader_tactics_v2_materialize",
+    "dual_universe_leader_tactics_v2_materialize_etf",
+    "etf_leader_tactics_shadow_continue",
+)
 
 
 def _configure_logging() -> None:
@@ -69,6 +77,15 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
             logger.warning(
                 "认证字段迁移尚未完成，已跳过 qje 管理员启动补齐。请先运行 alembic upgrade head。"
             )
+        try:
+            reconciled = await reconcile_interrupted_job_runs(
+                application.state.db.session,
+                job_names=_LEADER_TACTICS_JOB_NAMES,
+            )
+            if reconciled:
+                logger.warning("已关闭 %s 条因进程重启中断的任务审计记录。", reconciled)
+        except SQLAlchemyError:
+            logger.warning("任务审计表暂不可用，已跳过重启中断记录清理。")
         if start_scheduler:
             application.state.scheduler.start()
         yield

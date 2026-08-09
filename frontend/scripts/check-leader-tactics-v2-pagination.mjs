@@ -36,6 +36,10 @@ const checks = [
       panel.includes("mergeLeaderTacticsV2Pages(pages)")
   },
   {
+    name: "defaults to the materialized A-share research universe",
+    pass: panel.includes('useState<Universe>("ashare")')
+  },
+  {
     name: "renders qualification and availability evidence",
     pass:
       panel.includes("candidate.availability") &&

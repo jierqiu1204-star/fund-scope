@@ -127,3 +127,83 @@ The ETF evidence page MUST NOT label a transparent proxy as the source author's 
 #### Scenario: No live notification evidence exists
 - **WHEN** only factor replay and simulated MA5 lifecycle evidence exist
 - **THEN** email accuracy, provider delivery, and real execution remain explicitly unavailable
+
+### Requirement: Leader panel shows current research observations
+The strategy-evidence page SHALL show the latest complete leader shadow observation with signal date, candidate identity, ETF code and name when available, research score, matched gates, cutoff, coverage, and exclusions, plus accumulation and pending-outcome counts.
+
+#### Scenario: Current observations are available
+- **WHEN** a complete PIT session has one or more frozen-proxy matches
+- **THEN** the panel lists them under `当日 Shadow 观察` and visibly labels the list as unvalidated research rather than a buy recommendation
+
+#### Scenario: Session has no matches
+- **WHEN** the complete session has zero eligible proxy matches
+- **THEN** the panel shows `本日无透明代理命中` together with coverage and leading exclusion reasons
+
+#### Scenario: Session processing is partial
+- **WHEN** the current source checkpoint has remaining ETF pages
+- **THEN** the panel shows progress and MUST NOT display a partial ranked cohort as a completed observation
+
+### Requirement: Leader panel separates accumulation from validation
+The strategy-evidence page SHALL display observation-session count, matured primary-date count, the 252-session and 40-independent-date gates, fold progress, and promotion state as distinct fields.
+
+#### Scenario: Evidence is still accumulating
+- **WHEN** observations exist but promotion gates are incomplete
+- **THEN** the panel shows `研究积累中 / 样本不足` and keeps formal ranking, email accuracy, provider delivery, and confirmed execution unavailable
+
+### Requirement: Leader panel labels historical-price screening as non-PIT research
+The strategy-evidence page SHALL render current-vintage historical-price candidates separately from factual daily Shadow observations and SHALL state that they cannot satisfy promotion gates or constitute a buy signal.
+
+#### Scenario: Historical proxy evidence is complete
+- **WHEN** compatible `leader_tactics_historical_proxy_v1` evidence exists
+- **THEN** the panel shows source signal date, history depth, eligible/source asset counts, candidate formulas, scores, peer group, limitations, and explicit zero PIT-promotion credit in a separate research section
+
+### Requirement: Leader panel displays historical proxy outcomes separately
+The strategy-evidence page SHALL display the latest complete rolling historical-proxy backtest beneath the historical proxy screen and separate it visually from factual PIT observations, formal ranking, and live trade state.
+
+#### Scenario: Complete rolling backtest exists
+- **WHEN** compatible historical backtest evidence is available
+- **THEN** the panel shows signal-date range, source and eligible asset counts, match and zero-match counts, per-candidate multi-horizon net metrics, costs, exclusions, confidence intervals, and current-vintage bias warnings
+
+#### Scenario: Evidence is missing or insufficient
+- **WHEN** the rolling backtest is absent, partial, has no match, or lacks a complete horizon
+- **THEN** the panel shows the exact unavailable reason and MUST NOT display zero as a return or call the screen validated
+
+### Requirement: Leader-tactics evidence supports explicit ETF and A-share views
+The research evidence dashboard SHALL provide an `ETF` and `个股` universe switch for leader-tactics V2, default to `ETF`, preserve the selected `as_of` cutoff, and never merge candidates or coverage denominators across universes.
+
+#### Scenario: User switches to individual stocks
+- **WHEN** the user selects `个股`
+- **THEN** the dashboard requests the A-share research surface and shows its own candidate count, coverage, provenance, and availability state
+
+#### Scenario: One universe is unavailable
+- **WHEN** A-share evidence is unavailable but ETF evidence exists, or vice versa
+- **THEN** the unavailable view shows its exact reason and the dashboard does not silently display the other universe
+
+### Requirement: Leader-tactics candidates are filterable by formula and state
+The dashboard SHALL offer formula filters for all, breakout, base launch, and former-leader repair, plus lifecycle filters for preparing, confirmed, and invalidated, and SHALL show deterministic paginated candidate rows.
+
+#### Scenario: User filters confirmed base-launch candidates
+- **WHEN** the selected formula is base launch and the selected state is confirmed
+- **THEN** only matching rows are displayed with code, name, theme, score, signal date, confirmation date, and cutoff
+
+#### Scenario: Filtered result is empty
+- **WHEN** no row matches the selected filters
+- **THEN** the page shows a Chinese empty state with candidate and exclusion counts rather than implying a loading failure
+
+### Requirement: Dashboard distinguishes disclosed rules from transparent proxies
+The leader-tactics panel SHALL display the source-disclosed conditions, the exact transparent proxy identity, unavailable proprietary elements, and a visible statement that the result is research evidence rather than the author's original signal or an investment recommendation.
+
+#### Scenario: User opens candidate details
+- **WHEN** a candidate row is expanded
+- **THEN** the dashboard shows every gate fact, failed or passed state, formula version, source identity, data cutoff, manifest hash, and non-equivalence notice
+
+### Requirement: Dashboard separates lifecycle, validation, and live provenance
+The dashboard SHALL present preparing or confirmed research signals, historical replay outcomes, validation conclusions, notifications, and executions as separate evidence layers.
+
+#### Scenario: A confirmed research signal exists without execution
+- **WHEN** the V2 state machine confirms a candidate but no production notification or user-confirmed trade exists
+- **THEN** the page shows a confirmed research proxy while notification and execution remain unavailable
+
+#### Scenario: Validation samples are insufficient
+- **WHEN** the promotion gates lack enough factual PIT sessions or independent dates
+- **THEN** the panel displays `样本不足` with exact counts and MUST NOT describe the formula as validated or currently usable for live trading

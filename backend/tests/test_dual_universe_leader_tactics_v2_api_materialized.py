@@ -10,6 +10,7 @@ from tests.test_dual_universe_leader_tactics_v2_storage import _seed_read_db
 async def test_enabled_v2_api_paginates_one_manifest_and_keeps_summary_stable(app, client) -> None:
     await _seed_read_db(app.state.db.engine)
     app.state.settings.etf_leader_tactics_v2_api_enabled = True
+    app.state.settings.etf_leader_tactics_v2_etf_materialize_enabled = True
 
     first_response = await client.get(
         "/api/short-research/leader-tactics-v2/candidates",
@@ -17,7 +18,7 @@ async def test_enabled_v2_api_paginates_one_manifest_and_keeps_summary_stable(ap
     )
     assert first_response.status_code == 200
     first = first_response.json()
-    assert [row["asset_code"] for row in first["candidates"]] == ["000003", "000005"]
+    assert [row["asset_code"] for row in first["candidates"]] == ["000001", "000003"]
 
     second_response = await client.get(
         "/api/short-research/leader-tactics-v2/candidates",
@@ -25,7 +26,7 @@ async def test_enabled_v2_api_paginates_one_manifest_and_keeps_summary_stable(ap
     )
     assert second_response.status_code == 200
     second = second_response.json()
-    assert [row["asset_code"] for row in second["candidates"]] == ["000006", "000001"]
+    assert [row["asset_code"] for row in second["candidates"]] == ["000005", "000006"]
     assert first["manifest_hash"] == second["manifest_hash"]
     assert first["summary"] == second["summary"]
 
@@ -53,6 +54,7 @@ async def test_enabled_v2_api_paginates_one_manifest_and_keeps_summary_stable(ap
 async def test_enabled_v2_api_hides_corrupt_latest_manifest(app, client, corruption: str) -> None:
     manifest_ids = await _seed_read_db(app.state.db.engine)
     app.state.settings.etf_leader_tactics_v2_api_enabled = True
+    app.state.settings.etf_leader_tactics_v2_etf_materialize_enabled = True
     async with app.state.db.engine.begin() as connection:
         await connection.execute(
             text(

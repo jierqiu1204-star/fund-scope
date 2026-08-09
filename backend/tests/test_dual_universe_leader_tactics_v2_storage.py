@@ -289,8 +289,14 @@ async def test_candidates_isolate_latest_manifest_and_use_composite_cursor(tmp_p
         as_of_same_day = await read_v2_candidates(connection, as_of="2026-08-01", limit=10)
     await engine.dispose()
 
-    assert [row["asset_code"] for row in first["candidates"]] == ["000003", "000005"]
-    assert [row["asset_code"] for row in second["candidates"]] == ["000006", "000001"]
+    assert [row["asset_code"] for row in first["candidates"]] == ["000001", "000003"]
+    assert [row["asset_code"] for row in second["candidates"]] == ["000005", "000006"]
+    assert [row["score"] for row in first["candidates"] + second["candidates"]] == [
+        0.90,
+        0.80,
+        0.70,
+        0.60,
+    ]
     assert first["manifest_hash"] == second["manifest_hash"] == manifest_ids["new"]
     assert first["summary"] == second["summary"]
     assert first["summary"]["observation_count"] == 6
@@ -381,12 +387,14 @@ async def test_transition_state_is_causal_to_as_of(tmp_path) -> None:
         before = await read_v2_candidates(connection, as_of="2026-08-05", state="confirmed")
         after = await read_v2_candidates(connection, as_of="2026-08-06", state="confirmed")
         invalidated = await read_v2_candidates(connection, as_of="2026-08-07", state="invalidated")
+        current = await read_v2_candidates(connection, state="invalidated")
     await engine.dispose()
 
     assert before["candidates"] == []
     assert [row["asset_code"] for row in after["candidates"]] == ["000001"]
     assert str(after["candidates"][0]["transition_date"])[:10] == "2026-08-06"
     assert [row["asset_code"] for row in invalidated["candidates"]] == ["000001"]
+    assert [row["asset_code"] for row in current["candidates"]] == ["000001"]
 
 
 @pytest.mark.asyncio

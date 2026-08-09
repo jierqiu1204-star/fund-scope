@@ -161,3 +161,22 @@ def test_v2_etf_screen_consumes_neutral_data_not_ranking_outputs() -> None:
         ranking_path,
         ("etf_ranking_replay_inputs",),
     )
+
+
+def test_v2_leader_tactics_cannot_write_comprehensive_ranking_or_actions() -> None:
+    paths = (
+        ROOT / "workflows" / "dual_universe_leader_tactics_v2_jobs.py",
+        ROOT / "strategy_lab" / "dual_universe_leader_tactics_v2_storage.py",
+        ROOT / "strategy_lab" / "dual_universe_leader_tactics_v2_etf_inputs.py",
+    )
+    forbidden = (
+        "etf_ranking_snapshots",
+        "short_research_signal_items",
+        "app.services.short_research.service",
+        "app.services.portfolio_allocation",
+        "app.services.tracked_positions",
+        "app.services.risk_alerts",
+        "app.services.notifier",
+    )
+    for path in paths:
+        _assert_no_forbidden_imports(path, forbidden)

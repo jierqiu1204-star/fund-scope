@@ -7,7 +7,12 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.models.entities import JobRun
-from app.services.job_runner import run_job, start_background_job
+from app.services.job_runner import (
+    INTERRUPTED_BY_RESTART,
+    reconcile_interrupted_job_runs,
+    run_job,
+    start_background_job,
+)
 
 
 @pytest.mark.asyncio
@@ -15,12 +20,22 @@ from app.services.job_runner import run_job, start_background_job
     ("result", "expected_status", "expected_error"),
     [
         ({"job_status": "skipped", "job_message": "daily history deferred"}, "skipped", None),
-        ({"job_status": "partial", "job_message": "provider returned partial data"}, "partial", None),
-        ({"job_status": "failed", "job_message": "coverage below threshold"}, "failed", "coverage below threshold"),
+        (
+            {"job_status": "partial", "job_message": "provider returned partial data"},
+            "partial",
+            None,
+        ),
+        (
+            {"job_status": "failed", "job_message": "coverage below threshold"},
+            "failed",
+            "coverage below threshold",
+        ),
         ({"rows_inserted": 1}, "success", None),
     ],
 )
-async def test_run_job_persists_business_result_status(app, result, expected_status, expected_error) -> None:
+async def test_run_job_persists_business_result_status(
+    app, result, expected_status, expected_error
+) -> None:
     async def job(_session):
         return result
 
@@ -28,7 +43,9 @@ async def test_run_job_persists_business_result_status(app, result, expected_sta
 
     async with app.state.db.session() as session:
         job_run = await session.scalar(
-            select(JobRun).where(JobRun.job_name == "business_status_probe").order_by(JobRun.id.desc())
+            select(JobRun)
+            .where(JobRun.job_name == "business_status_probe")
+            .order_by(JobRun.id.desc())
         )
 
     assert returned == result
@@ -49,7 +66,9 @@ async def test_run_job_rolls_back_partial_business_writes_before_recording_failu
         await run_job(app.state.db.session, "rollback_probe", job)
 
     async with app.state.db.session() as session:
-        partial = await session.scalar(select(JobRun).where(JobRun.job_name == "uncommitted_business_write"))
+        partial = await session.scalar(
+            select(JobRun).where(JobRun.job_name == "uncommitted_business_write")
+        )
         recorded = await session.scalar(select(JobRun).where(JobRun.job_name == "rollback_probe"))
 
     assert partial is None
@@ -61,7 +80,9 @@ async def test_run_job_rolls_back_partial_business_writes_before_recording_failu
 @pytest.mark.asyncio
 async def test_run_job_recovers_failed_flush_before_recording_failure(app) -> None:
     async def job(session):
-        current = await session.scalar(select(JobRun).where(JobRun.job_name == "failed_flush_probe"))
+        current = await session.scalar(
+            select(JobRun).where(JobRun.job_name == "failed_flush_probe")
+        )
         assert current is not None
         session.add(JobRun(id=current.id, job_name="duplicate_primary_key", status="running"))
         await session.flush()
@@ -71,11 +92,48 @@ async def test_run_job_recovers_failed_flush_before_recording_failure(app) -> No
         await run_job(app.state.db.session, "failed_flush_probe", job)
 
     async with app.state.db.session() as session:
-        recorded = await session.scalar(select(JobRun).where(JobRun.job_name == "failed_flush_probe"))
+        recorded = await session.scalar(
+            select(JobRun).where(JobRun.job_name == "failed_flush_probe")
+        )
 
     assert recorded is not None
     assert recorded.status == "failed"
     assert recorded.error_message
+
+
+@pytest.mark.asyncio
+async def test_startup_reconciles_only_unfinished_running_job_rows(app) -> None:
+    async with app.state.db.session() as session:
+        session.add_all(
+            [
+                JobRun(job_name="stale", status="running"),
+                JobRun(job_name="finished", status="success"),
+                JobRun(job_name="unrelated-ranking", status="running"),
+            ]
+        )
+        await session.commit()
+
+    reconciled = await reconcile_interrupted_job_runs(
+        app.state.db.session,
+        job_names=("stale",),
+    )
+
+    async with app.state.db.session() as session:
+        stale = await session.scalar(select(JobRun).where(JobRun.job_name == "stale"))
+        finished = await session.scalar(select(JobRun).where(JobRun.job_name == "finished"))
+        unrelated = await session.scalar(
+            select(JobRun).where(JobRun.job_name == "unrelated-ranking")
+        )
+
+    assert reconciled == 1
+    assert stale is not None
+    assert stale.status == "failed"
+    assert stale.finished_at is not None
+    assert stale.error_message == INTERRUPTED_BY_RESTART
+    assert finished is not None
+    assert finished.status == "success"
+    assert unrelated is not None
+    assert unrelated.status == "running"
 
 
 @pytest.mark.asyncio
@@ -89,7 +147,9 @@ async def test_background_job_persists_business_result_status(app) -> None:
     job_run = None
     for _ in range(20):
         async with app.state.db.session() as session:
-            job_run = await session.scalar(select(JobRun).where(JobRun.job_name == "background_status_probe"))
+            job_run = await session.scalar(
+                select(JobRun).where(JobRun.job_name == "background_status_probe")
+            )
         if job_run is not None and job_run.status != "running":
             break
         await asyncio.sleep(0.01)

@@ -86,6 +86,8 @@ export const LEADER_TACTICS_V2_RESEARCH_COPY = {
 
 const unavailableLabels: Record<string, string> = {
   leader_tactics_v2_api_disabled: "V2 研究 API 仍处于关闭状态。",
+  leader_tactics_v2_etf_materialization_disabled:
+    "ETF 龙头研究尚未开启物化；个股研究与 ETF 综合排名不受影响。",
   leader_tactics_v2_not_materialized: "尚未生成可复现的研究物化结果。",
   leader_tactics_v2_empty_materialization: "最新物化结果没有候选观测。",
   leader_tactics_v2_invalid_filter: "筛选条件或分页游标无效。",

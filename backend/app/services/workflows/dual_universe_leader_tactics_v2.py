@@ -433,6 +433,7 @@ async def run_v2_capture_batch(
             checkpoint=result.checkpoint,
             lease_owner=effective_lease_owner,
             lease_expires_at=lease_expires_at,
+            previous_checkpoint=checkpoint,
         )
         checkpoint_saved = True
         return result

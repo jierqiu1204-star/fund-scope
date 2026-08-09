@@ -46,7 +46,7 @@ function provenanceValue(provenance: Record<string, unknown>, key: string) {
 }
 
 export function LeaderTacticsV2Panel() {
-  const [universe, setUniverse] = useState<Universe>("etf");
+  const [universe, setUniverse] = useState<Universe>("ashare");
   const [formula, setFormula] = useState<Formula>("all");
   const [state, setState] = useState<Lifecycle>("all");
   const [asOf, setAsOf] = useState("");

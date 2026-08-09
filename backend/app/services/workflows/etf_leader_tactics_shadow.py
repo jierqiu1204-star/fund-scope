@@ -86,9 +86,7 @@ LEADER_CODE_VERSION_MISSING = "leader_tactics_code_version_missing"
 LEADER_PIT_SESSIONS_INSUFFICIENT = "leader_tactics_requires_252_pit_sessions"
 LEADER_PIT_SOURCE_UNAVAILABLE = "leader_tactics_complete_pit_source_unavailable"
 LEADER_PIT_BACKLOG_SCAN_LIMIT = "leader_tactics_pit_backlog_scan_limit"
-LEADER_HISTORICAL_TAXONOMY_MISSING = (
-    "leader_historical_taxonomy_artifacts_unavailable"
-)
+LEADER_HISTORICAL_TAXONOMY_MISSING = "leader_historical_taxonomy_artifacts_unavailable"
 MINIMUM_LEADER_PIT_SESSIONS = 252
 MAX_SOURCE_DISCOVERY_ROWS = 512
 MAX_SOURCE_ROWS_PER_PAGE = 16 * REPAIR_HISTORY_SESSIONS * 4
@@ -113,13 +111,11 @@ def _complete_pit_source_coverage_clause():
                 ETF_READINESS_POLICY_VERSION,
             )
         ),
-        EtfPitCaptureSource.warmup_coverage_ratio
-        >= ETF_COMPLETE_SCORE_COVERAGE,
+        EtfPitCaptureSource.warmup_coverage_ratio >= ETF_COMPLETE_SCORE_COVERAGE,
     )
     legacy_policy = and_(
         or_(
-            EtfPitCaptureSource.readiness_policy_version
-            .notin_(
+            EtfPitCaptureSource.readiness_policy_version.notin_(
                 (
                     ETF_PREVIOUS_READINESS_POLICY_VERSION,
                     ETF_READINESS_POLICY_VERSION,
@@ -127,8 +123,7 @@ def _complete_pit_source_coverage_clause():
             ),
             EtfPitCaptureSource.readiness_policy_version.is_(None),
         ),
-        EtfPitCaptureSource.warmup_coverage_ratio
-        >= ETF_LEGACY_COMPLETE_SCORE_COVERAGE,
+        EtfPitCaptureSource.warmup_coverage_ratio >= ETF_LEGACY_COMPLETE_SCORE_COVERAGE,
     )
     return or_(current_policy, legacy_policy)
 
@@ -137,8 +132,7 @@ async def _pit_session_count(session: AsyncSession) -> int:
     value = await session.scalar(
         select(func.count(distinct(EtfPitCaptureSource.as_of_trade_date))).where(
             EtfPitCaptureSource.readiness_state == "complete",
-            EtfPitCaptureSource.target_date_coverage_ratio
-            >= ETF_DAILY_DECISION_MIN_COVERAGE,
+            EtfPitCaptureSource.target_date_coverage_ratio >= ETF_DAILY_DECISION_MIN_COVERAGE,
             _complete_pit_source_coverage_clause(),
         )
     )
@@ -189,9 +183,7 @@ def build_leader_continuation_manifest_for_source(
             "schema_version": "leader_observation_lane_v1",
             "observation_manifest_hash": observation.manifest_hash,
             "hypothesis_registry_hash": LEADER_HYPOTHESIS_REGISTRY.registry_hash,
-            "candidate_registry_hash": (
-                FROZEN_LEADER_CANDIDATE_REGISTRY.registry_hash
-            ),
+            "candidate_registry_hash": (FROZEN_LEADER_CANDIDATE_REGISTRY.registry_hash),
         }
     )
     factor_manifest_hash = stable_contract_hash(
@@ -228,8 +220,7 @@ async def _oldest_due_source(
             select(EtfPitCaptureSource)
             .where(
                 EtfPitCaptureSource.readiness_state == "complete",
-                EtfPitCaptureSource.target_date_coverage_ratio
-                >= ETF_DAILY_DECISION_MIN_COVERAGE,
+                EtfPitCaptureSource.target_date_coverage_ratio >= ETF_DAILY_DECISION_MIN_COVERAGE,
                 _complete_pit_source_coverage_clause(),
             )
             .order_by(
@@ -255,9 +246,7 @@ async def _oldest_due_source(
                     EtfFactorExperimentEvidence.experiment_family
                     == LEADER_OBSERVATION_EXPERIMENT_FAMILY,
                     EtfFactorExperimentEvidence.code_version == code_version,
-                    EtfFactorExperimentEvidence.manifest_hash.in_(
-                        tuple(manifest_hashes.values())
-                    ),
+                    EtfFactorExperimentEvidence.manifest_hash.in_(tuple(manifest_hashes.values())),
                 )
             )
         ).all()
@@ -277,8 +266,7 @@ async def _latest_maturity_source(
         select(EtfPitCaptureSource)
         .where(
             EtfPitCaptureSource.readiness_state == "complete",
-            EtfPitCaptureSource.target_date_coverage_ratio
-            >= ETF_DAILY_DECISION_MIN_COVERAGE,
+            EtfPitCaptureSource.target_date_coverage_ratio >= ETF_DAILY_DECISION_MIN_COVERAGE,
             _complete_pit_source_coverage_clause(),
             EtfPitCaptureSource.as_of_trade_date > after_date,
         )
@@ -311,8 +299,7 @@ async def _oldest_due_maturity(
         await session.scalars(
             select(EtfFactorExperimentEvidence)
             .where(
-                EtfFactorExperimentEvidence.experiment_family
-                == LEADER_MATURITY_EXPERIMENT_FAMILY,
+                EtfFactorExperimentEvidence.experiment_family == LEADER_MATURITY_EXPERIMENT_FAMILY,
                 EtfFactorExperimentEvidence.code_version == code_version,
             )
             .order_by(EtfFactorExperimentEvidence.created_at.desc())
@@ -338,9 +325,7 @@ async def _oldest_due_maturity(
             latest_report = dict(latest.report_json or {})
             if int(latest_report.get("pending_outcome_count") or 0) == 0:
                 continue
-            latest_cutoff = datetime.fromisoformat(
-                str(latest_report["outcome_cutoff"])
-            )
+            latest_cutoff = datetime.fromisoformat(str(latest_report["outcome_cutoff"]))
             if latest_cutoff >= _local(source.replay_visibility_cutoff):
                 continue
         return observation, source
@@ -373,12 +358,9 @@ def _decision_eligible_outcome_prices(
             or float(close) <= 0
         ):
             continue
-        values.setdefault(fact.etf_code, []).append(
-            (fact.trade_date, float(close))
-        )
+        values.setdefault(fact.etf_code, []).append((fact.trade_date, float(close)))
     return {
-        code: tuple(sorted(set(rows), key=lambda item: item[0]))
-        for code, rows in values.items()
+        code: tuple(sorted(set(rows), key=lambda item: item[0])) for code, rows in values.items()
     }
 
 
@@ -475,9 +457,7 @@ async def mature_oldest_leader_observation(
         cutoff=cutoff,
     )
     ma5_prices = _decision_eligible_ma5_prices(facts, cutoff=cutoff)
-    round_trip_cost_bps = 2.0 * (
-        RANKING_FEE_BPS_PER_SIDE + RANKING_SLIPPAGE_BPS_PER_SIDE
-    )
+    round_trip_cost_bps = 2.0 * (RANKING_FEE_BPS_PER_SIDE + RANKING_SLIPPAGE_BPS_PER_SIDE)
     outcomes = tuple(
         build_leader_matured_outcome(
             candidate_id=str(item["candidate_id"]),
@@ -485,9 +465,7 @@ async def mature_oldest_leader_observation(
             signal_date=date.fromisoformat(str(item["signal_date"])),
             horizon_sessions=int(horizon),
             feature_hash=str(item["feature_hash"]),
-            adjusted_closes_after_signal=prices.get(
-                str(item["asset_code"]), ()
-            ),
+            adjusted_closes_after_signal=prices.get(str(item["asset_code"]), ()),
             round_trip_cost_bps=round_trip_cost_bps,
         )
         for item in pending
@@ -503,13 +481,7 @@ async def mature_oldest_leader_observation(
         for item in pending
     )
     trading_sessions = tuple(
-        sorted(
-            {
-                row.session_date
-                for rows in ma5_prices.values()
-                for row in rows
-            }
-        )
+        sorted({row.session_date for rows in ma5_prices.values() for row in rows})
     )
     ma5_results = evaluate_ma5_exit_proxy(
         entries,
@@ -529,9 +501,7 @@ async def mature_oldest_leader_observation(
         session,
         manifest=maturity_manifest,
         outcomes=outcomes,
-        ma5_policy_shadow=tuple(
-            _ma5_result_payload(item) for item in ma5_results
-        ),
+        ma5_policy_shadow=tuple(_ma5_result_payload(item) for item in ma5_results),
     )
     await session.commit()
     status_counts = Counter(item.status for item in outcomes)
@@ -556,8 +526,7 @@ def _artifact_store_for_manifest(
     manifest: LeaderContinuationManifest,
 ) -> ReplayArtifactStore:
     return ReplayArtifactStore(
-        Path(settings.etf_leader_tactics_artifact_dir)
-        / f"{manifest.manifest_hash}.sqlite3"
+        Path(settings.etf_leader_tactics_artifact_dir) / f"{manifest.manifest_hash}.sqlite3"
     )
 
 
@@ -632,9 +601,7 @@ def build_production_leader_observation_handlers(
         replay_reasons: dict[str, list[str]] = {}
         for item in snapshot.exclusions:
             if item.asset_code in snapshot.page_asset_codes:
-                replay_reasons.setdefault(str(item.asset_code), []).append(
-                    item.reason.value
-                )
+                replay_reasons.setdefault(str(item.asset_code), []).append(item.reason.value)
         artifacts: list[LeaderPageArtifact] = []
         exclusions: Counter[str] = Counter()
         for code in snapshot.page_asset_codes:
@@ -676,8 +643,7 @@ def build_production_leader_observation_handlers(
                     "expected": len(snapshot.authoritative_universe),
                     "available": len(snapshot.eligible_inputs),
                     "ratio": (
-                        len(snapshot.eligible_inputs)
-                        / max(1, len(snapshot.page_asset_codes))
+                        len(snapshot.eligible_inputs) / max(1, len(snapshot.page_asset_codes))
                     ),
                 }
             },
@@ -728,21 +694,13 @@ def build_production_leader_observation_handlers(
                     payload={
                         "kind": "session_observation",
                         "observation_hash": finalized.observation_hash,
-                        "current_matches": [
-                            item.to_dict() for item in finalized.current_matches
-                        ],
-                        "available_observation_count": (
-                            finalized.available_observation_count
-                        ),
-                        "qualifying_observation_count": (
-                            finalized.qualifying_observation_count
-                        ),
+                        "current_matches": [item.to_dict() for item in finalized.current_matches],
+                        "available_observation_count": (finalized.available_observation_count),
+                        "qualifying_observation_count": (finalized.qualifying_observation_count),
                         "exclusion_counts": finalized.exclusion_counts,
                         "pending_outcomes": list(finalized.pending_outcomes),
                         "input_asset_count": len(payloads),
-                        "feature_hash_count": len(
-                            finalized.all_observation_hashes
-                        ),
+                        "feature_hash_count": len(finalized.all_observation_hashes),
                     },
                 ),
             ),
@@ -775,25 +733,26 @@ def build_production_leader_observation_handlers(
         if summary is None:
             raise RuntimeError("sealed leader observation summary is missing")
         eligible_sessions = await _pit_session_count(session)
-        materialized_sessions = int(
-            await session.scalar(
-                select(func.count())
-                .select_from(EtfFactorExperimentEvidence)
-                .where(
-                    EtfFactorExperimentEvidence.experiment_family
-                    == LEADER_OBSERVATION_EXPERIMENT_FAMILY
+        materialized_sessions = (
+            int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(EtfFactorExperimentEvidence)
+                    .where(
+                        EtfFactorExperimentEvidence.experiment_family
+                        == LEADER_OBSERVATION_EXPERIMENT_FAMILY
+                    )
                 )
+                or 0
             )
-            or 0
-        ) + 1
+            + 1
+        )
         matches = tuple(
             LeaderObservationMatch(
                 candidate_id=str(item["candidate_id"]),
                 asset_code=str(item["asset_code"]),
                 asset_name=(
-                    str(item["asset_name"])
-                    if item.get("asset_name") is not None
-                    else None
+                    str(item["asset_name"]) if item.get("asset_name") is not None else None
                 ),
                 score=float(item["score"]),
                 rank=int(item["rank"]),
@@ -829,22 +788,14 @@ def build_production_leader_observation_handlers(
             current_matches=matches,
             exclusion_counts={
                 str(key): int(value)
-                for key, value in dict(
-                    summary.get("exclusion_counts") or {}
-                ).items()
+                for key, value in dict(summary.get("exclusion_counts") or {}).items()
             },
-            available_observation_count=int(
-                summary["available_observation_count"]
-            ),
-            qualifying_observation_count=int(
-                summary["qualifying_observation_count"]
-            ),
+            available_observation_count=int(summary["available_observation_count"]),
+            qualifying_observation_count=int(summary["qualifying_observation_count"]),
             current_observations_truncated=(
                 int(summary["qualifying_observation_count"]) > len(matches)
             ),
-            pending_outcome_count=len(
-                list(summary.get("pending_outcomes") or ())
-            ),
+            pending_outcome_count=len(list(summary.get("pending_outcomes") or ())),
             matured_outcome_count=0,
         )
         await persist_leader_observation_evidence(
@@ -860,9 +811,7 @@ def build_production_leader_observation_handlers(
                 LeaderPageArtifact(
                     item_key="observation-evidence",
                     payload={
-                        "observation_manifest_hash": (
-                            observation_manifest.manifest_hash
-                        ),
+                        "observation_manifest_hash": (observation_manifest.manifest_hash),
                         "materialized_pit_sessions": materialized_sessions,
                         "research_only": True,
                         "production_mutation_allowed": False,
@@ -884,6 +833,7 @@ def _unavailable(reason: str, **details: Any) -> dict[str, Any]:
     return {
         "job_name": LEADER_CONTINUATION_JOB_NAME,
         "status": "insufficient_data" if details else "disabled",
+        "job_status": "skipped",
         "unavailable_reason": reason,
         "live_provider_calls": 0,
         "advanced_pages": 0,
@@ -891,6 +841,47 @@ def _unavailable(reason: str, **details: Any) -> dict[str, Any]:
         "research_only": True,
         "production_mutation_allowed": False,
         **details,
+    }
+
+
+async def preflight_etf_leader_tactics_shadow_job(
+    session: AsyncSession,
+    *,
+    settings: Settings,
+) -> dict[str, Any]:
+    """Avoid creating high-frequency JobRun rows when no research page is due."""
+
+    if not settings.etf_leader_tactics_continuation_enabled:
+        return {"due": False, "reason": LEADER_CONTINUATION_DISABLED}
+    code_version = settings.etf_leader_tactics_code_version.strip()
+    if not code_version:
+        return {"due": False, "reason": LEADER_CODE_VERSION_MISSING}
+    source, scan_exhausted = await _oldest_due_source(
+        session,
+        code_version=code_version,
+    )
+    if source is not None:
+        return {
+            "due": True,
+            "reason": "leader_tactics_observation_page_due",
+            "source_id": int(source.id),
+        }
+    maturity = await _oldest_due_maturity(session, code_version=code_version)
+    if maturity is not None:
+        observation, source = maturity
+        return {
+            "due": True,
+            "reason": "leader_tactics_maturity_page_due",
+            "observation_manifest_hash": observation.manifest_hash,
+            "source_id": int(source.id),
+        }
+    return {
+        "due": False,
+        "reason": (
+            LEADER_PIT_BACKLOG_SCAN_LIMIT if scan_exhausted else LEADER_PIT_SOURCE_UNAVAILABLE
+        ),
+        "eligible_pit_sessions": await _pit_session_count(session),
+        "required_pit_sessions": MINIMUM_LEADER_PIT_SESSIONS,
     }
 
 

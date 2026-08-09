@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.config import Settings
+from app.models.entities import JobRun
 from app.services.strategy_lab.etf_point_in_time_decision_data import EtfDecisionDataSnapshot
 from app.services.workflows import dual_universe_leader_tactics_v2_jobs as jobs
 from app.services.workflows.dual_universe_leader_tactics_v2 import AshareReadinessReport
@@ -52,6 +53,35 @@ def test_capture_signal_date_continues_last_closed_session_without_backdating() 
     assert jobs._capture_signal_date(datetime(2026, 8, 7, 14, 59)) is None
     assert jobs._capture_signal_date(datetime(2026, 8, 7, 15, 0)) == date(2026, 8, 7)
     assert jobs._capture_signal_date(datetime(2026, 8, 8, 0, 1)) == date(2026, 8, 7)
+
+
+@pytest.mark.asyncio
+async def test_materialization_preserves_degraded_capture_provider_health(app) -> None:
+    async with app.state.db.session() as session:
+        session.add(
+            JobRun(
+                job_name=jobs.V2_CAPTURE_JOB_NAME,
+                status="partial",
+                started_at=datetime(2026, 8, 7, 15, 30),
+                finished_at=datetime(2026, 8, 7, 15, 31),
+                details_json={
+                    "signal_date": "2026-08-07",
+                    "provider_health": {
+                        "provider": "tickflow",
+                        "status": "degraded",
+                    },
+                },
+            )
+        )
+        await session.commit()
+        health = await jobs._latest_capture_provider_health(
+            session,
+            signal_date=date(2026, 8, 7),
+            as_of=datetime(2026, 8, 8, 9, 12),
+        )
+
+    assert health == (("tickflow", "degraded"),)
+
 
 @pytest.mark.asyncio
 async def test_materialization_job_is_default_off_without_database_work(monkeypatch) -> None:
@@ -148,14 +178,16 @@ async def test_ready_materialization_reads_persisted_facts_and_writes_one_manife
     async def read_inputs(*_args, **kwargs):
         calls.append("inputs")
         captured["decision_mode"] = kwargs.get("decision_mode")
-        captured["membership_evaluation_date"] = kwargs.get(
-            "membership_evaluation_date"
-        )
+        captured["membership_evaluation_date"] = kwargs.get("membership_evaluation_date")
         captured["next_eligible_date"] = kwargs.get("next_eligible_date")
         return inputs
 
-    def screen(*_args, **_kwargs):
+    async def provider_health(*_args, **_kwargs):
+        return (("eastmoney", "degraded"),)
+
+    def screen(*_args, **kwargs):
         calls.append("screen")
+        captured["provider_health"] = kwargs.get("provider_health")
         return screen_result
 
     async def persist(*_args, **_kwargs):
@@ -167,6 +199,7 @@ async def test_ready_materialization_reads_persisted_facts_and_writes_one_manife
     monkeypatch.setattr(jobs, "available_memory_bytes", lambda: 2**30)
     monkeypatch.setattr(jobs, "read_ashare_authoritative_assets", read_assets)
     monkeypatch.setattr(jobs, "read_ashare_asset_inputs", read_inputs)
+    monkeypatch.setattr(jobs, "_latest_capture_provider_health", provider_health)
     monkeypatch.setattr(jobs, "screen_dual_universe", screen)
     monkeypatch.setattr(jobs, "materialize_v2_result", persist)
 
@@ -187,6 +220,7 @@ async def test_ready_materialization_reads_persisted_facts_and_writes_one_manife
         "decision_mode": "post_close_watchlist",
         "membership_evaluation_date": date(2026, 8, 5),
         "next_eligible_date": date(2026, 8, 6),
+        "provider_health": (("eastmoney", "degraded"),),
     }
     assert result["notification_provenance"] == "none"
     assert result["execution_provenance"] == "none"
@@ -207,6 +241,34 @@ async def test_etf_materialization_is_default_off_without_database_work(monkeypa
 
     assert result["status"] == "skipped"
     assert result["research_only"] is True
+
+
+@pytest.mark.asyncio
+async def test_etf_materialization_rejects_stale_ready_snapshot_before_input_load(
+    monkeypatch,
+) -> None:
+    snapshot = _etf_decision_snapshot()
+
+    async def latest(*_args, **_kwargs):
+        return snapshot
+
+    async def unexpected(*_args, **_kwargs):
+        raise AssertionError("stale ETF snapshot must stop before materialization reads")
+
+    monkeypatch.setattr(jobs, "latest_ready_etf_decision_data_snapshot", latest)
+    monkeypatch.setattr(jobs, "get_v2_materialized_manifest", unexpected)
+    monkeypatch.setattr(jobs, "read_etf_v2_asset_inputs", unexpected)
+
+    result = await jobs.dual_universe_leader_tactics_v2_etf_materialize_job(
+        object(),  # type: ignore[arg-type]
+        _settings(etf_enabled=True),
+        now=datetime(2026, 8, 6, 9, 10),
+    )
+
+    assert result["status"] == "waiting"
+    assert result["unavailable_reason"] == "etf_decision_data_snapshot_stale"
+    assert result["signal_date"] == "2026-08-04"
+    assert result["required_trade_date"] == "2026-08-05"
 
 
 @pytest.mark.asyncio
@@ -271,7 +333,10 @@ async def test_etf_materialization_reads_persisted_pit_inputs_and_writes_manifes
     assert result["candidate_codes"] == ["510001"]
     assert result["readiness"]["provider_health"] == {"eastmoney": "healthy"}
     assert result["decision_data_snapshot_id"] == 7
-    assert result["readiness"]["decision_data_snapshot"]["provenance_kind"] == "persisted_etf_pit_decision_data"
+    assert (
+        result["readiness"]["decision_data_snapshot"]["provenance_kind"]
+        == "persisted_etf_pit_decision_data"
+    )
     assert "source_signal_run_id" not in result["readiness"]["decision_data_snapshot"]
     assert result["notification_provenance"] == "none"
     assert result["execution_provenance"] == "none"

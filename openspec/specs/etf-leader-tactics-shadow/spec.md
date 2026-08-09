@@ -106,3 +106,86 @@ The leader-tactics experiment SHALL use one worker, deterministic pages of at mo
 #### Scenario: Shadow run completes
 - **WHEN** factors, outcomes, diagnostics, or MA5 policy evidence are persisted
 - **THEN** production ranking, allocation, tracked positions, risk alerts, notification logs, SMTP state, score weights, and the existing frozen ranking-candidate registry remain unchanged
+
+### Requirement: Leader observations accumulate before promotion eligibility
+The leader-tactics shadow SHALL begin accumulating research observations from the first complete decision-eligible PIT source and MUST keep collection eligibility separate from promotion eligibility.
+
+#### Scenario: First complete PIT source is available
+- **WHEN** one immutable policy-v2 PIT source passes daily 95-percent and 61-session 90-percent readiness, cutoff, adjusted-price, membership, and provider-health checks
+- **THEN** the system may materialize leader proxy observations for that source with status `insufficient_data` even though fewer than 252 eligible sessions exist
+
+#### Scenario: Promotion sample is short
+- **WHEN** fewer than 252 eligible PIT sessions, 40 independent primary dates, or three chronological validation folds exist
+- **THEN** observations and matured outcomes remain research-only, every missing gate is reported, and no candidate becomes promotion eligible
+
+### Requirement: Leader observation pages preserve cross-sectional correctness
+The leader-tactics shadow SHALL process at most 20 ETFs per bounded page, persist compact per-asset primitives and exclusions, and form candidate scores only after the complete same-session eligible cross-section required by each peer comparison has been sealed.
+
+#### Scenario: Session processing is incomplete
+- **WHEN** only part of a PIT source has been processed
+- **THEN** the checkpoint exposes page progress and exclusions but MUST NOT publish a partial Top N cohort or fill missing peers from another date, baseline, or proxy
+
+#### Scenario: Complete session cross-section is sealed
+- **WHEN** every eligible asset page for the PIT source is complete and all peer-group inputs are finite
+- **THEN** the system deterministically materializes the frozen proxy observations, clone exclusions, scores, ranks, source cutoff, and feature hashes
+
+### Requirement: Leader forward outcomes mature without blocking new observations
+The leader-tactics shadow SHALL preserve pending five-session, ten-session, and MA5 policy-shadow outcomes separately from same-session observations and SHALL mature them only from later decision-eligible adjusted facts visible by the outcome cutoff.
+
+#### Scenario: Future window is incomplete
+- **WHEN** an observation lacks the required later trading sessions or adjusted entry or exit fact
+- **THEN** the outcome remains pending with an exact reason while later PIT observations may continue accumulating
+
+#### Scenario: Future window matures
+- **WHEN** all pre-registered entry, hold, cost, and MA5 lifecycle facts become decision eligible
+- **THEN** the system appends a compatible matured outcome identity without rewriting the original observation or reading a one-time holdout early
+
+### Requirement: Missing PIT taxonomy and regime facts fail closed per asset
+The leader-tactics shadow SHALL use only taxonomy, peer, sector-trend, baseline-score, and market-regime facts bound to the complete source snapshot and visible by its declared replay cutoff.
+
+#### Scenario: Historical metadata is absent
+- **WHEN** a required peer mapping, sector fact, baseline fact, or regime fact is missing, stale, received late, or incompatible
+- **THEN** the affected asset or routed proxy is excluded with a stable reason while other factually complete assets may continue
+
+### Requirement: Historical proxy screening cannot masquerade as factual observation
+The leader-tactics shadow SHALL keep sealed-source current-vintage historical screening outside the factual observation and outcome families.
+
+#### Scenario: Current-vintage screening finds a match
+- **WHEN** total-return-adjusted historical prices and a sealed current source snapshot produce a transparent proxy match
+- **THEN** the match is stored only in the historical-proxy family, reports its current-vintage membership limitation, grants zero promotion credit, and cannot enter ranking, position, alert, email, execution, or holdout state
+
+### Requirement: Historical proxy evaluation recomputes every eligible signal date without future features
+The leader-tactics shadow SHALL recompute the frozen breakout and former-leader repair formulas for every eligible historical signal date using only adjusted bars at or before that date, the sealed current-vintage source cohort, and the frozen peer and clone mappings.
+
+#### Scenario: Historical date has one or more matches
+- **WHEN** one or more ETFs satisfy every frozen formula gate using facts no later than the signal close
+- **THEN** every match remaining after the frozen clone policy is recorded with its signal date, feature values, score, peer group, and immutable feature hash
+
+#### Scenario: Historical date has no match
+- **WHEN** no ETF satisfies either frozen formula on an otherwise eligible signal date
+- **THEN** the evaluator records a zero-match date and MUST NOT substitute the highest-scoring non-match
+
+### Requirement: Historical proxy outcomes use next-session execution and frozen costs
+Each recorded match SHALL enter at the next eligible total-return-adjusted close and SHALL report 1, 3, 5, 10, and 20-session outcomes after 5 basis points of fees and 5 basis points of slippage per side.
+
+#### Scenario: Forward window is complete
+- **WHEN** the entry close and requested exit close are decision eligible and finite
+- **THEN** the result reports gross return, 20-basis-point round-trip cost, net return, peer benchmark return, and net peer excess for that horizon
+
+#### Scenario: Forward window is incomplete
+- **WHEN** a required future session or adjusted price is unavailable
+- **THEN** that horizon is excluded with a stable reason and MUST NOT be filled with a later quote, raw close, or zero return
+
+### Requirement: Historical proxy evaluation is bounded and resumable
+The evaluator SHALL persist an immutable contract and monotonic checkpoint, process one worker at a time, and produce identical final evidence across compatible page sizes and interruption boundaries.
+
+#### Scenario: Invocation approaches its time budget
+- **WHEN** the bounded continuation reaches its configured stop threshold below 55 seconds
+- **THEN** it commits the current page and returns a resumable cursor without publishing a partial result as complete
+
+### Requirement: Historical proxy results disclose current-vintage bias
+Historical proxy results MUST state that source membership and peer taxonomy come from a later sealed source snapshot and therefore do not constitute factual PIT evidence.
+
+#### Scenario: Backtest metrics appear favorable
+- **WHEN** any horizon has positive average return, win rate, or confidence interval
+- **THEN** the result remains research-only, grants zero formal PIT promotion credit, and does not become a recommendation or production signal

@@ -345,7 +345,23 @@ async def test_capture_resume_validates_full_checkpoint_contract_at_entry(tmp_pa
                     lease_owner TEXT,
                     lease_expires_at DATETIME,
                     error_summary TEXT,
-                    updated_at DATETIME NOT NULL
+                    updated_at DATETIME NOT NULL,
+                    storage_version INTEGER NOT NULL DEFAULT 1
+                )
+                """
+            )
+        )
+        await connection.execute(
+            text(
+                """
+                CREATE TABLE leader_tactics_v2_checkpoint_items (
+                    manifest_hash TEXT NOT NULL,
+                    asset_code TEXT NOT NULL,
+                    item_state TEXT NOT NULL,
+                    content_hash TEXT,
+                    error_message TEXT,
+                    updated_at DATETIME NOT NULL,
+                    PRIMARY KEY (manifest_hash, asset_code)
                 )
                 """
             )

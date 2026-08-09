@@ -48,6 +48,7 @@ from app.services.tracked_positions.jobs import daily_tracked_position_alerts_jo
 from app.services.workflows.etf_leader_tactics_shadow import (
     LEADER_CONTINUATION_JOB_NAME,
     continue_etf_leader_tactics_shadow_job,
+    preflight_etf_leader_tactics_shadow_job,
 )
 from app.services.workflows.etf_point_in_time_capture import (
     preflight_production_pit_capture,
@@ -236,6 +237,14 @@ def register_default_jobs(
             timeout_seconds=50.0,
         )
 
+    async def etf_leader_tactics_observation_preflight(
+        session: AsyncSession,
+    ) -> dict[str, Any]:
+        return await preflight_etf_leader_tactics_shadow_job(
+            session,
+            settings=settings,
+        )
+
     if (
         settings.etf_leader_tactics_v2_capture_enabled
         or settings.etf_leader_tactics_v2_materialize_enabled
@@ -316,12 +325,13 @@ def register_default_jobs(
     )
     if settings.etf_leader_tactics_continuation_enabled:
         scheduler.add_job(
-            _run_tracked_job,
+            _run_due_tracked_job,
             "cron",
             args=[
                 db,
                 LEADER_CONTINUATION_JOB_NAME,
                 etf_leader_tactics_observation_tracked,
+                etf_leader_tactics_observation_preflight,
             ],
             day_of_week="tue-sat",
             hour="0-6",

@@ -219,7 +219,23 @@ async def _create_tables(engine) -> None:
                     lease_owner TEXT,
                     lease_expires_at DATETIME,
                     error_summary TEXT,
-                    updated_at DATETIME NOT NULL
+                    updated_at DATETIME NOT NULL,
+                    storage_version INTEGER NOT NULL DEFAULT 1
+                )
+                """
+            )
+        )
+        await connection.execute(
+            text(
+                """
+                CREATE TABLE leader_tactics_v2_checkpoint_items (
+                    manifest_hash TEXT NOT NULL,
+                    asset_code TEXT NOT NULL,
+                    item_state TEXT NOT NULL,
+                    content_hash TEXT,
+                    error_message TEXT,
+                    updated_at DATETIME NOT NULL,
+                    PRIMARY KEY (manifest_hash, asset_code)
                 )
                 """
             )
@@ -255,7 +271,7 @@ async def test_fact_capture_writes_three_tables_and_real_hashes(tmp_path) -> Non
                 await session.execute(
                     text(
                         """
-                    SELECT completed_count, completed_hashes_json
+                    SELECT completed_count, completed_hashes_json, storage_version
                     FROM leader_tactics_v2_checkpoints
                     WHERE manifest_hash = :manifest_hash
                     """
@@ -268,9 +284,35 @@ async def test_fact_capture_writes_three_tables_and_real_hashes(tmp_path) -> Non
         )
         payload = json.loads(row["completed_hashes_json"])
         assert row["completed_count"] == 2
+        assert row["storage_version"] == 2
         assert payload["schema_version"] == CHECKPOINT_SCHEMA_VERSION
-        assert payload["completed_codes"] == ["000001", "000002"]
-        assert payload["content_hashes"] == [[code, bundles[code].content_hash] for code in bundles]
+        assert payload["completed_codes"] == []
+        assert payload["content_hashes"] == []
+        checkpoint_items = (
+            (
+                await session.execute(
+                    text(
+                        """
+                        SELECT asset_code, item_state, content_hash
+                        FROM leader_tactics_v2_checkpoint_items
+                        WHERE manifest_hash = :manifest_hash
+                        ORDER BY asset_code
+                        """
+                    ),
+                    {"manifest_hash": MANIFEST_HASH},
+                )
+            )
+            .mappings()
+            .all()
+        )
+        assert [dict(item) for item in checkpoint_items] == [
+            {
+                "asset_code": code,
+                "item_state": "completed",
+                "content_hash": bundles[code].content_hash,
+            }
+            for code in bundles
+        ]
         counts = (
             await session.execute(
                 text(
@@ -313,9 +355,7 @@ async def test_industry_bootstrap_persists_bounded_supplements_and_reaches_gate(
                 float_shares=1_000_000,
                 industry_group_id="tickflow_sw1:软件" if classified else None,
                 industry_source=TICKFLOW_THEME_SOURCE if classified else None,
-                industry_taxonomy_version=(
-                    TICKFLOW_TAXONOMY_VERSION if classified else None
-                ),
+                industry_taxonomy_version=(TICKFLOW_TAXONOMY_VERSION if classified else None),
                 industry_effective_from=date(2026, 8, 7) if classified else None,
                 industry_received_at=observed_at if classified else None,
                 industry_confidence="observed_current" if classified else None,

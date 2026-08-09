@@ -127,6 +127,19 @@ def _capture_signal_date(local_now: datetime) -> date | None:
     return None
 
 
+def _latest_completed_trading_date(local_now: datetime) -> date | None:
+    """Return the latest fully closed exchange session without inferring holidays."""
+
+    candidate = local_now.date()
+    if not is_trading_day(candidate) or local_now.hour < 15:
+        candidate -= timedelta(days=1)
+    for _ in range(15):
+        if is_trading_day(candidate):
+            return candidate
+        candidate -= timedelta(days=1)
+    return None
+
+
 def _capture_manifest_hash(
     *,
     signal_date: date,
@@ -401,9 +414,7 @@ async def _bootstrap_baostock_industries(
 
     started = time.monotonic()
     actual_as_of = _utc_naive(_local_now())
-    signal_end = _utc_naive(
-        datetime.combine(signal_date, datetime.max.time(), tzinfo=_SHANGHAI)
-    )
+    signal_end = _utc_naive(datetime.combine(signal_date, datetime.max.time(), tzinfo=_SHANGHAI))
     as_of = min(actual_as_of, signal_end)
     persisted = await _load_persisted_industry_supplements(
         session,
@@ -491,9 +502,7 @@ async def _bootstrap_baostock_industries(
             _page_symbols: tuple[str, ...] = page_symbols,
             _page: tuple[str, ...] = page,
             _load_state: dict[str, object] = load_state,
-            _page_classifications: dict[str, AshareIndustryClassification] = (
-                page_classifications
-            ),
+            _page_classifications: dict[str, AshareIndustryClassification] = (page_classifications),
             _page_facts: dict[str, AshareThemeMembershipFact] = page_facts,
             _page_completed_symbols: set[str] = page_completed_symbols,
             _page_failures: dict[str, str] = page_failures,
@@ -729,9 +738,7 @@ async def _capture_ashare(
                 "industry_bootstrap": industry_bootstrap,
                 "provider_health": {
                     "provider": TICKFLOW_PROVIDER,
-                    "status": "degraded"
-                    if industry_bootstrap["failed_count"]
-                    else "healthy",
+                    "status": "degraded" if industry_bootstrap["failed_count"] else "healthy",
                     "transport": provider.transport_diagnostics,
                 },
                 "research_only": True,
@@ -867,7 +874,7 @@ async def _capture_ashare(
         "stopped_reason": batch.stopped_reason,
         "provider_health": {
             "provider": TICKFLOW_PROVIDER,
-            "status": "healthy" if not batch.failed else "degraded",
+            "status": "healthy" if failed_count == 0 else "degraded",
             "batch_failures": batch_failures,
             "error_summary": batch.checkpoint.error_summary,
             "transport": provider.transport_diagnostics,
@@ -927,6 +934,43 @@ def _same_datetime(left: object, right: datetime) -> bool:
     return _utc_naive(left) == _utc_naive(right)
 
 
+async def _latest_capture_provider_health(
+    session: AsyncSession,
+    *,
+    signal_date: date,
+    as_of: datetime,
+) -> tuple[tuple[str, str], ...]:
+    """Read bounded transport evidence instead of inferring health from row counts."""
+
+    details_rows = (
+        await session.scalars(
+            select(JobRun.details_json)
+            .where(
+                JobRun.job_name == V2_CAPTURE_JOB_NAME,
+                JobRun.finished_at.is_not(None),
+                JobRun.finished_at <= _utc_naive(as_of),
+            )
+            .order_by(JobRun.id.desc())
+            .limit(20)
+        )
+    ).all()
+    for details in details_rows:
+        if not isinstance(details, dict) or details.get("signal_date") != signal_date.isoformat():
+            continue
+        health = details.get("provider_health")
+        if not isinstance(health, dict):
+            continue
+        provider = health.get("provider")
+        status = health.get("status")
+        if (
+            isinstance(provider, str)
+            and provider.strip()
+            and status in {"healthy", "degraded", "unavailable"}
+        ):
+            return ((provider.strip(), str(status)),)
+    return ()
+
+
 async def _materialize_etf(
     session: AsyncSession,
     *,
@@ -939,6 +983,19 @@ async def _materialize_etf(
             "status": "waiting",
             "job_status": "partial",
             "unavailable_reason": "etf_decision_data_snapshot_unavailable",
+            "research_only": True,
+        }
+    required_trade_date = _latest_completed_trading_date(local_as_of)
+    if required_trade_date is None or snapshot.trade_date != required_trade_date:
+        return {
+            "status": "waiting",
+            "job_status": "partial",
+            "signal_date": snapshot.trade_date.isoformat(),
+            "required_trade_date": (
+                required_trade_date.isoformat() if required_trade_date else None
+            ),
+            "unavailable_reason": "etf_decision_data_snapshot_stale",
+            "decision_data_snapshot_id": snapshot.snapshot_id,
             "research_only": True,
         }
     code_version = settings.etf_leader_tactics_v2_code_version.strip()
@@ -1091,13 +1148,9 @@ async def _materialize_ashare(
 
     if decision_date < signal_date:
         raise V2ContractError("decision date precedes feature trade date")
-    decision_mode = (
-        POST_CLOSE_WATCHLIST_MODE if decision_date > signal_date else SESSION_PIT_MODE
-    )
+    decision_mode = POST_CLOSE_WATCHLIST_MODE if decision_date > signal_date else SESSION_PIT_MODE
     next_eligible_date = (
-        next_trading_day(decision_date)
-        if decision_mode == POST_CLOSE_WATCHLIST_MODE
-        else None
+        next_trading_day(decision_date) if decision_mode == POST_CLOSE_WATCHLIST_MODE else None
     )
     readiness = await read_ashare_readiness(
         session,
@@ -1158,10 +1211,16 @@ async def _materialize_ashare(
         membership_evaluation_date=decision_date,
         next_eligible_date=next_eligible_date,
     )
-    provider_health = tuple(
-        (provider, "healthy" if count > 0 else "unavailable")
-        for provider, count in readiness.provider_health
+    provider_health = await _latest_capture_provider_health(
+        session,
+        signal_date=signal_date,
+        as_of=as_of,
     )
+    if not provider_health:
+        provider_health = tuple(
+            (provider, "observed" if count > 0 else "unavailable")
+            for provider, count in readiness.provider_health
+        )
     result = screen_dual_universe(
         inputs,
         code_version=settings.etf_leader_tactics_v2_code_version,
@@ -1179,9 +1238,7 @@ async def _materialize_ashare(
         "signal_date": signal_date.isoformat(),
         "decision_mode": decision_mode,
         "decision_date": decision_date.isoformat(),
-        "next_eligible_date": (
-            next_eligible_date.isoformat() if next_eligible_date else None
-        ),
+        "next_eligible_date": (next_eligible_date.isoformat() if next_eligible_date else None),
         "manifest_hash": manifest_hash,
         "universe_count": len(inputs),
         "observation_count": len(result.observations),

@@ -24,6 +24,7 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_collector import 
 )
 
 CHECKPOINT_SCHEMA_VERSION = "dual_universe_leader_tactics_v2_checkpoint_v2"
+CHECKPOINT_STORAGE_VERSION_INCREMENTAL = 2
 V2_GLOBAL_RUN_LEASE_KEY = "__dual_universe_leader_tactics_v2_global_run__"
 _VALID_CHECKPOINT_STATUSES = frozenset({"paused", "partial", "complete"})
 
@@ -226,9 +227,11 @@ async def acquire_v2_checkpoint_lease(
             INSERT INTO leader_tactics_v2_checkpoints
                 (manifest_hash, cursor, batch_size, completed_count,
                  completed_hashes_json, failed_codes_json, status,
-                 lease_owner, lease_expires_at, error_summary, updated_at)
+                 lease_owner, lease_expires_at, error_summary, updated_at,
+                 storage_version)
             VALUES (:manifest_hash, NULL, :batch_size, 0, :completed_hashes, '[]', 'paused',
-                    :lease_owner, :lease_expires_at, NULL, :updated_at)
+                    :lease_owner, :lease_expires_at, NULL, :updated_at,
+                    :storage_version)
             ON CONFLICT (manifest_hash) DO NOTHING
             """
         ),
@@ -245,6 +248,7 @@ async def acquire_v2_checkpoint_lease(
             "lease_owner": lease_owner,
             "lease_expires_at": expires_at,
             "updated_at": effective_now,
+            "storage_version": CHECKPOINT_STORAGE_VERSION_INCREMENTAL,
         },
     )
     await session.commit()
@@ -332,7 +336,7 @@ async def load_v2_checkpoint(
                     """
                 SELECT manifest_hash, cursor, batch_size, completed_count,
                        completed_hashes_json, failed_codes_json, status,
-                       error_summary
+                       error_summary, storage_version
                 FROM leader_tactics_v2_checkpoints
                 WHERE manifest_hash = :manifest_hash
                 """
@@ -347,8 +351,70 @@ async def load_v2_checkpoint(
         return None
     if row["manifest_hash"] != manifest_hash:
         raise ValueError("checkpoint manifest identity is incompatible")
-    completed_json = _loads_checkpoint_json(row["completed_hashes_json"], "completed_hashes")
-    completed_codes, content_hashes = _parse_completed_json(completed_json)
+    storage_version = row["storage_version"]
+    if (
+        isinstance(storage_version, bool)
+        or not isinstance(storage_version, int)
+        or storage_version not in {1, CHECKPOINT_STORAGE_VERSION_INCREMENTAL}
+    ):
+        raise ValueError("checkpoint storage_version is invalid")
+    if storage_version == CHECKPOINT_STORAGE_VERSION_INCREMENTAL:
+        item_rows = (
+            (
+                await session.execute(
+                    text(
+                        """
+                        SELECT asset_code, item_state, content_hash, error_message
+                        FROM leader_tactics_v2_checkpoint_items
+                        WHERE manifest_hash = :manifest_hash
+                        ORDER BY asset_code
+                        """
+                    ),
+                    {"manifest_hash": manifest_hash},
+                )
+            )
+            .mappings()
+            .all()
+        )
+        completed_codes_list: list[str] = []
+        content_hashes_list: list[tuple[str, str]] = []
+        failed_codes: list[tuple[str, str]] = []
+        for item in item_rows:
+            code = item["asset_code"]
+            state = item["item_state"]
+            content_hash = item["content_hash"]
+            error_message = item["error_message"]
+            if not isinstance(code, str) or not code or code != code.strip():
+                raise ValueError("checkpoint item asset_code is invalid")
+            if state == "completed":
+                if error_message is not None:
+                    raise ValueError("completed checkpoint item has an error")
+                completed_codes_list.append(code)
+                if content_hash is not None:
+                    content_hashes_list.append((code, content_hash))
+            elif state == "failed":
+                if (
+                    content_hash is not None
+                    or not isinstance(error_message, str)
+                    or not error_message
+                ):
+                    raise ValueError("failed checkpoint item is invalid")
+                failed_codes.append((code, error_message))
+            else:
+                raise ValueError("checkpoint item state is invalid")
+        completed_codes = tuple(completed_codes_list)
+        content_hashes = tuple(content_hashes_list)
+    else:
+        completed_json = _loads_checkpoint_json(row["completed_hashes_json"], "completed_hashes")
+        completed_codes, content_hashes = _parse_completed_json(completed_json)
+        failed_json = _loads_checkpoint_json(row["failed_codes_json"], "failed_codes")
+        if not isinstance(failed_json, list):
+            raise ValueError("checkpoint failed_codes JSON is invalid")
+        failed_codes = []
+        for item in failed_json:
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                raise ValueError("checkpoint failed_codes has invalid pairs")
+            failed_codes.append((item[0], item[1]))
     completed_codes, content_hashes = _validate_loaded_checkpoint(
         completed_count=row["completed_count"],
         completed_codes=completed_codes,
@@ -362,15 +428,9 @@ async def load_v2_checkpoint(
     status = row["status"]
     if not isinstance(status, str) or status not in _VALID_CHECKPOINT_STATUSES:
         raise ValueError("checkpoint status is invalid")
-    failed_json = _loads_checkpoint_json(row["failed_codes_json"], "failed_codes")
-    if not isinstance(failed_json, list):
-        raise ValueError("checkpoint failed_codes JSON is invalid")
-    failed_codes: list[tuple[str, str]] = []
+    normalized_failed_codes: list[tuple[str, str]] = []
     seen_failed: set[str] = set()
-    for item in failed_json:
-        if not isinstance(item, (list, tuple)) or len(item) != 2:
-            raise ValueError("checkpoint failed_codes has invalid pairs")
-        code, message = item
+    for code, message in failed_codes:
         if (
             not isinstance(code, str)
             or code != code.strip()
@@ -381,7 +441,7 @@ async def load_v2_checkpoint(
         ):
             raise ValueError("checkpoint failed_codes contains invalid or duplicate entries")
         seen_failed.add(code)
-        failed_codes.append((code, message))
+        normalized_failed_codes.append((code, message))
     overlap = set(completed_codes) & seen_failed
     if overlap:
         raise ValueError(
@@ -400,11 +460,59 @@ async def load_v2_checkpoint(
         batch_size=batch_size,
         completed_codes=completed_codes,
         status=status,
-        failed_codes=tuple(failed_codes),
+        failed_codes=tuple(normalized_failed_codes),
         error_summary=row["error_summary"],
         manifest_hash=manifest_hash,
         completed_hashes=content_hashes,
     )
+
+
+def _incremental_checkpoint_items(
+    checkpoint: V2CollectorCheckpoint,
+    previous_checkpoint: V2CollectorCheckpoint | None,
+    *,
+    manifest_hash: str,
+    updated_at: datetime,
+) -> list[dict[str, object]]:
+    previous_completed = (
+        set(previous_checkpoint.completed_codes) if previous_checkpoint is not None else set()
+    )
+    previous_hashes = (
+        dict(previous_checkpoint.completed_hashes) if previous_checkpoint is not None else {}
+    )
+    previous_failed = (
+        dict(previous_checkpoint.failed_codes) if previous_checkpoint is not None else {}
+    )
+    current_hashes = dict(checkpoint.completed_hashes)
+    payloads: list[dict[str, object]] = []
+    for code in checkpoint.completed_codes:
+        content_hash = current_hashes.get(code)
+        if code in previous_completed and previous_hashes.get(code) == content_hash:
+            continue
+        payloads.append(
+            {
+                "manifest_hash": manifest_hash,
+                "asset_code": code,
+                "item_state": "completed",
+                "content_hash": content_hash,
+                "error_message": None,
+                "updated_at": updated_at,
+            }
+        )
+    for code, message in checkpoint.failed_codes:
+        if previous_failed.get(code) == message:
+            continue
+        payloads.append(
+            {
+                "manifest_hash": manifest_hash,
+                "asset_code": code,
+                "item_state": "failed",
+                "content_hash": None,
+                "error_message": message,
+                "updated_at": updated_at,
+            }
+        )
+    return payloads
 
 
 async def save_v2_checkpoint(
@@ -414,6 +522,7 @@ async def save_v2_checkpoint(
     checkpoint: V2CollectorCheckpoint,
     lease_owner: str | None = None,
     lease_expires_at: datetime | None = None,
+    previous_checkpoint: V2CollectorCheckpoint | None = None,
 ) -> None:
     """Persist a checkpoint without overwriting another valid lease."""
 
@@ -444,6 +553,7 @@ async def save_v2_checkpoint(
         "status": checkpoint.status,
         "error_summary": checkpoint.error_summary,
         "updated_at": now,
+        "storage_version": CHECKPOINT_STORAGE_VERSION_INCREMENTAL,
     }
     if lease_owner is not None:
         if lease_expires_at is None:
@@ -455,8 +565,14 @@ async def save_v2_checkpoint(
                 SET cursor = :cursor,
                     batch_size = :batch_size,
                     completed_count = :completed_count,
-                    completed_hashes_json = :completed_hashes,
-                    failed_codes_json = :failed_codes,
+                    completed_hashes_json = CASE
+                        WHEN storage_version = 1 THEN :completed_hashes
+                        ELSE completed_hashes_json
+                    END,
+                    failed_codes_json = CASE
+                        WHEN storage_version = 1 THEN :failed_codes
+                        ELSE failed_codes_json
+                    END,
                     status = :status,
                     error_summary = :error_summary,
                     updated_at = :updated_at
@@ -474,16 +590,25 @@ async def save_v2_checkpoint(
                 INSERT INTO leader_tactics_v2_checkpoints
                     (manifest_hash, cursor, batch_size, completed_count,
                      completed_hashes_json, failed_codes_json, status,
-                     lease_owner, lease_expires_at, error_summary, updated_at)
+                     lease_owner, lease_expires_at, error_summary, updated_at,
+                     storage_version)
                 VALUES (:manifest_hash, :cursor, :batch_size, :completed_count,
                         :completed_hashes, :failed_codes, :status, NULL, NULL,
-                        :error_summary, :updated_at)
+                        :error_summary, :updated_at, :storage_version)
                 ON CONFLICT (manifest_hash) DO UPDATE SET
                     cursor = excluded.cursor,
                     batch_size = excluded.batch_size,
                     completed_count = excluded.completed_count,
-                    completed_hashes_json = excluded.completed_hashes_json,
-                    failed_codes_json = excluded.failed_codes_json,
+                    completed_hashes_json = CASE
+                        WHEN leader_tactics_v2_checkpoints.storage_version = 1
+                        THEN excluded.completed_hashes_json
+                        ELSE leader_tactics_v2_checkpoints.completed_hashes_json
+                    END,
+                    failed_codes_json = CASE
+                        WHEN leader_tactics_v2_checkpoints.storage_version = 1
+                        THEN excluded.failed_codes_json
+                        ELSE leader_tactics_v2_checkpoints.failed_codes_json
+                    END,
                     status = excluded.status,
                     error_summary = excluded.error_summary,
                     updated_at = excluded.updated_at
@@ -497,11 +622,48 @@ async def save_v2_checkpoint(
     if int(result.rowcount or 0) <= 0:
         await session.rollback()
         raise V2LeaseLostError("checkpoint lease is not owned or has expired")
+    storage_version = await session.scalar(
+        text(
+            """
+            SELECT storage_version
+            FROM leader_tactics_v2_checkpoints
+            WHERE manifest_hash = :manifest_hash
+            """
+        ),
+        {"manifest_hash": manifest_hash},
+    )
+    if storage_version == CHECKPOINT_STORAGE_VERSION_INCREMENTAL:
+        assert_v2_research_table("leader_tactics_v2_checkpoint_items")
+        item_payloads = _incremental_checkpoint_items(
+            checkpoint,
+            previous_checkpoint,
+            manifest_hash=manifest_hash,
+            updated_at=now,
+        )
+        if item_payloads:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO leader_tactics_v2_checkpoint_items
+                        (manifest_hash, asset_code, item_state, content_hash,
+                         error_message, updated_at)
+                    VALUES (:manifest_hash, :asset_code, :item_state, :content_hash,
+                            :error_message, :updated_at)
+                    ON CONFLICT (manifest_hash, asset_code) DO UPDATE SET
+                        item_state = excluded.item_state,
+                        content_hash = excluded.content_hash,
+                        error_message = excluded.error_message,
+                        updated_at = excluded.updated_at
+                    """
+                ),
+                item_payloads,
+            )
     await session.commit()
 
 
 __all__ = [
     "CHECKPOINT_SCHEMA_VERSION",
+    "CHECKPOINT_STORAGE_VERSION_INCREMENTAL",
     "V2_GLOBAL_RUN_LEASE_KEY",
     "V2LeaseLostError",
     "acquire_v2_checkpoint_lease",

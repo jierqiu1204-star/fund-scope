@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from typing import Any
 
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.entities import JobRun, utcnow
 
 _BUSINESS_JOB_STATUSES = {"skipped", "partial", "failed"}
+INTERRUPTED_BY_RESTART = "interrupted_by_process_restart"
 
 
 def _job_run_payload(job_run: JobRun) -> dict[str, Any]:
@@ -37,6 +39,37 @@ async def _finish_job_run(job_run: JobRun, result: dict[str, Any]) -> None:
     job_run.error_message = error_message
     job_run.details_json = result
     job_run.finished_at = utcnow()
+
+
+async def reconcile_interrupted_job_runs(
+    session_factory: Callable[[], AsyncSession],
+    *,
+    job_names: Collection[str],
+) -> int:
+    """Close audit rows that cannot still be running after process startup."""
+
+    normalized_names = tuple(
+        sorted({name.strip() for name in job_names if isinstance(name, str) and name.strip()})
+    )
+    if not normalized_names:
+        return 0
+    finished_at = utcnow()
+    async with session_factory() as session:
+        result = await session.execute(
+            update(JobRun)
+            .where(
+                JobRun.job_name.in_(normalized_names),
+                JobRun.status == "running",
+                JobRun.finished_at.is_(None),
+            )
+            .values(
+                status="failed",
+                finished_at=finished_at,
+                error_message=INTERRUPTED_BY_RESTART,
+            )
+        )
+        await session.commit()
+        return int(result.rowcount or 0)
 
 
 async def run_job(

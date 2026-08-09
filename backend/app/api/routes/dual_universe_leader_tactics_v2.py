@@ -128,6 +128,15 @@ async def get_leader_tactics_v2_summary(
             as_of=as_of,
             reason="leader_tactics_v2_api_disabled",
         )
+    if (
+        universe == "etf"
+        and not request.app.state.settings.etf_leader_tactics_v2_etf_materialize_enabled
+    ):
+        return unavailable_v2_summary(
+            universe=universe,
+            as_of=as_of,
+            reason="leader_tactics_v2_etf_materialization_disabled",
+        )
     try:
         return await read_v2_summary(session, universe=universe, as_of=as_of)
     except ValueError:
@@ -173,6 +182,16 @@ async def get_leader_tactics_v2_candidates(
                 state=state,
                 as_of=as_of,
                 reason="leader_tactics_v2_api_disabled",
+            )
+        )
+    if universe == "etf" and not settings.etf_leader_tactics_v2_etf_materialize_enabled:
+        return LeaderTacticsV2CandidatesOut.model_validate(
+            _empty_candidates_payload(
+                universe=universe,
+                formula=formula,
+                state=state,
+                as_of=as_of,
+                reason="leader_tactics_v2_etf_materialization_disabled",
             )
         )
     try:

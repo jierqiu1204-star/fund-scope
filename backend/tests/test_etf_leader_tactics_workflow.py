@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
+import pytest
 from sqlalchemy import func, select
 
 from app.core.config import Settings
@@ -35,6 +36,7 @@ from app.services.workflows.etf_leader_tactics_shadow import (
     LEADER_CONTINUATION_JOB_NAME,
     LEADER_PIT_SOURCE_UNAVAILABLE,
     continue_etf_leader_tactics_shadow_job,
+    preflight_etf_leader_tactics_shadow_job,
 )
 
 
@@ -101,6 +103,7 @@ async def test_disabled_workflow_is_read_only_and_never_calls_provider(app) -> N
     assert result == {
         "job_name": LEADER_CONTINUATION_JOB_NAME,
         "status": "disabled",
+        "job_status": "skipped",
         "unavailable_reason": LEADER_CONTINUATION_DISABLED,
         "live_provider_calls": 0,
         "advanced_pages": 0,
@@ -137,6 +140,7 @@ async def test_enabled_workflow_advances_exactly_one_injected_page(
     assert result["phase"] == LeaderContinuationPhase.OUTCOMES.value
     assert result["live_provider_calls"] == 0
     assert result["production_mutation_allowed"] is False
+
 
 async def test_enabled_discovery_fails_closed_before_creating_checkpoint(app) -> None:
     settings = Settings(
@@ -224,9 +228,7 @@ async def test_first_complete_source_advances_collection_before_252_sessions(
                 settings=settings,
                 timeout_seconds=5.0,
             )
-    assert result["phase"] == LeaderContinuationPhase.COMPLETE.value, result.get(
-        "stop_reason"
-    )
+    assert result["phase"] == LeaderContinuationPhase.COMPLETE.value, result.get("stop_reason")
     async with app.state.db.session() as session:
         evidence_count = int(
             await session.scalar(
@@ -250,9 +252,7 @@ async def test_first_complete_source_advances_collection_before_252_sessions(
 
 
 async def test_admin_entry_is_disabled_by_default(client) -> None:
-    response = await client.post(
-        "/api/admin/jobs/etf-leader-tactics-shadow/continue"
-    )
+    response = await client.post("/api/admin/jobs/etf-leader-tactics-shadow/continue")
 
     assert response.status_code == 200
     payload = response.json()
@@ -284,3 +284,47 @@ def test_leader_continuation_scheduler_is_separately_gated(app) -> None:
     assert job is not None
     assert job.max_instances == 1
     assert job.coalesce is True
+    assert job.func is scheduler_module._run_due_tracked_job
+
+
+@pytest.mark.asyncio
+async def test_leader_continuation_preflight_skips_job_audit_without_due_work(
+    monkeypatch,
+) -> None:
+    async def no_source(*_args, **_kwargs):
+        return None, False
+
+    async def no_maturity(*_args, **_kwargs):
+        return None
+
+    async def one_session(*_args, **_kwargs):
+        return 1
+
+    monkeypatch.setattr(
+        "app.services.workflows.etf_leader_tactics_shadow._oldest_due_source",
+        no_source,
+    )
+    monkeypatch.setattr(
+        "app.services.workflows.etf_leader_tactics_shadow._oldest_due_maturity",
+        no_maturity,
+    )
+    monkeypatch.setattr(
+        "app.services.workflows.etf_leader_tactics_shadow._pit_session_count",
+        one_session,
+    )
+
+    result = await preflight_etf_leader_tactics_shadow_job(
+        object(),  # type: ignore[arg-type]
+        settings=Settings(
+            _env_file=None,
+            etf_leader_tactics_continuation_enabled=True,
+            etf_leader_tactics_code_version="leader-shadow-test-v1",
+        ),
+    )
+
+    assert result == {
+        "due": False,
+        "reason": LEADER_PIT_SOURCE_UNAVAILABLE,
+        "eligible_pit_sessions": 1,
+        "required_pit_sessions": 252,
+    }

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import math
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from binascii import Error as Base64Error
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, fields
 from datetime import date, datetime, time
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +29,7 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_boundary import (
 V2_STORAGE_SCHEMA_VERSION = "leader_tactics_v2_storage_v1"
 V2_MANIFEST_STATUS = "materialized"
 MAX_V2_PAGE_SIZE = 100
+_SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 _FORMULA_IDS = {
     "breakout": "leader_breakout_proxy_v2",
@@ -205,13 +208,17 @@ def _as_date(value: datetime | date | str | None) -> date:
 
 def _encode_cursor(
     *,
+    score: float,
+    transition_cutoff: date,
     signal_date: date,
     formula_id: str,
     asset_code: str,
     manifest_hash: str,
 ) -> str:
     payload = {
-        "version": 1,
+        "version": 2,
+        "score": score,
+        "transition_cutoff": transition_cutoff.isoformat(),
         "signal_date": signal_date.isoformat(),
         "formula_id": formula_id,
         "asset_code": asset_code,
@@ -226,13 +233,28 @@ def _decode_cursor(cursor: str) -> dict[str, Any]:
         payload = json.loads(urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
     except (Base64Error, UnicodeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError("cursor is invalid") from exc
-    if not isinstance(payload, dict) or payload.get("version") != 1:
+    if not isinstance(payload, dict) or payload.get("version") != 2:
         raise ValueError("cursor is invalid")
-    required = ("signal_date", "formula_id", "asset_code", "manifest_hash")
+    required = (
+        "signal_date",
+        "transition_cutoff",
+        "formula_id",
+        "asset_code",
+        "manifest_hash",
+    )
     if any(not isinstance(payload.get(key), str) or not payload[key] for key in required):
         raise ValueError("cursor is invalid")
+    score = payload.get("score")
+    if (
+        isinstance(score, bool)
+        or not isinstance(score, (int, float))
+        or not math.isfinite(float(score))
+    ):
+        raise ValueError("cursor is invalid")
+    payload["score"] = float(score)
     try:
         date.fromisoformat(payload["signal_date"])
+        date.fromisoformat(payload["transition_cutoff"])
     except ValueError as exc:
         raise ValueError("cursor is invalid") from exc
     return payload
@@ -561,14 +583,10 @@ async def read_v2_candidates(
         .mappings()
         .first()
     )
-    timing_facts = (
-        _decode_json(timing_row["gate_facts_json"], {}) if timing_row is not None else {}
-    )
+    timing_facts = _decode_json(timing_row["gate_facts_json"], {}) if timing_row is not None else {}
     decision_mode = str(timing_facts.get("decision_mode") or "session_pit")
     ranking_source_kind = (
-        "post_close_watchlist"
-        if decision_mode == "post_close_watchlist"
-        else "research_replay"
+        "post_close_watchlist" if decision_mode == "post_close_watchlist" else "research_replay"
     )
     feature_trade_date = timing_facts.get("feature_trade_date")
     if feature_trade_date is None and timing_row is not None:
@@ -577,10 +595,17 @@ async def read_v2_candidates(
     if decoded_cursor is not None and decoded_cursor["manifest_hash"] != manifest_hash:
         raise ValueError("cursor belongs to a different materialized manifest")
 
+    requested_transition_cutoff = _as_date(as_of) if as_of else datetime.now(_SHANGHAI).date()
+    if decoded_cursor is not None:
+        cursor_transition_cutoff = date.fromisoformat(decoded_cursor["transition_cutoff"])
+        if as_of and cursor_transition_cutoff != requested_transition_cutoff:
+            raise ValueError("cursor belongs to a different transition cutoff")
+        requested_transition_cutoff = cursor_transition_cutoff
+
     params: dict[str, Any] = {
         "manifest_hash": manifest_hash,
         "universe": universe,
-        "transition_cutoff": _as_date(as_of or manifest["decision_cutoff"]),
+        "transition_cutoff": requested_transition_cutoff,
         "available": "available",
         "qualifies": True,
         "limit": limit + 1,
@@ -597,16 +622,19 @@ async def read_v2_candidates(
     if decoded_cursor is not None:
         params.update(
             {
+                "cursor_score": decoded_cursor["score"],
                 "cursor_signal_date": date.fromisoformat(decoded_cursor["signal_date"]),
                 "cursor_formula_id": decoded_cursor["formula_id"],
                 "cursor_asset_code": decoded_cursor["asset_code"],
             }
         )
         cursor_clause = (
-            " AND (signal_date < :cursor_signal_date "
-            "OR (signal_date = :cursor_signal_date AND formula_id > :cursor_formula_id) "
-            "OR (signal_date = :cursor_signal_date AND formula_id = :cursor_formula_id "
-            "AND asset_code > :cursor_asset_code))"
+            " AND (score < :cursor_score "
+            "OR (score = :cursor_score AND signal_date < :cursor_signal_date) "
+            "OR (score = :cursor_score AND signal_date = :cursor_signal_date "
+            "AND formula_id > :cursor_formula_id) "
+            "OR (score = :cursor_score AND signal_date = :cursor_signal_date "
+            "AND formula_id = :cursor_formula_id AND asset_code > :cursor_asset_code))"
         )
     cte = _candidate_cte(filter_where)
 
@@ -624,7 +652,7 @@ async def read_v2_candidates(
                 FROM filtered
                 WHERE availability = :available AND qualifies = :qualifies
                 {cursor_clause}
-                ORDER BY signal_date DESC, formula_id ASC, asset_code ASC
+                ORDER BY score DESC, signal_date DESC, formula_id ASC, asset_code ASC
                 LIMIT :limit
                 """
                 ),
@@ -649,6 +677,8 @@ async def read_v2_candidates(
     if has_more and candidates:
         last = candidates[-1]
         next_cursor = _encode_cursor(
+            score=float(last["score"]),
+            transition_cutoff=requested_transition_cutoff,
             signal_date=_as_date(last["signal_date"]),
             formula_id=str(last["formula_id"]),
             asset_code=str(last["asset_code"]),
@@ -727,9 +757,7 @@ async def read_v2_candidates(
         "feature_trade_date": feature_trade_date,
         "membership_evaluation_date": timing_facts.get("membership_evaluation_date"),
         "next_eligible_date": timing_facts.get("next_eligible_date"),
-        "historical_validation_eligible": timing_facts.get(
-            "historical_validation_eligible", True
-        ),
+        "historical_validation_eligible": timing_facts.get("historical_validation_eligible", True),
         "candidates": candidates,
         "next_cursor": next_cursor,
         "has_more": has_more,

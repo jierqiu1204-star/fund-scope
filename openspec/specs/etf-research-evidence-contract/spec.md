@@ -160,3 +160,50 @@ ETF evidence SHALL expose leader-tactics results with `ranking_source_kind=resea
 - **WHEN** a candidate passes every research gate
 - **THEN** the evidence may say `eligible_for_v4_proposal` but MUST NOT claim current production use, guaranteed return, or author endorsement
 
+### Requirement: Leader evidence exposes partial observation accumulation
+The ETF research evidence contract SHALL expose leader observation progress before promotion eligibility, including observed PIT sessions, completed cross-sections, current matches, pending and matured outcomes, independent primary dates, chronological folds, exact exclusions, cutoffs, manifests, and feature hashes.
+
+#### Scenario: Observation exists without mature outcome
+- **WHEN** at least one complete session observation exists but its forward window is pending
+- **THEN** the API returns the current research-only matches and exact pending counts with status `insufficient_data`, and no return metric is fabricated
+
+#### Scenario: No candidate passes a frozen proxy
+- **WHEN** a complete session produces zero finite candidate matches
+- **THEN** the API returns an explicit zero-match observation with coverage and exclusion counts instead of treating the evidence as unavailable
+
+### Requirement: Observation progress cannot satisfy promotion by implication
+Leader observation evidence MUST keep accumulation state, statistical validation state, and production promotion state independent.
+
+#### Scenario: Early observations appear favorable
+- **WHEN** current matches or immature exploratory outcomes look favorable before every promotion gate passes
+- **THEN** evidence remains `research_replay`, notification and execution provenance remain `none` or simulated as observed, and the production score contract remains unchanged
+
+### Requirement: Current-vintage historical screening remains a separate zero-credit evidence family
+The ETF research evidence contract SHALL expose any sealed-source historical-price screening under a distinct experiment family and SHALL assign it zero eligible PIT sessions, zero independent primary dates, and zero walk-forward folds.
+
+#### Scenario: Historical adjusted prices produce a proxy candidate
+- **WHEN** a bounded artifact combines a sealed current source snapshot with decision-eligible total-return-adjusted history and passes immutable contract validation
+- **THEN** the API may expose the candidate as `research_replay` with membership mode `sealed_source_snapshot_current_vintage_proxy`, while factual observation counts, notification provenance, execution provenance, and promotion state remain unchanged
+
+#### Scenario: Peer classification or price provenance is unsafe
+- **WHEN** a candidate uses an unknown, other, or unclassified peer group, a raw-price fallback, or a mismatched source or feature hash
+- **THEN** the historical proxy evidence is rejected or shown as incompatible and contributes no candidate or gate credit
+
+### Requirement: Rolling leader backtests persist immutable multi-horizon evidence
+The ETF research evidence contract SHALL persist the rolling historical-proxy report under a separate experiment family with source, universe, formula, execution, cost, feature, signal, outcome, exclusion, checkpoint, code, and result identities.
+
+#### Scenario: Complete backtest is persisted
+- **WHEN** all source assets and eligible signal dates have been sealed and finalized
+- **THEN** the evidence exposes per-candidate and combined 1, 3, 5, 10, and 20-session sample counts, average and median net returns, win rates, event-series drawdown, peer excess, coverage, exclusions, and confidence intervals
+
+#### Scenario: Partial or incompatible evidence is read
+- **WHEN** the checkpoint is incomplete or any immutable identity is incompatible
+- **THEN** the API reports partial or incompatible with no fabricated aggregate and no fallback to a prior formula version
+
+### Requirement: Historical backtest evidence cannot alter formal evidence state
+Historical proxy backtest evidence SHALL keep PIT observation counts, independent dates, folds, holdout state, notification provenance, execution provenance, and production mutation permission unchanged.
+
+#### Scenario: Historical sample count exceeds formal gates
+- **WHEN** the proxy backtest contains at least 252 dates or 40 independent-looking samples
+- **THEN** formal PIT gate credit remains zero because historical membership and receipt provenance are not factual
+

@@ -27,6 +27,25 @@ async def test_v2_contract_is_readable_when_candidate_materialization_is_disable
 
 
 @pytest.mark.asyncio
+async def test_enabled_v2_api_reports_disabled_etf_materialization(app, client) -> None:
+    app.state.settings.etf_leader_tactics_v2_api_enabled = True
+    app.state.settings.etf_leader_tactics_v2_etf_materialize_enabled = False
+
+    response = await client.get(
+        "/api/short-research/leader-tactics-v2/candidates",
+        params={"universe": "etf"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["unavailable_reason"] == (
+        "leader_tactics_v2_etf_materialization_disabled"
+    )
+    assert payload["research_only"] is True
+    assert payload["production_mutation_allowed"] is False
+
+
+@pytest.mark.asyncio
 async def test_v2_readiness_is_disabled_without_materialization(client) -> None:
     response = await client.get("/api/short-research/leader-tactics-v2/readiness")
     assert response.status_code == 200
