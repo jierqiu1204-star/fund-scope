@@ -54,6 +54,7 @@ from app.services.workflows.etf_history_readiness import (
 PUBLICATION_ADJUSTMENT_CONTRACT = "total-return-adjusted-provenance-v1"
 PUBLICATION_READINESS_SCOPE_PREFIX = "publication_readiness"
 PUBLICATION_RSS_LIMIT_BYTES = 512 * 1024 * 1024
+PUBLICATION_SCHEDULER_TICK_SECONDS = 30
 COMPACT_CODE_SAMPLE_LIMIT = 20
 
 
@@ -185,11 +186,19 @@ def _profile_cadence_due(
     latest = runs[0]
     if latest.status == "running":
         return False
-    # APScheduler fires on whole-second boundaries while JobRun timestamps retain
-    # microseconds.  Compare at scheduler precision so a healthy 30-second cycle
-    # is not accidentally delayed until the next trigger.
-    latest_started_at = latest.started_at.replace(microsecond=0)
-    return latest_started_at <= now - timedelta(minutes=profile.cadence_minutes)
+    # The inner slice is recorded after preflight, usually one or two seconds
+    # after the cron tick. Compare both timestamps at the 30-second scheduler
+    # boundary so that bookkeeping latency cannot double a healthy cycle.
+    def scheduler_tick(value: datetime) -> datetime:
+        return value.replace(
+            second=(value.second // PUBLICATION_SCHEDULER_TICK_SECONDS)
+            * PUBLICATION_SCHEDULER_TICK_SECONDS,
+            microsecond=0,
+        )
+
+    return scheduler_tick(latest.started_at) <= scheduler_tick(now) - timedelta(
+        minutes=profile.cadence_minutes
+    )
 
 
 def build_publication_readiness_request(

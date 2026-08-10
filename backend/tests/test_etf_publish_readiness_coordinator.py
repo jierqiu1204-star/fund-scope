@@ -191,7 +191,7 @@ def test_profile_treats_durable_unseasoned_checkpoint_as_healthy_progress() -> N
 def test_profile_cadence_is_one_or_half_minute_without_boundary_drift() -> None:
     now = datetime(2026, 7, 20, 15, 30, 30)
     half_minute_ago = SimpleNamespace(
-        started_at=datetime(2026, 7, 20, 15, 30, 0, 900_000),
+        started_at=datetime(2026, 7, 20, 15, 30, 1, 900_000),
         status="partial",
     )
     assert (
