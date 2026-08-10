@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from collections import Counter
 from collections.abc import Awaitable, Callable
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -58,6 +58,8 @@ from app.services.short_research.snapshot_publication import (
 from app.services.short_research.theme_heat import theme_heat_summary
 from app.services.short_research.universe import build_point_in_time_universe_snapshot
 
+MAX_SOURCE_AVAILABILITY_LAG = timedelta(days=1)
+
 
 def _finite_score(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, int | float):
@@ -111,8 +113,12 @@ async def materialize_dual_ranking_snapshot(
 ) -> ShortResearchSignalRun:
     market_cutoff = _normalized_cutoff(decision_cutoff)
     data_cutoff = _normalized_cutoff(source_availability_cutoff or decision_cutoff)
-    if market_cutoff.date() != trade_date or data_cutoff.date() != trade_date:
+    if market_cutoff.date() != trade_date:
         raise ValueError("decision cutoff must match trade date")
+    if data_cutoff < market_cutoff:
+        raise ValueError("source availability cutoff cannot precede decision cutoff")
+    if data_cutoff - market_cutoff > MAX_SOURCE_AVAILABILITY_LAG:
+        raise ValueError("source availability cutoff exceeds bounded publication lag")
 
     universe = await build_point_in_time_universe_snapshot(session, as_of_date=trade_date)
     barrier = await build_etf_coverage_barrier(

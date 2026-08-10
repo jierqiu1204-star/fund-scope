@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -161,6 +161,60 @@ def _install(
         "compute_etf_snapshot_assets",
         fake_compute,
     )
+
+
+@pytest.mark.asyncio
+async def test_dual_snapshot_accepts_bounded_next_day_source_cutoff(
+    app,
+    monkeypatch,
+) -> None:
+    source_cutoff = CUTOFF + timedelta(hours=10)
+    _install(monkeypatch, [_asset("510001", research_score=70.0, actionable_score=80.0)])
+
+    async with app.state.db.session() as session:
+        run = await materialize_dual_ranking_snapshot(
+            session,
+            trade_date=TRADE_DATE,
+            decision_cutoff=CUTOFF,
+            source_availability_cutoff=source_cutoff,
+        )
+
+    assert run.as_of_trade_date == TRADE_DATE
+    assert run.data_cutoff == source_cutoff
+    assert run.config_json["market_decision_cutoff"] == CUTOFF.isoformat()
+    assert run.config_json["source_availability_cutoff"] == source_cutoff.isoformat()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source_cutoff", "message"),
+    [
+        (
+            CUTOFF - timedelta(minutes=1),
+            "source availability cutoff cannot precede decision cutoff",
+        ),
+        (
+            CUTOFF + timedelta(days=1, seconds=1),
+            "source availability cutoff exceeds bounded publication lag",
+        ),
+    ],
+)
+async def test_dual_snapshot_rejects_unbounded_source_cutoff(
+    app,
+    monkeypatch,
+    source_cutoff,
+    message,
+) -> None:
+    _install(monkeypatch, [_asset("510001", research_score=70.0, actionable_score=80.0)])
+
+    async with app.state.db.session() as session:
+        with pytest.raises(ValueError, match=message):
+            await materialize_dual_ranking_snapshot(
+                session,
+                trade_date=TRADE_DATE,
+                decision_cutoff=CUTOFF,
+                source_availability_cutoff=source_cutoff,
+            )
 
 
 @pytest.mark.asyncio
