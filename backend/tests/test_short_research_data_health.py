@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta
 
 import pytest
 
+from app.api.routes import short_research as short_research_routes
 from app.models.entities import EtfDataHealth, EtfPriceHistory, JobRun, TradableEtf
 
 
@@ -90,3 +91,50 @@ async def test_data_health_separates_raw_and_research_etf_prices(client, app) ->
     assert health["decision_eligible"] is False
     assert health["sync_state"] == "deferred"
     assert "missing_total_return_provenance" in health["issue_details"]
+
+
+@pytest.mark.asyncio
+async def test_data_issues_endpoint_filters_and_bounds_health_rows(
+    client,
+    monkeypatch,
+) -> None:
+    async def fake_data_health(_session, *, asset_type=None):
+        assert asset_type == "etf"
+        return [
+            {
+                "asset_type": "etf",
+                "code": "510001",
+                "name": "Issue ETF 1",
+                "status": "stale",
+                "usable_days": 61,
+                "source_note": "fixture",
+                "is_stale": True,
+            },
+            {
+                "asset_type": "etf",
+                "code": "510002",
+                "name": "Healthy ETF",
+                "status": "success",
+                "usable_days": 61,
+                "source_note": "fixture",
+                "is_stale": False,
+            },
+            {
+                "asset_type": "etf",
+                "code": "510003",
+                "name": "Issue ETF 2",
+                "status": "failed",
+                "usable_days": 0,
+                "source_note": "fixture",
+                "is_stale": True,
+            },
+        ]
+
+    monkeypatch.setattr(short_research_routes, "data_health", fake_data_health)
+
+    response = await client.get(
+        "/api/short-research/status/data-issues?asset_type=etf&limit=1"
+    )
+
+    assert response.status_code == 200
+    assert [item["code"] for item in response.json()] == ["510001"]

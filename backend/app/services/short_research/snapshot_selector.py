@@ -98,10 +98,57 @@ def _persisted_readiness_for_run(
     )
 
 
+def _summary_provider_health_identity(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    candidate_records = value.get("candidate_records")
+    summary = {
+        key: item
+        for key, item in value.items()
+        if key != "candidate_records"
+    }
+    if isinstance(candidate_records, list):
+        summary["candidate_record_count"] = len(candidate_records)
+    summary["detail_level"] = "summary"
+    return summary
+
+
+def _summary_observation_only(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    items = value.get("items")
+    summary = {key: item for key, item in value.items() if key != "items"}
+    if isinstance(items, list):
+        summary.setdefault("count", len(items))
+    summary["detail_level"] = "summary"
+    return summary
+
+
+def _summary_ranking_surfaces(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    summary: dict[str, Any] = {}
+    for surface_name, surface_value in value.items():
+        if not isinstance(surface_value, dict):
+            continue
+        excluded = surface_value.get("excluded")
+        surface_summary = {
+            key: item
+            for key, item in surface_value.items()
+            if key != "excluded"
+        }
+        if isinstance(excluded, list):
+            surface_summary["excluded_count"] = len(excluded)
+        surface_summary["detail_level"] = "summary"
+        summary[str(surface_name)] = surface_summary
+    return summary
+
+
 def snapshot_metadata(
     run: ShortResearchSignalRun | None,
     *,
     selection_state: str | None = None,
+    evidence_detail: Literal["full", "summary"] = "full",
 ) -> SnapshotMetadata:
     if run is None:
         freshness_status = selection_state or "waiting"
@@ -199,16 +246,34 @@ def snapshot_metadata(
     )
     resource_profile = summary.get("resource_profile")
     provider_health_identity = summary.get("provider_health_identity")
+    observation_only = summary.get("observation_only", {})
+    ranking_surfaces = summary.get("ranking_surfaces", {})
+    if evidence_detail == "summary":
+        provider_health_payload = _summary_provider_health_identity(
+            provider_health_identity
+        )
+        observation_only_payload = _summary_observation_only(observation_only)
+        ranking_surfaces_payload = _summary_ranking_surfaces(ranking_surfaces)
+    else:
+        provider_health_payload = (
+            dict(provider_health_identity)
+            if isinstance(provider_health_identity, dict)
+            else {}
+        )
+        observation_only_payload = observation_only
+        ranking_surfaces_payload = ranking_surfaces
     quality_evidence = {
         "canonical_research_eligibility": summary.get(
             "canonical_research_eligibility",
             {},
         ),
-        "observation_only": summary.get("observation_only", {}),
-        "ranking_surfaces": summary.get("ranking_surfaces", {}),
+        "observation_only": observation_only_payload,
+        "ranking_surfaces": ranking_surfaces_payload,
         "non_finite_reject_count": summary.get("non_finite_reject_count", 0),
         "cap_violation_count": summary.get("cap_violation_count", 0),
     }
+    if evidence_detail == "summary":
+        quality_evidence["detail_level"] = "summary"
     return {
         "snapshot_id": run.id,
         "score_version": run.score_version,
@@ -247,11 +312,7 @@ def snapshot_metadata(
         "resource_profile": (
             dict(resource_profile) if isinstance(resource_profile, dict) else {}
         ),
-        "provider_health_identity": (
-            dict(provider_health_identity)
-            if isinstance(provider_health_identity, dict)
-            else {}
-        ),
+        "provider_health_identity": provider_health_payload,
         "quality_evidence": quality_evidence,
         "publication_evidence": dict(summary.get("publication_evidence") or {}),
         "pit_evidence": dict(summary.get("pit_evidence") or {}),

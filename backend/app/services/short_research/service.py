@@ -5436,10 +5436,21 @@ async def scheduled_etf_job_freshness(session: AsyncSession) -> dict[str, dict[s
     return freshness
 
 
-async def status_summary(session: AsyncSession, *, include_health: bool = False) -> dict[str, Any]:
-    await ensure_short_research_universe(session)
-    latest_run = await latest_signal_run(session)
+async def status_summary(
+    session: AsyncSession,
+    *,
+    include_health: bool = False,
+    asset_type: str | None = None,
+) -> dict[str, Any]:
+    if asset_type not in {None, ASSET_TYPE_FUND, ASSET_TYPE_ETF}:
+        raise ValueError("asset_type 只支持 fund 或 etf")
+    if asset_type is None:
+        await ensure_short_research_universe(session)
     latest_etf_run = await latest_signal_run(session, asset_type=ASSET_TYPE_ETF)
+    if asset_type == ASSET_TYPE_ETF:
+        latest_run = latest_etf_run
+    else:
+        latest_run = await latest_signal_run(session, asset_type=asset_type)
     latest = await latest_data_date(session)
     etf_total = int(await session.scalar(select(func.count()).select_from(TradableEtf)) or 0)
     etf_eligible = int(
@@ -5450,12 +5461,44 @@ async def status_summary(session: AsyncSession, *, include_health: bool = False)
     )
     etf_default_display_count = 0
     if latest_etf_run is not None:
-        latest_etf_items = await list_signal_items(session, latest_etf_run.id)
-        etf_default_display_count = sum(
-            1
-            for item in latest_etf_items
-            if item.asset_type == ASSET_TYPE_ETF and bool((item.metrics_json or {}).get("default_display_eligible", True))
-        )
+        if asset_type == ASSET_TYPE_ETF:
+            surfaces = (latest_etf_run.summary_json or {}).get("ranking_surfaces")
+            research = surfaces.get("research") if isinstance(surfaces, dict) else None
+            persisted_count = (
+                research.get("eligible_count")
+                if isinstance(research, dict)
+                else None
+            )
+            if isinstance(persisted_count, int) and not isinstance(
+                persisted_count,
+                bool,
+            ):
+                etf_default_display_count = max(0, persisted_count)
+            else:
+                etf_default_display_count = int(
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(ShortResearchSignalItem)
+                        .where(
+                            ShortResearchSignalItem.run_id == latest_etf_run.id,
+                            ShortResearchSignalItem.asset_type == ASSET_TYPE_ETF,
+                        )
+                    )
+                    or 0
+                )
+        else:
+            latest_etf_items = await list_signal_items(session, latest_etf_run.id)
+            etf_default_display_count = sum(
+                1
+                for item in latest_etf_items
+                if item.asset_type == ASSET_TYPE_ETF
+                and bool(
+                    (item.metrics_json or {}).get(
+                        "default_display_eligible",
+                        True,
+                    )
+                )
+            )
     etf_failed = int(
         await session.scalar(
             select(func.count()).select_from(EtfDataHealth).where(EtfDataHealth.status == "failed")
@@ -5487,13 +5530,40 @@ async def status_summary(session: AsyncSession, *, include_health: bool = False)
         or 0
     )
     if latest_run is not None:
-        items = await list_signal_items(session, latest_run.id)
-        observable_count = sum(1 for item in items if item.conclusion == CONCLUSION_WATCH)
-        high_risk_count = sum(1 for item in items if item.conclusion == CONCLUSION_HIGH_WATCH)
+        if asset_type is None:
+            items = await list_signal_items(session, latest_run.id)
+            observable_count = sum(
+                1 for item in items if item.conclusion == CONCLUSION_WATCH
+            )
+            high_risk_count = sum(
+                1 for item in items if item.conclusion == CONCLUSION_HIGH_WATCH
+            )
+        else:
+            conclusion_rows = await session.execute(
+                select(
+                    ShortResearchSignalItem.conclusion,
+                    func.count(),
+                )
+                .where(
+                    ShortResearchSignalItem.run_id == latest_run.id,
+                    ShortResearchSignalItem.asset_type == asset_type,
+                )
+                .group_by(ShortResearchSignalItem.conclusion)
+            )
+            conclusion_counts = {
+                str(conclusion): int(count)
+                for conclusion, count in conclusion_rows
+            }
+            observable_count = conclusion_counts.get(CONCLUSION_WATCH, 0)
+            high_risk_count = conclusion_counts.get(CONCLUSION_HIGH_WATCH, 0)
     else:
         observable_count = 0
         high_risk_count = 0
-    health = await data_health(session) if include_health else []
+    health = (
+        await data_health(session, asset_type=asset_type)
+        if include_health
+        else []
+    )
     if include_health:
         etf_data_stale_count = sum(
             1 for item in health if item["asset_type"] == ASSET_TYPE_ETF and item["is_stale"]
@@ -5561,8 +5631,12 @@ async def _latest_etf_sync_state(session: AsyncSession) -> tuple[str, int]:
     return run.status, deferred
 
 
-async def data_health(session: AsyncSession) -> list[dict[str, Any]]:
-    metadata_items = await _available_assets(session)
+async def data_health(
+    session: AsyncSession,
+    *,
+    asset_type: str | None = None,
+) -> list[dict[str, Any]]:
+    metadata_items = await _available_assets(session, asset_type=asset_type)
     etf_codes = [item.code for item in metadata_items if item.asset_type == ASSET_TYPE_ETF]
     raw_by_code: dict[str, EtfPriceHistory] = {}
     research_by_code: dict[str, EtfPriceHistory] = {}
@@ -6520,7 +6594,10 @@ async def observation_portfolio_from_snapshot(
             validation_evidence=None if allocation_contract else {"sample_count": 0},
             caveats=["组合证据只说明当前权重口径是否有同源历史验证，不构成买卖指令。"],
         ),
-        "source_ranking_snapshot": snapshot_metadata(source_run),
+        "source_ranking_snapshot": snapshot_metadata(
+            source_run,
+            evidence_detail="summary",
+        ),
     }
 
 
@@ -7073,5 +7150,8 @@ async def etf_observation_portfolio(
         current_contract=allocation_contract,
         caveats=["当前组合权重仍在等待同源历史回放验证。"],
     )
-    portfolio["source_ranking_snapshot"] = snapshot_metadata(run)
+    portfolio["source_ranking_snapshot"] = snapshot_metadata(
+        run,
+        evidence_detail="summary",
+    )
     return await _attach_optimized_allocation(session, portfolio) if include_optimized else portfolio

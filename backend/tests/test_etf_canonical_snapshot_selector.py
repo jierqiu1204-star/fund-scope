@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta
 
 import pytest
@@ -324,3 +325,50 @@ async def test_snapshot_metadata_exposes_decision_and_score_coverage(app) -> Non
     assert metadata["readiness_state"] == "complete"
     assert metadata["snapshot_state"] == "complete"
     assert metadata["unavailable_reason"] is None
+
+
+@pytest.mark.asyncio
+async def test_snapshot_metadata_summary_omits_row_level_evidence(app) -> None:
+    run_id = await _seed_run(app, scope_kind="full")
+    async with app.state.db.session() as session:
+        run = await session.get(ShortResearchSignalRun, run_id)
+        assert run is not None
+        run.summary_json = {
+            "provider_health_identity": {
+                "state": "available",
+                "hash": "provider-hash",
+                "candidate_records": [{"code": "510001"}] * 10,
+            },
+            "observation_only": {
+                "count": 5,
+                "items": [{"asset_code": "510001"}] * 5,
+            },
+            "ranking_surfaces": {
+                "research": {
+                    "eligible_count": 5,
+                    "excluded": [{"asset_code": "510001"}] * 5,
+                },
+                "actionable": {
+                    "eligible_count": 1,
+                    "excluded": [{"asset_code": "510002"}] * 9,
+                },
+            },
+        }
+
+        full = snapshot_metadata(run)
+        summary = snapshot_metadata(run, evidence_detail="summary")
+
+    assert full["provider_health_identity"]["candidate_records"]
+    assert full["quality_evidence"]["observation_only"]["items"]
+    assert full["quality_evidence"]["ranking_surfaces"]["research"]["excluded"]
+    assert "candidate_records" not in summary["provider_health_identity"]
+    assert summary["provider_health_identity"]["candidate_record_count"] == 10
+    assert "items" not in summary["quality_evidence"]["observation_only"]
+    assert summary["quality_evidence"]["observation_only"]["count"] == 5
+    assert (
+        summary["quality_evidence"]["ranking_surfaces"]["research"][
+            "excluded_count"
+        ]
+        == 5
+    )
+    assert len(json.dumps(summary, default=str)) < len(json.dumps(full, default=str))

@@ -367,6 +367,13 @@ async def test_low_turnover_top_score_is_persisted_as_observation_only(
     ]
     assert body["items"][0]["evidence"]["average_turnover_20d"] == 10_000_000.0
     assert body["snapshot"]["quality_evidence"]["observation_only"]["count"] == 1
+    assert "items" not in body["snapshot"]["quality_evidence"]["observation_only"]
+    assert (
+        "excluded"
+        not in body["snapshot"]["quality_evidence"]["ranking_surfaces"][
+            "research"
+        ]
+    )
     assert run.eligible_item_count == 10
     assert run.coverage_ratio == 1.0
     assert run.summary_json["score_coverage"]["eligible_count"] == 10

@@ -33,8 +33,14 @@ const checks = [
     pass: source.includes("scopeLabel={assetCountScope}") && source.includes("当前页 {start} - {end}")
   },
   {
-    name: "loads health detail for the issue panel",
-    pass: source.includes("/api/short-research/status?include_health=true")
+    name: "loads bounded health detail after the ranking page",
+    pass:
+      source.includes("/api/short-research/status/data-issues") &&
+      source.includes("enabled: assets.isSuccess")
+  },
+  {
+    name: "does not fetch the full ETF signal run on first load",
+    pass: source.includes('enabled: assetType !== "etf"')
   },
   {
     name: "keys private tracking data by stable user identity",

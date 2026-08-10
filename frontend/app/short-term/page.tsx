@@ -29,6 +29,7 @@ import type {
   ShortResearchAsset,
   ShortResearchAssetDetail,
   ShortResearchAssetList,
+  ShortResearchDataHealth,
   ShortResearchObservationPortfolio,
   ShortResearchSignalRun,
   ShortResearchStatus,
@@ -1963,13 +1964,19 @@ function ShortTermClient() {
   const labelFilterSignature = useMemo(() => JSON.stringify(labelFilters), [labelFilters]);
 
   const status = useQuery({
-    queryKey: ["short-research", "status"],
+    queryKey: ["short-research", "status", assetType],
     queryFn: async ({ signal }) =>
-      (await api.get<ShortResearchStatus>("/api/short-research/status?include_health=true", { signal })).data
+      (
+        await api.get<ShortResearchStatus>(
+          `/api/short-research/status?asset_type=${assetType}`,
+          { signal }
+        )
+      ).data
   });
 
   const latestCompletedSignal = useQuery({
     queryKey: ["short-research", "signals", "latest", assetType, theme],
+    enabled: assetType !== "etf",
     queryFn: async ({ signal }) => {
       const params = new URLSearchParams({ asset_type: assetType });
       if (theme !== "all") {
@@ -2001,6 +2008,19 @@ function ShortTermClient() {
       return (await api.get<ShortResearchAssetList>(`/api/short-research/assets?${params.toString()}`, { signal })).data;
     },
     refetchInterval: false
+  });
+
+  const dataIssuesQuery = useQuery({
+    queryKey: ["short-research", "data-issues", assetType],
+    enabled: assets.isSuccess,
+    queryFn: async ({ signal }) =>
+      (
+        await api.get<ShortResearchDataHealth[]>(
+          `/api/short-research/status/data-issues?asset_type=${assetType}&limit=6`,
+          { signal }
+        )
+      ).data,
+    staleTime: 5 * 60_000
   });
 
   const etfLiveStatusQuery = useQuery({
@@ -2421,10 +2441,7 @@ function ShortTermClient() {
   const goToNextAssetPage = () => setAssetOffset((value) => value + ASSET_PAGE_SIZE);
   const observableCount = visibleAssets.filter((item) => itemConclusion(item) === "短线观察").length;
   const highRiskCount = visibleAssets.filter((item) => itemConclusion(item) === "高位观察").length;
-  const dataIssues =
-    statusData?.data_health
-      .filter((item) => item.asset_type === assetType && (item.status !== "success" || item.is_stale))
-      .slice(0, 6) ?? [];
+  const dataIssues = dataIssuesQuery.data ?? [];
   const selectedTracked = activeTracked.filter(
     (item) => selectedAsset && item.asset_type === selectedAsset.asset_type && item.asset_code === selectedAsset.code
   );

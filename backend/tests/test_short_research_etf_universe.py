@@ -1205,6 +1205,47 @@ async def test_status_endpoint_is_lightweight_by_default(client, app, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_scoped_etf_status_avoids_universe_seed_and_full_item_load(
+    client,
+    app,
+    monkeypatch,
+) -> None:
+    run_id = await _seed_cached_etf_signals(app, count=2)
+    async with app.state.db.session() as session:
+        seeded_run = await session.get(ShortResearchSignalRun, run_id)
+    assert seeded_run is not None
+
+    async def fail_expensive_path(*_args: Any, **_kwargs: Any) -> list[Any]:
+        raise AssertionError("scoped ETF status should use persisted counts")
+
+    async def latest_seeded_run(*_args: Any, **_kwargs: Any) -> ShortResearchSignalRun:
+        return seeded_run
+
+    monkeypatch.setattr(
+        short_research_service,
+        "ensure_short_research_universe",
+        fail_expensive_path,
+    )
+    monkeypatch.setattr(
+        short_research_service,
+        "list_signal_items",
+        fail_expensive_path,
+    )
+    monkeypatch.setattr(
+        short_research_service,
+        "latest_signal_run",
+        latest_seeded_run,
+    )
+
+    response = await client.get("/api/short-research/status?asset_type=etf")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["etf_default_display_count"] == 2
+    assert body["data_health"] == []
+
+
+@pytest.mark.asyncio
 async def test_dynamic_etf_sync_batches_and_prioritizes_tracked_etfs(app, monkeypatch) -> None:
     async with app.state.db.session() as session:
         session.add_all(

@@ -47,6 +47,7 @@ from app.schemas.short_research import (
     ShortResearchAssetListOut,
     ShortResearchAssetOut,
     ShortResearchChartPointOut,
+    ShortResearchDataHealthOut,
     ShortResearchDataSyncRequest,
     ShortResearchObservationPortfolioOut,
     ShortResearchSignalRunOut,
@@ -107,6 +108,7 @@ from app.services.short_research.service import (
     ComputedAsset,
     cached_signal_assets,
     current_etf_ranking_surface_selection,
+    data_health,
     etf_observation_portfolio,
     get_asset_detail,
     has_available_opportunity_score,
@@ -840,9 +842,31 @@ async def _signal_run_out(
 @router.get("/status", response_model=ShortResearchStatusOut)
 async def get_short_research_status(
     include_health: bool = Query(default=False),
+    asset_type: Literal["fund", "etf"] | None = Query(default=None),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
-    return await status_summary(session, include_health=include_health)
+    return await status_summary(
+        session,
+        include_health=include_health,
+        asset_type=asset_type,
+    )
+
+
+@router.get(
+    "/status/data-issues",
+    response_model=list[ShortResearchDataHealthOut],
+)
+async def get_short_research_data_issues(
+    asset_type: Literal["fund", "etf"] = Query(default="etf"),
+    limit: int = Query(default=6, ge=1, le=20),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[dict[str, Any]]:
+    health = await data_health(session, asset_type=asset_type)
+    return [
+        item
+        for item in health
+        if item["status"] != "success" or item["is_stale"]
+    ][:limit]
 
 
 def _ranking_surface_snapshot_metadata(
@@ -852,7 +876,11 @@ def _ranking_surface_snapshot_metadata(
     selection_state: str | None = None,
 ) -> dict[str, Any]:
     metadata = {
-        **snapshot_metadata(run, selection_state=selection_state),
+        **snapshot_metadata(
+            run,
+            selection_state=selection_state,
+            evidence_detail="summary",
+        ),
         "ranking_surface": ranking_surface,
     }
     if run is None or run.rule_version != DUAL_RANKING_RULE_VERSION:
@@ -1554,7 +1582,9 @@ async def get_short_research_asset_detail(
             "return_60d": asset.metrics.get("return_60d"),
         },
         explanation_sections=sections,
-        snapshot=EtfRankingSnapshotMetadataOut.model_validate(snapshot_metadata(run)),
+        snapshot=EtfRankingSnapshotMetadataOut.model_validate(
+            snapshot_metadata(run, evidence_detail="summary")
+        ),
     )
 
 
