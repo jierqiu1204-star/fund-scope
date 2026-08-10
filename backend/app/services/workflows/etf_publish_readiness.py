@@ -23,6 +23,7 @@ from app.services.short_etf.publication_providers import (
 )
 from app.services.short_research.coverage_policy import (
     ETF_DAILY_DECISION_MIN_COVERAGE,
+    ETF_SCORE_PUBLICATION_MIN_COVERAGE,
     EtfReadinessPolicyResult,
     evaluate_etf_readiness,
 )
@@ -526,6 +527,45 @@ def _both_gates_pass(readiness: Mapping[str, Any]) -> bool:
     return _readiness_policy(readiness).complete_publication_allowed
 
 
+def _slice_could_reach_both_gates(
+    readiness: Mapping[str, Any],
+    *,
+    max_codes: int,
+) -> bool:
+    """Return whether one bounded slice could possibly cross both gates.
+
+    A slice can improve coverage for at most ``max_codes`` distinct ETF codes.
+    When even that optimistic upper bound remains below either threshold, a
+    second full readiness aggregation cannot change the publication decision.
+    Unknown or malformed denominators deliberately force a remeasurement.
+    """
+
+    universe = readiness.get("universe")
+    universe_payload = universe if isinstance(universe, Mapping) else {}
+    expected = int(universe_payload.get("expected_count") or 0)
+    if expected <= 0 or max_codes <= 0:
+        return True
+
+    daily = readiness.get("daily_freshness")
+    warmup = readiness.get("history_depth_61")
+    if not isinstance(daily, Mapping) or not isinstance(warmup, Mapping):
+        return True
+
+    try:
+        daily_ratio = float(daily.get("coverage_ratio") or 0.0)
+        warmup_ratio = float(warmup.get("coverage_ratio") or 0.0)
+    except (TypeError, ValueError):
+        return True
+
+    maximum_gain = max_codes / expected
+    return (
+        min(1.0, daily_ratio + maximum_gain)
+        >= ETF_DAILY_DECISION_MIN_COVERAGE
+        and min(1.0, warmup_ratio + maximum_gain)
+        >= ETF_SCORE_PUBLICATION_MIN_COVERAGE
+    )
+
+
 async def preflight_post_close_etf_publication_readiness(
     session: AsyncSession,
     *,
@@ -707,10 +747,23 @@ async def run_post_close_etf_publication_readiness(
                     fetcher=fetcher,
                 )
             sync_payload = compact_sync_result(sync_result, request=request)
-            readiness = await read_etf_history_readiness(
-                session,
-                target_date=trade_date,
-            )
+            if _slice_could_reach_both_gates(
+                readiness,
+                max_codes=request.max_codes,
+            ):
+                readiness = await read_etf_history_readiness(
+                    session,
+                    target_date=trade_date,
+                )
+                sync_payload["readiness_remeasurement"] = "completed"
+            else:
+                # Keep the pre-slice measurement as the conservative audit
+                # value. The next scheduler cycle measures again before any
+                # provider work, while this cycle is already mathematically
+                # unable to publish even under the most optimistic outcome.
+                sync_payload["readiness_remeasurement"] = (
+                    "deferred_below_gate_upper_bound"
+                )
 
         compact_after = compact_readiness_payload(readiness)
         readiness_policy = _readiness_policy(readiness)

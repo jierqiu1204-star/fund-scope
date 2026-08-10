@@ -225,6 +225,62 @@ def test_profile_cadence_is_one_or_half_minute_without_boundary_drift() -> None:
     )
 
 
+def test_slice_gate_upper_bound_only_defers_remeasurement_far_from_gate() -> None:
+    far = _readiness(0.50, 0.50)
+    far["universe"]["expected_count"] = 1_500
+    far["daily_freshness"]["expected_count"] = 1_500
+    far["history_depth_61"]["expected_count"] = 1_500
+    assert (
+        coordinator._slice_could_reach_both_gates(far, max_codes=20)
+        is False
+    )
+
+    near = _readiness(0.94, 0.89)
+    near["universe"]["expected_count"] = 1_500
+    assert coordinator._slice_could_reach_both_gates(near, max_codes=20) is True
+
+    missing_denominator = _readiness(0.50, 0.50)
+    missing_denominator["universe"]["expected_count"] = 0
+    assert (
+        coordinator._slice_could_reach_both_gates(
+            missing_denominator,
+            max_codes=20,
+        )
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_coordinator_defers_remeasurement_when_slice_cannot_reach_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_common(monkeypatch)
+    readiness = _readiness(0.50, 0.50)
+    readiness["universe"]["expected_count"] = 1_500
+    readiness["daily_freshness"]["expected_count"] = 1_500
+    readiness["history_depth_61"]["expected_count"] = 1_500
+    read_count = 0
+
+    async def read(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal read_count
+        read_count += 1
+        return readiness
+
+    monkeypatch.setattr(coordinator, "read_etf_history_readiness", read)
+
+    result = await coordinator.run_post_close_etf_publication_readiness(
+        object(),  # type: ignore[arg-type]
+        trade_date=TRADE_DATE,
+        decision_cutoff=DECISION_CUTOFF,
+    )
+
+    assert read_count == 1
+    assert result["status"] == "waiting"
+    assert result["sync"]["readiness_remeasurement"] == (
+        "deferred_below_gate_upper_bound"
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("before", "after"),
