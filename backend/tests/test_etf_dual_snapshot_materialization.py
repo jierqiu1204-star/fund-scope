@@ -4,8 +4,9 @@ from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 
+from app.api.routes import short_research as short_research_routes
 from app.defaults.short_research import ASSET_TYPE_ETF, ShortResearchAsset
 from app.models.entities import (
     EtfCanonicalPublicationRegistry,
@@ -600,6 +601,20 @@ async def test_cached_assets_api_defaults_to_research_and_filters_actionable(
         "required_etf_snapshot_trade_date",
         lambda _now=None: TRADE_DATE,
     )
+    selected_surfaces: list[str] = []
+    original_selection = (
+        short_research_routes.current_etf_ranking_surface_selection
+    )
+
+    async def recording_selection(*args, **kwargs):
+        selected_surfaces.append(str(kwargs.get("ranking_surface") or "research"))
+        return await original_selection(*args, **kwargs)
+
+    monkeypatch.setattr(
+        short_research_routes,
+        "current_etf_ranking_surface_selection",
+        recording_selection,
+    )
 
     async with app.state.db.session() as session:
         session.add_all(
@@ -678,6 +693,7 @@ async def test_cached_assets_api_defaults_to_research_and_filters_actionable(
     assert theme_body["theme_heat"][0]["theme"] == "宽基"
     assert theme_body["theme_heat"][0]["avg_score"] == 75.0
     assert theme_body["theme_heat"][0]["top_asset"]["code"] == "510002"
+    assert selected_surfaces == ["research", "actionable", "research"]
 
     async with app.state.db.session() as session:
         published_run = await session.get(ShortResearchSignalRun, run_id)
@@ -943,11 +959,39 @@ async def test_new_same_date_identity_supersedes_without_rewriting_prior_run(
         await session.commit()
         await publish_dual_ranking_snapshot(session, run_id=second.id)
 
-        selection = await resolve_current_etf_ranking_surface_snapshot(
-            session,
-            required_trade_date=TRADE_DATE,
-            ranking_surface="research",
+        selector_statements: list[str] = []
+
+        def capture_selector_statement(
+            _conn,
+            _cursor,
+            statement,
+            _parameters,
+            _context,
+            _executemany,
+        ) -> None:
+            normalized = " ".join(str(statement).split()).lower()
+            if normalized.startswith("select") and (
+                "from short_research_signal_runs" in normalized
+            ):
+                selector_statements.append(normalized)
+
+        event.listen(
+            app.state.db.engine.sync_engine,
+            "before_cursor_execute",
+            capture_selector_statement,
         )
+        try:
+            selection = await resolve_current_etf_ranking_surface_snapshot(
+                session,
+                required_trade_date=TRADE_DATE,
+                ranking_surface="research",
+            )
+        finally:
+            event.remove(
+                app.state.db.engine.sync_engine,
+                "before_cursor_execute",
+                capture_selector_statement,
+            )
         registries = (
             await session.scalars(
                 select(EtfCanonicalPublicationRegistry).order_by(
@@ -961,6 +1005,7 @@ async def test_new_same_date_identity_supersedes_without_rewriting_prior_run(
     assert selection.state == "ready"
     assert selection.run is not None
     assert selection.run.id == second.id
+    assert len(selector_statements) == 1
     assert [(row.source_signal_run_id, row.is_current) for row in registries] == [
         (first.id, False),
         (second.id, True),

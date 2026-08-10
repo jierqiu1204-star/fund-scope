@@ -22,6 +22,7 @@ from app.services.short_research.coverage_policy import (
     ETF_COMPLETE_SCORE_COVERAGE,
     ETF_DAILY_DECISION_MIN_COVERAGE,
     EtfCoveragePolicyMode,
+    EtfReadinessPolicyResult,
     evaluate_persisted_etf_readiness,
 )
 from app.services.short_research.daily_reconstructable import (
@@ -77,6 +78,24 @@ class SnapshotMetadata(TypedDict):
     concentration_evidence: dict[str, Any]
     freshness_status: str
     limitations: list[str]
+
+
+def _persisted_readiness_for_run(
+    run: ShortResearchSignalRun,
+) -> EtfReadinessPolicyResult:
+    summary = run.summary_json or {}
+    config = run.config_json or {}
+    policy = summary.get("readiness_policy")
+    policy_version = policy.get("policy_version") if isinstance(policy, dict) else None
+    if not isinstance(policy_version, str):
+        policy_version = summary.get("readiness_policy_version")
+    if not isinstance(policy_version, str):
+        policy_version = config.get("readiness_policy_version")
+    return evaluate_persisted_etf_readiness(
+        policy_version=policy_version if isinstance(policy_version, str) else None,
+        daily_coverage_ratio=run.decision_data_coverage_ratio,
+        warmup_coverage_ratio=run.coverage_ratio,
+    )
 
 
 def snapshot_metadata(
@@ -139,19 +158,7 @@ def snapshot_metadata(
         limitations.append("partial_scope")
     summary = run.summary_json or {}
     config = run.config_json or {}
-    policy = summary.get("readiness_policy")
-    policy_version = policy.get("policy_version") if isinstance(policy, dict) else None
-    if not isinstance(policy_version, str):
-        policy_version = summary.get("readiness_policy_version")
-    if not isinstance(policy_version, str):
-        policy_version = config.get("readiness_policy_version")
-    if not isinstance(policy_version, str):
-        policy_version = None
-    readiness = evaluate_persisted_etf_readiness(
-        policy_version=policy_version,
-        daily_coverage_ratio=run.decision_data_coverage_ratio,
-        warmup_coverage_ratio=run.coverage_ratio,
-    )
+    readiness = _persisted_readiness_for_run(run)
     policy_version = readiness.policy_version
     if readiness.state == "degraded":
         snapshot_state: Literal["unavailable", "provisional", "complete"] = (
@@ -255,6 +262,30 @@ def snapshot_metadata(
         "freshness_status": freshness_status,
         "limitations": limitations,
     }
+
+
+def etf_ranking_surface_selection_from_run(
+    run: ShortResearchSignalRun,
+    *,
+    ranking_surface: Literal["research", "actionable"],
+) -> CanonicalSnapshotSelection:
+    readiness = _persisted_readiness_for_run(run)
+    if (
+        readiness.complete_publication_allowed
+        and run.publication_state == "published"
+    ):
+        if ranking_surface == "research":
+            return CanonicalSnapshotSelection("ready", run)
+        surfaces = (run.summary_json or {}).get("ranking_surfaces")
+        actionable = surfaces.get("actionable") if isinstance(surfaces, dict) else None
+        if (
+            isinstance(actionable, dict)
+            and int(actionable.get("eligible_count") or 0) > 0
+        ):
+            return CanonicalSnapshotSelection("ready", run)
+    if ranking_surface == "research" and readiness.state == "degraded":
+        return CanonicalSnapshotSelection("provisional", run)
+    return CanonicalSnapshotSelection("waiting", None)
 
 
 def _etf_item_clauses() -> tuple[ColumnElement[bool], ColumnElement[bool]]:
@@ -473,47 +504,29 @@ async def resolve_current_etf_ranking_surface_snapshot(
     ).all()
     if len(registered_runs) > 1:
         return CanonicalSnapshotSelection("version_mismatch", None)
-    legacy_runs = (
-        await session.scalars(
-            select(ShortResearchSignalRun)
-            .where(
-                *base,
-                ShortResearchSignalRun.as_of_trade_date == required_trade_date,
+    if registered_runs:
+        runs = registered_runs
+    else:
+        runs = (
+            await session.scalars(
+                select(ShortResearchSignalRun)
+                .where(
+                    *base,
+                    ShortResearchSignalRun.as_of_trade_date == required_trade_date,
+                )
+                .order_by(
+                    ShortResearchSignalRun.published_at.desc(),
+                    ShortResearchSignalRun.id.desc(),
+                )
             )
-            .order_by(
-                ShortResearchSignalRun.published_at.desc(),
-                ShortResearchSignalRun.id.desc(),
-            )
-        )
-    ).all()
-    runs = registered_runs or legacy_runs
+        ).all()
     for run in runs:
-        metadata = snapshot_metadata(run)
-        readiness = evaluate_persisted_etf_readiness(
-            policy_version=metadata["policy_version"],
-            daily_coverage_ratio=run.decision_data_coverage_ratio,
-            warmup_coverage_ratio=run.coverage_ratio,
+        selection = etf_ranking_surface_selection_from_run(
+            run,
+            ranking_surface=ranking_surface,
         )
-        if (
-            readiness.complete_publication_allowed
-            and run.publication_state == "published"
-        ):
-            if ranking_surface == "research":
-                return CanonicalSnapshotSelection("ready", run)
-            surfaces = (run.summary_json or {}).get("ranking_surfaces")
-            actionable = (
-                surfaces.get("actionable")
-                if isinstance(surfaces, dict)
-                else None
-            )
-            if (
-                isinstance(actionable, dict)
-                and int(actionable.get("eligible_count") or 0) > 0
-            ):
-                return CanonicalSnapshotSelection("ready", run)
-        if ranking_surface != "research" or readiness.state != "degraded":
-            continue
-        return CanonicalSnapshotSelection("provisional", run)
+        if selection.run is not None:
+            return selection
     if runs:
         return CanonicalSnapshotSelection("waiting", None)
     stale = await session.scalar(

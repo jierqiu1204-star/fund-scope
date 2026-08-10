@@ -120,7 +120,10 @@ from app.services.short_research.service import (
     status_summary,
     sync_short_research_data,
 )
-from app.services.short_research.snapshot_selector import snapshot_metadata
+from app.services.short_research.snapshot_selector import (
+    etf_ranking_surface_selection_from_run,
+    snapshot_metadata,
+)
 from app.services.short_research.theme_heat import theme_heat_summary
 from app.services.strategy_lab.etf_evidence_overview import (
     build_etf_evidence_overview,
@@ -1102,14 +1105,18 @@ async def list_short_research_assets(
         else {}
     )
     validation_by_label = await latest_validation_evidence_by_label(session) if asset_type in {None, "etf"} else {}
-    actionable_selection = (
-        await current_etf_ranking_surface_selection(
+    if asset_type == "etf" and selection is not None:
+        actionable_selection = etf_ranking_surface_selection_from_run(
+            run,
+            ranking_surface="actionable",
+        )
+    elif asset_type is None:
+        actionable_selection = await current_etf_ranking_surface_selection(
             session,
             ranking_surface="actionable",
         )
-        if asset_type in {None, "etf"}
-        else None
-    )
+    else:
+        actionable_selection = None
     portfolio_context_by_code = (
         _portfolio_contexts(
             await observation_portfolio_for_run(
