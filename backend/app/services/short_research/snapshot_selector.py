@@ -163,7 +163,7 @@ def snapshot_metadata(
         freshness_status = "provisional"
         unavailable_reason = str(
             summary.get("unavailable_reason")
-            or "history_depth_61_coverage_below_95pct"
+            or "history_depth_61_coverage_below_90pct"
         )
     elif (
         readiness.complete_publication_allowed

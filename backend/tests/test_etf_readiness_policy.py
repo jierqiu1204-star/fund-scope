@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from app.services.short_research.coverage_policy import (
+    ETF_CANONICAL_COVERAGE_READINESS_POLICY_VERSION,
     ETF_LEGACY_READINESS_POLICY_VERSION,
     ETF_PREVIOUS_READINESS_POLICY_VERSION,
     ETF_READINESS_POLICY_VERSION,
@@ -85,14 +86,23 @@ def test_persisted_legacy_policy_is_not_reinterpreted_by_v2() -> None:
     assert current.complete_publication_allowed is True
 
 
-def test_persisted_v2_policy_retains_its_original_ninety_percent_semantics() -> None:
+@pytest.mark.parametrize(
+    "policy_version",
+    (
+        ETF_PREVIOUS_READINESS_POLICY_VERSION,
+        ETF_CANONICAL_COVERAGE_READINESS_POLICY_VERSION,
+    ),
+)
+def test_persisted_ninety_percent_policies_retain_their_semantics(
+    policy_version: str,
+) -> None:
     prior = evaluate_persisted_etf_readiness(
-        policy_version=ETF_PREVIOUS_READINESS_POLICY_VERSION,
+        policy_version=policy_version,
         daily_coverage_ratio=0.95,
         warmup_coverage_ratio=0.90,
     )
 
-    assert prior.policy_version == ETF_PREVIOUS_READINESS_POLICY_VERSION
+    assert prior.policy_version == policy_version
     assert prior.state == "complete"
     assert prior.complete_publication_allowed is True
 

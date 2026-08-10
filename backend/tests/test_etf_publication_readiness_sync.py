@@ -92,7 +92,7 @@ def test_publication_request_freezes_identity_and_resource_profile() -> None:
     assert request.price_basis == "total_return_adjusted"
     assert request.identity_hash != replace(
         request,
-        provider_policy_version="adjusted-provider-policy-v3",
+        provider_policy_version=f"{request.provider_policy_version}-changed",
     ).identity_hash
 
 

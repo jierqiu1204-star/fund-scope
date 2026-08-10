@@ -95,6 +95,7 @@ from app.services.short_research.optimized_allocation import (
     run_etf_optimized_allocation,
 )
 from app.services.short_research.ranking_read_model import (
+    canonical_research_item_count,
     observation_portfolio_for_run,
     ranking_assets_page,
 )
@@ -857,15 +858,12 @@ def _ranking_surface_snapshot_metadata(
     surface = surfaces.get(ranking_surface) if isinstance(surfaces, dict) else None
     if not isinstance(surface, dict):
         return metadata
-    eligible_count = int(surface.get("eligible_count") or 0)
     coverage_ratio = float(surface.get("coverage_ratio") or 0.0)
     return {
         **metadata,
         "score_version": surface.get("contract_id"),
         "score_field": surface.get("score_field"),
         "ranking_contract_hash": surface.get("contract_hash"),
-        "score_eligible_item_count": eligible_count,
-        "score_coverage_ratio": coverage_ratio,
         "coverage_ratio": coverage_ratio,
     }
 
@@ -1000,7 +998,7 @@ async def get_etf_theme_heat(
     )
     return ShortResearchAssetListOut(
         items=[],
-        total=int(run.eligible_item_count or 0),
+        total=canonical_research_item_count(run),
         generated_at=run.finished_at or run.started_at,
         as_of_date=run.as_of_date,
         theme_heat=theme_heat,

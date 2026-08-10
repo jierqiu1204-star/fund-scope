@@ -26,6 +26,18 @@ class IndexedRankingReadError(RuntimeError):
     """The immutable snapshot does not satisfy the indexed read contract."""
 
 
+def canonical_research_item_count(run: ShortResearchSignalRun) -> int:
+    """Return persisted canonical rows, not the broader score-ready numerator."""
+
+    summary = run.summary_json or {}
+    surfaces = summary.get("ranking_surfaces")
+    research = surfaces.get("research") if isinstance(surfaces, dict) else None
+    value = research.get("eligible_count") if isinstance(research, dict) else None
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return int(run.eligible_item_count or 0)
+
+
 def can_read_indexed_research_page(
     run: ShortResearchSignalRun,
     *,
@@ -77,7 +89,7 @@ async def indexed_research_assets_page(
         ShortResearchSignalItem.ranking_score.is_not(None),
         ShortResearchSignalItem.global_rank.is_not(None),
     )
-    total = int(run.eligible_item_count or 0)
+    total = canonical_research_item_count(run)
     rows = await session.scalars(
         select(ShortResearchSignalItem)
         .where(*conditions)

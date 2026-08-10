@@ -230,7 +230,7 @@ async def test_tencent_history_pairs_raw_and_hfq_with_total_return_provenance() 
     )
     assert all(request.headers["referer"] == "https://gu.qq.com/" for request in requests)
     assert rows[0]["close"] == 1.0
-    assert rows[0]["turnover"] == 100.0
+    assert rows[0]["turnover"] == 10_000.0
     assert rows[0]["research_adjusted_value"] == 2.0
     assert rows[0]["research_price_basis"] == data.TOTAL_RETURN_PRICE_BASIS
     assert rows[0]["adjustment_version"] == data.TENCENT_HFQ_ADJUSTMENT_VERSION
@@ -262,9 +262,19 @@ def test_tencent_hfq_is_accepted_by_the_central_decision_registry() -> None:
         adjustment_version="tencent.forged_v9",
         data_cutoff=datetime(2026, 7, 10, 15, 0),
     )
+    legacy_unit_bug = etf_adjusted_price_provenance_issue(
+        adjusted_value=2.0,
+        price_basis=data.TOTAL_RETURN_PRICE_BASIS,
+        data_provider="tencent",
+        provider_version="tencent.ifzq.fqkline.hfq_v1",
+        source_timestamp=datetime(2026, 7, 10, 6, 0),
+        adjustment_version="tencent.ifzq.fqkline.hfq_v1",
+        data_cutoff=datetime(2026, 7, 10, 15, 0),
+    )
 
     assert issue is None
     assert forged == "unsupported_adjusted_provider"
+    assert legacy_unit_bug == "unsupported_adjusted_provider"
 
 
 def test_tencent_parser_rejects_incomplete_rows() -> None:

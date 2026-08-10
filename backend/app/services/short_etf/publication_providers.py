@@ -12,7 +12,7 @@ import httpx
 from app.services.short_etf import data
 from app.services.short_etf.data import PriceHistoryRows, ProviderFetchResult
 
-PUBLICATION_PROVIDER_POLICY_VERSION = "adjusted-provider-policy-v2"
+PUBLICATION_PROVIDER_POLICY_VERSION = "adjusted-provider-policy-v3"
 MAX_PROVIDER_ATTEMPT_SECONDS = 6.0
 PROVIDER_CLOSE_TIMEOUT_SECONDS = 2.0
 PROVIDER_COOLDOWN_SECONDS = 300

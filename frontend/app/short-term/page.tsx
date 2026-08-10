@@ -707,6 +707,7 @@ function snapshotUnavailableText(reason: string | null | undefined) {
       return "旧快照缺少当前就绪证据";
     case "snapshot_readiness_incompatible":
       return "快照未满足当前就绪合同";
+    case "history_depth_61_coverage_below_90pct":
     case "history_depth_61_coverage_below_95pct":
       return "历史预热覆盖未达发布门槛";
     default:

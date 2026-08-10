@@ -208,7 +208,7 @@ async def test_ninety_percent_materialization_is_complete_and_publishable(
     assert persisted_run.summary_json["readiness_state"] == "complete"
     assert persisted_run.summary_json["snapshot_state"] == "complete_candidate"
     assert persisted_run.summary_json["readiness_policy_version"] == (
-        "etf_readiness_policy_v3"
+        "etf_readiness_policy_v4"
     )
     assert (
         persisted_run.summary_json["ranking_surfaces"]["actionable"][
@@ -312,6 +312,53 @@ async def test_low_turnover_top_score_is_persisted_as_observation_only(
     ]
     assert body["items"][0]["evidence"]["average_turnover_20d"] == 10_000_000.0
     assert body["snapshot"]["quality_evidence"]["observation_only"]["count"] == 1
+    assert run.eligible_item_count == 10
+    assert run.coverage_ratio == 1.0
+    assert run.summary_json["score_coverage"]["eligible_count"] == 10
+    assert run.summary_json["ranking_surfaces"]["research"]["coverage_ratio"] == 0.9
+    assert body["snapshot"]["score_eligible_item_count"] == 10
+    assert body["snapshot"]["score_coverage_ratio"] == 1.0
+    assert body["snapshot"]["coverage_ratio"] == 0.9
+
+
+@pytest.mark.asyncio
+async def test_quality_exclusions_do_not_reduce_score_readiness_coverage(
+    app,
+    monkeypatch,
+) -> None:
+    universe_codes = [f"5103{index:02d}" for index in range(10)]
+    assets = [
+        _asset(code, research_score=99.0 - index, actionable_score=90.0 - index)
+        for index, code in enumerate(universe_codes)
+    ]
+    for asset in assets[:7]:
+        asset.metrics["average_turnover_20d"] = 10_000_000.0
+        asset.metrics["default_display_eligible"] = False
+    _install(monkeypatch, assets, universe_codes=universe_codes)
+
+    async with app.state.db.session() as session:
+        run = await materialize_dual_ranking_snapshot(
+            session,
+            trade_date=TRADE_DATE,
+            decision_cutoff=CUTOFF,
+        )
+        await session.commit()
+        published = await publish_dual_ranking_snapshot(session, run_id=run.id)
+        items = (
+            await session.scalars(
+                select(ShortResearchSignalItem).where(
+                    ShortResearchSignalItem.run_id == run.id
+                )
+            )
+        ).all()
+
+    assert published.publication_state == "published"
+    assert run.eligible_item_count == 10
+    assert run.coverage_ratio == 1.0
+    assert len(items) == 3
+    assert run.summary_json["item_count"] == 3
+    assert run.summary_json["observation_only"]["count"] == 7
+    assert run.summary_json["ranking_surfaces"]["research"]["coverage_ratio"] == 0.3
 
 
 @pytest.mark.asyncio
@@ -657,7 +704,7 @@ async def test_ninety_percent_assets_api_exposes_complete_dual_ranking(
     research = research_response.json()
     assert research["snapshot"]["snapshot_state"] == "complete"
     assert research["snapshot"]["readiness_state"] == "complete"
-    assert research["snapshot"]["policy_version"] == "etf_readiness_policy_v3"
+    assert research["snapshot"]["policy_version"] == "etf_readiness_policy_v4"
     assert len(research["items"]) == 9
     assert all(item["actionable_rank"] is not None for item in research["items"])
     assert all(item["actionable_score"] is not None for item in research["items"])

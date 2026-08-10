@@ -52,7 +52,7 @@ TOTAL_RETURN_PRICE_BASIS = "total_return_adjusted"
 EASTMONEY_HFQ_ADJUSTMENT_VERSION = "eastmoney.push2his.kline.hfq_v1"
 EFINANCE_HFQ_ADJUSTMENT_VERSION = "efinance.stock.get_quote_history.fqt2_v1"
 TICKFLOW_BACKWARD_ADJUSTMENT_VERSION = "tickflow.free.klines.backward_v1"
-TENCENT_HFQ_ADJUSTMENT_VERSION = "tencent.ifzq.fqkline.hfq_v1"
+TENCENT_HFQ_ADJUSTMENT_VERSION = "tencent.ifzq.fqkline.hfq_turnover_yuan_v2"
 EASTMONEY_HISTORY_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 TICKFLOW_HISTORY_URL = "https://free-api.tickflow.org/v1/klines"
 TENCENT_RAW_HISTORY_URL = "https://web.ifzq.gtimg.cn/appstock/app/kline/kline"
@@ -731,7 +731,9 @@ def parse_tencent_history_payload(
                 "high": float(item[3]),
                 "low": float(item[4]),
                 "volume": volume,
-                "turnover": volume * close,
+                # Tencent's daily kline volume is reported in board lots (手),
+                # while FundScope's turnover contract is denominated in yuan.
+                "turnover": volume * 100.0 * close,
                 "pct_change": pct_change,
             }
         )

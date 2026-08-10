@@ -15,6 +15,7 @@ from app.models.entities import (
 )
 from app.services.short_research import ranking_read_model
 from app.services.short_research.ranking_read_model import (
+    canonical_research_item_count,
     observation_portfolio_for_run,
     ranking_assets_page,
 )
@@ -183,3 +184,18 @@ async def test_observation_portfolio_cache_requires_exact_source_run(
         "source": "persisted",
         "allocation_attached": True,
     }
+
+
+def test_canonical_research_count_is_distinct_from_score_ready_count() -> None:
+    run = SimpleNamespace(
+        eligible_item_count=90,
+        summary_json={
+            "ranking_surfaces": {
+                "research": {
+                    "eligible_count": 37,
+                }
+            }
+        },
+    )
+
+    assert canonical_research_item_count(run) == 37  # type: ignore[arg-type]

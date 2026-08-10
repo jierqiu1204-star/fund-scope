@@ -317,8 +317,8 @@ async def test_readiness_cutoff_and_central_provider_registry_fail_closed(app) -
         )
         accepted = _price(accepted_code, target, eligible=True)
         accepted.data_provider = "tencent"
-        accepted.provider_version = "tencent.ifzq.fqkline.hfq_v1"
-        accepted.adjustment_version = "tencent.ifzq.fqkline.hfq_v1"
+        accepted.provider_version = "tencent.ifzq.fqkline.hfq_turnover_yuan_v2"
+        accepted.adjustment_version = "tencent.ifzq.fqkline.hfq_turnover_yuan_v2"
         forged = _price(forged_code, target, eligible=True)
         forged.data_provider = "tencent"
         forged.provider_version = "tencent.forged_v9"

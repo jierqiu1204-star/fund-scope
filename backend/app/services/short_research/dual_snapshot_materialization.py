@@ -24,6 +24,7 @@ from app.services.short_research.canonical_publication import (
 from app.services.short_research.coverage_policy import (
     ETF_COMPLETE_SCORE_COVERAGE,
     ETF_DAILY_DECISION_MIN_COVERAGE,
+    ETF_READINESS_POLICY_VERSION,
     evaluate_etf_readiness,
     evaluate_persisted_etf_readiness,
 )
@@ -144,19 +145,28 @@ async def materialize_dual_ranking_snapshot(
 
     research: list[tuple[ComputedAsset, float]] = []
     actionable: list[tuple[ComputedAsset, float]] = []
+    score_ready_codes: list[str] = []
+    score_excluded: list[dict[str, Any]] = []
     research_excluded: list[dict[str, Any]] = []
     actionable_excluded: list[dict[str, Any]] = []
     for code in expected_codes:
         asset = assets_by_code.get(code)
-        research_reasons: list[str] = []
+        score_reasons: list[str] = []
+        quality_reasons: list[str] = []
         if code not in decision_code_set:
-            research_reasons.append(decision_exclusions.get(code, "decision_data_ineligible"))
+            score_reasons.append(
+                decision_exclusions.get(code, "decision_data_ineligible")
+            )
         elif asset is None:
-            research_reasons.append("missing_computed_asset")
+            score_reasons.append("missing_computed_asset")
         else:
             score = _finite_score(asset.metrics.get("research_score"))
+            if asset.usable_days < research_manifest.required_bar_count:
+                score_reasons.append(
+                    "history:insufficient_61_eligible_adjusted_sessions"
+                )
             if asset.metrics.get("research_score_eligible") is not True or score is None:
-                research_reasons.append(
+                score_reasons.append(
                     str(
                         asset.metrics.get("research_score_unavailable_reason")
                         or "research_score_unavailable"
@@ -167,7 +177,7 @@ async def materialize_dual_ranking_snapshot(
                 or asset.metrics.get("research_score_field") != research_manifest.score_field
                 or asset.metrics.get("research_contract_hash") != research_manifest.manifest_hash
             ):
-                research_reasons.append("research_contract_identity_mismatch")
+                score_reasons.append("research_contract_identity_mismatch")
             theme_profile = asset.metrics.get("theme_profile")
             taxonomy_evidence_valid = (
                 isinstance(theme_profile, dict)
@@ -190,7 +200,22 @@ async def materialize_dual_ranking_snapshot(
                     asset.metrics.get("default_display_eligible") is True
                 ),
             )
-            research_reasons.extend(quality.reasons)
+            quality_reasons.extend(quality.reasons)
+        score_reasons = sorted(set(score_reasons))
+        if score_reasons:
+            score_excluded.append(
+                _observation_evidence(
+                    code=code,
+                    asset=asset,
+                    reasons=score_reasons,
+                    decision_data_eligible=code in decision_code_set,
+                    price_basis=research_manifest.price_basis,
+                )
+            )
+        else:
+            score_ready_codes.append(code)
+
+        research_reasons = sorted(set([*score_reasons, *quality_reasons]))
         if research_reasons:
             research_excluded.append(
                 _observation_evidence(
@@ -239,10 +264,15 @@ async def materialize_dual_ranking_snapshot(
     research.sort(key=lambda item: (-item[1], item[0].metadata.code))
     actionable.sort(key=lambda item: (-item[1], item[0].metadata.code))
     expected_count = len(expected_codes)
-    research_ratio = len(research) / expected_count if expected_count else 0.0
+    score_coverage_ratio = (
+        len(score_ready_codes) / expected_count if expected_count else 0.0
+    )
+    canonical_research_ratio = (
+        len(research) / expected_count if expected_count else 0.0
+    )
     readiness = evaluate_etf_readiness(
         daily_coverage_ratio=barrier.coverage_ratio,
-        warmup_coverage_ratio=research_ratio,
+        warmup_coverage_ratio=score_coverage_ratio,
     )
     if readiness.state == "blocked":
         raise SnapshotMaterializationError(
@@ -417,6 +447,7 @@ async def materialize_dual_ranking_snapshot(
             "policy_version": readiness.policy_version,
             "daily_coverage_threshold": ETF_DAILY_DECISION_MIN_COVERAGE,
             "warmup_coverage_threshold": ETF_COMPLETE_SCORE_COVERAGE,
+            "warmup_coverage_kind": "daily_reconstructable_score_eligible",
         },
         "canonical_research_eligibility": canonical_research_eligibility_policy(),
         "provider_health_policy": provider_health_identity.get("policy", {}),
@@ -520,7 +551,7 @@ async def materialize_dual_ranking_snapshot(
                 else "research_complete_actionable_unavailable"
             ),
             "unavailable_reason": (
-                "history_depth_61_coverage_below_95pct"
+                "history_depth_61_coverage_below_90pct"
                 if readiness.state == "degraded"
                 else provider_health_reason
                 if not actionable
@@ -534,13 +565,30 @@ async def materialize_dual_ranking_snapshot(
             },
             "surface_group_hash": surface_group_hash,
             "provider_health_identity": provider_health_identity,
+            "score_coverage": {
+                "coverage_kind": "daily_reconstructable_score_eligible",
+                "expected_count": expected_count,
+                "eligible_count": len(score_ready_codes),
+                "coverage_ratio": round(score_coverage_ratio, 6),
+                "eligible_code_hash": canonical_hash(sorted(score_ready_codes)),
+                "excluded_count": len(score_excluded),
+                "exclusion_reason_counts": dict(
+                    sorted(
+                        Counter(
+                            reason
+                            for item in score_excluded
+                            for reason in item["reasons"]
+                        ).items()
+                    )
+                ),
+            },
             "ranking_surfaces": {
                 "research": {
                     "contract_id": research_manifest.contract_id,
                     "score_field": research_manifest.score_field,
                     "contract_hash": research_manifest.manifest_hash,
                     "eligible_count": len(research),
-                    "coverage_ratio": round(research_ratio, 6),
+                    "coverage_ratio": round(canonical_research_ratio, 6),
                     "excluded": research_excluded,
                 },
                 "actionable": {
@@ -601,8 +649,8 @@ async def materialize_dual_ranking_snapshot(
             len(barrier.included_codes) / expected_count if expected_count else 0.0,
             6,
         ),
-        eligible_item_count=len(research),
-        coverage_ratio=round(research_ratio, 6),
+        eligible_item_count=len(score_ready_codes),
+        coverage_ratio=round(score_coverage_ratio, 6),
         publication_state="unpublished",
         idempotency_key=idempotency_key,
     )
@@ -773,7 +821,26 @@ async def publish_dual_ranking_snapshot(
                 .with_for_update()
             )
         ).all()
-        if not items or run.eligible_item_count != len(items):
+        if not items:
+            raise SnapshotPublicationError("research surface is empty or incomplete")
+        if policy_version == ETF_READINESS_POLICY_VERSION:
+            score_coverage = summary.get("score_coverage")
+            if (
+                not isinstance(score_coverage, dict)
+                or score_coverage.get("coverage_kind")
+                != "daily_reconstructable_score_eligible"
+                or score_coverage.get("expected_count") != run.expected_item_count
+                or score_coverage.get("eligible_count") != run.eligible_item_count
+                or score_coverage.get("coverage_ratio")
+                != round(float(run.coverage_ratio or 0.0), 6)
+                or run.eligible_item_count is None
+                or run.eligible_item_count < len(items)
+                or summary.get("item_count") != len(items)
+            ):
+                raise SnapshotPublicationError(
+                    "score-ready and canonical research coverage are inconsistent"
+                )
+        elif run.eligible_item_count != len(items):
             raise SnapshotPublicationError("research surface is empty or incomplete")
         if [item.global_rank for item in items] != list(range(1, len(items) + 1)):
             raise SnapshotPublicationError("research ranks are not contiguous")
