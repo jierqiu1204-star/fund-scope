@@ -1995,6 +1995,7 @@ function ShortTermClient() {
       params.set("sort", sort);
       if (assetType === "etf") {
         params.set("ranking_surface", rankingSurface);
+        params.set("include_theme_heat", "false");
       }
       return (await api.get<ShortResearchAssetList>(`/api/short-research/assets?${params.toString()}`, { signal })).data;
     },
@@ -2020,10 +2021,11 @@ function ShortTermClient() {
   const etfThemeSource = useQuery({
     queryKey: ["short-research", "etf-theme-heat"],
     enabled: assetType === "etf",
-    queryFn: async () =>
+    queryFn: async ({ signal }) =>
       (
         await api.get<ShortResearchAssetList>(
-          "/api/short-research/assets?asset_type=etf&ranking_surface=research&universe=all&sort=score&limit=1&offset=0"
+          "/api/short-research/assets/theme-heat?universe=all",
+          { signal }
         )
       ).data,
     staleTime: 5 * 60_000

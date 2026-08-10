@@ -4,7 +4,7 @@ import json
 from datetime import date
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
@@ -400,14 +400,32 @@ async def _upsert_report(
 async def latest_reports_by_asset(
     session: AsyncSession,
     signal_run_id: int,
+    *,
+    asset_keys: set[tuple[str, str]] | None = None,
 ) -> dict[tuple[str, str], ShortResearchAdvisorReport]:
-    rows = (
-        await session.scalars(
-            select(ShortResearchAdvisorReport).where(
-                ShortResearchAdvisorReport.signal_run_id == signal_run_id,
-                ShortResearchAdvisorReport.status == "success",
+    query = select(ShortResearchAdvisorReport).where(
+        ShortResearchAdvisorReport.signal_run_id == signal_run_id,
+        ShortResearchAdvisorReport.status == "success",
+    )
+    if asset_keys is not None:
+        codes_by_type: dict[str, set[str]] = {}
+        for asset_type, asset_code in asset_keys:
+            codes_by_type.setdefault(asset_type, set()).add(asset_code)
+        if not codes_by_type:
+            return {}
+        query = query.where(
+            or_(
+                *(
+                    and_(
+                        ShortResearchAdvisorReport.asset_type == asset_type,
+                        ShortResearchAdvisorReport.asset_code.in_(sorted(codes)),
+                    )
+                    for asset_type, codes in codes_by_type.items()
+                )
             )
         )
+    rows = (
+        await session.scalars(query)
     ).all()
     return {(row.asset_type, row.asset_code): row for row in rows}
 

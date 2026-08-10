@@ -94,6 +94,10 @@ from app.services.short_research.optimized_allocation import (
     optimized_allocation_payload,
     run_etf_optimized_allocation,
 )
+from app.services.short_research.ranking_read_model import (
+    observation_portfolio_for_run,
+    ranking_assets_page,
+)
 from app.services.short_research.ranking_surfaces import DUAL_RANKING_RULE_VERSION
 from app.services.short_research.service import (
     VALIDATION_MODE_FORWARD_LIVE,
@@ -116,6 +120,7 @@ from app.services.short_research.service import (
     sync_short_research_data,
 )
 from app.services.short_research.snapshot_selector import snapshot_metadata
+from app.services.short_research.theme_heat import theme_heat_summary
 from app.services.strategy_lab.etf_evidence_overview import (
     build_etf_evidence_overview,
 )
@@ -554,50 +559,65 @@ def _asset_out(
 
 
 def _theme_heat_summary(assets: list[ComputedAsset]) -> list[dict[str, Any]]:
-    groups: dict[str, dict[str, Any]] = {}
-    for asset in assets:
-        if asset.metadata.asset_type != "etf":
-            continue
-        profile = dict(asset.metrics.get("theme_profile") or asset.rationale.get("theme_profile") or {})
-        primary_theme = str(profile.get("primary_theme") or "").strip() or "未分类"
-        if primary_theme == "未分类":
-            primary_theme = str(profile.get("theme_group") or "未分类")
-        bucket = groups.setdefault(
-            primary_theme,
-            {
-                "theme": primary_theme,
-                "count": 0,
-                "score_sum": 0.0,
-                "change_sum": 0.0,
-                "change_count": 0,
-                "top_asset": None,
-                "top_score": 0.0,
-            },
-        )
-        bucket["count"] += 1
-        bucket["score_sum"] += float(asset.total_score)
-        today_return = asset.metrics.get("today_return_pct")
-        if isinstance(today_return, (int, float)):
-            bucket["change_sum"] += float(today_return)
-            bucket["change_count"] += 1
-        if float(asset.total_score) >= float(bucket["top_score"]):
-            bucket["top_score"] = round(float(asset.total_score), 2)
-            bucket["top_asset"] = {"code": asset.metadata.code, "name": asset.metadata.name}
-    result: list[dict[str, Any]] = []
-    for item in groups.values():
-        count = max(int(item["count"]), 1)
-        change_count = int(item["change_count"])
-        result.append(
-            {
-                "theme": item["theme"],
-                "count": count,
-                "avg_score": round(float(item["score_sum"]) / count, 2),
-                "avg_today_return": round(float(item["change_sum"]) / change_count, 4) if change_count else None,
-                "top_score": item["top_score"],
-                "top_asset": item["top_asset"],
-            }
-        )
-    return sorted(result, key=lambda item: (item["avg_score"], item["count"]), reverse=True)[:12]
+    return theme_heat_summary(assets)
+
+
+def _persisted_theme_heat(
+    run: ShortResearchSignalRun,
+    *,
+    universe: str,
+) -> list[dict[str, Any]] | None:
+    if (
+        universe not in {"default", "all"}
+        or run.score_version != "daily_reconstructable_v1"
+        or run.rule_version != DUAL_RANKING_RULE_VERSION
+    ):
+        return None
+    raw = (run.summary_json or {}).get("theme_heat")
+    if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
+        return None
+    return [dict(item) for item in raw]
+
+
+async def _theme_heat_for_run(
+    request: Request,
+    session: AsyncSession,
+    run: ShortResearchSignalRun,
+    *,
+    universe: str,
+) -> list[dict[str, Any]]:
+    persisted = _persisted_theme_heat(run, universe=universe)
+    if persisted is not None:
+        return persisted
+    cache = getattr(request.app.state, "short_research_theme_heat_cache", None)
+    if cache is None:
+        cache = {}
+        request.app.state.short_research_theme_heat_cache = cache
+    key = (run.id, run.idempotency_key or "", universe)
+    cached = cache.get(key)
+    if cached is not None:
+        return [dict(item) for item in cached]
+    ranking_surface = (
+        "research"
+        if run.score_version == "daily_reconstructable_v1"
+        and run.rule_version == DUAL_RANKING_RULE_VERSION
+        else None
+    )
+    heat_assets, _ = await cached_signal_assets(
+        session,
+        run,
+        asset_type="etf",
+        sort="score",
+        universe=universe,
+        limit=None,
+        offset=0,
+        ranking_surface=ranking_surface,
+    )
+    result = _theme_heat_summary(heat_assets)
+    if len(cache) >= 8:
+        cache.pop(next(iter(cache)))
+    cache[key] = result
+    return [dict(item) for item in result]
 
 
 def _validation_for_asset(asset: ComputedAsset, evidence_by_label: dict[tuple[str, str], dict[str, Any]]) -> dict[str, Any]:
@@ -944,8 +964,54 @@ async def list_etf_observation_only_assets(
     )
 
 
+@router.get("/assets/theme-heat", response_model=ShortResearchAssetListOut)
+async def get_etf_theme_heat(
+    request: Request,
+    universe: str = Query(default="all"),
+    session: AsyncSession = Depends(get_db_session),
+) -> ShortResearchAssetListOut:
+    if universe not in {"default", "all"}:
+        raise HTTPException(status_code=400, detail="主题热度只支持 default 或 all")
+    selection = await current_etf_ranking_surface_selection(
+        session,
+        ranking_surface="research",
+    )
+    run = selection.run
+    snapshot = EtfRankingSnapshotMetadataOut.model_validate(
+        _ranking_surface_snapshot_metadata(
+            run,
+            ranking_surface="research",
+            selection_state=selection.state,
+        )
+    )
+    if run is None:
+        return ShortResearchAssetListOut(
+            items=[],
+            total=0,
+            theme_heat=[],
+            snapshot=snapshot,
+            ranking_surface="research",
+        )
+    theme_heat = await _theme_heat_for_run(
+        request,
+        session,
+        run,
+        universe=universe,
+    )
+    return ShortResearchAssetListOut(
+        items=[],
+        total=int(run.eligible_item_count or 0),
+        generated_at=run.finished_at or run.started_at,
+        as_of_date=run.as_of_date,
+        theme_heat=theme_heat,
+        snapshot=snapshot,
+        ranking_surface="research",
+    )
+
+
 @router.get("/assets", response_model=ShortResearchAssetListOut)
 async def list_short_research_assets(
+    request: Request,
     asset_type: str | None = Query(default=None),
     theme: str | None = Query(default=None),
     sort: str = Query(default="score"),
@@ -955,6 +1021,7 @@ async def list_short_research_assets(
     entry_labels: str | None = Query(default=None),
     tracking_states: str | None = Query(default=None),
     ranking_surface: Literal["research", "actionable"] = Query(default="research"),
+    include_theme_heat: bool = Query(default=True),
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_db_session),
@@ -962,6 +1029,8 @@ async def list_short_research_assets(
 ) -> ShortResearchAssetListOut:
     try:
         tracking_filters = _csv_values(tracking_states)
+        observation_filters = _csv_values(observation_labels)
+        entry_filters = _csv_values(entry_labels)
         validate_tracking_states(tracking_filters)
         if tracking_filters and user is None:
             raise HTTPException(status_code=401, detail="持仓筛选需要登录")
@@ -997,7 +1066,7 @@ async def list_short_research_assets(
                 ),
                 ranking_surface=ranking_surface if asset_type == "etf" else None,
             )
-        assets, total = await cached_signal_assets(
+        assets, total = await ranking_assets_page(
             session,
             run,
             asset_type=asset_type,
@@ -1007,8 +1076,9 @@ async def list_short_research_assets(
             universe=universe,
             limit=None if tracking_filters else limit,
             offset=0 if tracking_filters else offset,
-            observation_labels=_csv_values(observation_labels),
-            entry_labels=_csv_values(entry_labels),
+            observation_labels=observation_filters,
+            entry_labels=entry_filters,
+            tracking_states=tracking_filters,
             ranking_surface=ranking_surface if asset_type == "etf" else None,
         )
         if tracking_filters:
@@ -1024,7 +1094,15 @@ async def list_short_research_assets(
             assets = assets[offset : offset + limit]
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    advisor_reports = await latest_reports_by_asset(session, run.id) if run is not None else {}
+    advisor_reports = (
+        await latest_reports_by_asset(
+            session,
+            run.id,
+            asset_keys={(asset.metadata.asset_type, asset.metadata.code) for asset in assets},
+        )
+        if run is not None
+        else {}
+    )
     validation_by_label = await latest_validation_evidence_by_label(session) if asset_type in {None, "etf"} else {}
     actionable_selection = (
         await current_etf_ranking_surface_selection(
@@ -1036,38 +1114,26 @@ async def list_short_research_assets(
     )
     portfolio_context_by_code = (
         _portfolio_contexts(
-            await etf_observation_portfolio(
+            await observation_portfolio_for_run(
                 session,
-                source_run=(
-                    actionable_selection.run
-                    if actionable_selection is not None
-                    else None
-                ),
+                actionable_selection.run,
             )
         )
-        if asset_type in {None, "etf"}
+        if (
+            asset_type in {None, "etf"}
+            and actionable_selection is not None
+            and actionable_selection.run is not None
+        )
         else {}
     )
     theme_heat: list[dict[str, Any]] = []
-    if asset_type in {None, "etf"}:
-        heat_assets, _heat_total = await cached_signal_assets(
+    if include_theme_heat and asset_type in {None, "etf"}:
+        theme_heat = await _theme_heat_for_run(
+            request,
             session,
             run,
-            asset_type="etf",
-            sort=sort,
             universe=universe,
-            limit=2000,
-            offset=0,
-            ranking_surface=(
-                "research"
-                if (
-                    run.score_version == "daily_reconstructable_v1"
-                    and run.rule_version == DUAL_RANKING_RULE_VERSION
-                )
-                else None
-            ),
         )
-        theme_heat = _theme_heat_summary(heat_assets)
     catalyst_shadow_by_code = await _catalyst_shadow_by_asset_code(
         session,
         assets,
@@ -1436,11 +1502,19 @@ async def get_short_research_asset_detail(
         asset, chart, sections = await get_asset_detail(session, asset_type, code, source_run=run)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    advisor_reports = await latest_reports_by_asset(session, run.id) if run is not None else {}
+    advisor_reports = (
+        await latest_reports_by_asset(
+            session,
+            run.id,
+            asset_keys={(asset.metadata.asset_type, asset.metadata.code)},
+        )
+        if run is not None
+        else {}
+    )
     validation_by_label = await latest_validation_evidence_by_label(session) if asset.metadata.asset_type == "etf" else {}
     portfolio_context_by_code = (
-        _portfolio_contexts(await etf_observation_portfolio(session, source_run=run))
-        if asset.metadata.asset_type == "etf"
+        _portfolio_contexts(await observation_portfolio_for_run(session, run))
+        if asset.metadata.asset_type == "etf" and run is not None
         else {}
     )
     catalyst_shadow_by_code = await _catalyst_shadow_by_asset_code(

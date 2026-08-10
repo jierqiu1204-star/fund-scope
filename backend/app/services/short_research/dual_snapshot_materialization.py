@@ -54,6 +54,7 @@ from app.services.short_research.snapshot_publication import (
     build_etf_coverage_barrier,
     build_snapshot_draft_seal,
 )
+from app.services.short_research.theme_heat import theme_heat_summary
 from app.services.short_research.universe import build_point_in_time_universe_snapshot
 
 
@@ -558,6 +559,12 @@ async def materialize_dual_ranking_snapshot(
                 "count": len(research_excluded),
                 "items": research_excluded,
             },
+            "theme_heat": theme_heat_summary(
+                (asset for asset, _score in research),
+                scores_by_code={
+                    asset.metadata.code: score for asset, score in research
+                },
+            ),
             "input_snapshot": _json_safe(input_snapshot),
             "non_finite_reject_count": sum(
                 any("non_finite" in reason for reason in item["reasons"])

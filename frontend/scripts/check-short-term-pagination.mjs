@@ -42,7 +42,7 @@ const checks = [
   },
   {
     name: "uses server polling intervals and next boundary hints",
-    pass: source.includes("data.next_poll_seconds") && source.includes("data.page_poll_seconds")
+    pass: source.includes("data?.next_poll_seconds") && source.includes("data.page_poll_seconds")
   },
   {
     name: "passes React Query abort signals to list requests",

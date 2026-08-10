@@ -526,15 +526,19 @@ async def test_cached_assets_api_defaults_to_research_and_filters_actionable(
         run_id = run.id
 
     research_response = await client.get(
-        "/api/short-research/assets?asset_type=etf&universe=all"
+        "/api/short-research/assets?asset_type=etf&universe=all&include_theme_heat=false"
     )
     actionable_response = await client.get(
         "/api/short-research/assets"
         "?asset_type=etf&universe=all&ranking_surface=actionable"
     )
+    theme_response = await client.get(
+        "/api/short-research/assets/theme-heat?universe=all"
+    )
 
     assert research_response.status_code == 200
     research = research_response.json()
+    assert research["theme_heat"] == []
     assert research["ranking_surface"] == "research"
     assert research["snapshot"]["ranking_surface"] == "research"
     assert (
@@ -565,6 +569,14 @@ async def test_cached_assets_api_defaults_to_research_and_filters_actionable(
         for item in actionable["items"]
     ] == [("510001", 1, 1, 90.0)]
     assert actionable["items"][0]["ranking_score"] == 90.0
+
+    assert theme_response.status_code == 200
+    theme_body = theme_response.json()
+    assert theme_body["items"] == []
+    assert theme_body["total"] == 2
+    assert theme_body["theme_heat"][0]["theme"] == "宽基"
+    assert theme_body["theme_heat"][0]["avg_score"] == 75.0
+    assert theme_body["theme_heat"][0]["top_asset"]["code"] == "510002"
 
     async with app.state.db.session() as session:
         published_run = await session.get(ShortResearchSignalRun, run_id)
