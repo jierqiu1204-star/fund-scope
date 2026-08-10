@@ -499,6 +499,7 @@ def register_default_jobs(
         day_of_week="mon-fri",
         hour="15-22",
         minute="*",
+        second="0,30",
         id="post_close_etf_adjusted_sync",
         max_instances=1,
         coalesce=True,

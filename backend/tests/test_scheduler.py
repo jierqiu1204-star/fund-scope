@@ -158,6 +158,7 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     assert trigger_field(post_close_etf_signals, "minute") == "10"
     assert trigger_field(post_close_etf_adjusted_sync, "hour") == "15-22"
     assert trigger_field(post_close_etf_adjusted_sync, "minute") == "*"
+    assert trigger_field(post_close_etf_adjusted_sync, "second") == "0,30"
     assert post_close_etf_adjusted_sync.max_instances == 1
     assert post_close_etf_adjusted_sync.coalesce is True
     assert trigger_field(production_etf_pit_capture, "hour") == "15-22"

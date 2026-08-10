@@ -61,7 +61,7 @@ COMPACT_CODE_SAMPLE_LIMIT = 20
 class PublicationReadinessProfile:
     name: str
     max_codes: int
-    cadence_minutes: int
+    cadence_minutes: float
 
 
 @dataclass(frozen=True)
@@ -71,7 +71,7 @@ class PublicationReadinessPreflight:
     trade_date: date
     decision_cutoff: datetime
     profile: str | None = None
-    cadence_minutes: int | None = None
+    cadence_minutes: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -87,12 +87,12 @@ class PublicationReadinessPreflight:
 CONSERVATIVE_PUBLICATION_PROFILE = PublicationReadinessProfile(
     name="conservative",
     max_codes=10,
-    cadence_minutes=5,
+    cadence_minutes=1.0,
 )
 MAXIMUM_PUBLICATION_PROFILE = PublicationReadinessProfile(
     name="maximum",
     max_codes=20,
-    cadence_minutes=2,
+    cadence_minutes=0.5,
 )
 
 
@@ -183,7 +183,13 @@ def _profile_cadence_due(
     if not runs:
         return True
     latest = runs[0]
-    return latest.started_at <= now - timedelta(minutes=profile.cadence_minutes)
+    if latest.status == "running":
+        return False
+    # APScheduler fires on whole-second boundaries while JobRun timestamps retain
+    # microseconds.  Compare at scheduler precision so a healthy 30-second cycle
+    # is not accidentally delayed until the next trigger.
+    latest_started_at = latest.started_at.replace(microsecond=0)
+    return latest_started_at <= now - timedelta(minutes=profile.cadence_minutes)
 
 
 def build_publication_readiness_request(

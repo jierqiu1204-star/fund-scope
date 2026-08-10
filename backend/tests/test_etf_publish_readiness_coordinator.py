@@ -188,12 +188,15 @@ def test_profile_treats_durable_unseasoned_checkpoint_as_healthy_progress() -> N
     )
 
 
-def test_profile_cadence_is_five_or_two_minutes() -> None:
-    now = datetime(2026, 7, 20, 15, 30)
-    four_minutes_ago = SimpleNamespace(started_at=datetime(2026, 7, 20, 15, 26))
+def test_profile_cadence_is_one_or_half_minute_without_boundary_drift() -> None:
+    now = datetime(2026, 7, 20, 15, 30, 30)
+    half_minute_ago = SimpleNamespace(
+        started_at=datetime(2026, 7, 20, 15, 30, 0, 900_000),
+        status="partial",
+    )
     assert (
         coordinator._profile_cadence_due(
-            [four_minutes_ago],
+            [half_minute_ago],
             profile=coordinator.CONSERVATIVE_PUBLICATION_PROFILE,
             now=now,
         )
@@ -201,11 +204,24 @@ def test_profile_cadence_is_five_or_two_minutes() -> None:
     )
     assert (
         coordinator._profile_cadence_due(
-            [four_minutes_ago],
+            [half_minute_ago],
             profile=coordinator.MAXIMUM_PUBLICATION_PROFILE,
             now=now,
         )
         is True
+    )
+
+    running = SimpleNamespace(
+        started_at=datetime(2026, 7, 20, 15, 0),
+        status="running",
+    )
+    assert (
+        coordinator._profile_cadence_due(
+            [running],
+            profile=coordinator.MAXIMUM_PUBLICATION_PROFILE,
+            now=now,
+        )
+        is False
     )
 
 
@@ -493,6 +509,6 @@ async def test_readiness_status_exposes_compact_operational_fields(
     assert payload["synchronization"]["checkpoint_age_seconds"] is not None
     assert payload["synchronization"]["max_codes"] == 10
     assert payload["synchronization"]["estimated_remaining_slices"] == 1
-    assert payload["synchronization"]["estimated_eta_minutes"] == 5
+    assert payload["synchronization"]["estimated_eta_minutes"] == 1.0
     assert payload["synchronization"]["lease"]["active"] is False
     assert "checkpoint" in payload["synchronization"]
