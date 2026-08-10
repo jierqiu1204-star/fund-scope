@@ -8,6 +8,7 @@ import httpx
 import pandas as pd
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.dialects import postgresql
 
 from app.models.entities import (
     EtfIntradayCleanupCheckpoint,
@@ -85,6 +86,24 @@ def _etf(code: str, name: str | None = None) -> TradableEtf:
         is_short_term_eligible=True,
         is_watchlist=True,
     )
+
+
+def test_large_postgres_cutoff_query_uses_one_bounded_distinct_on_scan() -> None:
+    codes = [f"{index:06d}" for index in range(1_500)]
+    statement = intraday_service._postgres_distinct_on_historical_quotes_stmt(
+        codes,
+        trade_date=date(2026, 8, 10),
+        decision_cutoff=datetime(2026, 8, 10, 15, 0),
+        captured_cutoff=datetime(2026, 8, 10, 7, 0),
+    )
+
+    compiled = str(statement.compile(dialect=postgresql.dialect()))
+
+    assert "DISTINCT ON (etf_intraday_quotes.etf_code)" in compiled
+    assert "etf_intraday_quotes.trade_date =" in compiled
+    assert "etf_intraday_quotes.quote_time <=" in compiled
+    assert "etf_intraday_quotes.created_at <=" in compiled
+    assert "JOIN LATERAL" not in compiled
 
 
 async def _seed_signal_run(

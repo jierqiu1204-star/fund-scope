@@ -72,6 +72,7 @@ INTRADAY_CLEANUP_BATCH_SIZE_MAX = 5_000
 INTRADAY_CLEANUP_GROUP_SCAN_LIMIT = 64
 INTRADAY_CLEANUP_PROTECTED_ROW_ALLOWANCE = 1_000
 INTRADAY_CLEANUP_ADVISORY_LOCK_KEY = 2_026_081_001
+POSTGRES_DISTINCT_ON_MIN_CODES = 100
 SOURCE_ALL_ETF = "all_etf"
 _PROVIDER_FAILURE_COUNT = 0
 _PROVIDER_BACKOFF_UNTIL: datetime | None = None
@@ -751,6 +752,33 @@ async def latest_intraday_quote(session: AsyncSession, etf_code: str) -> QuoteRo
     )
 
 
+def _postgres_distinct_on_historical_quotes_stmt(
+    codes: list[str],
+    *,
+    trade_date: date,
+    decision_cutoff: datetime | None,
+    captured_cutoff: datetime | None,
+) -> Any:
+    filters: list[Any] = [
+        EtfIntradayQuote.etf_code.in_(codes),
+        EtfIntradayQuote.trade_date == trade_date,
+    ]
+    if decision_cutoff is not None:
+        filters.append(EtfIntradayQuote.quote_time <= decision_cutoff)
+    if captured_cutoff is not None:
+        filters.append(EtfIntradayQuote.created_at <= captured_cutoff)
+    return (
+        select(EtfIntradayQuote)
+        .where(*filters)
+        .distinct(EtfIntradayQuote.etf_code)
+        .order_by(
+            EtfIntradayQuote.etf_code,
+            EtfIntradayQuote.quote_time.desc(),
+            EtfIntradayQuote.id.desc(),
+        )
+    )
+
+
 async def _latest_historical_quotes_by_code(
     session: AsyncSession,
     codes: list[str],
@@ -765,6 +793,22 @@ async def _latest_historical_quotes_by_code(
 
     bind = session.get_bind()
     if bind.dialect.name == "postgresql":
+        if (
+            trade_date is not None
+            and len(unique_codes) >= POSTGRES_DISTINCT_ON_MIN_CODES
+        ):
+            rows = (
+                await session.scalars(
+                    _postgres_distinct_on_historical_quotes_stmt(
+                        unique_codes,
+                        trade_date=trade_date,
+                        decision_cutoff=decision_cutoff,
+                        captured_cutoff=captured_cutoff,
+                    )
+                )
+            ).all()
+            return {row.etf_code: row for row in rows}
+
         values_sql = ", ".join(f"(:code_{index})" for index in range(len(unique_codes)))
         params: dict[str, Any] = {f"code_{index}": code for index, code in enumerate(unique_codes)}
         cutoff_filters = ""
