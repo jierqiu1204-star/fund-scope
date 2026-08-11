@@ -5,6 +5,7 @@ BACKUP_DIR=${BACKUP_DIR:-/var/backups/fundscope}
 COMPOSE_FILE=${COMPOSE_FILE:-docker-compose.ip.yml}
 POSTGRES_USER=${POSTGRES_USER:-fundscope}
 POSTGRES_DB=${POSTGRES_DB:-fundscope}
+BACKUP_COMPRESSION=${BACKUP_COMPRESSION:-zstd:1}
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "${SCRIPT_DIR}/backup-retention.sh"
@@ -23,7 +24,8 @@ TMP_PATH="${BACKUP_PATH}.tmp"
 trap 'rm -f "${TMP_PATH}"' EXIT
 
 docker compose -f "${COMPOSE_FILE}" exec -T postgres \
-  pg_dump -U "${POSTGRES_USER}" --format=custom "${POSTGRES_DB}" \
+  pg_dump -U "${POSTGRES_USER}" --format=custom \
+  --compress="${BACKUP_COMPRESSION}" "${POSTGRES_DB}" \
   > "${TMP_PATH}"
 test -s "${TMP_PATH}"
 docker compose -f "${COMPOSE_FILE}" exec -T postgres \

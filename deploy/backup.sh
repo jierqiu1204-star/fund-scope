@@ -2,6 +2,7 @@
 set -eu
 
 BACKUP_DIR=${BACKUP_DIR:-/var/backups/fundscope}
+BACKUP_COMPRESSION=${BACKUP_COMPRESSION:-zstd:1}
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "${SCRIPT_DIR}/backup-retention.sh"
 
@@ -18,7 +19,8 @@ BACKUP_PATH="${BACKUP_DIR}/fundscope_${STAMP}.dump"
 TMP_PATH="${BACKUP_PATH}.tmp"
 trap 'rm -f "${TMP_PATH}"' EXIT
 
-pg_dump --format=custom "${DATABASE_URL}" > "${TMP_PATH}"
+pg_dump --format=custom --compress="${BACKUP_COMPRESSION}" \
+  "${DATABASE_URL}" > "${TMP_PATH}"
 test -s "${TMP_PATH}"
 pg_restore --list < "${TMP_PATH}" > /dev/null
 mv "${TMP_PATH}" "${BACKUP_PATH}"

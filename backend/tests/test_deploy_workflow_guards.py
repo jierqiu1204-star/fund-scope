@@ -35,6 +35,8 @@ def test_compose_backup_is_atomic_and_restore_verified() -> None:
     script = _read_repository_file("deploy/backup-compose.sh")
 
     assert "--format=custom" in script
+    assert 'BACKUP_COMPRESSION=${BACKUP_COMPRESSION:-zstd:1}' in script
+    assert '--compress="${BACKUP_COMPRESSION}"' in script
     assert 'TMP_PATH="${BACKUP_PATH}.tmp"' in script
     assert 'pg_restore --list < "${TMP_PATH}"' in script
     assert 'mv "${TMP_PATH}" "${BACKUP_PATH}"' in script
@@ -137,8 +139,9 @@ def test_manual_backup_uses_the_same_atomic_retention_contract() -> None:
 
     assert '. "${SCRIPT_DIR}/backup-retention.sh"' in script
     assert "backup_require_capacity" in script
+    assert 'BACKUP_COMPRESSION=${BACKUP_COMPRESSION:-zstd:1}' in script
     assert 'TMP_PATH="${BACKUP_PATH}.tmp"' in script
-    assert 'pg_dump --format=custom "${DATABASE_URL}"' in script
+    assert 'pg_dump --format=custom --compress="${BACKUP_COMPRESSION}"' in script
     assert 'pg_restore --list < "${TMP_PATH}"' in script
     assert 'backup_prune_completed "${BACKUP_KEEP_COUNT}"' in script
 
@@ -158,6 +161,8 @@ def test_deploy_backs_up_before_replacing_source() -> None:
     assert "rollback-metadata" in workflow
     assert "VPS_BACKUP_KEEP_COUNT || '3'" in workflow
     assert "VPS_BACKUP_MIN_FREE_BYTES || '2147483648'" in workflow
+    assert "VPS_BACKUP_COMPRESSION || 'zstd:1'" in workflow
+    assert 'BACKUP_COMPRESSION="$BACKUP_COMPRESSION"' in workflow
 
 
 def test_deploy_checks_single_head_before_migration_and_health_afterward() -> None:
