@@ -25,6 +25,7 @@ from app.services.risk_alerts import (
     ACTION_CLASS_GUARD_ONLY,
     ALERT_CONFIRMED_TREND_WEAKENING,
     ALERT_HARD_STOP,
+    ALERT_MA5_CLOSE_BREAK_EXIT,
     ETF_RISK_STATE_DATA_HALT,
     EtfSleevePositionEvidence,
     PositionSizingRecommendation,
@@ -45,7 +46,7 @@ from app.services.tracked_positions.sleeve_repository import (
 MAX_OWNER_RISK_POSITIONS = 100
 MAX_OWNER_RISK_CYCLE_ROWS = 500
 MAX_OWNER_RISK_SNAPSHOT_HISTORY = 20
-STOP_RULE_IDS = frozenset({ALERT_HARD_STOP, ALERT_CONFIRMED_TREND_WEAKENING})
+STOP_RULE_IDS = frozenset({ALERT_HARD_STOP, ALERT_MA5_CLOSE_BREAK_EXIT, ALERT_CONFIRMED_TREND_WEAKENING})
 
 
 @dataclass(frozen=True)

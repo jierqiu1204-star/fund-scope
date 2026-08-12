@@ -40,6 +40,22 @@ from app.services.tracked_positions.service import (
     position_analysis,
 )
 
+TEST_ADJUSTED_PROVIDER_VERSION = "eastmoney.push2his.kline.hfq_v1"
+
+
+def _decision_adjusted_fields(close: float) -> dict[str, object]:
+    return {
+        "raw_price_basis": "unadjusted",
+        "research_adjusted_value": close,
+        "research_price_basis": "total_return_adjusted",
+        "data_provider": "eastmoney",
+        "provider_version": TEST_ADJUSTED_PROVIDER_VERSION,
+        "source_timestamp": datetime.now() - timedelta(days=1),
+        "adjustment_version": TEST_ADJUSTED_PROVIDER_VERSION,
+        "decision_eligible": True,
+        "decision_ineligibility_reason": None,
+    }
+
 
 def test_position_sizing_hard_stop_exits_when_allowed() -> None:
     sizing = calculate_position_sizing(
@@ -552,6 +568,21 @@ async def test_etf_trailing_take_profit_starts_after_moderate_profit_giveback(cl
             [
                 EtfPriceHistory(
                     etf_code="513520",
+                    trade_date=date(2026, 5, 1) + timedelta(days=offset),
+                    open=2.45,
+                    high=2.47,
+                    low=2.43,
+                    close=2.45,
+                    volume=1_000_000,
+                    turnover=2_450_000,
+                    pct_change=0.0,
+                    **_decision_adjusted_fields(2.45),
+                )
+                for offset in range(30)
+            ]
+            + [
+                EtfPriceHistory(
+                    etf_code="513520",
                     trade_date=trade_date,
                     open=open_price,
                     high=high_price,
@@ -560,6 +591,7 @@ async def test_etf_trailing_take_profit_starts_after_moderate_profit_giveback(cl
                     volume=1_000_000,
                     turnover=close_price * 1_000_000,
                     pct_change=0.0,
+                    **_decision_adjusted_fields(close_price),
                 )
                 for trade_date, open_price, high_price, low_price, close_price in [
                     (date(2026, 6, 10), 2.45, 2.52, 2.40, 2.45),
@@ -615,8 +647,11 @@ async def test_etf_trailing_take_profit_starts_after_moderate_profit_giveback(cl
     item = response.json()["items"][0]
     assert item["max_profit_pct"] == pytest.approx(4.74, abs=0.05)
     assert item["profit_giveback_pct"] == pytest.approx(3.53, abs=0.05)
-    assert item["dynamic_thresholds"]["profit_start_pct"] == pytest.approx(4.0, abs=0.01)
-    assert item["dynamic_thresholds"]["trailing_giveback_pct"] == pytest.approx(2.5, abs=0.01)
+    assert 2.5 <= item["dynamic_thresholds"]["profit_start_pct"] <= 8.0
+    assert 1.4 <= item["dynamic_thresholds"]["trailing_giveback_pct"] <= 5.5
+    assert item["dynamic_thresholds"]["threshold_mode"] == "dynamic"
+    assert item["dynamic_thresholds"]["threshold_source"] == "rule_dynamic_v2"
+    assert item["dynamic_thresholds"]["risk_data_eligible"] is True
     assert item["exit_signal"]["alert_type"] == "trailing_take_profit"
     assert item["exit_signal"]["email_eligible"] is True
     assert item["intraday_snapshot"]["iopv"] is None
@@ -726,6 +761,7 @@ async def _seed_etf_dynamic_threshold_position(session, *, code: str):
                 volume=2_000_000,
                 turnover=close * 2_000_000,
                 pct_change=(close / previous - 1.0) * 100,
+                **_decision_adjusted_fields(close),
             )
         )
     await session.commit()
@@ -836,8 +872,8 @@ async def test_etf_dynamic_thresholds_ignore_unapproved_calibration(app) -> None
         analysis = await position_analysis(session, position)
 
     assert analysis.dynamic_thresholds is not None
-    assert analysis.dynamic_thresholds.threshold_source == "rule_dynamic"
-    assert analysis.dynamic_thresholds.rule_version == "dynamic_etf_threshold_v1"
+    assert analysis.dynamic_thresholds.threshold_source == "rule_dynamic_v2"
+    assert analysis.dynamic_thresholds.rule_version == "dynamic_etf_threshold_v2"
     assert analysis.dynamic_thresholds.calibration_candidate_id is None
 
 
@@ -853,7 +889,7 @@ async def test_etf_dynamic_thresholds_ignore_daily_close_calibration(app) -> Non
         analysis = await position_analysis(session, position)
 
     assert analysis.dynamic_thresholds is not None
-    assert analysis.dynamic_thresholds.threshold_source == "rule_dynamic"
+    assert analysis.dynamic_thresholds.threshold_source == "rule_dynamic_v2"
     assert analysis.dynamic_thresholds.calibration_candidate_id is None
 
 
@@ -1011,6 +1047,23 @@ async def test_etf_email_proposal_does_not_write_executed_action_or_start_reentr
             [
                 EtfPriceHistory(
                     etf_code="513520",
+                    trade_date=entry_date - timedelta(days=30 - offset),
+                    open=1.0,
+                    high=1.01,
+                    low=0.99,
+                    close=1.0,
+                    volume=1_000_000,
+                    turnover=1_000_000,
+                    pct_change=0.0,
+                    **_decision_adjusted_fields(1.0),
+                )
+                for offset in range(30)
+            ]
+        )
+        session.add_all(
+            [
+                EtfPriceHistory(
+                    etf_code="513520",
                     trade_date=entry_date,
                     open=1.0,
                     high=1.01,
@@ -1019,6 +1072,7 @@ async def test_etf_email_proposal_does_not_write_executed_action_or_start_reentr
                     volume=1_000_000,
                     turnover=1_000_000,
                     pct_change=0.0,
+                    **_decision_adjusted_fields(1.0),
                 ),
                 EtfPriceHistory(
                     etf_code="513520",
@@ -1030,6 +1084,7 @@ async def test_etf_email_proposal_does_not_write_executed_action_or_start_reentr
                     volume=1_000_000,
                     turnover=1_080_000,
                     pct_change=8.0,
+                    **_decision_adjusted_fields(1.08),
                 ),
                 EtfIntradayQuote(
                     etf_code="513520",
@@ -1074,6 +1129,13 @@ async def test_etf_email_proposal_does_not_write_executed_action_or_start_reentr
 
     assert alert is not None
     assert alert.alert_type == "trailing_take_profit"
+    threshold_context = dict(alert.threshold_context_json or {})
+    protection_context = dict(threshold_context.get("profit_protection") or {})
+    assert threshold_context["risk_data_eligible"] is True
+    assert threshold_context["risk_price_basis"] == "total_return_adjusted"
+    assert protection_context["risk_sample_count"] >= 30
+    assert protection_context["rule_version"] == "etf_profit_protection_v2"
+    assert protection_context["trailing_stop_pnl_pct"] is not None
     assert "latest_position_action" not in dict(position.exit_state_json or {})
 
 

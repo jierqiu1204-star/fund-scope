@@ -447,6 +447,29 @@ def test_backtest_trailing_take_profit_daily_action() -> None:
     assert context["profit_giveback_pct"] > context["trailing_giveback_pct"]
 
 
+def test_backtest_ma5_close_break_is_daily_close_only_and_full_exit() -> None:
+    asset = _computed_asset("513520")
+    position = ReplayPosition(
+        code="513520",
+        name="日经ETF",
+        shares=1000,
+        avg_cost=1.0,
+        entry_date=date(2026, 6, 1),
+    )
+
+    intraday_alert_type, _, intraday_context = _risk_action(position, asset, 1.0)
+    daily_alert_type, daily_fraction, daily_context = _risk_action(
+        position, asset, 1.0, close_only=True
+    )
+
+    assert intraday_alert_type is None
+    assert intraday_context["ma5_close_break_condition_met"] is False
+    assert daily_alert_type == "ma5_close_break_exit"
+    assert daily_fraction == 1.0
+    assert daily_context["ma5_close_break_price_basis"] == "total_return_adjusted"
+    assert daily_context["ma5_close_break_intraday_trigger_allowed"] is False
+
+
 def test_backtest_data_insufficient_is_frozen_not_exit_watch() -> None:
     position = ReplayPosition(
         code="513520",

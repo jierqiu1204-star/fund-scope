@@ -22,6 +22,7 @@ ALERT_TRAILING_TAKE_PROFIT = "trailing_take_profit"
 ALERT_TREND_WEAKENING = "trend_weakening"
 ALERT_CONFIRMED_TREND_WEAKENING = "confirmed_trend_weakening"
 ALERT_HARD_STOP = "hard_stop"
+ALERT_MA5_CLOSE_BREAK_EXIT = "ma5_close_break_exit"
 
 EXIT_ACTION_VERSION = OPERATIONAL_EXIT_ACTION_VERSION
 REENTRY_RULE_VERSION = OPERATIONAL_REENTRY_RULE_VERSION
@@ -43,6 +44,7 @@ EMAIL_ALERT_TYPES = {
     ALERT_TRAILING_TAKE_PROFIT,
     ALERT_CONFIRMED_TREND_WEAKENING,
     ALERT_HARD_STOP,
+    ALERT_MA5_CLOSE_BREAK_EXIT,
 }
 
 TAKE_PROFIT_WATCH_PCT = 3.0
@@ -55,6 +57,9 @@ ETF_TRAILING_PROFIT_START_MAX_PCT = 4.0
 ETF_TRAILING_GIVEBACK_VOL_MULTIPLIER = 0.65
 ETF_TRAILING_GIVEBACK_MIN_PCT = 1.8
 ETF_TRAILING_GIVEBACK_MAX_PCT = 2.5
+ETF_DYNAMIC_THRESHOLD_VERSION = "dynamic_etf_threshold_v2"
+ETF_PROFIT_PROTECTION_VERSION = "etf_profit_protection_v2"
+ETF_PROFIT_PROTECTION_STATE_KEY = "etf_profit_protection_v2"
 TRAILING_FIRST_TARGET_REMAINING_FRACTION = 0.75
 TRAILING_SECOND_TARGET_REMAINING_FRACTION = 0.50
 HARD_STOP_LOSS_PCT = -4.0
@@ -109,10 +114,13 @@ SELL_ALERT_TYPES = {
     ALERT_TRAILING_TAKE_PROFIT,
     ALERT_CONFIRMED_TREND_WEAKENING,
     ALERT_HARD_STOP,
+    ALERT_MA5_CLOSE_BREAK_EXIT,
 }
 
 
-def _finite_number(value: object, *, positive: bool = False, nonnegative: bool = False) -> float | None:
+def _finite_number(
+    value: object, *, positive: bool = False, nonnegative: bool = False
+) -> float | None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
     parsed = float(value)
@@ -123,6 +131,221 @@ def _finite_number(value: object, *, positive: bool = False, nonnegative: bool =
     if nonnegative and parsed < 0:
         return None
     return parsed
+
+
+@dataclass(frozen=True)
+class EtfProfitThresholdPolicy:
+    risk_min_pct: float
+    risk_max_pct: float
+    start_multiplier: float
+    start_min_pct: float
+    start_max_pct: float
+    giveback_multiplier: float
+    giveback_min_pct: float
+    giveback_max_pct: float
+
+
+_ETF_PROFIT_THRESHOLD_POLICIES: dict[str, EtfProfitThresholdPolicy] = {
+    "money": EtfProfitThresholdPolicy(0.10, 0.80, 2.0, 0.60, 1.80, 1.20, 0.35, 1.00),
+    "bond": EtfProfitThresholdPolicy(0.25, 1.20, 2.0, 0.90, 2.80, 1.20, 0.50, 1.60),
+    "broad_base": EtfProfitThresholdPolicy(0.60, 2.50, 1.8, 1.50, 5.00, 1.10, 0.80, 3.00),
+    "dividend": EtfProfitThresholdPolicy(0.55, 2.20, 1.8, 1.40, 4.50, 1.05, 0.75, 2.60),
+    "equity": EtfProfitThresholdPolicy(0.80, 3.50, 1.8, 2.00, 6.50, 1.10, 1.00, 4.00),
+    "cross_border": EtfProfitThresholdPolicy(1.00, 4.50, 1.8, 2.50, 8.00, 1.20, 1.40, 5.50),
+    "commodity": EtfProfitThresholdPolicy(0.90, 4.00, 1.8, 2.30, 7.00, 1.15, 1.30, 4.80),
+    "unknown": EtfProfitThresholdPolicy(0.80, 3.00, 1.8, 2.00, 6.00, 1.10, 1.00, 3.80),
+}
+
+
+@dataclass(frozen=True)
+class EtfProfitThresholds:
+    asset_bucket: str
+    current_risk_unit_pct: float
+    entry_risk_unit_pct: float
+    profit_start_pct: float
+    trailing_giveback_pct: float
+    risk_components_pct: tuple[float, ...]
+    rule_version: str = ETF_DYNAMIC_THRESHOLD_VERSION
+
+    def as_context(self) -> dict[str, Any]:
+        return {
+            "asset_bucket": self.asset_bucket,
+            "current_risk_unit_pct": self.current_risk_unit_pct,
+            "entry_risk_unit_pct": self.entry_risk_unit_pct,
+            "profit_start_pct": self.profit_start_pct,
+            "trailing_giveback_pct": self.trailing_giveback_pct,
+            "risk_components_pct": list(self.risk_components_pct),
+            "rule_version": self.rule_version,
+        }
+
+
+def derive_etf_profit_thresholds(
+    *,
+    asset_bucket: str,
+    atr_pct: float | None,
+    realized_volatility_pct: float | None,
+    median_abs_return_pct: float | None,
+    persisted_entry_risk_unit_pct: float | None = None,
+) -> EtfProfitThresholds | None:
+    """Return robust ETF profit thresholds without consulting ranking state.
+
+    All inputs are percentages derived from decision-eligible adjusted bars. At
+    least two independent components are required so a single noisy proxy
+    cannot silently become an actionable exit threshold.
+    """
+
+    components = tuple(
+        value
+        for raw in (atr_pct, realized_volatility_pct, median_abs_return_pct)
+        if (value := _finite_number(raw, positive=True)) is not None
+    )
+    if len(components) < 2:
+        return None
+    bucket = asset_bucket if asset_bucket in _ETF_PROFIT_THRESHOLD_POLICIES else "unknown"
+    policy = _ETF_PROFIT_THRESHOLD_POLICIES[bucket]
+    current_risk = min(policy.risk_max_pct, max(policy.risk_min_pct, median(components)))
+    persisted_risk = _finite_number(persisted_entry_risk_unit_pct, positive=True)
+    entry_risk = (
+        min(policy.risk_max_pct, max(policy.risk_min_pct, persisted_risk))
+        if persisted_risk is not None
+        else current_risk
+    )
+    profit_start = min(
+        policy.start_max_pct,
+        max(policy.start_min_pct, policy.start_multiplier * entry_risk),
+    )
+    trailing_giveback = min(
+        policy.giveback_max_pct,
+        max(policy.giveback_min_pct, policy.giveback_multiplier * entry_risk),
+    )
+    return EtfProfitThresholds(
+        asset_bucket=bucket,
+        current_risk_unit_pct=round(current_risk, 6),
+        entry_risk_unit_pct=round(entry_risk, 6),
+        profit_start_pct=round(profit_start, 6),
+        trailing_giveback_pct=round(trailing_giveback, 6),
+        risk_components_pct=tuple(round(value, 6) for value in components),
+    )
+
+
+@dataclass(frozen=True)
+class LongProfitProtectionDecision:
+    state: str
+    data_eligible: bool
+    high_water_profit_pct: float
+    current_profit_pct: float
+    profit_giveback_pct: float
+    profit_start_pct: float | None
+    trailing_giveback_pct: float | None
+    previous_trailing_stop_pnl_pct: float | None
+    candidate_trailing_stop_pnl_pct: float | None
+    trailing_stop_pnl_pct: float | None
+    distance_to_trailing_stop_pct: float | None
+    triggered: bool
+    rule_version: str = ETF_PROFIT_PROTECTION_VERSION
+
+    def as_context(self) -> dict[str, Any]:
+        return {
+            "state": self.state,
+            "data_eligible": self.data_eligible,
+            "high_water_profit_pct": self.high_water_profit_pct,
+            "current_profit_pct": self.current_profit_pct,
+            "profit_giveback_pct": self.profit_giveback_pct,
+            "profit_start_pct": self.profit_start_pct,
+            "trailing_giveback_pct": self.trailing_giveback_pct,
+            "previous_trailing_stop_pnl_pct": self.previous_trailing_stop_pnl_pct,
+            "candidate_trailing_stop_pnl_pct": self.candidate_trailing_stop_pnl_pct,
+            "trailing_stop_pnl_pct": self.trailing_stop_pnl_pct,
+            "distance_to_trailing_stop_pct": self.distance_to_trailing_stop_pct,
+            "triggered": self.triggered,
+            "rule_version": self.rule_version,
+        }
+
+
+def evaluate_long_profit_protection(
+    *,
+    current_profit_pct: float,
+    observed_high_water_profit_pct: float,
+    profit_start_pct: float | None,
+    trailing_giveback_pct: float | None,
+    data_eligible: bool,
+    persisted_high_water_profit_pct: float | None = None,
+    persisted_trailing_stop_pnl_pct: float | None = None,
+    persisted_armed: bool = False,
+) -> LongProfitProtectionDecision:
+    """Advance one long-position profit-protection observation.
+
+    Once armed, both the high-water profit and the effective protection line
+    are monotonic for the lifetime of the position episode.
+    """
+
+    current = _finite_number(current_profit_pct)
+    observed_high = _finite_number(observed_high_water_profit_pct)
+    if current is None or observed_high is None:
+        raise ValueError("current and observed high-water profit must be finite")
+    persisted_high = _finite_number(persisted_high_water_profit_pct)
+    high_water = max(
+        value for value in (current, observed_high, persisted_high) if value is not None
+    )
+    giveback = max(0.0, high_water - current)
+    start = _finite_number(profit_start_pct, positive=True)
+    allowed_giveback = _finite_number(trailing_giveback_pct, positive=True)
+    previous_stop = _finite_number(persisted_trailing_stop_pnl_pct)
+    if not data_eligible or start is None or allowed_giveback is None:
+        frozen_distance = current - previous_stop if previous_stop is not None else None
+        return LongProfitProtectionDecision(
+            state="data_waiting",
+            data_eligible=False,
+            high_water_profit_pct=round(high_water, 6),
+            current_profit_pct=round(current, 6),
+            profit_giveback_pct=round(giveback, 6),
+            profit_start_pct=start,
+            trailing_giveback_pct=allowed_giveback,
+            previous_trailing_stop_pnl_pct=previous_stop,
+            candidate_trailing_stop_pnl_pct=None,
+            trailing_stop_pnl_pct=previous_stop,
+            distance_to_trailing_stop_pct=round(frozen_distance, 6)
+            if frozen_distance is not None
+            else None,
+            triggered=False,
+        )
+
+    armed = bool(persisted_armed or high_water >= start)
+    if not armed:
+        return LongProfitProtectionDecision(
+            state="unarmed",
+            data_eligible=True,
+            high_water_profit_pct=round(high_water, 6),
+            current_profit_pct=round(current, 6),
+            profit_giveback_pct=round(giveback, 6),
+            profit_start_pct=round(start, 6),
+            trailing_giveback_pct=round(allowed_giveback, 6),
+            previous_trailing_stop_pnl_pct=previous_stop,
+            candidate_trailing_stop_pnl_pct=None,
+            trailing_stop_pnl_pct=None,
+            distance_to_trailing_stop_pct=None,
+            triggered=False,
+        )
+
+    candidate_stop = max(0.0, high_water - allowed_giveback)
+    effective_stop = max(
+        value for value in (candidate_stop, previous_stop) if value is not None
+    )
+    distance = current - effective_stop
+    return LongProfitProtectionDecision(
+        state="triggered" if distance <= 0 else "armed",
+        data_eligible=True,
+        high_water_profit_pct=round(high_water, 6),
+        current_profit_pct=round(current, 6),
+        profit_giveback_pct=round(giveback, 6),
+        profit_start_pct=round(start, 6),
+        trailing_giveback_pct=round(allowed_giveback, 6),
+        previous_trailing_stop_pnl_pct=previous_stop,
+        candidate_trailing_stop_pnl_pct=round(candidate_stop, 6),
+        trailing_stop_pnl_pct=round(effective_stop, 6),
+        distance_to_trailing_stop_pct=round(distance, 6),
+        triggered=distance <= 0,
+    )
 
 
 @dataclass(frozen=True)
@@ -222,7 +445,9 @@ def calculate_tracked_etf_sleeve_nav(
         quantity = _finite_number(position.quantity, positive=True)
         market_value = _finite_number(position.market_value, nonnegative=True)
         cost_basis = _finite_number(position.remaining_cost_basis, nonnegative=True)
-        mark_ready = bool(position.decision_eligible and quantity is not None and market_value is not None)
+        mark_ready = bool(
+            position.decision_eligible and quantity is not None and market_value is not None
+        )
         if mark_ready:
             valuation_ready += 1
             market_values.append(float(market_value))
@@ -379,7 +604,9 @@ def evaluate_etf_owner_risk_state(
 
     drawdown = _finite_number(sleeve_drawdown)
     if nav_status != "ready" or drawdown is None:
-        reasons = ["sleeve_nav_unavailable" if nav_status != "ready" else "drawdown_history_insufficient"]
+        reasons = [
+            "sleeve_nav_unavailable" if nav_status != "ready" else "drawdown_history_insufficient"
+        ]
         return EtfOwnerRiskStateDecision(
             state=ETF_RISK_STATE_DATA_HALT,
             reason_codes=tuple(reasons),
@@ -399,8 +626,7 @@ def evaluate_etf_owner_risk_state(
     prior_signal_cycles = max(0, int(previous_signal_stop_cycles))
     prior_confirmed_cycles = max(0, int(previous_confirmed_stop_cycles))
     if signal_cycles >= ETF_RISK_STOP_CYCLE_TRIGGER and (
-        prior_signal_cycles < ETF_RISK_STOP_CYCLE_TRIGGER
-        or signal_cycles > prior_signal_cycles
+        prior_signal_cycles < ETF_RISK_STOP_CYCLE_TRIGGER or signal_cycles > prior_signal_cycles
     ):
         trigger_reasons.append("repeated_distinct_stop_signals")
     if confirmed_cycles >= ETF_RISK_STOP_CYCLE_TRIGGER and (
@@ -526,7 +752,11 @@ def assess_etf_liquidity_capacity(
     reasons: list[str] = []
     if amount is None:
         reasons.append("trade_amount_invalid")
-    adv = median(valid_turnovers) if len(valid_turnovers) >= ETF_LIQUIDITY_MIN_TURNOVER_SESSIONS else None
+    adv = (
+        median(valid_turnovers)
+        if len(valid_turnovers) >= ETF_LIQUIDITY_MIN_TURNOVER_SESSIONS
+        else None
+    )
     if adv is None:
         reasons.append("turnover_history_insufficient")
     bid = _finite_number(bid_price, positive=True)
@@ -567,7 +797,10 @@ def assess_etf_liquidity_capacity(
     if side == "buy" and participation is not None:
         if participation > ETF_ENTRY_MAX_ADV_PARTICIPATION:
             reasons.append("entry_participation_exceeds_limit")
-        if stress_participation is not None and stress_participation > ETF_ENTRY_STRESS_MAX_ADV_PARTICIPATION:
+        if (
+            stress_participation is not None
+            and stress_participation > ETF_ENTRY_STRESS_MAX_ADV_PARTICIPATION
+        ):
             reasons.append("entry_stress_participation_exceeds_limit")
 
     fundamental_unavailable = any(
@@ -793,6 +1026,7 @@ def legacy_exit_target_remaining_fraction(alert_type: str | None) -> float | Non
 
     return {
         ALERT_HARD_STOP: 0.0,
+        ALERT_MA5_CLOSE_BREAK_EXIT: 0.0,
         ALERT_TRAILING_TAKE_PROFIT: TRAILING_FIRST_TARGET_REMAINING_FRACTION,
         ALERT_CONFIRMED_TREND_WEAKENING: 0.5,
         ALERT_EXIT_WATCH: 0.5,
@@ -823,6 +1057,12 @@ def evaluate_position_risk_rule_set(
     profit_start_pct = _finite_metric(metrics, "profit_start_pct")
     trend_weakening_value = metrics.get("trend_weakening")
     confirmed_trend_value = metrics.get("confirmed_trend_weakening")
+    ma5_close_break_value = metrics.get("ma5_close_break_condition_met")
+    ma5_close_break_data_eligible = metrics.get("ma5_close_break_decision_eligible") is True
+    ma5_close_break_observation_new = metrics.get("ma5_close_break_observation_new") is True
+    ma5_close_break_reason_code = str(
+        metrics.get("ma5_close_break_reason_code") or "ma5_adjusted_close_unavailable"
+    )
 
     def rule(
         *,
@@ -833,10 +1073,16 @@ def evaluate_position_risk_rule_set(
         reason: str,
         hard_stop: bool = False,
         confirmation_required: int = 2,
+        data_eligible_override: bool | None = None,
+        data_reason_code_override: str | None = None,
+        recovery_met_override: bool | None = None,
     ) -> EvaluatedRiskRule:
-        if not data_eligible:
+        effective_data_eligible = (
+            data_eligible if data_eligible_override is None else data_eligible_override
+        )
+        if not effective_data_eligible:
             state = "data_waiting"
-            reason_code = data_reason_code
+            reason_code = data_reason_code_override or data_reason_code
             condition = False
             recovery = False
         elif not observable:
@@ -848,7 +1094,9 @@ def evaluate_position_risk_rule_set(
             state = "eligible"
             reason_code = "eligible_prepared_analysis"
             condition = bool(condition_met)
-            recovery = not condition
+            recovery = (
+                not condition if recovery_met_override is None else bool(recovery_met_override)
+            )
         return EvaluatedRiskRule(
             rule_id=rule_id,
             data_state=state,
@@ -891,6 +1139,23 @@ def evaluate_position_risk_rule_set(
             reason="Prepared analysis reached the frozen hard-stop threshold.",
             hard_stop=True,
             confirmation_required=1,
+        ),
+        rule(
+            rule_id=ALERT_MA5_CLOSE_BREAK_EXIT,
+            observable=isinstance(ma5_close_break_value, bool),
+            condition_met=ma5_close_break_value is True,
+            target=0.0,
+            reason=(
+                "The decision-eligible total-return-adjusted close finished below its "
+                "same-session adjusted MA5."
+            ),
+            hard_stop=True,
+            confirmation_required=1,
+            data_eligible_override=ma5_close_break_data_eligible,
+            data_reason_code_override=ma5_close_break_reason_code,
+            recovery_met_override=bool(
+                ma5_close_break_observation_new and ma5_close_break_value is False
+            ),
         ),
         rule(
             rule_id=ALERT_TRAILING_TAKE_PROFIT,
@@ -1085,13 +1350,17 @@ def map_exit_signal_to_position_action(
         or not 0.0 <= current_remaining_fraction <= 1.0
     ):
         raise ValueError("current_remaining_fraction must be a finite fraction")
-    if alert_type == ALERT_HARD_STOP:
+    if alert_type in {ALERT_HARD_STOP, ALERT_MA5_CLOSE_BREAK_EXIT}:
         return PositionActionDecision(
             action=POSITION_ACTION_EXIT,
             action_class=ACTION_CLASS_ACTIONABLE_EXIT,
             label=position_action_label(POSITION_ACTION_EXIT),
             target_remaining_fraction=0.0,
-            reason="触发硬止损，绝对目标为当前 exposure baseline 的 0%。",
+            reason=(
+                "触发硬止损，绝对目标为当前 exposure baseline 的 0%。"
+                if alert_type == ALERT_HARD_STOP
+                else "复权收盘价跌破同日复权五日线，T 日确认并以 T+1 为最早可执行日，绝对目标为当前 exposure baseline 的 0%。"
+            ),
         )
     if alert_type == ALERT_EXIT_WATCH:
         if not evidence_eligible:
@@ -1335,11 +1604,7 @@ def calculate_position_sizing(
             label=position_action_label(POSITION_ACTION_HOLD),
             reason="仓位金额建议第一版只用于场内 ETF。",
         )
-    capital = (
-        _finite_number(etf_trading_capital, positive=True)
-        if capital_confirmed
-        else None
-    )
+    capital = _finite_number(etf_trading_capital, positive=True) if capital_confirmed else None
     market_value = _finite_number(current_market_value, nonnegative=True)
     price = _finite_number(current_price, positive=True)
     baseline_quantity = _finite_number(exposure_baseline_quantity, positive=True)
@@ -1359,7 +1624,9 @@ def calculate_position_sizing(
     )
     action = action_decision.action
     reason = action_decision.reason
-    current_weight = market_value / capital if market_value is not None and capital is not None else None
+    current_weight = (
+        market_value / capital if market_value is not None and capital is not None else None
+    )
     target_weight = current_weight
     if (
         action_decision.target_remaining_fraction is not None
@@ -1427,7 +1694,9 @@ def calculate_position_sizing(
             action=action,
             label=position_action_label(action),
             current_market_value=round(market_value, 2) if market_value is not None else None,
-            current_account_weight=(round(current_weight, 4) if current_weight is not None else None),
+            current_account_weight=(
+                round(current_weight, 4) if current_weight is not None else None
+            ),
             target_account_weight=(round(target_weight, 4) if target_weight is not None else None),
             reason=f"{reason}；{'；'.join(missing_size_evidence)}，保留退出动作但不生成金额或份额。",
             action_class=action_decision.action_class,
@@ -1478,9 +1747,7 @@ def calculate_position_sizing(
     trade_amount: float | None = _round_trade_amount(max(0.0, raw_amount))
     if trade_amount is not None and trade_amount <= 0:
         trade_amount = None
-    trade_shares = (
-        _round_trade_shares(trade_amount / price) if trade_amount is not None else None
-    )
+    trade_shares = _round_trade_shares(trade_amount / price) if trade_amount is not None else None
     return PositionSizingRecommendation(
         action=action,
         label=label,

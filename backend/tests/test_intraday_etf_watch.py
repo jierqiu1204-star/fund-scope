@@ -75,6 +75,22 @@ from app.services.tracked_positions.service import (
 )
 from app.services.workflows import etf_live_rankings as live_ranking_workflow
 
+TEST_ADJUSTED_PROVIDER_VERSION = "eastmoney.push2his.kline.hfq_v1"
+
+
+def _decision_adjusted_fields(close: float) -> dict[str, object]:
+    return {
+        "raw_price_basis": "unadjusted",
+        "research_adjusted_value": close,
+        "research_price_basis": "total_return_adjusted",
+        "data_provider": "eastmoney",
+        "provider_version": TEST_ADJUSTED_PROVIDER_VERSION,
+        "source_timestamp": datetime.now() - timedelta(days=1),
+        "adjustment_version": TEST_ADJUSTED_PROVIDER_VERSION,
+        "decision_eligible": True,
+        "decision_ineligibility_reason": None,
+    }
+
 
 def test_observation_only_research_row_cannot_be_used_as_intraday_action_base() -> None:
     snapshot = SimpleNamespace(
@@ -282,7 +298,7 @@ async def _seed_price_history(app, code: str, *, start_price: float = 1.0) -> No
         if await session.get(TradableEtf, code) is None:
             session.add(_etf(code))
             await session.flush()
-        for offset in range(25):
+        for offset in range(35):
             close = start_price * (1 + offset * 0.001)
             session.add(
                 EtfPriceHistory(
@@ -295,6 +311,7 @@ async def _seed_price_history(app, code: str, *, start_price: float = 1.0) -> No
                     volume=10_000_000,
                     turnover=100_000_000,
                     pct_change=0.1,
+                    **_decision_adjusted_fields(close),
                 )
             )
         await session.commit()
@@ -312,6 +329,22 @@ async def _seed_price_history_from_closes(
         if await session.get(TradableEtf, code) is None:
             session.add(_etf(code))
             await session.flush()
+        for offset in range(30):
+            close = closes[0]
+            session.add(
+                EtfPriceHistory(
+                    etf_code=code,
+                    trade_date=start - timedelta(days=30 - offset),
+                    open=close,
+                    high=close * 1.004,
+                    low=close * 0.996,
+                    close=close,
+                    volume=10_000_000,
+                    turnover=turnover,
+                    pct_change=0.0,
+                    **_decision_adjusted_fields(close),
+                )
+            )
         for offset, close in enumerate(closes):
             session.add(
                 EtfPriceHistory(
@@ -324,6 +357,7 @@ async def _seed_price_history_from_closes(
                     volume=10_000_000,
                     turnover=turnover,
                     pct_change=0.0,
+                    **_decision_adjusted_fields(close),
                 )
             )
         await session.commit()
@@ -1777,7 +1811,7 @@ async def test_dynamic_hard_stop_and_intraday_cooldown(app, settings, monkeypatc
     assert first_alert.threshold_context_json["alert_type"] == "hard_stop"
     assert first_alert.threshold_context_json["hard_stop_pct"] is not None
     assert first_alert.threshold_context_json["threshold_mode"] in {
-        "rule_dynamic",
+        "rule_dynamic_v2",
         "fixed_fallback",
     }
     assert sent[0]["threshold_context"]["alert_type"] == "hard_stop"

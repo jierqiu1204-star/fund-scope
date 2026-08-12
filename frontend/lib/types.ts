@@ -1776,14 +1776,26 @@ export type TrackedEtfIntradaySnapshot = {
 export type DynamicExitThresholds = {
   threshold_source: string;
   rule_version: string;
+  threshold_mode: string | null;
+  asset_bucket: string | null;
   calibration_run_id: number | null;
   calibration_candidate_id: number | null;
   calibration_bucket_key: string | null;
   calibration_version: string | null;
   volatility_unit_pct: number | null;
+  current_volatility_unit_pct: number | null;
+  entry_risk_unit_pct: number | null;
+  risk_data_eligible: boolean | null;
+  risk_data_reason_code: string | null;
+  risk_price_basis: string | null;
+  risk_sample_count: number | null;
   hard_stop_pct: number | null;
   profit_start_pct: number | null;
   trailing_giveback_pct: number | null;
+  profit_protection_state: string | null;
+  high_water_profit_pct: number | null;
+  trailing_stop_pnl_pct: number | null;
+  distance_to_trailing_stop_pct: number | null;
   trend_weakening: boolean;
   distance_to_hard_stop_pct: number | null;
   distance_to_profit_start_pct: number | null;

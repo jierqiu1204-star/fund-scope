@@ -373,6 +373,55 @@ async def etf_adjusted_daily_facts_on_or_before(
     )
 
 
+async def recent_decision_eligible_etf_adjusted_facts(
+    session: AsyncSession,
+    *,
+    etf_code: str,
+    on_or_before: date,
+    lookback_sessions: int = 120,
+) -> tuple[EtfAdjustedDailyFact, ...]:
+    """Return one bounded ETF adjusted-history page for live risk decisions.
+
+    The projection may contain raw-only or stale-provider rows, so this facade
+    revalidates the explicit adjusted-price provenance before exposing facts to
+    Position Tracking or Risk Alert consumers. It never requests a provider.
+    """
+
+    code = str(etf_code).strip()
+    if not code:
+        return ()
+    if lookback_sessions < 1 or lookback_sessions > 120:
+        raise MarketDataReadLimitExceededError(
+            "ETF adjusted-history lookback must be between 1 and 120 sessions"
+        )
+    source_limit = min(240, lookback_sessions * 2)
+    facts = await etf_adjusted_daily_facts_on_or_before(
+        session,
+        etf_codes=(code,),
+        replay_date=on_or_before,
+        rows_per_code=source_limit,
+        max_source_rows=source_limit,
+    )
+    cutoff = datetime.now(ASIA_SHANGHAI)
+    eligible = [
+        fact
+        for fact in facts
+        if fact.decision_eligible is True
+        and fact.research_price_basis == "total_return_adjusted"
+        and etf_adjusted_price_provenance_issue(
+            adjusted_value=fact.adjusted_close,
+            price_basis=fact.research_price_basis,
+            data_provider=fact.data_provider,
+            provider_version=fact.provider_version,
+            source_timestamp=fact.source_timestamp,
+            adjustment_version=fact.adjustment_version,
+            data_cutoff=cutoff,
+        )
+        is None
+    ]
+    return tuple(eligible[-lookback_sessions:])
+
+
 async def etf_adjusted_source_watermark(
     session: AsyncSession,
     *,

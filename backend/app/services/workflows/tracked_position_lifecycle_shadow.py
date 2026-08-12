@@ -255,8 +255,13 @@ def _build_shadow_command(
             and snapshot.decision_eligible
         ),
     )
-    data_eligible = execution.status == "observable"
-    if data_eligible:
+    execution_data_eligible = execution.status == "observable"
+    ma5_data_eligible = bool(
+        analysis is not None
+        and analysis.technical_metrics.get("ma5_close_break_decision_eligible") is True
+    )
+    any_data_eligible = execution_data_eligible or ma5_data_eligible
+    if execution_data_eligible:
         data_reason_code = "fresh_explicit_intraday_quote"
     elif snapshot is None:
         data_reason_code = prepared.data_reason_code or "snapshot_unavailable"
@@ -268,7 +273,7 @@ def _build_shadow_command(
     evaluations = evaluate_position_risk_rule_set(
         technical_metrics=(analysis.technical_metrics if analysis is not None else None),
         legacy_alert_type=legacy_alert_type,
-        data_eligible=data_eligible,
+        data_eligible=execution_data_eligible,
         data_reason_code=str(data_reason_code),
     )
     trade_session, observed_at = _market_identity_time(prepared)
@@ -295,6 +300,9 @@ def _build_shadow_command(
             prepared.decision.trigger_label if prepared.decision is not None else None
         ),
         "risk_flags": sorted(prepared.decision.risk_flags if prepared.decision is not None else []),
+        "ma5_close_break": (
+            analysis.technical_metrics.get("ma5_close_break") if analysis is not None else None
+        ),
     }
     return (
         LifecycleEvaluationCommand(
@@ -320,7 +328,7 @@ def _build_shadow_command(
                 legacy_alert_type
             ),
         ),
-        data_eligible,
+        any_data_eligible,
     )
 
 

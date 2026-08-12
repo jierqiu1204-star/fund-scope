@@ -155,6 +155,10 @@ def test_complete_rule_set_includes_false_recovery_and_freezes_ineligible_data()
         "profit_start_pct": 3.0,
         "trend_weakening": False,
         "confirmed_trend_weakening": False,
+        "ma5_close_break_decision_eligible": True,
+        "ma5_close_break_condition_met": False,
+        "ma5_close_break_observation_new": True,
+        "ma5_close_break_reason_code": "eligible_total_return_adjusted_close",
     }
     eligible = evaluate_position_risk_rule_set(
         technical_metrics=metrics,
@@ -164,6 +168,7 @@ def test_complete_rule_set_includes_false_recovery_and_freezes_ineligible_data()
     )
     assert {rule.rule_id for rule in eligible} == {
         "hard_stop",
+        "ma5_close_break_exit",
         "trailing_take_profit",
         "confirmed_trend_weakening",
         "exit_watch",
@@ -174,7 +179,7 @@ def test_complete_rule_set_includes_false_recovery_and_freezes_ineligible_data()
     assert all(rule.recovery_met is True for rule in eligible)
 
     ineligible = evaluate_position_risk_rule_set(
-        technical_metrics=metrics,
+        technical_metrics={**metrics, "ma5_close_break_decision_eligible": False},
         legacy_alert_type=ALERT_HARD_STOP,
         data_eligible=False,
         data_reason_code="quote_not_decision_eligible",
@@ -184,18 +189,14 @@ def test_complete_rule_set_includes_false_recovery_and_freezes_ineligible_data()
 
     missing_threshold = evaluate_position_risk_rule_set(
         technical_metrics={
-            key: value
-            for key, value in metrics.items()
-            if key != "trailing_threshold_pct"
+            key: value for key, value in metrics.items() if key != "trailing_threshold_pct"
         },
         legacy_alert_type=None,
         data_eligible=True,
         data_reason_code="fresh_quote",
     )
     trailing_rule = next(
-        rule
-        for rule in missing_threshold
-        if rule.rule_id == "trailing_take_profit"
+        rule for rule in missing_threshold if rule.rule_id == "trailing_take_profit"
     )
     assert trailing_rule.data_state == "no_data"
     assert trailing_rule.recovery_met is False

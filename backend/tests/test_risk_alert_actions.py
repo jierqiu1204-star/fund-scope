@@ -17,6 +17,7 @@ from app.services.risk_alerts import (
     ALERT_CONFIRMED_TREND_WEAKENING,
     ALERT_EXIT_WATCH,
     ALERT_HARD_STOP,
+    ALERT_MA5_CLOSE_BREAK_EXIT,
     ALERT_TAKE_PROFIT_WATCH,
     ALERT_TRAILING_TAKE_PROFIT,
     ALERT_TREND_WEAKENING,
@@ -39,13 +40,21 @@ def test_hard_stop_always_maps_to_absolute_zero_target() -> None:
     assert decision.target_remaining_fraction == 0.0
 
 
+def test_ma5_close_break_maps_to_absolute_zero_target() -> None:
+    decision = map_exit_signal_to_position_action(
+        alert_type=ALERT_MA5_CLOSE_BREAK_EXIT,
+        allow_full_exit=False,
+    )
+
+    assert decision.action == "exit"
+    assert decision.action_class == ACTION_CLASS_ACTIONABLE_EXIT
+    assert decision.target_remaining_fraction == 0.0
+
+
 def test_legacy_quote_without_explicit_eligibility_fails_closed() -> None:
     assert quote_decision_eligible_flag(SimpleNamespace(raw_json={})) is False
     assert (
-        quote_decision_eligible_flag(
-            SimpleNamespace(raw_json={"decision_eligible": True})
-        )
-        is True
+        quote_decision_eligible_flag(SimpleNamespace(raw_json={"decision_eligible": True})) is True
     )
 
 
@@ -234,6 +243,35 @@ def test_daily_fund_email_keeps_confirmed_nav_path() -> None:
     assert _decision_email_data_eligible(
         position,
         _hard_stop_decision(),
+        None,
+        evaluation_mode="daily",
+    )
+
+
+def test_ma5_close_break_email_uses_adjusted_daily_evidence_without_intraday_fallback() -> None:
+    position = _tracked_etf()
+    ma5_context = {
+        "decision_eligible": True,
+        "price_basis": "total_return_adjusted",
+        "condition_met": True,
+        "should_alert": True,
+        "trade_date": "2026-08-10",
+    }
+    position.exit_state_json = {"exit_signal_threshold_context": {"ma5_close_break": ma5_context}}
+    decision = AlertDecision(
+        alert_type=ALERT_MA5_CLOSE_BREAK_EXIT,
+        trigger_label="收盘跌破五日线退出提醒",
+        reasons=["复权收盘价跌破复权 MA5"],
+        risk_flags=[],
+        advisor_summary=None,
+        signal_item=None,
+        advisor_report=None,
+        alert_source="total_return_adjusted_daily_close",
+    )
+
+    assert _decision_email_data_eligible(
+        position,
+        decision,
         None,
         evaluation_mode="daily",
     )

@@ -72,6 +72,7 @@ from app.services.portfolio_risk_shadow import (
 from app.services.risk_alerts import (
     ALERT_EXIT_WATCH,
     ALERT_HARD_STOP,
+    ALERT_MA5_CLOSE_BREAK_EXIT,
     ALERT_TAKE_PROFIT_WATCH,
     ALERT_TRAILING_TAKE_PROFIT,
     ALERT_TREND_WEAKENING,
@@ -126,7 +127,7 @@ from app.services.strategy_lab.etf_ranking_candidates import (
 BACKTEST_RULE_VERSION = "etf_portfolio_backtest_v2"
 BACKTEST_RANKING_VERSION = "short_research_daily_replay_v1"
 BACKTEST_ALLOCATION_VERSION = ALLOCATION_CONTRACT_VERSION
-BACKTEST_EXIT_RULE_VERSION = "risk_alerts_daily_v1"
+BACKTEST_EXIT_RULE_VERSION = "risk_alerts_daily_v2_adjusted_ma5_close_break"
 INTRADAY_BACKTEST_EXIT_RULE_VERSION = "risk_alerts_intraday_v1"
 STRATEGY_COMPARISON_RULE_VERSION = "etf_strategy_comparison_v1"
 EXIT_V2_STRATEGY_COMPARISON_VERSION = "etf_exit_v2_strategy_comparison_v1"
@@ -1020,7 +1021,13 @@ def _trend_weakening(metrics: dict[str, Any]) -> bool:
     )
 
 
-def _risk_action(position: ReplayPosition, asset: ComputedAsset, price: float) -> tuple[str | None, float, dict[str, Any]]:
+def _risk_action(
+    position: ReplayPosition,
+    asset: ComputedAsset,
+    price: float,
+    *,
+    close_only: bool = False,
+) -> tuple[str | None, float, dict[str, Any]]:
     profit_pct = (price / position.avg_cost - 1.0) * 100 if position.avg_cost > 0 else 0.0
     position.max_profit_pct = max(position.max_profit_pct, profit_pct)
     volatility_unit = max(1.5, float(asset.metrics.get("volatility_20d") or 0.025) * 100)
@@ -1037,6 +1044,16 @@ def _risk_action(position: ReplayPosition, asset: ComputedAsset, price: float) -
     )
     profit_giveback = position.max_profit_pct - profit_pct
     trend_weak = _trend_weakening(asset.metrics)
+    adjusted_close = asset.metrics.get("latest_value", asset.latest_value)
+    adjusted_ma5 = asset.metrics.get("ma5")
+    ma5_close_break = bool(
+        close_only
+        and isinstance(adjusted_close, (int, float))
+        and isinstance(adjusted_ma5, (int, float))
+        and math.isfinite(float(adjusted_close))
+        and math.isfinite(float(adjusted_ma5))
+        and float(adjusted_close) < float(adjusted_ma5)
+    )
     context = {
         "profit_pct": round(profit_pct, 4),
         "max_profit_pct": round(position.max_profit_pct, 4),
@@ -1045,6 +1062,9 @@ def _risk_action(position: ReplayPosition, asset: ComputedAsset, price: float) -
         "profit_start_pct": round(profit_start, 4),
         "trailing_giveback_pct": round(giveback, 4),
         "trend_weakening": trend_weak,
+        "ma5_close_break_condition_met": ma5_close_break,
+        "ma5_close_break_price_basis": "total_return_adjusted" if close_only else None,
+        "ma5_close_break_intraday_trigger_allowed": False,
     }
     if asset.conclusion == CONCLUSION_INSUFFICIENT:
         context.update(data_state="data_waiting", reason_code="ranking_data_insufficient")
@@ -1053,6 +1073,8 @@ def _risk_action(position: ReplayPosition, asset: ComputedAsset, price: float) -
         return ALERT_EXIT_WATCH, 1.0, context
     if profit_pct <= hard_stop:
         return ALERT_HARD_STOP, 1.0, context
+    if ma5_close_break:
+        return ALERT_MA5_CLOSE_BREAK_EXIT, 1.0, context
     if position.max_profit_pct >= profit_start and profit_giveback >= giveback:
         return ALERT_TRAILING_TAKE_PROFIT, 1.0 if trend_weak else 0.5, context
     if trend_weak:
@@ -1478,7 +1500,7 @@ async def run_etf_portfolio_backtest(
                 asset = asset_by_code.get(code)
                 if price is None or asset is None:
                     continue
-                alert_type, fraction, context = _risk_action(positions[code], asset, price)
+                alert_type, fraction, context = _risk_action(positions[code], asset, price, close_only=True)
                 if alert_type is None:
                     continue
                 risk_signal_codes.add(code)

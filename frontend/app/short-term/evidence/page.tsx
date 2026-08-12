@@ -91,6 +91,7 @@ function formatNullableRate(value: number | null | undefined) {
 function signalLabel(value: string) {
   const labels: Record<string, string> = {
     hard_stop: "硬止损",
+    ma5_close_break_exit: "收盘跌破五日线退出",
     trailing_take_profit: "移动止盈",
     trend_weakening: "趋势警戒",
     confirmed_trend_weakening: "确认趋势转弱",

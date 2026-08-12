@@ -150,6 +150,8 @@ class TrackedEtfIntradaySnapshotOut(BaseModel):
 class DynamicExitThresholdsOut(BaseModel):
     threshold_source: str = "rule_dynamic"
     rule_version: str = "dynamic_exit_v2"
+    threshold_mode: str | None = None
+    asset_bucket: str | None = None
     calibration_run_id: int | None = None
     calibration_candidate_id: int | None = None
     calibration_bucket_key: str | None = None
@@ -158,9 +160,19 @@ class DynamicExitThresholdsOut(BaseModel):
     calibration_contract_hash: str | None = None
     calibration_coverage_status: str | None = None
     volatility_unit_pct: float | None = None
+    current_volatility_unit_pct: float | None = None
+    entry_risk_unit_pct: float | None = None
+    risk_data_eligible: bool | None = None
+    risk_data_reason_code: str | None = None
+    risk_price_basis: str | None = None
+    risk_sample_count: int | None = None
     hard_stop_pct: float | None = None
     profit_start_pct: float | None = None
     trailing_giveback_pct: float | None = None
+    profit_protection_state: str | None = None
+    high_water_profit_pct: float | None = None
+    trailing_stop_pnl_pct: float | None = None
+    distance_to_trailing_stop_pct: float | None = None
     trend_weakening: bool = False
     distance_to_hard_stop_pct: float | None = None
     distance_to_profit_start_pct: float | None = None

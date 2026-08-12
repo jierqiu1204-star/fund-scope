@@ -205,7 +205,9 @@ async def intraday_tracked_position_alerts_job(
     turnover_by_code, quote_by_code = await batch_etf_liquidity_inputs(session, list(rows))
     for position in rows:
         await refresh_entry_if_waiting(session, position)
-        prepared = await prepare_alert_evaluation(session, position)
+        prepared = await prepare_alert_evaluation(
+            session, position, evaluation_mode="intraday"
+        )
         alert, status = await create_alert_if_needed(
             session,
             position,

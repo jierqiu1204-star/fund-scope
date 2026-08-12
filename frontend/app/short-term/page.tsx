@@ -508,6 +508,21 @@ function thresholdExplanationLine(position: TrackedPosition | null | undefined) 
   return "动态线等待足够价格数据后计算。";
 }
 
+function profitProtectionStateLabel(state: string | null | undefined) {
+  switch (state) {
+    case "armed":
+      return "已启动，保护线只升不降";
+    case "triggered":
+      return "已触及保护线";
+    case "unarmed":
+      return "尚未达到启动线";
+    case "data_waiting":
+      return "等待可决策复权数据";
+    default:
+      return "等待计算";
+  }
+}
+
 
 function signedScore(value: number | null | undefined) {
   if (value === null || value === undefined) {
@@ -1454,10 +1469,13 @@ function alertTypeLabel(alertType: string) {
   if (alertType === "hard_stop") {
     return "止损提醒";
   }
+  if (alertType === "ma5_close_break_exit") {
+    return "收盘跌破五日线退出提醒";
+  }
   return alertType;
 }
 
-const EXIT_ALERT_TYPES = new Set(["exit_watch", "take_profit_watch", "trailing_take_profit", "confirmed_trend_weakening", "hard_stop"]);
+const EXIT_ALERT_TYPES = new Set(["exit_watch", "take_profit_watch", "trailing_take_profit", "confirmed_trend_weakening", "hard_stop", "ma5_close_break_exit"]);
 
 function isEmailExitAlert(alertType: string) {
   return EXIT_ALERT_TYPES.has(alertType);
@@ -1586,7 +1604,7 @@ function latestAlertTone(alert: {
   quote_time?: string | null;
 }) {
   const deliveryLabel = alertDeliveryLabel(alert);
-  if (alert.alert_type === "hard_stop") {
+  if (["hard_stop", "ma5_close_break_exit"].includes(alert.alert_type)) {
     return "bg-rose-50 text-rose-800";
   }
   if (deliveryLabel === "仅网页提示") {
@@ -4442,13 +4460,29 @@ function ShortTermClient() {
                         : formatPercent(item.dynamic_thresholds.profit_start_pct)}
                     </span>
                     <span>
-                      移动止盈回吐线：
+                      允许从高点回吐：
                       {item.dynamic_thresholds?.trailing_giveback_pct === null ||
                       item.dynamic_thresholds?.trailing_giveback_pct === undefined
                         ? "等待数据"
                         : formatPercent(item.dynamic_thresholds.trailing_giveback_pct)}
                     </span>
-                    <span>动态线由规则计算，AI只做解释，不改写这些线。</span>
+                    <span>
+                      当前利润保护线：
+                      {item.dynamic_thresholds?.trailing_stop_pnl_pct === null ||
+                      item.dynamic_thresholds?.trailing_stop_pnl_pct === undefined
+                        ? "尚未启动"
+                        : formatPercent(item.dynamic_thresholds.trailing_stop_pnl_pct)}
+                    </span>
+                    <span>
+                      保护状态：{profitProtectionStateLabel(item.dynamic_thresholds?.profit_protection_state)}
+                    </span>
+                    <span>
+                      风险数据：
+                      {item.dynamic_thresholds?.risk_data_eligible
+                        ? `${item.dynamic_thresholds.risk_sample_count ?? 0} 日可决策复权数据`
+                        : "数据不足，不使用原始价格补算"}
+                    </span>
+                    <span>保护线由规则计算且只升不降，AI只做解释，不改写这些线。</span>
                     <span>阈值说明：{thresholdExplanationLine(item)}</span>
                     <span>
                       买卖价差：
@@ -5296,7 +5330,7 @@ function ShortTermClient() {
                             <Line
                               type="monotone"
                               dataKey="stop"
-                              name="移动止盈线"
+                              name="实际利润保护线（只升不降）"
                               stroke="#006bff"
                               strokeDasharray="5 5"
                               strokeWidth={2}
@@ -5316,6 +5350,9 @@ function ShortTermClient() {
                       <span>最高点：{trackingHigh ? `${trackingHigh.label} / ${percentOrWaiting(trackingHigh.pnl)}` : "等待数据"}</span>
                       <span>当前点：{trackingCurrent ? `${trackingCurrent.label} / ${percentOrWaiting(trackingCurrent.pnl)}` : "等待数据"}</span>
                     </div>
+                    <p className="mt-2 text-xs leading-5 text-ink/50">
+                      虚线只从止盈启动后出现，并按当日可见信息逐日抬高；它是风险规则轨迹，不代表已经成交。
+                    </p>
                     <p className="mt-3 rounded-[8px] bg-paper px-4 py-3 text-sm leading-6 text-ink/65">
                       {primaryTracked.exit_signal.reason ?? "暂无持仓处理原因，继续观察公开数据。"}
                     </p>

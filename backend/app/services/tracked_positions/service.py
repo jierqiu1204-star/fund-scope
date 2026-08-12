@@ -56,6 +56,7 @@ from app.services.etf_exit_calibration import (
 from app.services.market_data import (
     ASIA_SHANGHAI,
     latest_etf_quotes_by_code,
+    recent_decision_eligible_etf_adjusted_facts,
     recent_decision_eligible_etf_turnovers_by_code,
 )
 from app.services.market_data import (
@@ -101,18 +102,15 @@ from app.services.risk_alerts import (
     ALERT_CONFIRMED_TREND_WEAKENING,
     ALERT_EXIT_WATCH,
     ALERT_HARD_STOP,
+    ALERT_MA5_CLOSE_BREAK_EXIT,
     ALERT_RISK_WARNING,
     ALERT_TAKE_PROFIT_WATCH,
     ALERT_TRAILING_TAKE_PROFIT,
     ALERT_TREND_WEAKENING,
     DEFAULT_ETF_TRADING_CAPITAL,
     EMAIL_ALERT_TYPES,
-    ETF_TRAILING_GIVEBACK_MAX_PCT,
-    ETF_TRAILING_GIVEBACK_MIN_PCT,
-    ETF_TRAILING_GIVEBACK_VOL_MULTIPLIER,
-    ETF_TRAILING_PROFIT_START_MAX_PCT,
-    ETF_TRAILING_PROFIT_START_MIN_PCT,
-    ETF_TRAILING_PROFIT_START_VOL_MULTIPLIER,
+    ETF_DYNAMIC_THRESHOLD_VERSION,
+    ETF_PROFIT_PROTECTION_STATE_KEY,
     HARD_STOP_LOSS_PCT,
     TAKE_PROFIT_WATCH_COOLDOWN_DAYS,
     TAKE_PROFIT_WATCH_PCT,
@@ -121,10 +119,13 @@ from app.services.risk_alerts import (
     TRAILING_START_PROFIT_PCT,
     AlertDecision,
     EtfLiquidityCapacityAssessment,
+    LongProfitProtectionDecision,
     PositionSizingRecommendation,
     assess_etf_liquidity_capacity,
     calculate_position_sizing,
+    derive_etf_profit_thresholds,
     evaluate_exit_execution_evidence,
+    evaluate_long_profit_protection,
     evaluate_reentry_state,
 )
 from app.services.short_research.advisor import (
@@ -151,6 +152,11 @@ from app.services.tracked_positions.exposure_repository import (
     apply_exposure_mutation,
     initialize_tracked_position,
 )
+from app.services.tracked_positions.ma5_close_break import (
+    MA5_CLOSE_BREAK_STATE_KEY,
+    AdjustedMa5CloseBreakEvidence,
+    load_adjusted_ma5_close_break_evidence,
+)
 from app.services.tracked_positions.owner_risk import (
     EtfOwnerRiskContext,
     apply_owner_risk_guard,
@@ -169,6 +175,7 @@ RELIABILITY_DAILY_CLOSE = RELIABILITY_STALE
 RELIABILITY_STALE_QUOTE = RELIABILITY_STALE
 RELIABILITY_MISSING = RELIABILITY_UNAVAILABLE
 MAX_TRACKED_ETF_LIQUIDITY_CODES = 100
+MA5_CLOSE_BREAK_ALERT_SOURCE = "total_return_adjusted_daily_close"
 
 
 async def batch_etf_liquidity_inputs(
@@ -179,9 +186,7 @@ async def batch_etf_liquidity_inputs(
 
     codes = list(
         dict.fromkeys(
-            position.asset_code
-            for position in positions
-            if position.asset_type == ASSET_TYPE_ETF
+            position.asset_code for position in positions if position.asset_type == ASSET_TYPE_ETF
         )
     )[:MAX_TRACKED_ETF_LIQUIDITY_CODES]
     if not codes:
@@ -239,9 +244,7 @@ def apply_etf_liquidity_capacity_guard(
         return sizing
     capacity_context = capacity.as_context()
     reason_suffix = (
-        "流动性容量：" + "、".join(capacity.reason_codes)
-        if capacity.reason_codes
-        else None
+        "流动性容量：" + "、".join(capacity.reason_codes) if capacity.reason_codes else None
     )
     if sizing.action in {"add", "reentry_candidate"} and not capacity.entry_allowed:
         return replace(
@@ -258,7 +261,10 @@ def apply_etf_liquidity_capacity_guard(
             sizing,
             reason="；".join(
                 item
-                for item in (sizing.reason, reason_suffix or "退出容量暂不可用，注意分批和跳空风险。")
+                for item in (
+                    sizing.reason,
+                    reason_suffix or "退出容量暂不可用，注意分批和跳空风险。",
+                )
                 if item
             ),
             liquidity_capacity=capacity_context,
@@ -302,6 +308,8 @@ class PositionAnalysis:
     technical_metrics: dict[str, Any]
     intraday_snapshot: TrackedEtfIntradaySnapshotOut | None = None
     dynamic_thresholds: DynamicExitThresholdsOut | None = None
+    profit_protection: LongProfitProtectionDecision | None = None
+    ma5_close_break: AdjustedMa5CloseBreakEvidence | None = None
 
 
 @dataclass(frozen=True)
@@ -698,16 +706,21 @@ async def dynamic_thresholds_for_position(
         )
     if position.asset_type != ASSET_TYPE_ETF:
         return None
-    rows = (
-        await session.scalars(
-            select(EtfPriceHistory)
-            .where(EtfPriceHistory.etf_code == position.asset_code)
-            .order_by(EtfPriceHistory.trade_date.desc())
-            .limit(90)
-        )
-    ).all()
-    ordered = list(reversed(rows))
-    closes = [row.close for row in ordered if row.close]
+    etf = await session.scalar(select(TradableEtf).where(TradableEtf.code == position.asset_code))
+    theme_profile = classify_etf_theme(
+        code=position.asset_code,
+        name=etf.name if etf is not None else position.asset_code,
+        asset_class=etf.asset_class if etf is not None else None,
+        theme_tags=list(etf.theme_tags_json or []) if etf is not None else [],
+    )
+    risk_cutoff = chart[-1].date if chart else date.today()
+    adjusted_facts = await recent_decision_eligible_etf_adjusted_facts(
+        session,
+        etf_code=position.asset_code,
+        on_or_before=risk_cutoff,
+        lookback_sessions=120,
+    )
+    closes = [float(row.adjusted_close) for row in adjusted_facts if row.adjusted_close]
     returns = [
         closes[index] / closes[index - 1] - 1.0
         for index in range(1, len(closes))
@@ -727,85 +740,104 @@ async def dynamic_thresholds_for_position(
             if peak:
                 drawdown = min(drawdown, close / peak - 1.0)
         max_drawdown_60d = drawdown
-    etf = await session.scalar(select(TradableEtf).where(TradableEtf.code == position.asset_code))
-    theme_profile = classify_etf_theme(
-        code=position.asset_code,
-        name=etf.name if etf is not None else position.asset_code,
-        asset_class=etf.asset_class if etf is not None else None,
-        theme_tags=list(etf.theme_tags_json or []) if etf is not None else [],
-    )
-    threshold_context = dynamic_threshold_context(
-        asset_bucket=theme_profile.asset_bucket,
-        theme_group=theme_profile.theme_group,
-        points=[
+    adjusted_points: list[ThresholdPricePoint] = []
+    for row in adjusted_facts:
+        adjusted_close = float(row.adjusted_close or 0.0)
+        adjustment_factor = (
+            adjusted_close / float(row.raw_close) if row.raw_close and row.raw_close > 0 else None
+        )
+        adjusted_points.append(
             ThresholdPricePoint(
-                value=row.close,
-                high=row.high,
-                low=row.low,
-                pct_change=row.pct_change / 100,
+                value=adjusted_close,
+                high=float(row.raw_high) * adjustment_factor
+                if adjustment_factor is not None and row.raw_high > 0
+                else None,
+                low=float(row.raw_low) * adjustment_factor
+                if adjustment_factor is not None and row.raw_low > 0
+                else None,
+                pct_change=None,
             )
-            for row in ordered
-            if row.close
-        ],
-        today_return=ordered[-1].pct_change / 100 if ordered else None,
-        return_5d=return_5d,
-        return_20d=return_20d,
-        return_60d=return_60d,
-        volatility_20d=realized_vol,
-        max_drawdown_60d=max_drawdown_60d,
-        distance_to_ma5=None,
-        premium_discount_pct=intraday_snapshot.premium_discount_pct if intraday_snapshot else None,
-        holding_state={
-            "position_id": position.id,
-            "asset_code": position.asset_code,
-            "tracking_start_date": tracking_start_date(position).isoformat()
-            if tracking_start_date(position)
-            else None,
-        },
+        )
+    risk_data_eligible = len(adjusted_points) >= 30
+    threshold_context: dict[str, Any] = {}
+    if risk_data_eligible:
+        threshold_context = dynamic_threshold_context(
+            asset_bucket=theme_profile.asset_bucket,
+            theme_group=theme_profile.theme_group,
+            points=adjusted_points,
+            today_return=returns[-1] if returns else None,
+            return_5d=return_5d,
+            return_20d=return_20d,
+            return_60d=return_60d,
+            volatility_20d=realized_vol,
+            max_drawdown_60d=max_drawdown_60d,
+            distance_to_ma5=None,
+            premium_discount_pct=(
+                intraday_snapshot.premium_discount_pct if intraday_snapshot else None
+            ),
+            holding_state={
+                "position_id": position.id,
+                "asset_code": position.asset_code,
+                "tracking_start_date": tracking_start_date(position).isoformat()
+                if tracking_start_date(position)
+                else None,
+            },
+        )
+    persisted_protection = dict(
+        (position.exit_state_json or {}).get(ETF_PROFIT_PROTECTION_STATE_KEY) or {}
     )
+    profit_thresholds = (
+        derive_etf_profit_thresholds(
+            asset_bucket=theme_profile.asset_bucket,
+            atr_pct=threshold_context.get("atr_style_20d_pct"),
+            realized_volatility_pct=threshold_context.get("realized_vol_20d_pct"),
+            median_abs_return_pct=threshold_context.get("median_abs_return_60d_pct"),
+            persisted_entry_risk_unit_pct=persisted_protection.get("entry_risk_unit_pct"),
+        )
+        if risk_data_eligible
+        else None
+    )
+    risk_data_eligible = risk_data_eligible and profit_thresholds is not None
     thresholds = dict(threshold_context.get("thresholds") or {})
-    volatility_unit_pct = float(threshold_context.get("volatility_unit_pct") or 2.0)
+    volatility_unit_pct = (
+        profit_thresholds.entry_risk_unit_pct if profit_thresholds is not None else None
+    )
+    current_volatility_unit_pct = (
+        profit_thresholds.current_risk_unit_pct if profit_thresholds is not None else None
+    )
     hard_stop_pct = float(
-        thresholds.get("hard_stop_pct", -_clamp(1.5 * volatility_unit_pct, 1.2, 4.5))
+        thresholds.get("hard_stop_pct", HARD_STOP_LOSS_PCT)
     )
-    profit_start_pct = float(
-        thresholds.get(
-            "profit_start_pct",
-            _clamp(
-                ETF_TRAILING_PROFIT_START_VOL_MULTIPLIER * volatility_unit_pct,
-                ETF_TRAILING_PROFIT_START_MIN_PCT,
-                ETF_TRAILING_PROFIT_START_MAX_PCT,
-            ),
-        )
+    profit_start_pct = (
+        profit_thresholds.profit_start_pct if profit_thresholds is not None else None
     )
-    trailing_giveback_pct = float(
-        thresholds.get(
-            "trailing_giveback_pct",
-            _clamp(
-                ETF_TRAILING_GIVEBACK_VOL_MULTIPLIER * volatility_unit_pct,
-                ETF_TRAILING_GIVEBACK_MIN_PCT,
-                ETF_TRAILING_GIVEBACK_MAX_PCT,
-            ),
-        )
+    trailing_giveback_pct = (
+        profit_thresholds.trailing_giveback_pct if profit_thresholds is not None else None
     )
-    if volatility_unit_pct < 1.0:
+    if volatility_unit_pct is None:
+        volatility_bucket = "unavailable"
+    elif volatility_unit_pct < 1.0:
         volatility_bucket = "low_volatility"
     elif volatility_unit_pct < 2.5:
         volatility_bucket = "mid_volatility"
     else:
         volatility_bucket = "high_volatility"
-    approved_calibration = await _approved_calibration_thresholds(
-        session,
-        bucket_candidates=[
-            ("asset_bucket", theme_profile.asset_bucket or "unknown"),
-            ("theme_group", theme_profile.theme_group or "unknown"),
-            ("volatility", volatility_bucket),
-            ("all", "all"),
-        ],
-        volatility_unit_pct=volatility_unit_pct,
+    approved_calibration = (
+        await _approved_calibration_thresholds(
+            session,
+            bucket_candidates=[
+                ("asset_bucket", theme_profile.asset_bucket or "unknown"),
+                ("theme_group", theme_profile.theme_group or "unknown"),
+                ("volatility", volatility_bucket),
+                ("all", "all"),
+            ],
+            volatility_unit_pct=volatility_unit_pct,
+        )
+        if volatility_unit_pct is not None
+        else None
     )
-    threshold_source = "rule_dynamic"
-    threshold_rule_version = str(threshold_context.get("rule_version") or "dynamic_exit_v2")
+    threshold_source = "rule_dynamic_v2" if risk_data_eligible else "data_waiting"
+    threshold_rule_version = ETF_DYNAMIC_THRESHOLD_VERSION
     calibration_run_id = None
     calibration_candidate_id = None
     calibration_bucket_key = None
@@ -880,9 +912,26 @@ async def dynamic_thresholds_for_position(
         if intraday_snapshot.iopv is None:
             structure_warnings.append("暂无 IOPV，无法判断盘中价格相对净值是否偏贵。")
 
+    if not risk_data_eligible:
+        structure_warnings.append(
+            f"只有 {len(adjusted_points)} 个可决策复权交易日，少于动态止盈要求的 30 日；不使用原始价格补算。"
+        )
+    threshold_reason = (
+        str(threshold_context.get("reason") or "")
+        if risk_data_eligible
+        else "可决策 total-return-adjusted 日线不足，ETF 动态止盈等待数据。"
+    )
+    if profit_thresholds is not None:
+        threshold_reason = (
+            f"{threshold_reason} 止盈风险单位采用 ATR、实现波动率和绝对收益中位数的稳健中位数；"
+            f"持仓风险单位冻结为 {profit_thresholds.entry_risk_unit_pct:.2f}%。"
+        ).strip()
+
     return DynamicExitThresholdsOut(
         threshold_source=threshold_source,
         rule_version=threshold_rule_version,
+        threshold_mode="dynamic" if risk_data_eligible else "data_waiting",
+        asset_bucket=theme_profile.asset_bucket,
         calibration_run_id=calibration_run_id,
         calibration_candidate_id=calibration_candidate_id,
         calibration_bucket_key=calibration_bucket_key,
@@ -891,11 +940,19 @@ async def dynamic_thresholds_for_position(
         calibration_contract_hash=calibration_contract_hash_value,
         calibration_coverage_status=calibration_coverage_status,
         volatility_unit_pct=_round_or_none(volatility_unit_pct),
+        current_volatility_unit_pct=_round_or_none(current_volatility_unit_pct),
+        entry_risk_unit_pct=_round_or_none(volatility_unit_pct),
+        risk_data_eligible=risk_data_eligible,
+        risk_data_reason_code=(
+            "decision_eligible" if risk_data_eligible else "insufficient_adjusted_history"
+        ),
+        risk_price_basis="total_return_adjusted",
+        risk_sample_count=len(adjusted_points),
         hard_stop_pct=_round_or_none(hard_stop_pct),
         profit_start_pct=_round_or_none(profit_start_pct),
         trailing_giveback_pct=_round_or_none(trailing_giveback_pct),
         trend_weakening=trend_weakening,
-        explanation=[str(threshold_context.get("reason") or "")],
+        explanation=[threshold_reason],
         liquidity_warnings=liquidity_warnings,
         structure_warnings=structure_warnings,
     )
@@ -936,6 +993,56 @@ def _exit_signal(
     )
 
 
+def _ma5_close_break_metrics(
+    evidence: AdjustedMa5CloseBreakEvidence | None,
+) -> dict[str, Any]:
+    if evidence is None:
+        return {
+            "ma5_close_break_decision_eligible": False,
+            "ma5_close_break_reason_code": "not_applicable",
+        }
+    return {
+        "ma5_close_break_decision_eligible": evidence.decision_eligible,
+        "ma5_close_break_reason_code": evidence.reason_code,
+        "ma5_close_break_condition_met": evidence.condition_met,
+        "ma5_close_break_observation_new": evidence.observation_is_new,
+        "ma5_close_break_should_alert": evidence.should_alert,
+        "ma5_close_break": evidence.as_context(),
+    }
+
+
+def _ma5_close_break_exit_signal(
+    evidence: AdjustedMa5CloseBreakEvidence | None,
+) -> TrackedPositionExitSignal | None:
+    if evidence is None or not evidence.should_alert:
+        return None
+    assert evidence.trade_date is not None
+    assert evidence.adjusted_close is not None
+    assert evidence.adjusted_ma5 is not None
+    earliest = (
+        evidence.earliest_execution_date.isoformat()
+        if evidence.earliest_execution_date is not None
+        else "下一合格交易日"
+    )
+    context = evidence.as_context()
+    return _exit_signal(
+        alert_type=ALERT_MA5_CLOSE_BREAK_EXIT,
+        label="收盘跌破五日线退出提醒",
+        level="urgent",
+        action_class=ACTION_CLASS_ACTIONABLE_EXIT,
+        reasons=[
+            (
+                f"{evidence.trade_date.isoformat()} 复权收盘价 "
+                f"{evidence.adjusted_close:.4f} 低于同日复权 MA5 "
+                f"{evidence.adjusted_ma5:.4f}。"
+            ),
+            f"信号仅按收盘确认，不使用盘中最低价；最早可执行日为 {earliest}。",
+        ],
+        threshold_context={"ma5_close_break": context},
+        data_reliability=MA5_CLOSE_BREAK_ALERT_SOURCE,
+    )
+
+
 def _alert_type_label(alert_type: str) -> str:
     return {
         ALERT_EXIT_WATCH: "卖出/减仓提醒",
@@ -944,6 +1051,7 @@ def _alert_type_label(alert_type: str) -> str:
         ALERT_TREND_WEAKENING: "趋势警戒",
         ALERT_CONFIRMED_TREND_WEAKENING: "确认趋势转弱提醒",
         ALERT_HARD_STOP: "止损提醒",
+        ALERT_MA5_CLOSE_BREAK_EXIT: "收盘跌破五日线退出提醒",
     }.get(alert_type, "网页风险提示")
 
 
@@ -954,6 +1062,7 @@ def _should_send_email(alert_type: str) -> bool:
 def _action_class_for_alert_type(alert_type: str | None) -> str:
     if alert_type in {
         ALERT_HARD_STOP,
+        ALERT_MA5_CLOSE_BREAK_EXIT,
         ALERT_TRAILING_TAKE_PROFIT,
         ALERT_CONFIRMED_TREND_WEAKENING,
         ALERT_EXIT_WATCH,
@@ -1023,6 +1132,19 @@ def _data_reliability_for_position(
     return intraday_snapshot.reliability_level
 
 
+def _ma5_daily_signal_eligible(position: TrackedPosition) -> bool:
+    state = dict(position.exit_state_json or {})
+    threshold_context = dict(state.get("exit_signal_threshold_context") or {})
+    evidence = dict(threshold_context.get("ma5_close_break") or {})
+    return bool(
+        evidence.get("decision_eligible") is True
+        and evidence.get("price_basis") == "total_return_adjusted"
+        and evidence.get("condition_met") is True
+        and evidence.get("trade_date")
+        and evidence.get("should_alert") is True
+    )
+
+
 def _annotate_exit_signal_email_eligibility(
     position: TrackedPosition,
     signal: TrackedPositionExitSignal,
@@ -1046,6 +1168,31 @@ def _annotate_exit_signal_email_eligibility(
         signal.email_eligible = False
         signal.email_eligibility_reason = "数据质量或结构提示只在网页展示，不发送邮件。"
         return signal
+    ma5_context = dict(signal.threshold_context.get("ma5_close_break") or {})
+    if (
+        signal.alert_type in {ALERT_HARD_STOP, ALERT_MA5_CLOSE_BREAK_EXIT}
+        and ma5_context.get("decision_eligible") is True
+        and ma5_context.get("should_alert") is True
+    ):
+        signal.email_eligible = True
+        signal.email_eligibility_reason = "使用同一交易日的可决策复权收盘价与复权 MA5，按收盘确认。"
+        return signal
+    if position.asset_type == ASSET_TYPE_ETF and signal.alert_type in {
+        ALERT_TRAILING_TAKE_PROFIT,
+        ALERT_TAKE_PROFIT_WATCH,
+    }:
+        protection_context = dict(signal.threshold_context.get("profit_protection") or {})
+        if (
+            signal.threshold_context.get("risk_data_eligible") is not True
+            or signal.threshold_context.get("risk_price_basis")
+            != "total_return_adjusted"
+            or protection_context.get("data_eligible") is not True
+        ):
+            signal.email_eligible = False
+            signal.email_eligibility_reason = (
+                "动态止盈缺少可决策复权日线证据，仅在网页展示，不使用原始价格触发邮件。"
+            )
+            return signal
     if position.asset_type == ASSET_TYPE_ETF and not _is_fresh_intraday_snapshot(intraday_snapshot):
         signal.email_eligible = False
         signal.email_eligibility_reason = (
@@ -1068,6 +1215,19 @@ def _decision_email_data_eligible(
         return True
     if position.asset_type != ASSET_TYPE_ETF:
         return True
+    if decision.alert_type == ALERT_MA5_CLOSE_BREAK_EXIT:
+        return _ma5_daily_signal_eligible(position)
+    if decision.alert_type == ALERT_HARD_STOP and _ma5_daily_signal_eligible(position):
+        return True
+    if decision.alert_type in {ALERT_TRAILING_TAKE_PROFIT, ALERT_TAKE_PROFIT_WATCH}:
+        protection = dict(
+            (position.exit_state_json or {}).get(ETF_PROFIT_PROTECTION_STATE_KEY) or {}
+        )
+        if (
+            protection.get("data_eligible") is not True
+            or protection.get("risk_price_basis") != "total_return_adjusted"
+        ):
+            return False
     return _is_fresh_intraday_snapshot(intraday_snapshot)
 
 
@@ -1081,6 +1241,46 @@ def _web_only_message(alert_type: str) -> str:
     return "仅网页提示：不是明确卖出/减仓信号。"
 
 
+def _populate_etf_profit_protection_chart(
+    chart: list[TrackedPositionChartPoint],
+    *,
+    profit_start_pct: float | None,
+    trailing_giveback_pct: float | None,
+    data_eligible: bool,
+    effective_current_stop_pct: float | None,
+) -> None:
+    """Replay the V2 line forward without backfilling today's stop into history."""
+
+    running_high: float | None = None
+    running_stop: float | None = None
+    armed = False
+    for point in chart:
+        if point.estimated_pnl_pct is None:
+            point.trailing_stop_pnl_pct = None
+            continue
+        running_high = max(running_high, point.estimated_pnl_pct) if running_high is not None else point.estimated_pnl_pct
+        decision = evaluate_long_profit_protection(
+            current_profit_pct=point.estimated_pnl_pct,
+            observed_high_water_profit_pct=running_high,
+            profit_start_pct=profit_start_pct,
+            trailing_giveback_pct=trailing_giveback_pct,
+            data_eligible=data_eligible,
+            persisted_high_water_profit_pct=running_high,
+            persisted_trailing_stop_pnl_pct=running_stop,
+            persisted_armed=armed,
+        )
+        armed = decision.state in {"armed", "triggered"}
+        running_high = decision.high_water_profit_pct
+        running_stop = decision.trailing_stop_pnl_pct
+        point.trailing_stop_pnl_pct = _round_or_none(running_stop)
+    if chart and effective_current_stop_pct is not None:
+        # A persisted high may predate the bounded chart. Expose it only at the
+        # current point instead of pretending it existed on every visible date.
+        chart[-1].trailing_stop_pnl_pct = _round_or_none(
+            max(chart[-1].trailing_stop_pnl_pct or effective_current_stop_pct, effective_current_stop_pct)
+        )
+
+
 def _performance_analysis(
     position: TrackedPosition,
     chart: list[TrackedPositionChartPoint],
@@ -1088,10 +1288,13 @@ def _performance_analysis(
     *,
     intraday_snapshot: TrackedEtfIntradaySnapshotOut | None = None,
     dynamic_thresholds: DynamicExitThresholdsOut | None = None,
+    ma5_close_break: AdjustedMa5CloseBreakEvidence | None = None,
 ) -> PositionAnalysis:
     start_date = tracking_start_date(position)
+    ma5_signal = _ma5_close_break_exit_signal(ma5_close_break)
+    ma5_metrics = _ma5_close_break_metrics(ma5_close_break)
     if not chart:
-        exit_signal = _exit_signal(
+        exit_signal = ma5_signal or _exit_signal(
             reasons=["等待公开净值或 ETF 日线数据，暂不能计算卖出/减仓提醒。"],
             action_class=ACTION_CLASS_DATA_WAITING,
             no_alert_reason="等待公开净值或 ETF 日线数据。",
@@ -1107,16 +1310,17 @@ def _performance_analysis(
             max_profit_pct=None,
             profit_giveback_pct=None,
             holding_days=None,
-            technical_metrics={"data_status": "数据不足"},
+            technical_metrics={"data_status": "数据不足", **ma5_metrics},
             intraday_snapshot=intraday_snapshot,
             dynamic_thresholds=dynamic_thresholds,
+            ma5_close_break=ma5_close_break,
         )
 
     current_point = chart[-1]
     current_pnl_pct = current_point.estimated_pnl_pct
     pnl_points = [point for point in chart if point.estimated_pnl_pct is not None]
     if current_pnl_pct is None or not pnl_points:
-        exit_signal = _exit_signal(
+        exit_signal = ma5_signal or _exit_signal(
             reasons=["缺少买入净值或估算份额，暂不能计算卖出/减仓提醒。"],
             action_class=ACTION_CLASS_DATA_WAITING,
             no_alert_reason="缺少买入净值或估算份额。",
@@ -1132,14 +1336,14 @@ def _performance_analysis(
             max_profit_pct=None,
             profit_giveback_pct=None,
             holding_days=(current_point.date - start_date).days,
-            technical_metrics={"data_status": "等待买入净值"},
+            technical_metrics={"data_status": "等待买入净值", **ma5_metrics},
             intraday_snapshot=intraday_snapshot,
             dynamic_thresholds=dynamic_thresholds,
+            ma5_close_break=ma5_close_break,
         )
 
     high_point = max(pnl_points, key=lambda point: cast(float, point.estimated_pnl_pct))
-    max_profit_pct = cast(float, high_point.estimated_pnl_pct)
-    profit_giveback_pct = max(0.0, max_profit_pct - current_pnl_pct)
+    observed_max_profit_pct = cast(float, high_point.estimated_pnl_pct)
     prices = [point.price for point in chart]
     ma5 = _mean_or_none(prices[-5:]) if len(prices) >= 5 else None
     ma10 = _mean_or_none(prices[-10:]) if len(prices) >= 10 else None
@@ -1154,33 +1358,75 @@ def _performance_analysis(
     hard_stop_pct = (
         dynamic_hard_stop_pct if dynamic_hard_stop_pct is not None else HARD_STOP_LOSS_PCT
     )
-    profit_start_pct = (
-        dynamic_profit_start_pct
-        if dynamic_profit_start_pct is not None
-        else TRAILING_START_PROFIT_PCT
-    )
-    if max_profit_pct >= profit_start_pct:
-        trailing_threshold = (
-            dynamic_trailing_giveback_pct
-            if dynamic_trailing_giveback_pct is not None
-            else min(TRAILING_GIVEBACK_POINTS, max_profit_pct * TRAILING_GIVEBACK_RATIO)
+    profit_protection: LongProfitProtectionDecision | None = None
+    if position.asset_type == ASSET_TYPE_ETF:
+        profit_start_pct = dynamic_profit_start_pct
+        profit_data_eligible = bool(
+            dynamic_thresholds and dynamic_thresholds.risk_data_eligible is True
         )
+        persisted_protection = dict(
+            (position.exit_state_json or {}).get(ETF_PROFIT_PROTECTION_STATE_KEY) or {}
+        )
+        profit_protection = evaluate_long_profit_protection(
+            current_profit_pct=current_pnl_pct,
+            observed_high_water_profit_pct=observed_max_profit_pct,
+            profit_start_pct=profit_start_pct,
+            trailing_giveback_pct=dynamic_trailing_giveback_pct,
+            data_eligible=profit_data_eligible,
+            persisted_high_water_profit_pct=persisted_protection.get(
+                "high_water_profit_pct"
+            ),
+            persisted_trailing_stop_pnl_pct=persisted_protection.get(
+                "trailing_stop_pnl_pct"
+            ),
+            persisted_armed=persisted_protection.get("state") in {"armed", "triggered"},
+        )
+        max_profit_pct = profit_protection.high_water_profit_pct
+        profit_giveback_pct = profit_protection.profit_giveback_pct
+        trailing_threshold = (
+            profit_protection.trailing_giveback_pct
+            if profit_protection.state in {"armed", "triggered"}
+            else None
+        )
+        trailing_stop_pnl_pct = profit_protection.trailing_stop_pnl_pct
+        take_profit_watch_threshold = profit_start_pct if profit_data_eligible else None
     else:
-        trailing_threshold = None
-    take_profit_watch_threshold = (
-        max(TAKE_PROFIT_WATCH_PCT, profit_start_pct)
-        if position.asset_type == ASSET_TYPE_ETF
-        else TAKE_PROFIT_WATCH_PCT
-    )
-    trailing_stop_pnl_pct = (
-        max_profit_pct - trailing_threshold if trailing_threshold is not None else None
-    )
+        profit_data_eligible = True
+        max_profit_pct = observed_max_profit_pct
+        profit_giveback_pct = max(0.0, max_profit_pct - current_pnl_pct)
+        profit_start_pct = (
+            dynamic_profit_start_pct
+            if dynamic_profit_start_pct is not None
+            else TRAILING_START_PROFIT_PCT
+        )
+        if max_profit_pct >= profit_start_pct:
+            trailing_threshold = (
+                dynamic_trailing_giveback_pct
+                if dynamic_trailing_giveback_pct is not None
+                else min(TRAILING_GIVEBACK_POINTS, max_profit_pct * TRAILING_GIVEBACK_RATIO)
+            )
+        else:
+            trailing_threshold = None
+        take_profit_watch_threshold = TAKE_PROFIT_WATCH_PCT
+        trailing_stop_pnl_pct = (
+            max_profit_pct - trailing_threshold if trailing_threshold is not None else None
+        )
 
     for point in chart:
         point.is_entry = point.date == chart[0].date
         point.is_high = point.date == high_point.date
         point.is_current = point.date == current_point.date
-        point.trailing_stop_pnl_pct = _round_or_none(trailing_stop_pnl_pct)
+    if position.asset_type == ASSET_TYPE_ETF:
+        _populate_etf_profit_protection_chart(
+            chart,
+            profit_start_pct=profit_start_pct,
+            trailing_giveback_pct=dynamic_trailing_giveback_pct,
+            data_eligible=profit_data_eligible,
+            effective_current_stop_pct=trailing_stop_pnl_pct,
+        )
+    else:
+        for point in chart:
+            point.trailing_stop_pnl_pct = _round_or_none(trailing_stop_pnl_pct)
 
     risk_flags = set(item.risk_flags_json or []) if item is not None else set()
     current_label = item.conclusion if item is not None else None
@@ -1211,22 +1457,42 @@ def _performance_analysis(
         trend_distances.append((current_point.price / ma10 - 1.0) * 100)
     trend_weakening_distance_pct = min(trend_distances) if trend_distances else None
     distance_to_hard_stop_pct = current_pnl_pct - hard_stop_pct
-    distance_to_profit_start_pct = current_pnl_pct - take_profit_watch_threshold
+    distance_to_profit_start_pct = (
+        current_pnl_pct - take_profit_watch_threshold
+        if take_profit_watch_threshold is not None
+        else None
+    )
     distance_to_trailing_giveback_pct = (
-        trailing_threshold - profit_giveback_pct if trailing_threshold is not None else None
+        profit_protection.distance_to_trailing_stop_pct
+        if profit_protection is not None
+        else trailing_threshold - profit_giveback_pct
+        if trailing_threshold is not None
+        else None
     )
     threshold_explanation = [
-        f"规则版本：{dynamic_thresholds.rule_version if dynamic_thresholds else 'fixed_exit_v1'}。",
-        f"硬止损线 {hard_stop_pct:.2f}%，当前距离硬止损线 {distance_to_hard_stop_pct:.2f} 个百分点。",
-        f"止盈观察线 {take_profit_watch_threshold:.2f}%，当前距离止盈观察线 {distance_to_profit_start_pct:.2f} 个百分点。",
+        item
+        for item in (dynamic_thresholds.explanation if dynamic_thresholds else [])
+        if item
     ]
+    threshold_explanation.extend(
+        [
+            f"规则版本：{dynamic_thresholds.rule_version if dynamic_thresholds else 'fixed_exit_v1'}。",
+            f"硬止损线 {hard_stop_pct:.2f}%，当前距离硬止损线 {distance_to_hard_stop_pct:.2f} 个百分点。",
+        ]
+    )
+    if take_profit_watch_threshold is not None and distance_to_profit_start_pct is not None:
+        threshold_explanation.append(
+            f"止盈启动线 {take_profit_watch_threshold:.2f}%，当前距离启动线 {distance_to_profit_start_pct:.2f} 个百分点。"
+        )
+    elif position.asset_type == ASSET_TYPE_ETF:
+        threshold_explanation.append("动态止盈等待至少30个可决策复权交易日，不使用原始价格补算。")
     if dynamic_thresholds and dynamic_thresholds.volatility_unit_pct is not None:
         threshold_explanation.append(
             f"动态线参考近阶段波动/回撤，波动单位约 {dynamic_thresholds.volatility_unit_pct:.2f}%。"
         )
     if trailing_threshold is not None and distance_to_trailing_giveback_pct is not None:
         threshold_explanation.append(
-            f"移动止盈回吐线 {trailing_threshold:.2f} 个百分点，距离触发还有 {distance_to_trailing_giveback_pct:.2f} 个百分点。"
+            f"允许从高点回吐 {trailing_threshold:.2f} 个百分点，实际保护线为 {trailing_stop_pnl_pct:.2f}%，当前距离保护线 {distance_to_trailing_giveback_pct:.2f} 个百分点。"
         )
     if dynamic_thresholds is not None:
         dynamic_thresholds = dynamic_thresholds.model_copy(
@@ -1237,6 +1503,14 @@ def _performance_analysis(
                     distance_to_trailing_giveback_pct
                 ),
                 "trend_weakening_distance_pct": _round_or_none(trend_weakening_distance_pct),
+                "profit_protection_state": (
+                    profit_protection.state if profit_protection is not None else None
+                ),
+                "high_water_profit_pct": _round_or_none(max_profit_pct),
+                "trailing_stop_pnl_pct": _round_or_none(trailing_stop_pnl_pct),
+                "distance_to_trailing_stop_pct": _round_or_none(
+                    distance_to_trailing_giveback_pct
+                ),
                 "explanation": threshold_explanation,
             }
         )
@@ -1281,6 +1555,10 @@ def _performance_analysis(
         "trend_weakening_distance_pct": _round_or_none(trend_weakening_distance_pct),
         "threshold_explanation": threshold_explanation,
         "price_source": intraday_snapshot.price_source if intraday_snapshot else "daily_close",
+        "profit_protection": (
+            profit_protection.as_context() if profit_protection is not None else None
+        ),
+        **ma5_metrics,
     }
 
     if current_pnl_pct <= hard_stop_pct:
@@ -1291,7 +1569,15 @@ def _performance_analysis(
             action_class=ACTION_CLASS_ACTIONABLE_EXIT,
             reasons=[f"当前估算亏损 {current_pnl_pct:.2f}%，已达到 -4% 的硬止损检查线。"],
         )
-    elif trailing_threshold is not None and profit_giveback_pct >= trailing_threshold:
+    elif ma5_signal is not None:
+        exit_signal = ma5_signal
+    elif (
+        profit_protection is not None
+        and profit_protection.triggered
+        or profit_protection is None
+        and trailing_threshold is not None
+        and profit_giveback_pct >= trailing_threshold
+    ):
         exit_signal = _exit_signal(
             alert_type=ALERT_TRAILING_TAKE_PROFIT,
             label="盈利回吐提醒",
@@ -1328,7 +1614,10 @@ def _performance_analysis(
             no_alert_reason="趋势转弱未被亏损、盈利回吐或榜单转弱确认。",
             reasons=guard_reasons,
         )
-    elif current_pnl_pct >= take_profit_watch_threshold:
+    elif (
+        take_profit_watch_threshold is not None
+        and current_pnl_pct >= take_profit_watch_threshold
+    ):
         risk_text = "、".join(sorted(risk_flags.intersection(TAKE_PROFIT_RISKS))) or (
             "高位观察" if current_label == "高位观察" else "达到动态止盈观察线"
         )
@@ -1354,6 +1643,15 @@ def _performance_analysis(
             f"当前估算亏损 {abs(current_pnl_pct):.2f}%（盈亏 {current_pnl_pct:.2f}%），已触及硬止损线 {hard_stop_pct:.2f}%。",
             f"当前价 {current_point.price:.4f}；{source_message}",
         ]
+        if (
+            ma5_close_break is not None
+            and ma5_close_break.condition_met is True
+            and ma5_close_break.adjusted_close is not None
+            and ma5_close_break.adjusted_ma5 is not None
+        ):
+            exit_signal.reasons.append(
+                f"同时满足复权收盘破位：{ma5_close_break.adjusted_close:.4f} < 复权 MA5 {ma5_close_break.adjusted_ma5:.4f}。"
+            )
         exit_signal.reason = exit_signal.reasons[0]
     elif exit_signal.alert_type == ALERT_TRAILING_TAKE_PROFIT and trailing_threshold is not None:
         exit_signal.label = "盈利回吐提醒"
@@ -1409,6 +1707,17 @@ def _performance_analysis(
         "approved_for_live": bool(
             dynamic_thresholds and dynamic_thresholds.calibration_candidate_id
         ),
+        "risk_data_eligible": bool(
+            dynamic_thresholds and dynamic_thresholds.risk_data_eligible is True
+        ),
+        "risk_data_reason_code": (
+            dynamic_thresholds.risk_data_reason_code if dynamic_thresholds else None
+        ),
+        "risk_price_basis": dynamic_thresholds.risk_price_basis if dynamic_thresholds else None,
+        "profit_protection": (
+            profit_protection.as_context() if profit_protection is not None else None
+        ),
+        "ma5_close_break": (ma5_close_break.as_context() if ma5_close_break is not None else None),
     }
     exit_signal.approved_for_live = bool(
         dynamic_thresholds and dynamic_thresholds.calibration_candidate_id
@@ -1424,6 +1733,8 @@ def _performance_analysis(
         technical_metrics=technical_metrics,
         intraday_snapshot=intraday_snapshot,
         dynamic_thresholds=dynamic_thresholds,
+        profit_protection=profit_protection,
+        ma5_close_break=ma5_close_break,
     )
 
 
@@ -1598,14 +1909,21 @@ async def position_analysis(
     position: TrackedPosition,
     *,
     item: ShortResearchSignalItem | None = None,
+    now: datetime | None = None,
+    include_daily_close_rules: bool = True,
 ) -> PositionAnalysis:
     chart = await position_chart(session, position)
     intraday_snapshot = None
     dynamic_thresholds = None
+    ma5_close_break = None
     if position.asset_type == ASSET_TYPE_ETF:
         _price, intraday_snapshot = await latest_tracking_price(
             session, position.asset_type, position.asset_code
         )
+        if include_daily_close_rules:
+            ma5_close_break = await load_adjusted_ma5_close_break_evidence(
+                session, position, now=now
+            )
     dynamic_thresholds = await dynamic_thresholds_for_position(
         session, position, chart, intraday_snapshot
     )
@@ -1615,6 +1933,7 @@ async def position_analysis(
         item,
         intraday_snapshot=intraday_snapshot,
         dynamic_thresholds=dynamic_thresholds,
+        ma5_close_break=ma5_close_break,
     )
 
 
@@ -1631,6 +1950,48 @@ def merge_exit_state(position: TrackedPosition, analysis: PositionAnalysis) -> N
         state["holding_days"] = analysis.holding_days
     if analysis.dynamic_thresholds is not None:
         state["dynamic_thresholds"] = analysis.dynamic_thresholds.model_dump(mode="json")
+    if analysis.profit_protection is not None:
+        previous = dict(state.get(ETF_PROFIT_PROTECTION_STATE_KEY) or {})
+        protection = analysis.profit_protection.as_context()
+        previous_high = previous.get("high_water_profit_pct")
+        if isinstance(previous_high, int | float):
+            protection["high_water_profit_pct"] = max(
+                float(previous_high), analysis.profit_protection.high_water_profit_pct
+            )
+        previous_stop = previous.get("trailing_stop_pnl_pct")
+        current_stop = analysis.profit_protection.trailing_stop_pnl_pct
+        if isinstance(previous_stop, int | float):
+            protection["trailing_stop_pnl_pct"] = (
+                max(float(previous_stop), current_stop)
+                if current_stop is not None
+                else float(previous_stop)
+            )
+        if (
+            analysis.profit_protection.state == "data_waiting"
+            and previous.get("state") in {"armed", "triggered"}
+        ):
+            protection["state"] = "armed"
+            protection["triggered"] = False
+        protection["data_state"] = (
+            "eligible" if analysis.profit_protection.data_eligible else "data_waiting"
+        )
+        thresholds = analysis.dynamic_thresholds
+        if thresholds is not None:
+            protection.update(
+                {
+                    "asset_bucket": thresholds.asset_bucket,
+                    "entry_risk_unit_pct": thresholds.entry_risk_unit_pct
+                    if thresholds.entry_risk_unit_pct is not None
+                    else previous.get("entry_risk_unit_pct"),
+                    "current_risk_unit_pct": thresholds.current_volatility_unit_pct,
+                    "risk_data_eligible": thresholds.risk_data_eligible is True,
+                    "risk_data_reason_code": thresholds.risk_data_reason_code,
+                    "risk_price_basis": thresholds.risk_price_basis,
+                    "risk_sample_count": thresholds.risk_sample_count,
+                }
+            )
+        protection["updated_at"] = utcnow().isoformat()
+        state[ETF_PROFIT_PROTECTION_STATE_KEY] = protection
     state["action_class"] = analysis.exit_signal.action_class
     state["guard_state"] = analysis.exit_signal.guard_state
     state["guard_reasons"] = analysis.exit_signal.guard_reasons
@@ -1640,6 +2001,8 @@ def merge_exit_state(position: TrackedPosition, analysis: PositionAnalysis) -> N
         state["latest_price_source"] = analysis.intraday_snapshot.price_source
         if analysis.intraday_snapshot.quote_time is not None:
             state["latest_quote_time"] = analysis.intraday_snapshot.quote_time.isoformat()
+    if analysis.ma5_close_break is not None and analysis.ma5_close_break.state_update is not None:
+        state[MA5_CLOSE_BREAK_STATE_KEY] = dict(analysis.ma5_close_break.state_update)
     state["updated_at"] = utcnow().isoformat()
     position.exit_state_json = state
 
@@ -2126,6 +2489,8 @@ def _alert_threshold_context(
 ) -> dict[str, Any]:
     state = dict(position.exit_state_json or {})
     dynamic_thresholds = dict(state.get("dynamic_thresholds") or {})
+    profit_protection = dict(state.get(ETF_PROFIT_PROTECTION_STATE_KEY) or {})
+    signal_thresholds = dict(state.get("exit_signal_threshold_context") or {})
     context = {
         "threshold_mode": dynamic_thresholds.get("threshold_source", "fixed_rule"),
         "rule_version": dynamic_thresholds.get("rule_version", "fixed_exit_v1"),
@@ -2144,6 +2509,10 @@ def _alert_threshold_context(
         "max_profit_pct": state.get("max_profit_pct"),
         "profit_giveback_pct": state.get("profit_giveback_pct"),
         "holding_days": state.get("holding_days"),
+        "profit_protection": profit_protection,
+        "risk_data_eligible": profit_protection.get("risk_data_eligible"),
+        "risk_data_reason_code": profit_protection.get("risk_data_reason_code"),
+        "risk_price_basis": profit_protection.get("risk_price_basis"),
         "explanation": dynamic_thresholds.get("explanation") or [],
         "alert_type": decision.alert_type,
         "alert_source": decision.alert_source,
@@ -2152,6 +2521,7 @@ def _alert_threshold_context(
         "guard_reasons": state.get("guard_reasons") or [],
         "no_alert_reason": state.get("no_alert_reason"),
         "execution_risk": _exit_execution_context(position, intraday_snapshot),
+        "ma5_close_break": signal_thresholds.get("ma5_close_break"),
     }
     if position_sizing is not None:
         context["position_sizing"] = position_sizing.as_context()
@@ -2266,9 +2636,12 @@ def _audit_decision_context(
     if not _should_send_email(decision.alert_type):
         email_eligibility_reason = _web_only_message(decision.alert_type)
     elif not email_data_eligible:
-        email_eligibility_reason = (
-            "盘中提醒必须使用新鲜盘中行情；旧行情、日线价和估算价不会触发邮件。"
-        )
+        if decision.alert_type == ALERT_MA5_CLOSE_BREAK_EXIT:
+            email_eligibility_reason = "可决策复权收盘或同日复权 MA5 证据不可用。"
+        else:
+            email_eligibility_reason = (
+                "盘中提醒必须使用新鲜盘中行情；旧行情、日线价和估算价不会触发邮件。"
+            )
     return {
         "evaluation_mode": evaluation_mode,
         "outcome": outcome,
@@ -2279,7 +2652,11 @@ def _audit_decision_context(
         "alert_level": decision.alert_level,
         "reasons": list(decision.reasons),
         "risk_flags": list(decision.risk_flags),
-        "data_reliability": _data_reliability_for_position(position, intraday_snapshot),
+        "data_reliability": (
+            MA5_CLOSE_BREAK_ALERT_SOURCE
+            if decision.alert_source == MA5_CLOSE_BREAK_ALERT_SOURCE
+            else _data_reliability_for_position(position, intraday_snapshot)
+        ),
         "quote_time": decision.quote_time.isoformat() if decision.quote_time else None,
         "consensus_status": intraday_snapshot.consensus_status if intraday_snapshot else None,
         "provider_count": intraday_snapshot.provider_count if intraday_snapshot else 0,
@@ -2402,7 +2779,11 @@ async def _record_alert_audit(
         if existing is not None:
             return existing
     data_source = (
-        intraday_snapshot.price_source if intraday_snapshot else decision.alert_source or "unknown"
+        decision.alert_source
+        if decision.alert_source == MA5_CLOSE_BREAK_ALERT_SOURCE
+        else intraday_snapshot.price_source
+        if intraday_snapshot
+        else decision.alert_source or "unknown"
     )
     row = TrackedPositionAlertAudit(
         tracked_position_id=position.id,
@@ -2413,10 +2794,14 @@ async def _record_alert_audit(
         alert_type=decision.alert_type,
         trigger_label=decision.trigger_label,
         data_source=data_source,
-        quote_freshness=_quote_freshness_for_audit(
-            position,
-            intraday_snapshot,
-            evaluation_mode=evaluation_mode,
+        quote_freshness=(
+            MA5_CLOSE_BREAK_ALERT_SOURCE
+            if decision.alert_source == MA5_CLOSE_BREAK_ALERT_SOURCE
+            else _quote_freshness_for_audit(
+                position,
+                intraday_snapshot,
+                evaluation_mode=evaluation_mode,
+            )
         ),
         threshold_context_json=_alert_threshold_context(
             position,
@@ -2450,66 +2835,33 @@ async def evaluate_alert_decision(
     session: AsyncSession,
     position: TrackedPosition,
 ) -> tuple[AlertDecision | None, date | None]:
-    run, item, report = await latest_signal_context(session, position)
-    if run is None:
-        return None, None
-    if item is None:
-        return None, run.as_of_date
-    if item.conclusion == "数据不足":
-        state = dict(position.exit_state_json or {})
-        state["evaluation_data_outcome"] = {
-            "state": "data_waiting",
-            "reason_code": "ranking_data_insufficient",
-        }
-        position.exit_state_json = state
-        return None, run.as_of_date
-    trigger_label = (
-        report.action_label
-        if report is not None
-        else conservative_action_for_item(item, is_held=True)
-    )
-    risk_flags = list(item.risk_flags_json or [])
-    exit_risks = sorted(set(risk_flags).intersection(EXIT_RISKS))
-    analysis = await position_analysis(session, position, item=item)
-    technical_signal = analysis.exit_signal if analysis.exit_signal.alert_type is not None else None
-
-    if item.conclusion == "不适合短线":
-        alert_type = ALERT_EXIT_WATCH
-        reasons = [f"短线研究标签变为“{item.conclusion}”，不再适合作为短线持有观察对象。"]
-    elif exit_risks:
-        alert_type = ALERT_RISK_WARNING
-        reasons = [f"触发明显风险标签：{'、'.join(exit_risks)}。"]
-    elif technical_signal is not None:
-        alert_type = cast(str, technical_signal.alert_type)
-        reasons = list(technical_signal.reasons)
-        trigger_label = technical_signal.label
-    elif trigger_label != ACTION_EXIT:
-        return None, run.as_of_date
-    else:
-        alert_type = ALERT_EXIT_WATCH
-        reasons = ["保守规则把这笔持仓标记为“退出观察”。"]
-    if report is not None and report.plain_summary:
-        reasons.append(report.plain_summary)
-    return (
-        AlertDecision(
-            alert_type=alert_type,
-            trigger_label=trigger_label,
-            reasons=reasons,
-            risk_flags=risk_flags,
-            advisor_summary=report.plain_summary if report is not None else None,
-            signal_item=item,
-            advisor_report=report,
-        ),
-        run.as_of_date,
-    )
+    prepared = await prepare_alert_evaluation(session, position)
+    return prepared.decision, prepared.signal_date
 
 
 async def prepare_alert_evaluation(
     session: AsyncSession,
     position: TrackedPosition,
+    *,
+    evaluation_mode: str = "daily",
 ) -> PreparedAlertEvaluation:
     run, item, report = await latest_signal_context(session, position)
-    if item is not None and item.conclusion == "数据不足":
+    analysis = await position_analysis(
+        session,
+        position,
+        item=item,
+        include_daily_close_rules=evaluation_mode != "intraday",
+    )
+    merge_exit_state(position, analysis)
+    technical_signal = analysis.exit_signal if analysis.exit_signal.alert_type is not None else None
+    if (
+        item is not None
+        and item.conclusion == "数据不足"
+        and (
+            technical_signal is None
+            or technical_signal.alert_type not in {ALERT_HARD_STOP, ALERT_MA5_CLOSE_BREAK_EXIT}
+        )
+    ):
         state = dict(position.exit_state_json or {})
         state["evaluation_data_outcome"] = {
             "state": "data_waiting",
@@ -2519,12 +2871,9 @@ async def prepare_alert_evaluation(
         return PreparedAlertEvaluation(
             decision=None,
             signal_date=run.as_of_date if run is not None else date.today(),
-            analysis=None,
+            analysis=analysis,
             data_reason_code="ranking_data_insufficient",
         )
-    analysis = await position_analysis(session, position, item=item)
-    merge_exit_state(position, analysis)
-    technical_signal = analysis.exit_signal if analysis.exit_signal.alert_type is not None else None
     if run is None and technical_signal is None:
         return PreparedAlertEvaluation(
             decision=None,
@@ -2543,22 +2892,36 @@ async def prepare_alert_evaluation(
         trigger_label = ""
     risk_flags = list(item.risk_flags_json or []) if item is not None else []
     exit_risks = sorted(set(risk_flags).intersection(EXIT_RISKS))
-    alert_source = (
-        analysis.intraday_snapshot.price_source if analysis.intraday_snapshot else "daily_close"
-    )
-    quote_time = analysis.intraday_snapshot.quote_time if analysis.intraday_snapshot else None
-    if analysis.intraday_snapshot and analysis.intraday_snapshot.trade_date is not None:
-        alert_date = analysis.intraday_snapshot.trade_date
-    elif analysis.chart:
-        alert_date = analysis.chart[-1].date
-    elif run is not None:
-        alert_date = run.as_of_date
+    if (
+        technical_signal is not None
+        and technical_signal.alert_type in {ALERT_HARD_STOP, ALERT_MA5_CLOSE_BREAK_EXIT}
+        and analysis.ma5_close_break is not None
+        and analysis.ma5_close_break.trade_date is not None
+        and analysis.ma5_close_break.should_alert
+    ):
+        alert_source = MA5_CLOSE_BREAK_ALERT_SOURCE
+        quote_time = None
+        alert_date = analysis.ma5_close_break.trade_date
     else:
-        alert_date = date.today()
+        alert_source = (
+            analysis.intraday_snapshot.price_source if analysis.intraday_snapshot else "daily_close"
+        )
+        quote_time = analysis.intraday_snapshot.quote_time if analysis.intraday_snapshot else None
+        if analysis.intraday_snapshot and analysis.intraday_snapshot.trade_date is not None:
+            alert_date = analysis.intraday_snapshot.trade_date
+        elif analysis.chart:
+            alert_date = analysis.chart[-1].date
+        elif run is not None:
+            alert_date = run.as_of_date
+        else:
+            alert_date = date.today()
     alert_level = "warning"
 
-    if technical_signal is not None and technical_signal.alert_type == ALERT_HARD_STOP:
-        alert_type = ALERT_HARD_STOP
+    if technical_signal is not None and technical_signal.alert_type in {
+        ALERT_HARD_STOP,
+        ALERT_MA5_CLOSE_BREAK_EXIT,
+    }:
+        alert_type = cast(str, technical_signal.alert_type)
         trigger_label = technical_signal.label
         reasons = list(technical_signal.reasons)
         alert_level = technical_signal.level
@@ -2574,7 +2937,7 @@ async def prepare_alert_evaluation(
         trigger_label = technical_signal.label
         reasons = [
             *technical_signal.reasons,
-            "该资产未进入最新短线榜单上下文，本提醒只基于你的持仓价格和动态线计算。",
+            "该资产未进入最新短线榜单上下文，本提醒只基于你的持仓风控规则计算。",
         ]
         alert_level = technical_signal.level
     elif item.conclusion == "不适合短线":
@@ -2641,7 +3004,9 @@ async def create_alert_if_needed(
     owner_risk_context: EtfOwnerRiskContext | None = None,
     risk_counters: dict[str, int] | None = None,
 ) -> tuple[TrackedPositionAlert | None, str]:
-    prepared = prepared_evaluation or await prepare_alert_evaluation(session, position)
+    prepared = prepared_evaluation or await prepare_alert_evaluation(
+        session, position, evaluation_mode=evaluation_mode
+    )
     decision, signal_date = prepared.decision, prepared.signal_date
     if decision is None or signal_date is None:
         if session.is_modified(position, include_collections=False):
@@ -2833,7 +3198,13 @@ async def create_alert_if_needed(
         advisor_summary=decision.advisor_summary,
         alert_level=decision.alert_level,
         quote_time=decision.quote_time,
-        alert_source=intraday_snapshot.price_source if intraday_snapshot else decision.alert_source,
+        alert_source=(
+            decision.alert_source
+            if decision.alert_source == MA5_CLOSE_BREAK_ALERT_SOURCE
+            else intraday_snapshot.price_source
+            if intraday_snapshot
+            else decision.alert_source
+        ),
         suppression_status="sent_or_pending",
         email_status="pending",
     )
