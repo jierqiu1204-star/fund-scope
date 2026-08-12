@@ -42,6 +42,10 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_collector import 
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_etf_inputs import (
     read_etf_v2_asset_inputs,
 )
+from app.services.strategy_lab.dual_universe_leader_tactics_v2_fine_themes import (
+    load_registered_fine_theme_facts,
+    persist_fine_theme_membership_batch,
+)
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_ingestion import (
     AshareThemeMembershipFact,
     AshareUniverseSnapshotFact,
@@ -50,6 +54,10 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_ingestion import 
 )
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_lifecycle_storage import (
     load_v2_checkpoint,
+)
+from app.services.strategy_lab.dual_universe_leader_tactics_v2_staging import (
+    advance_ashare_materialization,
+    staging_tables_available,
 )
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_storage import (
     get_v2_materialized_manifest,
@@ -705,6 +713,7 @@ async def _capture_ashare(
 
     started = time.monotonic()
     provider_received_at = local_now
+    fine_theme_capture: dict[str, Any] = {"status": "not_run"}
     async with TickflowAshareV2Provider() as provider:
         baseline_members = await provider.fetch_universe(received_at=provider_received_at)
         baseline_members = provider.restrict_industries_to_signal_date(signal_date)
@@ -746,6 +755,41 @@ async def _capture_ashare(
                 "execution_provenance": "none",
             }
         database_received_at = _utc_naive(_local_now())
+        remaining = timeout_seconds - (time.monotonic() - started) - 2.0
+        if (
+            signal_date == local_now.date()
+            and remaining > 18.0
+            and await staging_tables_available(session)
+        ):
+            existing_fine = await session.scalar(
+                text(
+                    "SELECT COUNT(*) FROM ashare_fine_theme_membership_facts "
+                    "WHERE effective_from = :signal_date"
+                ),
+                {"signal_date": signal_date},
+            )
+            if int(existing_fine or 0) == 0:
+                try:
+                    fine_facts = await load_registered_fine_theme_facts(
+                        received_at=database_received_at
+                    )
+                    inserted = await persist_fine_theme_membership_batch(session, fine_facts)
+                    await session.commit()
+                    fine_theme_capture = {
+                        "status": "captured",
+                        "fact_count": inserted,
+                        "source": "akshare.stock_board_concept_cons_em.current",
+                    }
+                except Exception as exc:
+                    fine_theme_capture = {
+                        "status": "degraded",
+                        "error_summary": f"{type(exc).__name__}: {exc}"[:300],
+                    }
+            else:
+                fine_theme_capture = {
+                    "status": "already_captured",
+                    "fact_count": int(existing_fine or 0),
+                }
         manifest_hash = _capture_manifest_hash(
             signal_date=signal_date,
             members=members,
@@ -880,6 +924,7 @@ async def _capture_ashare(
             "transport": provider.transport_diagnostics,
         },
         "industry_bootstrap": industry_bootstrap,
+        "fine_theme_capture": fine_theme_capture,
         "price_basis": PRICE_BASIS,
         "raw_decision_violations": 0,
         "research_only": True,
@@ -1148,6 +1193,38 @@ async def _materialize_ashare(
 
     if decision_date < signal_date:
         raise V2ContractError("decision date precedes feature trade date")
+    existing_manifest = (
+        await get_v2_materialized_manifest(
+            session,
+            universe="ashare",
+            as_of=as_of,
+        )
+        if hasattr(session, "execute")
+        else None
+    )
+    if (
+        existing_manifest is not None
+        and str(existing_manifest["code_version"]) == settings.etf_leader_tactics_v2_code_version
+        and str(existing_manifest["formula_registry_hash"]) == V2_FORMULA_REGISTRY_HASH
+    ):
+        existing_signal_date = await session.scalar(
+            text(
+                "SELECT MAX(signal_date) "
+                "FROM leader_tactics_v2_candidate_observations "
+                "WHERE manifest_hash = :manifest_hash AND universe = 'ashare'"
+            ),
+            {"manifest_hash": str(existing_manifest["manifest_hash"])},
+        )
+        if isinstance(existing_signal_date, str):
+            existing_signal_date = date.fromisoformat(existing_signal_date[:10])
+        if existing_signal_date == signal_date:
+            return {
+                "status": "skipped",
+                "reason": "leader_tactics_v2_ashare_already_materialized",
+                "signal_date": signal_date.isoformat(),
+                "manifest_hash": str(existing_manifest["manifest_hash"]),
+                "research_only": True,
+            }
     decision_mode = POST_CLOSE_WATCHLIST_MODE if decision_date > signal_date else SESSION_PIT_MODE
     next_eligible_date = (
         next_trading_day(decision_date) if decision_mode == POST_CLOSE_WATCHLIST_MODE else None
@@ -1171,14 +1248,15 @@ async def _materialize_ashare(
         }
 
     headroom = available_memory_bytes()
-    if headroom is not None and headroom < V2_MIN_MATERIALIZATION_HEADROOM_BYTES:
+    stage_minimum = 192 * 1024 * 1024
+    if headroom is not None and headroom < stage_minimum:
         return {
             "status": "waiting",
             "job_status": "partial",
             "signal_date": signal_date.isoformat(),
             "unavailable_reason": "insufficient_materialization_memory_headroom",
             "available_memory_bytes": headroom,
-            "required_memory_bytes": V2_MIN_MATERIALIZATION_HEADROOM_BYTES,
+            "required_memory_bytes": stage_minimum,
             "readiness": readiness.to_dict(),
             "research_only": True,
         }
@@ -1200,17 +1278,6 @@ async def _materialize_ashare(
             "research_only": True,
         }
 
-    inputs = await read_ashare_asset_inputs(
-        session,
-        assets=assets,
-        signal_date=signal_date,
-        source_cutoff=as_of,
-        history_limit=REPAIR_HISTORY,
-        page_size=V2_ASHARE_INPUT_PAGE_SIZE,
-        decision_mode=decision_mode,
-        membership_evaluation_date=decision_date,
-        next_eligible_date=next_eligible_date,
-    )
     provider_health = await _latest_capture_provider_health(
         session,
         signal_date=signal_date,
@@ -1221,11 +1288,58 @@ async def _materialize_ashare(
             (provider, "observed" if count > 0 else "unavailable")
             for provider, count in readiness.provider_health
         )
-    result = screen_dual_universe(
-        inputs,
-        code_version=settings.etf_leader_tactics_v2_code_version,
-        provider_health=provider_health,
-    )
+    if await staging_tables_available(session):
+        result, stage_progress = await advance_ashare_materialization(
+            session,
+            assets=assets,
+            signal_date=signal_date,
+            source_cutoff=as_of,
+            decision_date=decision_date,
+            decision_mode=decision_mode,
+            next_eligible_date=next_eligible_date,
+            code_version=settings.etf_leader_tactics_v2_code_version,
+            provider_health=provider_health,
+            budget_seconds=48.0,
+            memory_reader=available_memory_bytes,
+        )
+        if result is None:
+            return {
+                **stage_progress,
+                "job_status": "partial",
+                "signal_date": signal_date.isoformat(),
+                "readiness": readiness.to_dict(),
+                "materialization_gate": decision.to_dict(),
+                "available_memory_bytes": headroom,
+            }
+    else:
+        # Migration compatibility only. Production uses the staged path.
+        if headroom is not None and headroom < V2_MIN_MATERIALIZATION_HEADROOM_BYTES:
+            return {
+                "status": "waiting",
+                "job_status": "partial",
+                "signal_date": signal_date.isoformat(),
+                "unavailable_reason": "insufficient_materialization_memory_headroom",
+                "available_memory_bytes": headroom,
+                "required_memory_bytes": V2_MIN_MATERIALIZATION_HEADROOM_BYTES,
+                "readiness": readiness.to_dict(),
+                "research_only": True,
+            }
+        inputs = await read_ashare_asset_inputs(
+            session,
+            assets=assets,
+            signal_date=signal_date,
+            source_cutoff=as_of,
+            history_limit=REPAIR_HISTORY,
+            page_size=V2_ASHARE_INPUT_PAGE_SIZE,
+            decision_mode=decision_mode,
+            membership_evaluation_date=decision_date,
+            next_eligible_date=next_eligible_date,
+        )
+        result = screen_dual_universe(
+            inputs,
+            code_version=settings.etf_leader_tactics_v2_code_version,
+            provider_health=provider_health,
+        )
     manifest_hash = await materialize_v2_result(
         session,
         result,

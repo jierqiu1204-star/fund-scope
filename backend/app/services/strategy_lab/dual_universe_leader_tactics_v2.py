@@ -22,12 +22,11 @@ from app.services.etf_research_evidence import stable_contract_hash
 V2_SCHEMA_VERSION = "dual_universe_leader_tactics_v2"
 V2_EXPERIMENT_FAMILY = "leader_tactics_shadow_v2"
 V2_SOURCE_REGISTRY_VERSION = "leader_tactics_source_registry_v2"
-V2_FORMULA_REGISTRY_VERSION = "leader_tactics_formula_registry_v2"
+V2_FORMULA_REGISTRY_VERSION = "leader_tactics_formula_registry_v4"
 V2_LIFECYCLE_VERSION = "leader_tactics_lifecycle_v2"
-V2_INPUT_HASH_SCHEMA_VERSION = "leader_tactics_v2_input_hash_v3"
-ASHARE_MEMBERSHIP_FACT_HASH_CONTRACT = (
-    "dual_universe_leader_tactics_v2_ashare_ingestion_v1"
-)
+V2_INPUT_HASH_SCHEMA_VERSION = "leader_tactics_v2_input_hash_v4"
+ASHARE_MEMBERSHIP_FACT_HASH_CONTRACT = "dual_universe_leader_tactics_v2_ashare_ingestion_v1"
+ASHARE_FINE_THEME_FACT_HASH_CONTRACT = "dual_universe_leader_tactics_v2_fine_theme_ingestion_v1"
 
 UNIVERSE_ETF = "etf"
 UNIVERSE_ASHARE = "ashare"
@@ -39,9 +38,15 @@ FORMER_LEADER_REPAIR_V2 = "former_leader_repair_proxy_v2"
 V2_CANDIDATE_IDS = (BREAKOUT_V2, BASE_LAUNCH_V2, FORMER_LEADER_REPAIR_V2)
 
 STATE_PREPARING = "preparing"
+STATE_TURNING_WATCH = "turning_watch"
 STATE_CONFIRMED = "confirmed"
 STATE_INVALIDATED = "invalidated"
-LIFECYCLE_STATES = (STATE_PREPARING, STATE_CONFIRMED, STATE_INVALIDATED)
+LIFECYCLE_STATES = (
+    STATE_PREPARING,
+    STATE_TURNING_WATCH,
+    STATE_CONFIRMED,
+    STATE_INVALIDATED,
+)
 
 SESSION_PIT_MODE = "session_pit"
 POST_CLOSE_WATCHLIST_MODE = "post_close_watchlist"
@@ -53,6 +58,9 @@ MINIMUM_PEER_COUNT = 5
 MINIMUM_BATCH_QUALIFIERS = 3
 BATCH_BREADTH_MINIMUM = 0.20
 VOLUME_LOOKBACK = 120
+BASE_VOLUME_LOOKBACK = 20
+BASE_RELATIVE_VOLUME_MIN = 1.20
+BASE_AMOUNT_PERCENTILE_MIN = 0.70
 BREAKOUT_LOOKBACK = 20
 REPAIR_LOOKBACK = 120
 REPAIR_HISTORY = 180
@@ -113,6 +121,18 @@ def _mean_finite(values: Sequence[object]) -> float | None:
     # stability without allocating Fraction intermediates for every MA/ATR.
     result = math.fsum(parsed) / len(parsed)
     return result if math.isfinite(result) else None
+
+
+def _latest_history_percentile(latest: object, history: Sequence[object]) -> float | None:
+    """Return the PIT empirical percentile of ``latest`` against prior values."""
+
+    latest_value = _finite(latest)
+    prior = [value for raw in history if (value := _finite(raw)) is not None]
+    if latest_value is None or not prior:
+        return None
+    below = sum(value < latest_value for value in prior)
+    equal = sum(value == latest_value for value in prior)
+    return (below + 0.5 * equal) / len(prior)
 
 
 @dataclass(frozen=True)
@@ -288,11 +308,15 @@ V2_FORMULAS = (
         BASE_LAUNCH_V2,
         STANDARD_HISTORY,
         "common_gates and cross(ma5,ma10,T-2:T) and close>ma20 and "
-        "ma20_T>=ma20_T-5 and atr5/atr20<=0.90 and abs(adjusted_close-adjusted_MA20)/adjusted_ATR20<=1.50",
+        "ma20_T>=ma20_T-5 and (volume_T>=1.20*mean(volume[T-20:T-1]) or "
+        "percentile(amount_T,amount[T-20:T-1])>=0.70) and atr5/atr20<=0.90 and "
+        "abs(adjusted_close-adjusted_MA20)/adjusted_ATR20<=1.50",
         (
             ("cross_window", 3),
             ("atr5_atr20_max", 0.90),
             ("overextension_atr_max", 1.50),
+            ("relative_volume_20_min", BASE_RELATIVE_VOLUME_MIN),
+            ("amount_vs_prior_20_percentile_min", BASE_AMOUNT_PERCENTILE_MIN),
             ("hot_score_min", 2 / 3),
             ("core_score_min", 0.80),
         ),
@@ -317,6 +341,14 @@ V2_FORMULA_REGISTRY_HASH = stable_contract_hash(
     {
         "version": V2_FORMULA_REGISTRY_VERSION,
         "formula_hashes": tuple(item.formula_hash for item in V2_FORMULAS),
+    }
+)
+V2_LEGACY_FORMULA_REGISTRY_PAIRS = frozenset(
+    {
+        (
+            "f85819290cc7ec5105c8622c23567d9f8d76559f246d685070414a4187bbb89e",
+            "leader_tactics_v2_input_hash_v3",
+        )
     }
 )
 
@@ -359,6 +391,10 @@ class V2PITMembership:
     source: str | None = None
     confidence: str | None = None
     supersedes_fact_hash: str | None = None
+    hierarchy_level: str = "broad_industry"
+    normalized_theme_key: str | None = None
+    resolution_mode: str = "broad_industry_fallback"
+    fallback_reason: str | None = None
 
     def canonical_payload(self) -> dict[str, Any]:
         # Avoid dataclasses.asdict's recursive deepcopy in the cross-section
@@ -375,9 +411,30 @@ class V2PITMembership:
             "tracked_index": self.tracked_index,
             "clone_group": self.clone_group,
             "issuer": self.issuer,
+            "hierarchy_level": self.hierarchy_level,
+            "normalized_theme_key": self.normalized_theme_key,
+            "resolution_mode": self.resolution_mode,
+            "fallback_reason": self.fallback_reason,
         }
 
     def fact_identity_payload(self, *, asset_code: str) -> dict[str, Any]:
+        if self.fact_hash_contract == ASHARE_FINE_THEME_FACT_HASH_CONTRACT:
+            return {
+                "schema_version": ASHARE_FINE_THEME_FACT_HASH_CONTRACT,
+                "fact_type": "ashare_fine_theme_membership",
+                "asset_code": self.source_asset_code or asset_code,
+                "group_id": self.group_id,
+                "theme": self.theme,
+                "normalized_theme_key": self.normalized_theme_key,
+                "hierarchy_level": self.hierarchy_level,
+                "effective_from": self.effective_from,
+                "effective_to": self.effective_to,
+                "received_at": self.observed_at,
+                "taxonomy_version": self.taxonomy_version,
+                "source": self.source,
+                "confidence": self.confidence,
+                "mapping_kind": self.mapping_kind,
+            }
         if self.fact_hash_contract != ASHARE_MEMBERSHIP_FACT_HASH_CONTRACT:
             return self.canonical_payload()
         return {
@@ -482,6 +539,21 @@ class V2ScreenResult:
         return tuple(item for item in self.observations if item.qualifies)
 
 
+@dataclass(frozen=True, slots=True)
+class V2StagedAssetFeature:
+    """Small durable Stage-A projection; it deliberately contains no bar objects."""
+
+    asset_code: str
+    asset_name: str
+    group_key: str | None
+    clone_group: str | None
+    standard_available: bool
+    return_1: float | None
+    return_5: float | None
+    mean_amount_20: float | None
+    input_digest: str
+
+
 @dataclass(frozen=True)
 class V2LifecycleTransition:
     universe: str
@@ -522,7 +594,7 @@ class V2ResearchManifest:
         ("slippage_bps_per_side", 5.0),
     )
     clone_policy: str = "one_most_liquid_representative_per_pit_clone_group"
-    state_policy: str = "preparing_confirmed_invalidated_v2"
+    state_policy: str = "preparing_turning_watch_confirmed_invalidated_v3"
     pagination_cursor: str | None = None
     exclusions: tuple[tuple[str, int], ...] = ()
     provider_health: tuple[tuple[str, str], ...] = ()
@@ -541,14 +613,16 @@ class V2ResearchManifest:
         _require_sha256(self.input_hash, "input_hash")
         if self.source_registry_hash != V2_SOURCE_REGISTRY.registry_hash:
             raise V2ContractError("source registry hash is incompatible")
-        if self.formula_registry_hash != V2_FORMULA_REGISTRY_HASH:
+        registry_pair = (self.formula_registry_hash, self.input_hash_schema_version)
+        if (
+            registry_pair != (V2_FORMULA_REGISTRY_HASH, V2_INPUT_HASH_SCHEMA_VERSION)
+            and registry_pair not in V2_LEGACY_FORMULA_REGISTRY_PAIRS
+        ):
             raise V2ContractError("formula registry hash is incompatible")
         if tuple(self.formula_ids) != V2_CANDIDATE_IDS:
             raise V2ContractError("manifest candidate set is not frozen")
         if self.adjustment_version != PRICE_BASIS:
             raise V2ContractError("manifest adjustment basis is incompatible")
-        if self.input_hash_schema_version != V2_INPUT_HASH_SCHEMA_VERSION:
-            raise V2ContractError("manifest input hash schema is incompatible")
         if not self.code_version.strip() or not self.holdout_identity.strip():
             raise V2ContractError("manifest code and holdout identity are required")
         if self.research_only is not True:
@@ -1008,9 +1082,9 @@ def _incremental_input_hash(items: Sequence[V2AssetInput]) -> str:
             metadata,
             ensure_ascii=False,
             separators=(",", ":"),
-            default=lambda value: value.isoformat()
-            if isinstance(value, (date, datetime))
-            else str(value),
+            default=lambda value: (
+                value.isoformat() if isinstance(value, (date, datetime)) else str(value)
+            ),
         ).encode("utf-8")
         hasher.update(len(encoded_metadata).to_bytes(8, "big"))
         hasher.update(encoded_metadata)
@@ -1064,13 +1138,85 @@ def _incremental_input_hash(items: Sequence[V2AssetInput]) -> str:
             bar_payload,
             ensure_ascii=False,
             separators=(",", ":"),
-            default=lambda value: value.isoformat()
-            if isinstance(value, (date, datetime))
-            else str(value),
+            default=lambda value: (
+                value.isoformat() if isinstance(value, (date, datetime)) else str(value)
+            ),
         ).encode("utf-8")
         hasher.update(len(encoded_bars).to_bytes(8, "big"))
         hasher.update(encoded_bars)
     return hasher.hexdigest()
+
+
+def build_v2_staged_asset_feature(item: V2AssetInput) -> V2StagedAssetFeature:
+    """Project one fully validated input into a bounded Stage-A row."""
+
+    return V2StagedAssetFeature(
+        asset_code=item.asset_code,
+        asset_name=item.asset_name,
+        group_key=_group_key(item),
+        clone_group=item.membership.clone_group if item.membership else None,
+        standard_available=not _base_input_reasons(item, STANDARD_HISTORY),
+        return_1=_return(item, 1),
+        return_5=_return(item, 5),
+        mean_amount_20=_mean_finite([bar.amount for bar in item.bars[-20:]]),
+        input_digest=_incremental_input_hash((item,)),
+    )
+
+
+def staged_theme_percentile_overrides(
+    features: Sequence[V2StagedAssetFeature],
+) -> dict[str, tuple[float, float, float]]:
+    """Build global theme percentiles from compact rows only."""
+
+    representatives: list[V2StagedAssetFeature] = []
+    clones: dict[tuple[str, str], list[V2StagedAssetFeature]] = defaultdict(list)
+    for feature in features:
+        if not feature.standard_available or feature.group_key is None:
+            continue
+        if feature.clone_group:
+            clones[(feature.group_key, feature.clone_group)].append(feature)
+        else:
+            representatives.append(feature)
+    for rows in clones.values():
+        representatives.append(
+            max(
+                rows,
+                key=lambda row: (
+                    row.mean_amount_20 if row.mean_amount_20 is not None else -math.inf,
+                    row.asset_code,
+                ),
+            )
+        )
+    groups: dict[str, list[V2StagedAssetFeature]] = defaultdict(list)
+    for feature in representatives:
+        groups[feature.group_key].append(feature)  # type: ignore[index]
+    one_day: dict[str, float] = {}
+    five_day: dict[str, float] = {}
+    breadth: dict[str, float] = {}
+    for group, rows in groups.items():
+        one = [row.return_1 for row in rows if row.return_1 is not None]
+        five = [row.return_5 for row in rows if row.return_5 is not None]
+        one_day[group] = _mean_finite(one) or 0.0
+        five_day[group] = _mean_finite(five) or 0.0
+        breadth[group] = sum(value > 0 for value in one) / len(one) if one else 0.0
+    one_pct = _percentile(one_day)
+    five_pct = _percentile(five_day)
+    breadth_pct = _percentile(breadth)
+    return {
+        group: (one_pct[group], five_pct[group], breadth_pct[group]) for group in sorted(groups)
+    }
+
+
+def staged_v2_input_hash(features: Sequence[V2StagedAssetFeature]) -> str:
+    return stable_contract_hash(
+        {
+            "schema_version": V2_INPUT_HASH_SCHEMA_VERSION,
+            "asset_digests": tuple(
+                (row.asset_code, row.input_digest)
+                for row in sorted(features, key=lambda item: item.asset_code)
+            ),
+        }
+    )
 
 
 def _base_input_reasons(item: V2AssetInput, required_history: int) -> list[str]:
@@ -1087,12 +1233,27 @@ def _observation(
     gate_facts: Mapping[str, str | int | float | bool | None],
     exclusion_reasons: Sequence[str],
     clone_excluded: bool,
+    state: str = STATE_PREPARING,
 ) -> V2CandidateObservation:
     reasons = tuple(sorted(set(exclusion_reasons)))
     facts = dict(gate_facts)
     membership_date = item.membership_evaluation_date or item.signal_date
+    membership = item.membership
     facts.update(
         {
+            "theme_hierarchy_level": (
+                membership.hierarchy_level if membership is not None else None
+            ),
+            "theme_normalized_key": (
+                membership.normalized_theme_key if membership is not None else None
+            ),
+            "theme_resolution_mode": (
+                membership.resolution_mode if membership is not None else None
+            ),
+            "theme_fallback_reason": (
+                membership.fallback_reason if membership is not None else None
+            ),
+            "theme_fact_hash": membership.fact_hash if membership is not None else None,
             "decision_mode": item.decision_mode,
             "feature_trade_date": item.signal_date.isoformat(),
             "membership_evaluation_date": membership_date.isoformat(),
@@ -1110,7 +1271,7 @@ def _observation(
         asset_name=item.asset_name,
         signal_date=item.signal_date,
         formula_id=formula_id,
-        state=STATE_PREPARING,
+        state=state,
         availability=availability,
         qualifies=qualifies,
         score=score,
@@ -1146,6 +1307,7 @@ def screen_dual_universe(
     *,
     code_version: str = "dual-universe-leader-tactics-v2",
     provider_health: tuple[tuple[str, str], ...] = (),
+    theme_percentile_overrides: Mapping[str, tuple[float, float, float]] | None = None,
 ) -> V2ScreenResult:
     """Screen one universe/session using only factual PIT adjusted inputs."""
 
@@ -1170,12 +1332,8 @@ def screen_dual_universe(
     if len({item.asset_code for item in items}) != len(items):
         raise V2ContractError("screen input asset codes must be unique")
     ordered = tuple(sorted(items, key=lambda item: item.asset_code))
-    membership_reasons = {
-        item.asset_code: tuple(_membership_reasons(item)) for item in ordered
-    }
-    intrinsic_bar_reasons = {
-        item.asset_code: tuple(_bar_reasons(item, 0)) for item in ordered
-    }
+    membership_reasons = {item.asset_code: tuple(_membership_reasons(item)) for item in ordered}
+    intrinsic_bar_reasons = {item.asset_code: tuple(_bar_reasons(item, 0)) for item in ordered}
 
     def cached_base_reasons(item: V2AssetInput, required_history: int) -> tuple[str, ...]:
         reasons = set(membership_reasons[item.asset_code])
@@ -1185,12 +1343,10 @@ def screen_dual_universe(
         return tuple(sorted(reasons))
 
     standard_reasons = {
-        item.asset_code: cached_base_reasons(item, STANDARD_HISTORY)
-        for item in ordered
+        item.asset_code: cached_base_reasons(item, STANDARD_HISTORY) for item in ordered
     }
     repair_reasons = {
-        item.asset_code: cached_base_reasons(item, REPAIR_HISTORY)
-        for item in ordered
+        item.asset_code: cached_base_reasons(item, REPAIR_HISTORY) for item in ordered
     }
     representatives, clone_excluded = _clone_representatives(
         ordered,
@@ -1202,6 +1358,10 @@ def screen_dual_universe(
         if item.asset_code in representatives and not standard_reasons[item.asset_code]
     )
     hot_1, hot_5, hot_breadth = _theme_features(eligible_standard, representatives)
+    if theme_percentile_overrides is not None:
+        hot_1 = {key: values[0] for key, values in theme_percentile_overrides.items()}
+        hot_5 = {key: values[1] for key, values in theme_percentile_overrides.items()}
+        hot_breadth = {key: values[2] for key, values in theme_percentile_overrides.items()}
     return_20_pct, return_5_pct, turnover_pct, peer_counts = _peer_features(
         eligible_standard, representatives
     )
@@ -1239,6 +1399,9 @@ def screen_dual_universe(
             "adjusted_ma5": _ma(item, 5),
             "adjusted_ma10": _ma(item, 10),
             "adjusted_ma20": _ma(item, 20),
+            "ma20_five_sessions_ago": (
+                _ma(item, 20, len(item.bars) - 5) if len(item.bars) >= 25 else None
+            ),
         }
         for formula_id in V2_CANDIDATE_IDS:
             candidate_reasons = list(reasons)
@@ -1306,14 +1469,16 @@ def screen_dual_universe(
                     candidate_reasons.append("ma_alignment_failed")
                 if peer_counts.get(item.asset_code, 0) < MINIMUM_PEER_COUNT:
                     candidate_reasons.append("insufficient_peer_count")
-                if len(item.bars) >= VOLUME_LOOKBACK:
-                    volume_max = max(bar.volume for bar in item.bars[-VOLUME_LOOKBACK:])
-                    facts["latest_120_volume_max"] = volume_max
-                    if item.bars[-1].volume < volume_max:
-                        candidate_reasons.append("volume_peak_gate_failed")
-                else:
-                    candidate_reasons.append("insufficient_volume_history")
                 if formula_id == BREAKOUT_V2:
+                    if len(item.bars) >= VOLUME_LOOKBACK:
+                        volume_max = max(bar.volume for bar in item.bars[-VOLUME_LOOKBACK:])
+                        facts["latest_120_volume_max"] = volume_max
+                        facts["breakout_volume_confirmed"] = item.bars[-1].volume >= volume_max
+                        if item.bars[-1].volume < volume_max:
+                            candidate_reasons.append("volume_peak_gate_failed")
+                    else:
+                        facts["breakout_volume_confirmed"] = False
+                        candidate_reasons.append("insufficient_volume_history")
                     prior_high = (
                         max(bar.adjusted_high for bar in item.bars[-21:-1])
                         if len(item.bars) >= 21
@@ -1331,6 +1496,35 @@ def screen_dual_universe(
                     if prior_high is None or item.bars[-1].adjusted_close <= prior_high:
                         candidate_reasons.append("price_breakout_gate_failed")
                 else:
+                    prior_volume_20 = _mean_finite(
+                        [bar.volume for bar in item.bars[-(BASE_VOLUME_LOOKBACK + 1) : -1]]
+                    )
+                    relative_volume_20 = (
+                        item.bars[-1].volume / prior_volume_20
+                        if item.bars and prior_volume_20 and prior_volume_20 > 0
+                        else None
+                    )
+                    amount_percentile = _latest_history_percentile(
+                        item.bars[-1].amount if item.bars else None,
+                        [bar.amount for bar in item.bars[-(BASE_VOLUME_LOOKBACK + 1) : -1]],
+                    )
+                    volume_confirmed = (
+                        relative_volume_20 is not None
+                        and relative_volume_20 >= BASE_RELATIVE_VOLUME_MIN
+                    ) or (
+                        amount_percentile is not None
+                        and amount_percentile >= BASE_AMOUNT_PERCENTILE_MIN
+                    )
+                    facts.update(
+                        {
+                            "prior_20_mean_volume": prior_volume_20,
+                            "relative_volume_20": relative_volume_20,
+                            "amount_vs_prior_20_percentile": amount_percentile,
+                            "base_volume_confirmed": volume_confirmed,
+                        }
+                    )
+                    if not volume_confirmed:
+                        candidate_reasons.append("base_volume_confirmation_failed")
                     atr5, atr20 = _atr(item, 5), _atr(item, 20)
                     close = item.bars[-1].adjusted_close if item.bars else None
                     overextension = (
@@ -1385,8 +1579,7 @@ def screen_dual_universe(
         eligible_rows = [
             (item, details)
             for item, details in rows
-            if item.asset_code in representatives
-            and not standard_reasons[item.asset_code]
+            if item.asset_code in representatives and not standard_reasons[item.asset_code]
         ]
         component_percentiles[formula_id] = _group_component_percentiles(
             eligible_rows,
@@ -1460,6 +1653,84 @@ def screen_dual_universe(
                 reasons.append("clone_not_representative")
             qualifies = not reasons
             score = _mean_finite(score_components) if qualifies else None
+            observation_state = STATE_PREPARING
+            if (
+                formula_id in {BASE_LAUNCH_V2, BREAKOUT_V2}
+                and not qualifies
+                and not standard_reasons[item.asset_code]
+                and group is not None
+                and not clone
+            ):
+                ma5 = _finite(facts.get("adjusted_ma5"))
+                ma10 = _finite(facts.get("adjusted_ma10"))
+                ma20 = _finite(facts.get("adjusted_ma20"))
+                ma20_5 = _finite(facts.get("ma20_five_sessions_ago"))
+                close = item.bars[-1].adjusted_close if item.bars else None
+                watch_conditions = {
+                    "hot_theme": hot_component >= 2 / 3,
+                    "core_leader": core_component >= 0.80,
+                    "ma_alignment": (None not in (ma5, ma10, ma20) and ma5 > ma10 > ma20),
+                    "volume_confirmation": (
+                        facts.get("base_volume_confirmed") is True
+                        if formula_id == BASE_LAUNCH_V2
+                        else facts.get("breakout_volume_confirmed") is True
+                    ),
+                }
+                watch_prerequisites = (
+                    close is not None
+                    and ma20 is not None
+                    and close > ma20
+                    and ma20_5 is not None
+                    and ma20 >= ma20_5
+                )
+                passed_watch = sum(watch_conditions.values())
+                missing_watch = tuple(key for key, passed in watch_conditions.items() if not passed)
+                relative_volume = _finite(facts.get("relative_volume_20"))
+                amount_percentile = _finite(facts.get("amount_vs_prior_20_percentile"))
+                volume_distance = min(
+                    (
+                        max(0.0, BASE_RELATIVE_VOLUME_MIN - relative_volume)
+                        / BASE_RELATIVE_VOLUME_MIN
+                        if relative_volume is not None
+                        else 1.0
+                    ),
+                    (
+                        max(0.0, BASE_AMOUNT_PERCENTILE_MIN - amount_percentile)
+                        / BASE_AMOUNT_PERCENTILE_MIN
+                        if amount_percentile is not None
+                        else 1.0
+                    ),
+                )
+                if formula_id == BREAKOUT_V2:
+                    latest_volume = item.bars[-1].volume if item.bars else None
+                    volume_max = _finite(facts.get("latest_120_volume_max"))
+                    volume_distance = (
+                        max(0.0, volume_max - latest_volume) / max(volume_max, 1e-12)
+                        if latest_volume is not None and volume_max is not None
+                        else 1.0
+                    )
+                ma_distance = 1.0
+                if None not in (ma5, ma10, ma20):
+                    ma_distance = max(
+                        0.0,
+                        (ma10 - ma5) / max(abs(ma10), 1e-12),
+                        (ma20 - ma10) / max(abs(ma20), 1e-12),
+                    )
+                facts.update(
+                    {
+                        "turning_watch_hot_distance": max(0.0, 2 / 3 - hot_component),
+                        "turning_watch_core_distance": max(0.0, 0.80 - core_component),
+                        "turning_watch_ma_distance": ma_distance,
+                        "turning_watch_volume_distance": volume_distance,
+                        "turning_watch_passed_conditions": passed_watch,
+                        "turning_watch_missing_count": len(missing_watch),
+                        "turning_watch_missing_conditions": ",".join(missing_watch),
+                        "turning_watch_formal_blocker_count": len(reasons),
+                        "turning_watch_formal_blockers": ",".join(reasons),
+                    }
+                )
+                if watch_prerequisites and passed_watch >= 3:
+                    observation_state = STATE_TURNING_WATCH
             observations.append(
                 _observation(
                     item=item,
@@ -1478,6 +1749,7 @@ def screen_dual_universe(
                     gate_facts=facts,
                     exclusion_reasons=reasons,
                     clone_excluded=clone,
+                    state=observation_state,
                 )
             )
 
@@ -1550,13 +1822,14 @@ def derive_lifecycle(
     next_eligible_date: date | None = None
     if decision_mode == POST_CLOSE_WATCHLIST_MODE:
         try:
-            transition_start = date.fromisoformat(
-                str(gate_facts["membership_evaluation_date"])
-            )
+            transition_start = date.fromisoformat(str(gate_facts["membership_evaluation_date"]))
             next_eligible_date = date.fromisoformat(str(gate_facts["next_eligible_date"]))
         except (KeyError, TypeError, ValueError) as exc:
             raise V2ContractError("post-close lifecycle timing is incomplete") from exc
-        if transition_start < observation.signal_date or next_eligible_date <= observation.signal_date:
+        if (
+            transition_start < observation.signal_date
+            or next_eligible_date <= observation.signal_date
+        ):
             raise V2ContractError("post-close lifecycle timing is invalid")
 
     ordered = tuple(sorted(signal_bars, key=lambda bar: bar.trade_date))
@@ -1717,6 +1990,7 @@ def screen_result_payload(result: V2ScreenResult) -> dict[str, Any]:
 
 
 __all__ = [
+    "ASHARE_FINE_THEME_FACT_HASH_CONTRACT",
     "BASE_LAUNCH_V2",
     "BREAKOUT_V2",
     "FORMER_LEADER_REPAIR_V2",
@@ -1724,6 +1998,7 @@ __all__ = [
     "STATE_CONFIRMED",
     "STATE_INVALIDATED",
     "STATE_PREPARING",
+    "STATE_TURNING_WATCH",
     "SUPPORTED_UNIVERSES",
     "V2AdjustedBar",
     "V2AssetInput",
@@ -1736,13 +2011,17 @@ __all__ = [
     "V2PITMembership",
     "V2ResearchManifest",
     "V2ScreenResult",
+    "V2StagedAssetFeature",
     "V2SourceArticle",
     "V2SourceRegistry",
     "V2_SOURCE_REGISTRY",
     "V2_EXPERIMENT_FAMILY",
     "build_v2_manifest",
+    "build_v2_staged_asset_feature",
     "derive_lifecycle",
     "screen_dual_universe",
+    "staged_theme_percentile_overrides",
+    "staged_v2_input_hash",
     "screen_result_payload",
     "validate_runtime_contract",
 ]

@@ -16,7 +16,12 @@ import {
 
 type Universe = "etf" | "ashare";
 type Formula = "all" | "breakout" | "base_launch" | "former_leader_repair";
-type Lifecycle = "all" | "preparing" | "confirmed" | "invalidated";
+type Lifecycle =
+  | "all"
+  | "preparing"
+  | "turning_watch"
+  | "confirmed"
+  | "invalidated";
 
 const RESEARCH_ONLY_CONTRACT = {
   research_only: true,
@@ -34,8 +39,9 @@ const formulaLabels: Record<Formula, string> = {
 };
 
 const stateLabels: Record<Lifecycle, string> = {
-  all: "全部状态",
+  all: "正式候选",
   preparing: "准备中",
+  turning_watch: "转强观察",
   confirmed: "已确认",
   invalidated: "已失效"
 };
@@ -240,6 +246,14 @@ export function LeaderTacticsV2Panel() {
                 不计入历史 PIT 验证
               </p>
             ) : null}
+            {summary.materialization_progress ? (
+              <p className="mt-1">
+                分批物化：{summary.materialization_progress.status} · 特征
+                {summary.materialization_progress.completed_count}/
+                {summary.materialization_progress.expected_count} · 已完成主题组
+                {summary.materialization_progress.completed_group_count}
+              </p>
+            ) : null}
             {exclusionEntries.length ? (
               <p className="mt-1">
                 排除证据：
@@ -286,6 +300,27 @@ export function LeaderTacticsV2Panel() {
                     <p className="mt-1">
                       可用性：{candidate.availability} · 门槛：
                       {candidate.qualifies ? "通过" : "未通过"}
+                    </p>
+                    {candidate.state === "turning_watch" ? (
+                      <p className="mt-2 rounded bg-amber-50 px-2 py-1 text-amber-900">
+                        仅为非行动“转强观察”，距正式候选仍缺：
+                        {String(
+                          candidate.gate_facts.turning_watch_formal_blockers ??
+                            candidate.gate_facts
+                              .turning_watch_missing_conditions ??
+                            "未量化"
+                        )}
+                      </p>
+                    ) : null}
+                    <p className="mt-2">
+                      主题层级：
+                      {String(
+                        candidate.gate_facts.theme_hierarchy_level ?? "未知"
+                      )}{" "}
+                      · 解析：
+                      {String(
+                        candidate.gate_facts.theme_resolution_mode ?? "未知"
+                      )}
                     </p>
                     <pre className="mt-1 overflow-auto whitespace-pre-wrap">
                       {JSON.stringify(candidate.gate_facts, null, 2)}

@@ -12,10 +12,20 @@ from alembic.script import ScriptDirectory
 
 VERSIONS_DIR = Path(__file__).resolve().parents[1] / "alembic" / "versions"
 MIGRATION_PATH = VERSIONS_DIR / "20260804_000062_dual_universe_leader_tactics_v2.py"
+STAGING_MIGRATION_PATH = VERSIONS_DIR / "20260812_000067_leader_materialization_stages.py"
 
 
 def _migration():
     spec = spec_from_file_location(MIGRATION_PATH.stem, MIGRATION_PATH)
+    assert spec is not None
+    assert spec.loader is not None
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _staging_migration():
+    spec = spec_from_file_location(STAGING_MIGRATION_PATH.stem, STAGING_MIGRATION_PATH)
     assert spec is not None
     assert spec.loader is not None
     module = module_from_spec(spec)
@@ -28,7 +38,7 @@ def test_v2_migration_is_the_linear_head() -> None:
     config.set_main_option("script_location", str(VERSIONS_DIR.parent))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["20260810_000064"]
+    assert script.get_heads() == ["20260812_000067"]
     revision = script.get_revision("20260809_000063")
     assert revision is not None
     assert revision.down_revision == "20260804_000062"
@@ -67,3 +77,28 @@ def test_v2_migration_preserves_same_day_universe_revisions_and_downgrades() -> 
 
         migration.downgrade()
         assert table not in sa.inspect(connection).get_table_names()
+
+
+def test_staging_migration_has_bounded_stage_and_fine_theme_indexes() -> None:
+    engine = sa.create_engine("sqlite:///:memory:")
+    with engine.begin() as connection:
+        migration = _staging_migration()
+        migration.op = Operations(MigrationContext.configure(connection))
+        migration.upgrade()
+
+        inspector = sa.inspect(connection)
+        assert {
+            "ashare_fine_theme_membership_facts",
+            "leader_tactics_v2_materialization_runs",
+            "leader_tactics_v2_materialization_features",
+            "leader_tactics_v2_materialization_groups",
+        }.issubset(inspector.get_table_names())
+        assert {
+            "ix_ashare_fine_theme_pit_lookup",
+            "ix_ashare_fine_theme_snapshot_lookup",
+        }.issubset(
+            {item["name"] for item in inspector.get_indexes("ashare_fine_theme_membership_facts")}
+        )
+
+        migration.downgrade()
+        assert "ashare_fine_theme_membership_facts" not in sa.inspect(connection).get_table_names()

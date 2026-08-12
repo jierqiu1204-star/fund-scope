@@ -234,6 +234,17 @@ async def _seed_read_db(engine) -> dict[str, str]:
         await connection.execute(
             text(
                 """
+                UPDATE leader_tactics_v2_candidate_observations
+                SET state = 'turning_watch', score = NULL,
+                    gate_facts_json = '{"turning_watch_missing_conditions":"core_leader"}'
+                WHERE manifest_hash = :manifest_hash AND asset_code = '000002'
+                """
+            ),
+            {"manifest_hash": new_manifest.manifest_hash},
+        )
+        await connection.execute(
+            text(
+                """
                 INSERT INTO leader_tactics_v2_candidate_observations
                     (id, manifest_hash, universe, asset_code, asset_name, theme,
                      sector, tracked_index, formula_id, state, availability,
@@ -485,3 +496,26 @@ async def test_persist_observations_uses_executemany_and_is_idempotent(tmp_path)
 
     assert count == 2
     assert any(events)
+
+
+@pytest.mark.asyncio
+async def test_turning_watch_filter_returns_non_actionable_observations(tmp_path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'watch.db'}")
+    await _seed_read_db(engine)
+    async with engine.begin() as connection:
+        page = await read_v2_candidates(
+            connection,
+            universe="etf",
+            state="turning_watch",
+            limit=10,
+        )
+    await engine.dispose()
+
+    assert [row["asset_code"] for row in page["candidates"]] == ["000002"]
+    assert page["candidates"][0]["qualifies"] is False
+    assert page["candidates"][0]["score"] is None
+    assert page["candidates"][0]["gate_facts"]["turning_watch_missing_conditions"] == (
+        "core_leader"
+    )
+    assert page["notification_provenance"] == "none"
+    assert page["execution_provenance"] == "none"

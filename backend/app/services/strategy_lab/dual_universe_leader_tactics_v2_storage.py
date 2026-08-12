@@ -502,6 +502,53 @@ def _candidate_cte(filter_where: str) -> str:
     """
 
 
+async def _read_materialization_progress(
+    session: AsyncSession,
+    *,
+    universe: str,
+) -> dict[str, Any] | None:
+    bind = getattr(session, "bind", None)
+    if universe != "ashare" or bind is None or bind.dialect.name == "sqlite":
+        return None
+    row = (
+        (
+            await session.execute(
+                text(
+                    """
+                    SELECT runs.run_hash, runs.status, runs.expected_count,
+                           runs.signal_date, runs.source_cutoff, runs.updated_at,
+                           (SELECT COUNT(*)
+                              FROM leader_tactics_v2_materialization_features features
+                             WHERE features.run_hash = runs.run_hash) AS completed_count,
+                           (SELECT COUNT(*)
+                              FROM leader_tactics_v2_materialization_groups groups
+                             WHERE groups.run_hash = runs.run_hash) AS completed_group_count
+                    FROM leader_tactics_v2_materialization_runs runs
+                    WHERE runs.universe = :universe
+                    ORDER BY runs.signal_date DESC, runs.created_at DESC
+                    LIMIT 1
+                    """
+                ),
+                {"universe": universe},
+            )
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        return None
+    return {
+        "run_hash": str(row["run_hash"]),
+        "status": str(row["status"]),
+        "signal_date": str(row["signal_date"]),
+        "source_cutoff": str(row["source_cutoff"]),
+        "expected_count": int(row["expected_count"] or 0),
+        "completed_count": int(row["completed_count"] or 0),
+        "completed_group_count": int(row["completed_group_count"] or 0),
+        "updated_at": str(row["updated_at"]),
+    }
+
+
 async def read_v2_candidates(
     session: AsyncSession,
     *,
@@ -518,7 +565,7 @@ async def read_v2_candidates(
         raise ValueError("universe must be etf or ashare")
     if formula not in {"all", *_FORMULA_IDS}:
         raise ValueError("formula filter is invalid")
-    if state not in {"all", "preparing", "confirmed", "invalidated"}:
+    if state not in {"all", "turning_watch", "preparing", "confirmed", "invalidated"}:
         raise ValueError("state filter is invalid")
     if not 1 <= limit <= MAX_V2_PAGE_SIZE:
         raise ValueError(f"limit must be between 1 and {MAX_V2_PAGE_SIZE}")
@@ -527,6 +574,10 @@ async def read_v2_candidates(
         session,
         universe=universe,
         as_of=as_of,
+    )
+    materialization_progress = await _read_materialization_progress(
+        session,
+        universe=universe,
     )
     if manifest is None:
         return {
@@ -555,6 +606,7 @@ async def read_v2_candidates(
                 "unavailable_reason": "leader_tactics_v2_not_materialized",
                 "exclusion_counts": {},
                 "manifest_hash": None,
+                "materialization_progress": materialization_progress,
             },
             "ranking_source_kind": "research_replay",
             "notification_provenance": "none",
@@ -607,7 +659,8 @@ async def read_v2_candidates(
         "universe": universe,
         "transition_cutoff": requested_transition_cutoff,
         "available": "available",
-        "qualifies": True,
+        "selected_qualifies": state != "turning_watch",
+        "qualifies_true": True,
         "limit": limit + 1,
     }
     filter_clauses: list[str] = []
@@ -629,11 +682,11 @@ async def read_v2_candidates(
             }
         )
         cursor_clause = (
-            " AND (score < :cursor_score "
-            "OR (score = :cursor_score AND signal_date < :cursor_signal_date) "
-            "OR (score = :cursor_score AND signal_date = :cursor_signal_date "
+            " AND (COALESCE(score, -1.0) < :cursor_score "
+            "OR (COALESCE(score, -1.0) = :cursor_score AND signal_date < :cursor_signal_date) "
+            "OR (COALESCE(score, -1.0) = :cursor_score AND signal_date = :cursor_signal_date "
             "AND formula_id > :cursor_formula_id) "
-            "OR (score = :cursor_score AND signal_date = :cursor_signal_date "
+            "OR (COALESCE(score, -1.0) = :cursor_score AND signal_date = :cursor_signal_date "
             "AND formula_id = :cursor_formula_id AND asset_code > :cursor_asset_code))"
         )
     cte = _candidate_cte(filter_where)
@@ -646,13 +699,17 @@ async def read_v2_candidates(
                 {cte}
                 SELECT manifest_hash, universe, asset_code, asset_name, theme, sector,
                        tracked_index, formula_id, effective_state AS state,
-                       availability, qualifies, score, signal_date, transition_date,
+                       availability, qualifies, score,
+                       COALESCE(score, -1.0) AS sort_score,
+                       signal_date, transition_date,
                        source_cutoff, gate_facts_json,
                        exclusion_reasons_json, provenance_json, feature_hash
                 FROM filtered
-                WHERE availability = :available AND qualifies = :qualifies
+                WHERE availability = :available
+                  AND qualifies = :selected_qualifies
                 {cursor_clause}
-                ORDER BY score DESC, signal_date DESC, formula_id ASC, asset_code ASC
+                ORDER BY COALESCE(score, -1.0) DESC,
+                         signal_date DESC, formula_id ASC, asset_code ASC
                 LIMIT :limit
                 """
                 ),
@@ -667,6 +724,7 @@ async def read_v2_candidates(
     candidates = [
         {
             **dict(row),
+            "qualifies": bool(row["qualifies"]),
             "gate_facts": _decode_json(row["gate_facts_json"], {}),
             "exclusion_reasons": _decode_json(row["exclusion_reasons_json"], []),
             "provenance": _decode_json(row["provenance_json"], {}),
@@ -677,13 +735,15 @@ async def read_v2_candidates(
     if has_more and candidates:
         last = candidates[-1]
         next_cursor = _encode_cursor(
-            score=float(last["score"]),
+            score=float(last["sort_score"]),
             transition_cutoff=requested_transition_cutoff,
             signal_date=_as_date(last["signal_date"]),
             formula_id=str(last["formula_id"]),
             asset_code=str(last["asset_code"]),
             manifest_hash=manifest_hash,
         )
+    for candidate in candidates:
+        candidate.pop("sort_score", None)
 
     summary_params = {
         key: value
@@ -699,9 +759,10 @@ async def read_v2_candidates(
                 SELECT COUNT(*) AS count,
                        SUM(CASE WHEN availability = :available THEN 1 ELSE 0 END)
                            AS available,
-                       SUM(CASE WHEN qualifies = :qualifies THEN 1 ELSE 0 END)
+                       SUM(CASE WHEN qualifies = :qualifies_true THEN 1 ELSE 0 END)
                            AS qualifying,
-                       SUM(CASE WHEN availability = :available AND qualifies = :qualifies
+                       SUM(CASE WHEN availability = :available
+                                     AND qualifies = :selected_qualifies
                                 THEN 1 ELSE 0 END) AS returned
                 FROM filtered
                 """
@@ -770,6 +831,7 @@ async def read_v2_candidates(
             "unavailable_reason": None if count else "leader_tactics_v2_empty_materialization",
             "exclusion_counts": dict(sorted(exclusion_counts.items())),
             "manifest_hash": manifest_hash,
+            "materialization_progress": materialization_progress,
         },
         "ranking_source_kind": ranking_source_kind,
         "notification_provenance": "none",

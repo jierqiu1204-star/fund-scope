@@ -225,7 +225,8 @@ test("cancelled requests never accept a late response", async () => {
 
   const duringRequest = new AbortController();
   let resolveRequest:
-    ((value: { data: CandidatesResponse }) => void) | undefined;
+    | ((value: { data: CandidatesResponse }) => void)
+    | undefined;
   const pending = new Promise<{ data: CandidatesResponse }>((resolve) => {
     resolveRequest = resolve;
   });
@@ -264,5 +265,44 @@ test("post-close watchlists require explicit non-PIT timing provenance", () => {
         filters
       ),
     /post-close timing is incomplete/
+  );
+});
+
+test("turning watches remain non-actionable and universe isolated", () => {
+  const watchFilters: LeaderTacticsV2Filters = {
+    ...filters,
+    universe: "ashare",
+    state: "turning_watch"
+  };
+  const watch = {
+    ...candidate("ashare"),
+    state: "turning_watch" as const,
+    qualifies: false,
+    score: null,
+    gate_facts: {
+      turning_watch_missing_conditions: "core_leader",
+      turning_watch_core_distance: 0.12
+    }
+  };
+  const watchPage = page({
+    universe: "ashare",
+    state: "turning_watch",
+    candidates: [watch]
+  });
+  assert.equal(
+    assertLeaderTacticsV2PageContract(watchPage, watchFilters),
+    watchPage
+  );
+  assert.throws(
+    () =>
+      assertLeaderTacticsV2PageContract(
+        page({
+          universe: "ashare",
+          state: "turning_watch",
+          candidates: [{ ...watch, qualifies: true, score: 0.8 }]
+        }),
+        watchFilters
+      ),
+    /non-actionable/
   );
 });

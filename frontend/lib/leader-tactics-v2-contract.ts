@@ -1,7 +1,15 @@
 export type Universe = "etf" | "ashare";
 export type Formula =
-  "all" | "breakout" | "base_launch" | "former_leader_repair";
-export type Lifecycle = "all" | "preparing" | "confirmed" | "invalidated";
+  | "all"
+  | "breakout"
+  | "base_launch"
+  | "former_leader_repair";
+export type Lifecycle =
+  | "all"
+  | "preparing"
+  | "turning_watch"
+  | "confirmed"
+  | "invalidated";
 
 export type LeaderTacticsV2Filters = {
   universe: Universe;
@@ -57,6 +65,16 @@ export type CandidatesResponse = {
     unavailable_reason: string | null;
     exclusion_counts: Record<string, number>;
     manifest_hash: string | null;
+    materialization_progress?: {
+      run_hash: string;
+      status: string;
+      signal_date: string;
+      source_cutoff: string;
+      expected_count: number;
+      completed_count: number;
+      completed_group_count: number;
+      updated_at: string;
+    } | null;
   };
   ranking_source_kind: "research_replay" | "post_close_watchlist";
   notification_provenance: "none";
@@ -184,6 +202,14 @@ export function assertLeaderTacticsV2PageContract(
     }
     if (filters.state !== "all" && candidate.state !== filters.state) {
       throw new Error("leader-tactics-v2 candidate crossed state boundary");
+    }
+    if (
+      candidate.state === "turning_watch" &&
+      (candidate.qualifies !== false || candidate.score !== null)
+    ) {
+      throw new Error(
+        "leader-tactics-v2 turning watch must remain non-actionable"
+      );
     }
     if (
       candidate.provenance.research_only !== true ||

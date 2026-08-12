@@ -11,7 +11,7 @@ def test_leader_tactics_panel_keeps_universes_filters_and_pagination_contract() 
     source = PANEL.read_text()
     for token in (
         'type Universe = "etf" | "ashare"',
-        'useState<Universe>("etf")',
+        'useState<Universe>("ashare")',
         "formula",
         "state",
         "as_of",

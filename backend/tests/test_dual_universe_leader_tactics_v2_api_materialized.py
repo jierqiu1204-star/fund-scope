@@ -45,7 +45,7 @@ async def test_enabled_v2_api_paginates_one_manifest_and_keeps_summary_stable(ap
             "former_leader_repair_proxy_v2": 2,
             "leader_breakout_proxy_v2": 2,
         },
-        "by_state": {"preparing": 6},
+        "by_state": {"preparing": 5, "turning_watch": 1},
     }
 
 

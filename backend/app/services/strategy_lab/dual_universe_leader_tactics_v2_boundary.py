@@ -9,6 +9,7 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2 import V2Contract
 V2_RESEARCH_TABLE_PREFIXES = (
     "leader_tactics_v2_",
     "ashare_research_",
+    "ashare_fine_theme_",
     "ashare_theme_",
     "ashare_adjusted_",
 )

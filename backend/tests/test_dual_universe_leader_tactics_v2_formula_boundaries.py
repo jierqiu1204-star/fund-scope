@@ -6,10 +6,15 @@ from datetime import date, datetime, time, timedelta
 
 from app.services.etf_research_evidence import stable_contract_hash
 from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
+    BASE_LAUNCH_V2,
+    BREAKOUT_V2,
     V2AdjustedBar,
     V2AssetInput,
     V2PITMembership,
+    build_v2_staged_asset_feature,
     screen_dual_universe,
+    staged_theme_percentile_overrides,
+    staged_v2_input_hash,
 )
 
 
@@ -26,6 +31,21 @@ def _membership(*, clone_group: str | None = None) -> V2PITMembership:
         tracked_index="index-a",
         clone_group=clone_group,
         issuer="issuer-a",
+        fact_hash="",
+    )
+    return replace(draft, fact_hash=stable_contract_hash(draft.canonical_payload()))
+
+
+def _group_membership(group: str, theme: str) -> V2PITMembership:
+    draft = replace(
+        _membership(),
+        group_id=group,
+        theme=theme,
+        hierarchy_level="fine_theme" if group.startswith("fine_theme:") else "broad_industry",
+        normalized_theme_key="rare_earth" if group == "fine_theme:rare_earth" else None,
+        resolution_mode=(
+            "fine_theme_pit" if group.startswith("fine_theme:") else "broad_industry_fallback"
+        ),
         fact_hash="",
     )
     return replace(draft, fact_hash=stable_contract_hash(draft.canonical_payload()))
@@ -143,3 +163,101 @@ def test_future_membership_and_bar_receipt_are_not_looked_through() -> None:
     reasons = {reason for row in result.observations for reason in row.exclusion_reasons}
     assert "membership_received_after_cutoff" in reasons
     assert "adjusted_bar_received_after_cutoff" in reasons
+
+
+def test_base_launch_uses_relative_volume_without_inheriting_breakout_peak_gate() -> None:
+    bars = list(_bars())
+    bars[-40] = replace(bars[-40], volume=10_000.0)
+    bars[-1] = replace(bars[-1], volume=2_000.0)
+    items = tuple(_asset(f"51000{index}", bars=tuple(bars)) for index in range(1, 7))
+
+    result = screen_dual_universe(items)
+    base_rows = [row for row in result.observations if row.formula_id == BASE_LAUNCH_V2]
+    breakout_rows = [row for row in result.observations if row.formula_id == BREAKOUT_V2]
+
+    assert base_rows
+    assert all(dict(row.gate_facts)["base_volume_confirmed"] is True for row in base_rows)
+    assert all("volume_peak_gate_failed" not in row.exclusion_reasons for row in base_rows)
+    assert all("volume_peak_gate_failed" in row.exclusion_reasons for row in breakout_rows)
+
+
+def test_base_launch_amount_confirmation_uses_own_prior_20_sessions() -> None:
+    bars = list(_bars())
+    bars[-1] = replace(
+        bars[-1],
+        volume=bars[-2].volume,
+        amount=max(bar.amount for bar in bars[-21:-1]) * 2,
+    )
+    items = tuple(_asset(f"51000{index}", bars=tuple(bars)) for index in range(1, 7))
+
+    result = screen_dual_universe(items)
+    base_rows = [row for row in result.observations if row.formula_id == BASE_LAUNCH_V2]
+
+    assert base_rows
+    for row in base_rows:
+        facts = dict(row.gate_facts)
+        assert facts["relative_volume_20"] < 1.20
+        assert facts["amount_vs_prior_20_percentile"] == 1.0
+        assert facts["base_volume_confirmed"] is True
+
+
+def test_rare_earth_early_rotation_is_non_actionable_turning_watch() -> None:
+    def trend_bars(*, slope: float, amount_scale: float) -> tuple[V2AdjustedBar, ...]:
+        rows = []
+        for index, bar in enumerate(_bars()):
+            close = 100 + index * slope
+            rows.append(
+                replace(
+                    bar,
+                    adjusted_open=close - 0.05,
+                    adjusted_high=close + 0.20,
+                    adjusted_low=close - 0.20,
+                    adjusted_close=close,
+                    amount=bar.amount * amount_scale,
+                )
+            )
+        return tuple(rows)
+
+    rare_membership = _group_membership("fine_theme:rare_earth", "稀土/稀土永磁")
+    fallback_membership = _group_membership("sw1:other", "其他行业")
+    rare = tuple(
+        _asset(
+            f"51000{index}",
+            bars=trend_bars(slope=0.04 + index * 0.01, amount_scale=float(index)),
+            membership=rare_membership,
+        )
+        for index in range(1, 7)
+    )
+    fallback = tuple(
+        _asset(
+            f"52000{index}",
+            bars=trend_bars(slope=-0.01, amount_scale=float(index)),
+            membership=fallback_membership,
+        )
+        for index in range(1, 7)
+    )
+
+    result = screen_dual_universe((*rare, *fallback))
+    target = next(
+        row
+        for row in result.observations
+        if row.asset_code == "510006" and row.formula_id == BASE_LAUNCH_V2
+    )
+    facts = dict(target.gate_facts)
+
+    assert target.state == "turning_watch"
+    assert target.qualifies is False
+    assert target.score is None
+    assert "ma5_ma10_cross_missing" in target.exclusion_reasons
+    assert "ma5_ma10_cross_missing" in str(facts["turning_watch_formal_blockers"])
+    assert facts["theme_hierarchy_level"] == "fine_theme"
+    assert facts["theme_resolution_mode"] == "fine_theme_pit"
+
+
+def test_compact_stage_hash_and_theme_overrides_are_order_invariant() -> None:
+    items = tuple(_asset(f"51000{index}") for index in range(1, 7))
+    forward = tuple(build_v2_staged_asset_feature(item) for item in items)
+    reverse = tuple(build_v2_staged_asset_feature(item) for item in reversed(items))
+
+    assert staged_v2_input_hash(forward) == staged_v2_input_hash(reverse)
+    assert staged_theme_percentile_overrides(forward) == staged_theme_percentile_overrides(reverse)

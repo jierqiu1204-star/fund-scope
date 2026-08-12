@@ -10,13 +10,14 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
+    ASHARE_FINE_THEME_FACT_HASH_CONTRACT,
     ASHARE_MEMBERSHIP_FACT_HASH_CONTRACT,
     PRICE_BASIS,
     V2AdjustedBar,
@@ -147,6 +148,42 @@ def ashare_membership_to_v2(row: dict[str, Any]) -> V2PITMembership:
         source=str(row.get("source") or "") or None,
         confidence=str(row.get("confidence") or "") or None,
         supersedes_fact_hash=row.get("supersedes_fact_hash"),
+        hierarchy_level="broad_industry",
+        normalized_theme_key=None,
+        resolution_mode="broad_industry_fallback",
+        fallback_reason="fine_theme_unavailable_at_cutoff",
+    )
+
+
+def fine_theme_membership_to_v2(row: dict[str, Any]) -> V2PITMembership:
+    """Convert an explicitly observed fine-theme fact; labels never infer membership."""
+
+    effective_from = row["effective_from"]
+    if isinstance(effective_from, str):
+        effective_from = date.fromisoformat(effective_from[:10])
+    effective_to = row.get("effective_to")
+    if isinstance(effective_to, str):
+        effective_to = date.fromisoformat(effective_to[:10])
+    observed_at = row["received_at"]
+    if isinstance(observed_at, str):
+        observed_at = datetime.fromisoformat(observed_at)
+    return V2PITMembership(
+        group_id=str(row["group_id"]),
+        effective_from=effective_from,
+        effective_to=effective_to,
+        observed_at=observed_at,
+        mapping_kind=str(row["mapping_kind"]),
+        taxonomy_version=str(row["taxonomy_version"]),
+        theme=str(row["theme"]),
+        sector=None,
+        fact_hash=str(row["fact_hash"]),
+        fact_hash_contract=ASHARE_FINE_THEME_FACT_HASH_CONTRACT,
+        source_asset_code=str(row.get("asset_code") or "") or None,
+        source=str(row.get("source") or "") or None,
+        confidence=str(row.get("confidence") or "") or None,
+        hierarchy_level=str(row.get("hierarchy_level") or "fine_theme"),
+        normalized_theme_key=str(row["normalized_theme_key"]),
+        resolution_mode="fine_theme_pit",
     )
 
 
@@ -369,6 +406,7 @@ async def read_ashare_asset_inputs(
     signal_end = datetime.combine(signal_date, datetime.max.time())
     membership_date = membership_evaluation_date or signal_date
     result_inputs: list[V2AssetInput] = []
+    has_fine_theme_table = session.bind is not None and session.bind.dialect.name != "sqlite"
     for page in _asset_code_pages(requested, page_size=page_size):
         page_codes = tuple(code for code, _ in page)
         code_sql, code_params = _asset_code_bindings(page_codes, prefix="asset_code")
@@ -376,6 +414,7 @@ async def read_ashare_asset_inputs(
             "signal_end": signal_end,
             "signal_date": signal_date,
             "membership_date": membership_date,
+            "fine_min_date": membership_date - timedelta(days=7),
             "source_cutoff": source_cutoff,
             "eligible": True,
             "historical_only": False,
@@ -441,6 +480,54 @@ async def read_ashare_asset_inputs(
             str(row["asset_code"]): ashare_membership_to_v2(dict(row))
             for row in membership_result.mappings().all()
         }
+        if has_fine_theme_table:
+            fine_result = await session.execute(
+                text(
+                    f"""
+                    SELECT asset_code, group_id, theme, normalized_theme_key,
+                           hierarchy_level, effective_from, effective_to, received_at,
+                           taxonomy_version, source, confidence, mapping_kind, fact_hash
+                    FROM (
+                        SELECT fine.*,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY asset_code
+                                   ORDER BY CASE WHEN normalized_theme_key = 'rare_earth'
+                                                 THEN 0 ELSE 1 END,
+                                            received_at DESC, effective_from DESC, fact_hash DESC
+                               ) AS membership_rank
+                        FROM ashare_fine_theme_membership_facts AS fine
+                        WHERE asset_code IN ({code_sql})
+                          AND effective_from <= :membership_date
+                          AND (effective_to IS NULL OR effective_to >= :membership_date)
+                          AND received_at <= :source_cutoff
+                          AND effective_from >= :fine_min_date
+                          AND mapping_kind = 'historical_pit'
+                          AND taxonomy_version = 'eastmoney.concept.current_v1'
+                          AND source = 'akshare.stock_board_concept_cons_em.current'
+                          AND effective_from = (
+                              SELECT MAX(snapshot.effective_from)
+                              FROM ashare_fine_theme_membership_facts AS snapshot
+                              WHERE snapshot.received_at <= :source_cutoff
+                                AND snapshot.effective_from <= :membership_date
+                                AND snapshot.effective_from >= :fine_min_date
+                                AND snapshot.mapping_kind = 'historical_pit'
+                                AND snapshot.taxonomy_version =
+                                    'eastmoney.concept.current_v1'
+                                AND snapshot.source =
+                                    'akshare.stock_board_concept_cons_em.current'
+                          )
+                    ) latest_fine
+                    WHERE membership_rank = 1
+                    """
+                ),
+                base_params,
+            )
+            membership_by_code.update(
+                {
+                    str(row["asset_code"]): fine_theme_membership_to_v2(dict(row))
+                    for row in fine_result.mappings().all()
+                }
+            )
 
         bars_result = await session.execute(
             text(
@@ -584,6 +671,7 @@ __all__ = [
     "APPROVED_ASHARE_PROVIDERS",
     "AshareReadinessMetric",
     "ashare_membership_to_v2",
+    "fine_theme_membership_to_v2",
     "ashare_price_fact_to_bar",
     "adjusted_fact_exclusion_reason",
     "read_ashare_adjusted_bars",

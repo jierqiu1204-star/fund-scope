@@ -87,9 +87,7 @@ def test_v2_scheduler_registers_only_enabled_stages(
 ) -> None:
     app.state.settings.etf_leader_tactics_v2_capture_enabled = capture_enabled
     app.state.settings.etf_leader_tactics_v2_materialize_enabled = materialize_enabled
-    app.state.settings.etf_leader_tactics_v2_etf_materialize_enabled = (
-        etf_materialize_enabled
-    )
+    app.state.settings.etf_leader_tactics_v2_etf_materialize_enabled = etf_materialize_enabled
     contract = scheduler_module._V2SchedulerJobContract(
         capture_name=scheduler_module.V2_CAPTURE_JOB_NAME,
         materialize_name=scheduler_module.V2_MATERIALIZE_JOB_NAME,
@@ -136,8 +134,8 @@ def test_v2_scheduler_registers_only_enabled_stages(
     materialize = v2_jobs.get(scheduler_module.V2_MATERIALIZE_JOB_NAME)
     if materialize is not None:
         assert _trigger_field(materialize, "day_of_week") == "tue-sat"
-        assert _trigger_field(materialize, "hour") == "9"
-        assert _trigger_field(materialize, "minute") == "12"
+        assert _trigger_field(materialize, "hour") == "9-10"
+        assert _trigger_field(materialize, "minute") == "12-58/2"
         assert _trigger_field(materialize, "second") == "0"
 
 
@@ -177,4 +175,4 @@ def test_v2_staged_ashare_rollout_is_wired_without_etf_materialization() -> None
     assert "ETF_LEADER_TACTICS_V2_API_ENABLED=true" in tracked_env
     assert "ETF_LEADER_TACTICS_V2_CAPTURE_ENABLED=true" in tracked_env
     assert "ETF_LEADER_TACTICS_V2_MATERIALIZE_ENABLED=true" in tracked_env
-    assert "ETF_LEADER_TACTICS_V2_ETF_MATERIALIZE_ENABLED=false" in tracked_env
+    assert "ETF_LEADER_TACTICS_V2_ETF_MATERIALIZE_ENABLED=true" in tracked_env
