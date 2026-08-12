@@ -6,11 +6,14 @@ import pytest
 
 from app.services.strategy_lab.etf_factor_diagnostics import (
     FactorObservation,
+    FactorVectorObservation,
     cross_sectional_factor_diagnostics,
+    factor_redundancy_diagnostics,
     history_tier_diagnostics,
     portfolio_diagnostics,
     redundancy_and_marginal_diagnostics,
     residualize_sector_trend,
+    shadow_peer_support_report,
     spearman,
 )
 
@@ -25,9 +28,7 @@ def _rows() -> list[FactorObservation]:
                     signal_date=date(2026, 1, 1) + timedelta(days=day),
                     asset_code=f"51{index:04d}",
                     peer_bucket="broad-equity",
-                    history_tier=(
-                        "standard_history" if index < 10 else "full_history_context"
-                    ),
+                    history_tier=("standard_history" if index < 10 else "full_history_context"),
                     factor_value=value + day / 10,
                     baseline_value=value,
                     technical_momentum=value * 2,
@@ -138,3 +139,87 @@ def test_primary_outcome_sampling_does_not_erase_daily_turnover_or_rank_churn() 
     assert metrics["daily_transitions"][0]["normalized_rank_churn"] == 1.0
     assert metrics["daily_transitions"][0]["weight_turnover"] == pytest.approx(0.6)
     assert result["primary_dates_are_outcome_only"] is True
+
+
+def _factor_vectors(
+    count: int,
+    *,
+    collapse_first_clone: bool = False,
+) -> list[FactorVectorObservation]:
+    return [
+        FactorVectorObservation(
+            signal_date=date(2026, 3, 2),
+            asset_code=f"51{index:04d}",
+            peer_bucket="broad-equity",
+            factor_values={
+                "baseline": float(index),
+                "residual_momentum": float(index * 2),
+                "breadth": float((index * 7) % max(count, 1)),
+            },
+            clone_group_id=(
+                "same-underlying"
+                if collapse_first_clone and index in {0, 1}
+                else f"underlying-{index}"
+            ),
+        )
+        for index in range(count)
+    ]
+
+
+def test_shadow_peer_support_uses_non_clone_common_support() -> None:
+    report = shadow_peer_support_report(
+        _factor_vectors(20, collapse_first_clone=True),
+        factor_ids=("baseline", "residual_momentum", "breadth"),
+    )
+
+    unit = report["units"][0]
+    assert unit["non_clone_peer_count"] == 19
+    assert unit["weakest_required_primitive_peer_count"] == 19
+    assert unit["common_support_count"] == 19
+    assert unit["eligible"] is False
+    assert unit["unavailable_reason"] == "insufficient_common_peer_support"
+
+
+def test_redundancy_clusters_are_same_date_deterministic_and_fail_closed() -> None:
+    rows = _factor_vectors(20)
+    first = factor_redundancy_diagnostics(
+        rows,
+        factor_ids=("baseline", "residual_momentum", "breadth"),
+        baseline_factor_id="baseline",
+        residual_evidence={
+            "residual_momentum": {
+                "residual_ic": 0.04,
+                "common_support_marginal_contribution": 0.02,
+            }
+        },
+    )
+    second = factor_redundancy_diagnostics(
+        list(reversed(rows)),
+        factor_ids=("breadth", "residual_momentum", "baseline"),
+        baseline_factor_id="baseline",
+        residual_evidence={
+            "residual_momentum": {
+                "residual_ic": 0.04,
+                "common_support_marginal_contribution": 0.02,
+            }
+        },
+    )
+
+    assert first == second
+    assert first["state"] == "available"
+    assert first["effective_factor_count"] == 2
+    assert any(
+        cluster["factor_ids"] == ["baseline", "residual_momentum"]
+        for cluster in first["correlation_clusters"]
+    )
+    assert first["residual_evidence"]["residual_momentum"]["residual_ic"] == 0.04
+    assert first["production_mutation_allowed"] is False
+
+    sparse = factor_redundancy_diagnostics(
+        _factor_vectors(19),
+        factor_ids=("baseline", "residual_momentum", "breadth"),
+        baseline_factor_id="baseline",
+    )
+    assert sparse["state"] == "insufficient_data"
+    assert sparse["unavailable_reason"] == "insufficient_common_peer_support"
+    assert all(pair["aggregate_spearman"] is None for pair in sparse["pairwise_spearman"])

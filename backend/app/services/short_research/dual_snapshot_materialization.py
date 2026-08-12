@@ -86,9 +86,7 @@ def _observation_evidence(
             "eligible_adjusted_sessions": asset.usable_days if asset is not None else 0,
             "price_basis": price_basis,
             "decision_data_eligible": decision_data_eligible,
-            "average_turnover_20d": _finite_score(
-                metrics.get("average_turnover_20d")
-            ),
+            "average_turnover_20d": _finite_score(metrics.get("average_turnover_20d")),
             "taxonomy_bucket": metrics.get("ranking_asset_bucket"),
             "taxonomy_source": theme_profile.get("classification_source"),
             "taxonomy_confidence": theme_profile.get("classification_confidence"),
@@ -145,8 +143,7 @@ async def materialize_dual_ranking_snapshot(
     actionable_manifest = actionable_rank_manifest()
     decision_code_set = set(barrier.included_codes)
     decision_exclusions = {
-        str(item["asset_code"]): str(item["reason"])
-        for item in barrier.excluded
+        str(item["asset_code"]): str(item["reason"]) for item in barrier.excluded
     }
 
     research: list[tuple[ComputedAsset, float]] = []
@@ -154,23 +151,21 @@ async def materialize_dual_ranking_snapshot(
     score_ready_codes: list[str] = []
     score_excluded: list[dict[str, Any]] = []
     research_excluded: list[dict[str, Any]] = []
+    research_quality_downgraded: list[dict[str, Any]] = []
+    research_quality_reasons_by_code: dict[str, list[str]] = {}
     actionable_excluded: list[dict[str, Any]] = []
     for code in expected_codes:
         asset = assets_by_code.get(code)
         score_reasons: list[str] = []
         quality_reasons: list[str] = []
         if code not in decision_code_set:
-            score_reasons.append(
-                decision_exclusions.get(code, "decision_data_ineligible")
-            )
+            score_reasons.append(decision_exclusions.get(code, "decision_data_ineligible"))
         elif asset is None:
             score_reasons.append("missing_computed_asset")
         else:
             score = _finite_score(asset.metrics.get("research_score"))
             if asset.usable_days < research_manifest.required_bar_count:
-                score_reasons.append(
-                    "history:insufficient_61_eligible_adjusted_sessions"
-                )
+                score_reasons.append("history:insufficient_61_eligible_adjusted_sessions")
             if asset.metrics.get("research_score_eligible") is not True or score is None:
                 score_reasons.append(
                     str(
@@ -188,59 +183,57 @@ async def materialize_dual_ranking_snapshot(
             taxonomy_evidence_valid = (
                 isinstance(theme_profile, dict)
                 and str(theme_profile.get("classification_source") or "") != "unknown"
-                and str(theme_profile.get("classification_confidence") or "")
-                not in {"", "unknown"}
+                and str(theme_profile.get("classification_confidence") or "") not in {"", "unknown"}
             )
             quality = evaluate_canonical_research_eligibility(
                 eligible_sessions=int(asset.usable_days),
                 price_basis=research_manifest.price_basis,
                 decision_data_eligible=code in decision_code_set,
                 finite_adjusted_inputs=(
-                    score is not None
-                    and asset.metrics.get("research_score_eligible") is True
+                    score is not None and asset.metrics.get("research_score_eligible") is True
                 ),
                 average_turnover_20d=asset.metrics.get("average_turnover_20d"),
                 taxonomy_bucket=asset.metrics.get("ranking_asset_bucket"),
                 taxonomy_evidence_valid=taxonomy_evidence_valid,
-                default_display_eligible=(
-                    asset.metrics.get("default_display_eligible") is True
-                ),
+                default_display_eligible=(asset.metrics.get("default_display_eligible") is True),
             )
-            quality_reasons.extend(quality.reasons)
+            score_reasons.extend(quality.score_reasons)
+            quality_reasons.extend(quality.quality_reasons)
         score_reasons = sorted(set(score_reasons))
+        quality_reasons = sorted(set(quality_reasons))
         if score_reasons:
-            score_excluded.append(
-                _observation_evidence(
-                    code=code,
-                    asset=asset,
-                    reasons=score_reasons,
-                    decision_data_eligible=code in decision_code_set,
-                    price_basis=research_manifest.price_basis,
-                )
+            exclusion = _observation_evidence(
+                code=code,
+                asset=asset,
+                reasons=score_reasons,
+                decision_data_eligible=code in decision_code_set,
+                price_basis=research_manifest.price_basis,
             )
+            score_excluded.append(exclusion)
+            research_excluded.append(exclusion)
         else:
             score_ready_codes.append(code)
-
-        research_reasons = sorted(set([*score_reasons, *quality_reasons]))
-        if research_reasons:
-            research_excluded.append(
-                _observation_evidence(
-                    code=code,
-                    asset=asset,
-                    reasons=research_reasons,
-                    decision_data_eligible=code in decision_code_set,
-                    price_basis=research_manifest.price_basis,
-                )
-            )
-        else:
             assert asset is not None
             score = _finite_score(asset.metrics.get("research_score"))
             assert score is not None
             research.append((asset, score))
+            if quality_reasons:
+                research_quality_reasons_by_code[code] = quality_reasons
+                research_quality_downgraded.append(
+                    _observation_evidence(
+                        code=code,
+                        asset=asset,
+                        reasons=quality_reasons,
+                        decision_data_eligible=True,
+                        price_basis=research_manifest.price_basis,
+                    )
+                )
 
         action_reasons: list[str] = []
-        if research_reasons:
+        if score_reasons:
             action_reasons.append("research_surface_unavailable")
+        else:
+            action_reasons.extend(quality_reasons)
         if asset is None:
             action_reasons.append("missing_computed_asset")
         else:
@@ -254,13 +247,12 @@ async def materialize_dual_ranking_snapshot(
             if (
                 asset.metrics.get("actionable_contract_id") != actionable_manifest.contract_id
                 or asset.metrics.get("actionable_score_field") != actionable_manifest.score_field
-                or asset.metrics.get("actionable_contract_hash") != actionable_manifest.manifest_hash
+                or asset.metrics.get("actionable_contract_hash")
+                != actionable_manifest.manifest_hash
             ):
                 action_reasons.append("actionable_contract_identity_mismatch")
         if action_reasons:
-            actionable_excluded.append(
-                {"asset_code": code, "reasons": sorted(set(action_reasons))}
-            )
+            actionable_excluded.append({"asset_code": code, "reasons": sorted(set(action_reasons))})
         else:
             assert asset is not None
             action_score = _finite_score(asset.metrics.get("actionable_score"))
@@ -269,12 +261,20 @@ async def materialize_dual_ranking_snapshot(
 
     research.sort(key=lambda item: (-item[1], item[0].metadata.code))
     actionable.sort(key=lambda item: (-item[1], item[0].metadata.code))
+    research_rank_by_code = {
+        asset.metadata.code: rank for rank, (asset, _score) in enumerate(research, start=1)
+    }
+    research_score_by_code = {asset.metadata.code: score for asset, score in research}
+    for item in research_quality_downgraded:
+        code = str(item["asset_code"])
+        item["research_rank"] = research_rank_by_code.get(code)
+        item["research_score"] = research_score_by_code.get(code)
     expected_count = len(expected_codes)
-    score_coverage_ratio = (
-        len(score_ready_codes) / expected_count if expected_count else 0.0
-    )
-    canonical_research_ratio = (
-        len(research) / expected_count if expected_count else 0.0
+    score_coverage_ratio = len(score_ready_codes) / expected_count if expected_count else 0.0
+    canonical_research_ratio = len(research) / expected_count if expected_count else 0.0
+    research_quality_eligible_count = len(research) - len(research_quality_downgraded)
+    research_quality_ratio = (
+        research_quality_eligible_count / expected_count if expected_count else 0.0
     )
     readiness = evaluate_etf_readiness(
         daily_coverage_ratio=barrier.coverage_ratio,
@@ -293,35 +293,30 @@ async def materialize_dual_ranking_snapshot(
             }
             for code in expected_codes
         ]
+    action_quality_research = [
+        (asset, score)
+        for asset, score in research
+        if asset.metadata.code not in research_quality_reasons_by_code
+    ]
     provider_health_identity = build_provider_health_seal(
         candidate_evidence=[
             {
                 "asset_code": asset.metadata.code,
-                "field_statuses": dict(
-                    asset.metrics.get("actionable_field_statuses") or {}
-                ),
-                "source_times": dict(
-                    asset.metrics.get("actionable_source_times") or {}
-                ),
+                "field_statuses": dict(asset.metrics.get("actionable_field_statuses") or {}),
+                "source_times": dict(asset.metrics.get("actionable_source_times") or {}),
             }
-            for asset, _score in research
+            for asset, _score in action_quality_research
         ],
         manifest=actionable_manifest,
         trade_date=trade_date,
         decision_cutoff=market_cutoff,
     )
-    provider_health_reason = (
-        str(provider_health_identity.get("unavailable_reason") or "") or None
-    )
-    if (
-        readiness.state == "complete"
-        and provider_health_identity.get("state") != "compatible"
-    ):
+    provider_health_reason = str(provider_health_identity.get("unavailable_reason") or "") or None
+    if readiness.state == "complete" and provider_health_identity.get("state") != "compatible":
         exclusion_by_code = {
-            str(item["asset_code"]): set(item.get("reasons") or [])
-            for item in actionable_excluded
+            str(item["asset_code"]): set(item.get("reasons") or []) for item in actionable_excluded
         }
-        for asset, _score in research:
+        for asset, _score in action_quality_research:
             exclusion_by_code.setdefault(asset.metadata.code, set()).add(
                 provider_health_reason or "provider_health_seal_incompatible"
             )
@@ -334,8 +329,7 @@ async def materialize_dual_ranking_snapshot(
             for code in sorted(exclusion_by_code)
         ]
     actionable_rank_by_code = {
-        asset.metadata.code: rank
-        for rank, (asset, _score) in enumerate(actionable, start=1)
+        asset.metadata.code: rank for rank, (asset, _score) in enumerate(actionable, start=1)
     }
     diversified_position_by_code = {
         asset.metadata.code: position
@@ -370,8 +364,7 @@ async def materialize_dual_ranking_snapshot(
     )
     concentration_evidence = {
         "clone_policy_active": any(
-            asset.metrics.get("clone_policy_active") is True
-            for asset, _score in research
+            asset.metrics.get("clone_policy_active") is True for asset, _score in research
         ),
         "tracked_underlying_coverage": round(
             tracked_underlying_coverage,
@@ -382,9 +375,7 @@ async def materialize_dual_ranking_snapshot(
             for asset, _score in research
         ),
         "clone_group_count": len(clone_group_counts),
-        "repeated_clone_group_count": sum(
-            count > 1 for count in clone_group_counts.values()
-        ),
+        "repeated_clone_group_count": sum(count > 1 for count in clone_group_counts.values()),
         "diversified_representative_count": len(diversified_position_by_code),
         "theme_counts": dict(sorted(theme_counts.items())),
     }
@@ -430,12 +421,8 @@ async def materialize_dual_ranking_snapshot(
                         "average_turnover_20d": assets_by_code[code].metrics.get(
                             "average_turnover_20d"
                         ),
-                        "taxonomy_bucket": assets_by_code[code].metrics.get(
-                            "ranking_asset_bucket"
-                        ),
-                        "theme_profile": assets_by_code[code].metrics.get(
-                            "theme_profile"
-                        ),
+                        "taxonomy_bucket": assets_by_code[code].metrics.get("ranking_asset_bucket"),
+                        "theme_profile": assets_by_code[code].metrics.get("theme_profile"),
                     }
                     if code in assets_by_code
                     else None
@@ -511,13 +498,12 @@ async def materialize_dual_ranking_snapshot(
         return existing
 
     actionable_ratio = len(actionable) / expected_count if expected_count else 0.0
+    actionable_exclusions_by_code = {
+        str(item["asset_code"]): list(item.get("reasons") or []) for item in actionable_excluded
+    }
     actionable_blocker_counts = dict(
         sorted(
-            Counter(
-                reason
-                for item in actionable_excluded
-                for reason in item["reasons"]
-            ).items()
+            Counter(reason for item in actionable_excluded for reason in item["reasons"]).items()
         )
     )
     now = utcnow()
@@ -545,9 +531,7 @@ async def materialize_dual_ranking_snapshot(
             "readiness_policy_version": readiness.policy_version,
             "readiness_state": readiness.state,
             "snapshot_state": (
-                "provisional"
-                if readiness.state == "degraded"
-                else "complete_candidate"
+                "provisional" if readiness.state == "degraded" else "complete_candidate"
             ),
             "surface_availability_state": (
                 "provisional"
@@ -560,8 +544,7 @@ async def materialize_dual_ranking_snapshot(
                 "history_depth_61_coverage_below_90pct"
                 if readiness.state == "degraded"
                 else provider_health_reason
-                if not actionable
-                and provider_health_identity.get("state") != "compatible"
+                if not actionable and provider_health_identity.get("state") != "compatible"
                 else None
             ),
             "cutoff_provenance": {
@@ -581,9 +564,7 @@ async def materialize_dual_ranking_snapshot(
                 "exclusion_reason_counts": dict(
                     sorted(
                         Counter(
-                            reason
-                            for item in score_excluded
-                            for reason in item["reasons"]
+                            reason for item in score_excluded for reason in item["reasons"]
                         ).items()
                     )
                 ),
@@ -595,6 +576,18 @@ async def materialize_dual_ranking_snapshot(
                     "contract_hash": research_manifest.manifest_hash,
                     "eligible_count": len(research),
                     "coverage_ratio": round(canonical_research_ratio, 6),
+                    "quality_eligible_count": research_quality_eligible_count,
+                    "quality_coverage_ratio": round(research_quality_ratio, 6),
+                    "observation_only_count": len(research_quality_downgraded),
+                    "quality_reason_counts": dict(
+                        sorted(
+                            Counter(
+                                reason
+                                for item in research_quality_downgraded
+                                for reason in item["reasons"]
+                            ).items()
+                        )
+                    ),
                     "excluded": research_excluded,
                 },
                 "actionable": {
@@ -610,19 +603,17 @@ async def materialize_dual_ranking_snapshot(
             "canonical_research_eligibility": canonical_research_eligibility_policy(),
             "concentration_evidence": concentration_evidence,
             "observation_only": {
-                "count": len(research_excluded),
-                "items": research_excluded,
+                "count": len(research_quality_downgraded),
+                "items": research_quality_downgraded,
             },
             "theme_heat": theme_heat_summary(
                 (asset for asset, _score in research),
-                scores_by_code={
-                    asset.metadata.code: score for asset, score in research
-                },
+                scores_by_code={asset.metadata.code: score for asset, score in research},
             ),
             "input_snapshot": _json_safe(input_snapshot),
             "non_finite_reject_count": sum(
                 any("non_finite" in reason for reason in item["reasons"])
-                for item in [*research_excluded, *actionable_excluded]
+                for item in [*score_excluded, *actionable_excluded]
             ),
             "cap_violation_count": sum(
                 any("cap_violation" in reason for reason in item["reasons"])
@@ -663,11 +654,10 @@ async def materialize_dual_ranking_snapshot(
     session.add(run)
     await session.flush()
 
-    actionable_score_by_code = {
-        asset.metadata.code: score for asset, score in actionable
-    }
+    actionable_score_by_code = {asset.metadata.code: score for asset, score in actionable}
     for research_rank, (asset, research_score) in enumerate(research, start=1):
         code = asset.metadata.code
+        research_quality_reasons = research_quality_reasons_by_code.get(code, [])
         actionable_rank = actionable_rank_by_code.get(code)
         actionable_score = actionable_score_by_code.get(code)
         session.add(
@@ -691,6 +681,9 @@ async def materialize_dual_ranking_snapshot(
                                 "contract_id": research_manifest.contract_id,
                                 "score_field": research_manifest.score_field,
                                 "contract_hash": research_manifest.manifest_hash,
+                                "quality_eligible": not research_quality_reasons,
+                                "quality_reasons": research_quality_reasons,
+                                "observation_only": bool(research_quality_reasons),
                             },
                             "actionable": {
                                 "rank": actionable_rank,
@@ -710,16 +703,19 @@ async def materialize_dual_ranking_snapshot(
                         **asset.metrics,
                         "ranking_surface": "research",
                         "canonical_research_rank": research_rank,
-                        "observation_only": False,
+                        "research_quality_eligible": not research_quality_reasons,
+                        "research_quality_reasons": research_quality_reasons,
+                        "observation_only": bool(research_quality_reasons),
                         "research_rank": research_rank,
                         "research_score": research_score,
                         "peer_diagnostics": {
-                            "asset_bucket": asset.metrics.get(
-                                "ranking_asset_bucket"
-                            ),
+                            "asset_bucket": asset.metrics.get("ranking_asset_bucket"),
                             "metric_peer_counts": asset.metrics.get(
                                 "v3_metric_peer_counts",
                                 {},
+                            ),
+                            "weakest_required_primitive_peer_count": (
+                                asset.metrics.get("v3_weakest_required_primitive_peer_count")
                             ),
                         },
                         "diversified_presentation_position": (
@@ -732,12 +728,7 @@ async def materialize_dual_ranking_snapshot(
                         "actionable_score": actionable_score,
                         "actionable_eligible": actionable_rank is not None,
                         "actionable_exclusion_reasons": (
-                            ["provisional_research_only"]
-                            if readiness.state == "degraded"
-                            else asset.metrics.get(
-                                "actionable_exclusion_reasons",
-                                [],
-                            )
+                            actionable_exclusions_by_code.get(code, [])
                         ),
                         "actionable_as_of_date": trade_date,
                         "latest_date": asset.latest_date,
@@ -813,8 +804,7 @@ async def publish_dual_ranking_snapshot(
             or summary.get("readiness_state") != "complete"
         ):
             raise SnapshotPublicationError(
-                "dual ranking publication requires 95 percent daily and "
-                "90 percent warmup readiness"
+                "dual ranking publication requires 95 percent daily and 90 percent warmup readiness"
             )
         items = (
             await session.scalars(
@@ -833,8 +823,7 @@ async def publish_dual_ranking_snapshot(
             score_coverage = summary.get("score_coverage")
             if (
                 not isinstance(score_coverage, dict)
-                or score_coverage.get("coverage_kind")
-                != "daily_reconstructable_score_eligible"
+                or score_coverage.get("coverage_kind") != "daily_reconstructable_score_eligible"
                 or score_coverage.get("expected_count") != run.expected_item_count
                 or score_coverage.get("eligible_count") != run.eligible_item_count
                 or score_coverage.get("coverage_ratio")
@@ -905,9 +894,7 @@ async def publish_dual_ranking_snapshot(
                 registration.winner_run_id,
             )
             if winner is None or winner.publication_state != "published":
-                raise SnapshotPublicationError(
-                    "canonical publication winner is not available"
-                )
+                raise SnapshotPublicationError("canonical publication winner is not available")
             return winner
         run.summary_json = {
             **summary,
@@ -916,9 +903,7 @@ async def publish_dual_ranking_snapshot(
                 "publication_registry_id": registration.registry.id,
                 "publication_identity": registration.registry.publication_identity_hash,
                 "canonical_slot_hash": registration.registry.canonical_slot_hash,
-                "supersedes_publication_id": (
-                    registration.registry.supersedes_publication_id
-                ),
+                "supersedes_publication_id": (registration.registry.supersedes_publication_id),
                 "duplicate_publication": not registration.created,
                 "is_current": registration.registry.is_current,
             },

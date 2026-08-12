@@ -14,10 +14,23 @@ const checks = [
     pass:
       types.includes('ranking_surface?: "research" | "actionable" | null') &&
       types.includes("research_rank?: number | null") &&
+      types.includes("research_quality_eligible?: boolean | null") &&
+      types.includes("research_quality_reasons?: string[]") &&
       types.includes("actionable_rank?: number | null") &&
       types.includes("history_confidence_tier?: string | null") &&
       types.includes("actionable_exclusion_reasons?: string[]") &&
       types.includes("actionable_source_times?: Record<string, string>")
+  },
+  {
+    name: "separates ranked discovery from action-quality eligibility",
+    pass:
+      types.includes("research_ranked_item_count?: number | null") &&
+      types.includes("research_quality_eligible_item_count?: number | null") &&
+      types.includes("observation_only_item_count?: number | null") &&
+      types.includes("actionable_eligible_item_count?: number | null") &&
+      page.includes("研究可见 · 仅观察") &&
+      page.includes("行动质量达标：") &&
+      page.includes("盘中可行动：")
   },
   {
     name: "defaults ETF discovery to the research surface",

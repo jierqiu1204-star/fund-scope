@@ -311,7 +311,9 @@ async def ensure_short_research_universe(session: AsyncSession) -> dict[str, int
                 existing.is_watchlist = eligible
             continue
 
-        existing_etf = await session.scalar(select(TradableEtf).where(TradableEtf.code == item.code))
+        existing_etf = await session.scalar(
+            select(TradableEtf).where(TradableEtf.code == item.code)
+        )
         if existing_etf is None:
             session.add(
                 TradableEtf(
@@ -343,7 +345,11 @@ async def ensure_short_research_universe(session: AsyncSession) -> dict[str, int
                 )
             )
             if exposure is None:
-                session.add(EtfThemeExposure(etf_code=item.code, theme=theme, weight=1.0, source="short_research"))
+                session.add(
+                    EtfThemeExposure(
+                        etf_code=item.code, theme=theme, weight=1.0, source="short_research"
+                    )
+                )
     await session.commit()
     return {"funds_created": funds_created, "etfs_created": etfs_created}
 
@@ -417,7 +423,9 @@ def _metadata_from_etf_row(row: TradableEtf) -> ShortResearchAsset:
     )
 
 
-async def _metadata_for_code(session: AsyncSession, asset_type: str, code: str) -> ShortResearchAsset:
+async def _metadata_for_code(
+    session: AsyncSession, asset_type: str, code: str
+) -> ShortResearchAsset:
     if asset_type == ASSET_TYPE_ETF:
         row = await session.scalar(select(TradableEtf).where(TradableEtf.code == code))
         if row is not None:
@@ -505,9 +513,7 @@ async def _latest_signal_run(
             )
         ).run
         candidates = [
-            row
-            for row in rows
-            if (row.config_json or {}).get("asset_type") == ASSET_TYPE_FUND
+            row for row in rows if (row.config_json or {}).get("asset_type") == ASSET_TYPE_FUND
         ]
         if canonical_etf_run is not None:
             candidates.append(canonical_etf_run)
@@ -695,7 +701,9 @@ async def _metadata_map_for_signal_items(
         elif item.asset_type == ASSET_TYPE_FUND:
             missing_fund_codes.append(item.asset_code)
     if missing_etf_codes:
-        rows = await session.scalars(select(TradableEtf).where(TradableEtf.code.in_(set(missing_etf_codes))))
+        rows = await session.scalars(
+            select(TradableEtf).where(TradableEtf.code.in_(set(missing_etf_codes)))
+        )
         for row in rows.all():
             by_key[(ASSET_TYPE_ETF, row.code)] = _metadata_from_etf_row(row)
     if missing_fund_codes:
@@ -732,11 +740,17 @@ def _cached_asset_from_signal_item(
     rationale.setdefault("entry_timing_label", entry_timing_label)
     rationale.setdefault("entry_timing_reason", entry_timing_reason)
     score_breakdown = dict(item.score_breakdown_json or {})
-    final_score_breakdown = score_breakdown.get("final_score_v3") or score_breakdown.get("final_score_v2")
+    final_score_breakdown = score_breakdown.get("final_score_v3") or score_breakdown.get(
+        "final_score_v2"
+    )
     score_version = (
         metrics.get("score_version")
         or score_breakdown.get("score_version")
-        or (final_score_breakdown.get("score_version") if isinstance(final_score_breakdown, dict) else None)
+        or (
+            final_score_breakdown.get("score_version")
+            if isinstance(final_score_breakdown, dict)
+            else None
+        )
     )
     if not score_version:
         score_version = "legacy"
@@ -831,9 +845,15 @@ async def cached_signal_assets(
             item.asset_type,
             item.asset_code,
         )
-        if not _matches_filters(metadata, asset_type=asset_type, theme=theme, codes=list(code_set) if code_set else None):
+        if not _matches_filters(
+            metadata, asset_type=asset_type, theme=theme, codes=list(code_set) if code_set else None
+        ):
             continue
-        if keyword and keyword not in metadata.code.lower() and keyword not in metadata.name.lower():
+        if (
+            keyword
+            and keyword not in metadata.code.lower()
+            and keyword not in metadata.name.lower()
+        ):
             continue
         asset = _cached_asset_from_signal_item(item, metadata, as_of_date=run.as_of_date)
         if item.asset_type == ASSET_TYPE_ETF and ranking_surface is not None:
@@ -873,13 +893,13 @@ async def cached_signal_assets(
             item.asset_type == ASSET_TYPE_ETF
             and ranking_surface is None
             and universe == UNIVERSE_DEFAULT
-            and not bool(
-            asset.metrics.get("default_display_eligible", True)
-            )
+            and not bool(asset.metrics.get("default_display_eligible", True))
         ):
             continue
-        if item.asset_type == ASSET_TYPE_ETF and universe == UNIVERSE_ILLIQUID and bool(
-            asset.metrics.get("default_display_eligible", True)
+        if (
+            item.asset_type == ASSET_TYPE_ETF
+            and universe == UNIVERSE_ILLIQUID
+            and bool(asset.metrics.get("default_display_eligible", True))
         ):
             continue
         assets.append(asset)
@@ -907,7 +927,9 @@ async def latest_data_date(session: AsyncSession) -> date | None:
     return max(dates) if dates else None
 
 
-async def _fund_series(session: AsyncSession, code: str, as_of_date: date | None = None) -> list[PricePoint]:
+async def _fund_series(
+    session: AsyncSession, code: str, as_of_date: date | None = None
+) -> list[PricePoint]:
     query = select(FundNavHistory).where(FundNavHistory.fund_code == code)
     if as_of_date is not None:
         query = query.where(FundNavHistory.nav_date <= as_of_date)
@@ -1088,9 +1110,7 @@ async def _prefetch_etf_snapshot_series(
     )
     rows = await session.stream(statement)
     history_digest_by_code: dict[str, str] = {}
-    history_rows_by_code: dict[str, list[EtfPriceHistory]] = {
-        code: [] for code in unique_codes
-    }
+    history_rows_by_code: dict[str, list[EtfPriceHistory]] = {code: [] for code in unique_codes}
     digest_code: str | None = None
     digest_rows: list[dict[str, Any]] = []
     async for row, usable_days in rows:
@@ -1260,7 +1280,9 @@ def _format_percent(value: float | None) -> str:
 
 def _mean_value(points: list[PricePoint], *, required_count: int | None = None) -> float | None:
     values = [item.value for item in points if item.value > 0]
-    if required_count is not None and (len(points) != required_count or len(values) != required_count):
+    if required_count is not None and (
+        len(points) != required_count or len(values) != required_count
+    ):
         return None
     return mean(values) if values else None
 
@@ -1286,7 +1308,10 @@ def _adjusted_atr20_overextension(
         if current.high is None or current.low is None:
             return None, "unavailable_missing_adjusted_range", len(true_ranges)
         values = (previous.value, current.value, current.high, current.low)
-        if any(not math.isfinite(value) or value <= 0 for value in values) or current.high < current.low:
+        if (
+            any(not math.isfinite(value) or value <= 0 for value in values)
+            or current.high < current.low
+        ):
             return None, "unavailable_invalid_adjusted_range", len(true_ranges)
         true_ranges.append(
             max(
@@ -1350,7 +1375,12 @@ def _entry_timing_metrics(
     pullback_5d = _pullback_from_high(series, 5)
     pullback_20d = _pullback_from_high(series, 20)
     volume_ratio_20d = None
-    if metadata.asset_type == ASSET_TYPE_ETF and latest and latest.turnover is not None and average_turnover_20d:
+    if (
+        metadata.asset_type == ASSET_TYPE_ETF
+        and latest
+        and latest.turnover is not None
+        and average_turnover_20d
+    ):
         volume_ratio_20d = latest.turnover / average_turnover_20d
 
     base = {
@@ -1367,13 +1397,25 @@ def _entry_timing_metrics(
     }
     if latest is None or len(series) < 20:
         reason = "公开历史不足 20 个可用交易日，今天不做买点判断。"
-        return {**base, "entry_timing_label": ENTRY_TIMING_INSUFFICIENT, "entry_timing_reason": reason}
+        return {
+            **base,
+            "entry_timing_label": ENTRY_TIMING_INSUFFICIENT,
+            "entry_timing_reason": reason,
+        }
     if latest_date is None or (as_of_date - latest_date).days > STALE_DATA_DAYS:
         reason = "最新公开数据已经滞后，今天不做买点判断。"
-        return {**base, "entry_timing_label": ENTRY_TIMING_INSUFFICIENT, "entry_timing_reason": reason}
+        return {
+            **base,
+            "entry_timing_label": ENTRY_TIMING_INSUFFICIENT,
+            "entry_timing_reason": reason,
+        }
     if today_return is None or ma5 is None or ma10 is None or ma20 is None:
         reason = "缺少今天涨跌或均线数据，今天不做买点判断。"
-        return {**base, "entry_timing_label": ENTRY_TIMING_INSUFFICIENT, "entry_timing_reason": reason}
+        return {
+            **base,
+            "entry_timing_label": ENTRY_TIMING_INSUFFICIENT,
+            "entry_timing_reason": reason,
+        }
 
     positive_trend = (return_5d or 0.0) > 0 and (return_20d or 0.0) > 0 and (return_60d or 0.0) > 0
     thresholds = dict((dynamic_context or {}).get("thresholds") or {})
@@ -1399,19 +1441,35 @@ def _entry_timing_metrics(
 
     if premium_state in {"high", "extreme"}:
         reason = f"折溢价状态为 {premium_state}，结构风险偏高；{threshold_note}"
-        return {**base, "entry_timing_label": ENTRY_TIMING_CHASE_RISK, "entry_timing_reason": reason}
+        return {
+            **base,
+            "entry_timing_label": ENTRY_TIMING_CHASE_RISK,
+            "entry_timing_reason": reason,
+        }
     if today_return < 0 and (heavy_volume or below_ma20):
         reason = (
             f"今天 {_format_percent(today_return)}，价格已低于20日线或成交额明显放大，"
             f"短线结构转弱，先等待新信号。{threshold_note}"
         )
-        return {**base, "entry_timing_label": ENTRY_TIMING_VOLUME_WEAKENING, "entry_timing_reason": reason}
-    if today_return <= drop_wait or below_ma5_ma10 or ((return_5d or 0.0) < 0 and not near_or_above_ma10):
+        return {
+            **base,
+            "entry_timing_label": ENTRY_TIMING_VOLUME_WEAKENING,
+            "entry_timing_reason": reason,
+        }
+    if (
+        today_return <= drop_wait
+        or below_ma5_ma10
+        or ((return_5d or 0.0) < 0 and not near_or_above_ma10)
+    ):
         reason = (
             f"今天 {_format_percent(today_return)}，已触及动态等待线 {_format_percent(drop_wait)} "
             f"或跌破5/10日线附近，短线趋势开始变弱，适合先等待。{threshold_note}"
         )
-        return {**base, "entry_timing_label": ENTRY_TIMING_BREAK_WAIT, "entry_timing_reason": reason}
+        return {
+            **base,
+            "entry_timing_label": ENTRY_TIMING_BREAK_WAIT,
+            "entry_timing_reason": reason,
+        }
     if today_return >= chase_daily and (
         (return_20d or 0.0) >= return_20_chase
         or (return_60d or 0.0) >= return_60_chase
@@ -1421,25 +1479,39 @@ def _entry_timing_metrics(
             f"今天 {_format_percent(today_return)} 已高于动态冲高线 {_format_percent(chase_daily)}，"
             f"近20日 {_format_percent(return_20d)}、近60日 {_format_percent(return_60d)} 处于偏热区间。{threshold_note}"
         )
-        return {**base, "entry_timing_label": ENTRY_TIMING_CHASE_RISK, "entry_timing_reason": reason}
-    if positive_trend and healthy_pullback_min <= today_return <= healthy_pullback_max and near_or_above_ma10 and not heavy_volume:
+        return {
+            **base,
+            "entry_timing_label": ENTRY_TIMING_CHASE_RISK,
+            "entry_timing_reason": reason,
+        }
+    if (
+        positive_trend
+        and healthy_pullback_min <= today_return <= healthy_pullback_max
+        and near_or_above_ma10
+        and not heavy_volume
+    ):
         reason = (
             f"近5/20/60日仍为正，今天 {_format_percent(today_return)}，"
             f"处在动态健康回踩区间 {_format_percent(healthy_pullback_min)} 到 {_format_percent(healthy_pullback_max)}，"
             f"仍在10日线附近或上方，适合继续观察。{threshold_note}"
         )
-        return {**base, "entry_timing_label": ENTRY_TIMING_HEALTHY_PULLBACK, "entry_timing_reason": reason}
+        return {
+            **base,
+            "entry_timing_label": ENTRY_TIMING_HEALTHY_PULLBACK,
+            "entry_timing_reason": reason,
+        }
     if positive_trend and today_return > healthy_pullback_min and near_or_above_ma10:
         reason = (
             f"近5/20/60日仍为正，今天 {_format_percent(today_return)}，"
             f"未跌破动态等待线 {_format_percent(drop_wait)}，价格仍在10日线附近或上方。{threshold_note}"
         )
-        return {**base, "entry_timing_label": ENTRY_TIMING_TREND_CONTINUATION, "entry_timing_reason": reason}
+        return {
+            **base,
+            "entry_timing_label": ENTRY_TIMING_TREND_CONTINUATION,
+            "entry_timing_reason": reason,
+        }
 
-    reason = (
-        f"今天 {_format_percent(today_return)}，趋势条件不够清晰，"
-        "短线买点需要等待更多确认。"
-    )
+    reason = f"今天 {_format_percent(today_return)}，趋势条件不够清晰，短线买点需要等待更多确认。"
     return {**base, "entry_timing_label": ENTRY_TIMING_BREAK_WAIT, "entry_timing_reason": reason}
 
 
@@ -1480,7 +1552,9 @@ def _score_metrics(
     return_60d = _window_return(series, 60)
     volatility_20d = pstdev(returns_20) if len(returns_20) == 20 else None
     downside_volatility_20d = (
-        math.sqrt(mean(min(item, 0.0) ** 2 for item in returns_20)) if len(returns_20) == 20 else None
+        math.sqrt(mean(min(item, 0.0) ** 2 for item in returns_20))
+        if len(returns_20) == 20
+        else None
     )
     max_drawdown_20d = _max_drawdown(last_20) if len(last_20) == 20 else None
     max_drawdown_60d = _max_drawdown(last_60)
@@ -1506,19 +1580,29 @@ def _score_metrics(
     ma20 = _mean_value(last_20, required_count=20)
     distance_to_ma5 = _distance_to_average(latest_value, ma5)
     distance_to_ma20 = _distance_to_average(latest_value, ma20)
-    overextension_atr, overextension_atr_status, atr20_true_range_count = _adjusted_atr20_overextension(
-        series,
-        ma20,
+    overextension_atr, overextension_atr_status, atr20_true_range_count = (
+        _adjusted_atr20_overextension(
+            series,
+            ma20,
+        )
     )
     trend_consistency = (
-        sum(1 for item in returns_20 if item > 0) / len(returns_20) if len(returns_20) == 20 else None
+        sum(1 for item in returns_20 if item > 0) / len(returns_20)
+        if len(returns_20) == 20
+        else None
     )
     market_data_reliability = (
-        "unavailable" if latest_date is None else "verified" if latest_date == as_of_date else "stale"
+        "unavailable"
+        if latest_date is None
+        else "verified"
+        if latest_date == as_of_date
+        else "stale"
     )
     source_trade_date = latest_date.isoformat() if latest_date else None
     threshold_points = [
-        ThresholdPricePoint(value=item.value, high=item.high, low=item.low, pct_change=item.pct_change)
+        ThresholdPricePoint(
+            value=item.value, high=item.high, low=item.low, pct_change=item.pct_change
+        )
         for item in series
         if item.value > 0
     ]
@@ -1737,9 +1821,9 @@ _SCORE_BUCKET_PRICE_BASIS = "total_return_adjusted"
 _SCORE_BUCKET_EXECUTION_MODEL = "t_plus_1_adjusted_close_full_horizon_v2"
 _SCORE_BUCKET_FEE_BPS_PER_SIDE = 5
 _SCORE_BUCKET_SLIPPAGE_BPS_PER_SIDE = 5
-_SCORE_BUCKET_ROUND_TRIP_COST = 2 * (
-    _SCORE_BUCKET_FEE_BPS_PER_SIDE + _SCORE_BUCKET_SLIPPAGE_BPS_PER_SIDE
-) / 10_000
+_SCORE_BUCKET_ROUND_TRIP_COST = (
+    2 * (_SCORE_BUCKET_FEE_BPS_PER_SIDE + _SCORE_BUCKET_SLIPPAGE_BPS_PER_SIDE) / 10_000
+)
 _SCORE_BUCKET_MIN_INDEPENDENT_DATES = 20
 _SCORE_BUCKET_MIN_COVERAGE = 0.95
 
@@ -1750,9 +1834,15 @@ def _forward_drawdown(series: list[PricePoint]) -> float | None:
     return _max_drawdown(series)
 
 
-def _validation_confidence(sample_count: int, *, recent_median: float | None = None, all_median: float | None = None) -> str:
+def _validation_confidence(
+    sample_count: int, *, recent_median: float | None = None, all_median: float | None = None
+) -> str:
     if sample_count >= 50:
-        if recent_median is not None and all_median is not None and recent_median < min(0.0, all_median - 0.01):
+        if (
+            recent_median is not None
+            and all_median is not None
+            and recent_median < min(0.0, all_median - 0.01)
+        ):
             return "recent_weakening"
         return "sufficient"
     if sample_count >= 20:
@@ -1778,7 +1868,11 @@ def _replay_validation_confidence(
 ) -> str:
     if sample_count < _LABEL_REPLAY_MIN_SAMPLES or coverage < 0.6:
         return "insufficient"
-    if recent_median is not None and all_median is not None and recent_median < min(0.0, all_median - 0.01):
+    if (
+        recent_median is not None
+        and all_median is not None
+        and recent_median < min(0.0, all_median - 0.01)
+    ):
         return "recent_weakening"
     if sample_count >= _LABEL_REPLAY_SUFFICIENT_SAMPLES and coverage >= 0.8:
         return "sufficient"
@@ -1788,7 +1882,11 @@ def _replay_validation_confidence(
 def _outcome_entry_timing(item: ShortResearchSignalItem) -> str:
     metrics = dict(item.metrics_json or {})
     rationale = dict(item.rationale_json or {})
-    return str(metrics.get("entry_timing_label") or rationale.get("entry_timing_label") or ENTRY_TIMING_INSUFFICIENT)
+    return str(
+        metrics.get("entry_timing_label")
+        or rationale.get("entry_timing_label")
+        or ENTRY_TIMING_INSUFFICIENT
+    )
 
 
 def _signal_item_decision_eligible(item: ShortResearchSignalItem) -> tuple[bool, str | None]:
@@ -1959,7 +2057,11 @@ async def review_etf_label_outcomes(
         select(ShortResearchSignalItem, ShortResearchSignalRun)
         .join(ShortResearchSignalRun, ShortResearchSignalRun.id == ShortResearchSignalItem.run_id)
         .where(ShortResearchSignalItem.asset_type == ASSET_TYPE_ETF)
-        .order_by(ShortResearchSignalRun.as_of_date.desc(), ShortResearchSignalRun.id.desc(), ShortResearchSignalItem.rank.asc())
+        .order_by(
+            ShortResearchSignalRun.as_of_date.desc(),
+            ShortResearchSignalRun.id.desc(),
+            ShortResearchSignalItem.rank.asc(),
+        )
         .limit(max_signal_items)
     )
     if source_run is not None:
@@ -1973,7 +2075,11 @@ async def review_etf_label_outcomes(
     for signal_item, signal_run in rows:
         processed += 1
         eligible, exclusion_reason = _signal_item_decision_eligible(signal_item)
-        price_rows = [] if not eligible else await _etf_price_rows_from(session, signal_item.asset_code, signal_run.as_of_date)
+        price_rows = (
+            []
+            if not eligible
+            else await _etf_price_rows_from(session, signal_item.asset_code, signal_run.as_of_date)
+        )
         for horizon in _LABEL_VALIDATION_WINDOWS:
             existing = await session.scalar(
                 select(EtfLabelOutcome).where(
@@ -1986,7 +2092,9 @@ async def review_etf_label_outcomes(
                 continue
             if not eligible:
                 status = "excluded"
-                payload: dict[str, Any] = {"exclusion_reason": exclusion_reason or "unreliable_signal"}
+                payload: dict[str, Any] = {
+                    "exclusion_reason": exclusion_reason or "unreliable_signal"
+                }
             elif not price_rows:
                 status = "pending"
                 payload = {"exclusion_reason": "missing_signal_price"}
@@ -2020,9 +2128,12 @@ async def review_etf_label_outcomes(
                 "future_price": payload.get("future_price"),
                 "future_date": payload.get("future_date"),
                 "stored_signal_context": True,
-                "signal_rule_version": (signal_run.config_json or {}).get("rule_version") or "short_research_signal_v1",
+                "signal_rule_version": (signal_run.config_json or {}).get("rule_version")
+                or "short_research_signal_v1",
                 "signal_date": signal_run.as_of_date.isoformat(),
-                "data_reliability": (signal_item.metrics_json or {}).get("data_reliability", "verified"),
+                "data_reliability": (signal_item.metrics_json or {}).get(
+                    "data_reliability", "verified"
+                ),
             }
             target.updated_at = now
             session.add(target)
@@ -2036,7 +2147,9 @@ async def review_etf_label_outcomes(
 
 
 def _summarize_outcome_rows(rows: list[EtfLabelOutcome], total_rows: int) -> dict[str, Any]:
-    completed_rows = [item for item in rows if item.status == "completed" and item.forward_return is not None]
+    completed_rows = [
+        item for item in rows if item.status == "completed" and item.forward_return is not None
+    ]
     excluded_count = sum(1 for item in rows if item.status == "excluded")
     pending_count = sum(1 for item in rows if item.status == "pending")
     if not completed_rows:
@@ -2060,11 +2173,15 @@ def _summarize_outcome_rows(rows: list[EtfLabelOutcome], total_rows: int) -> dic
     recent_returns = returns[: min(10, len(returns))]
     all_median = median(returns)
     recent_median = median(recent_returns) if recent_returns else None
-    confidence = _validation_confidence(len(completed_rows), recent_median=recent_median, all_median=all_median)
+    confidence = _validation_confidence(
+        len(completed_rows), recent_median=recent_median, all_median=all_median
+    )
     exclusion_reasons: dict[str, int] = {}
     for item in rows:
         if item.exclusion_reason:
-            exclusion_reasons[item.exclusion_reason] = exclusion_reasons.get(item.exclusion_reason, 0) + 1
+            exclusion_reasons[item.exclusion_reason] = (
+                exclusion_reasons.get(item.exclusion_reason, 0) + 1
+            )
     return {
         "sample_count": len(completed_rows),
         "excluded_count": excluded_count,
@@ -2104,7 +2221,9 @@ async def _label_outcome_summary(
     grouped: dict[tuple[str, str], dict[int, list[EtfLabelOutcome]]] = {}
     contract_groups: dict[str, int] = {}
     for row in rows:
-        grouped.setdefault((row.label, row.entry_timing_label), {}).setdefault(row.horizon_days, []).append(row)
+        grouped.setdefault((row.label, row.entry_timing_label), {}).setdefault(
+            row.horizon_days, []
+        ).append(row)
         metrics = dict(row.metrics_json or {})
         group_key = " / ".join(
             [
@@ -2119,7 +2238,9 @@ async def _label_outcome_summary(
     groups: list[dict[str, Any]] = []
     for (label, entry_label), windows in sorted(grouped.items()):
         window_summary = {
-            str(window): _summarize_outcome_rows(windows.get(window, []), len(windows.get(window, [])))
+            str(window): _summarize_outcome_rows(
+                windows.get(window, []), len(windows.get(window, []))
+            )
             for window in _LABEL_VALIDATION_WINDOWS
         }
         groups.append(
@@ -2180,7 +2301,9 @@ class _ReplayBucketStats:
 
         self.excluded_count += 1
         if sample.exclusion_reason:
-            self.exclusion_reasons[sample.exclusion_reason] = self.exclusion_reasons.get(sample.exclusion_reason, 0) + 1
+            self.exclusion_reasons[sample.exclusion_reason] = (
+                self.exclusion_reasons.get(sample.exclusion_reason, 0) + 1
+            )
 
     def summary(self) -> dict[str, Any]:
         if not self.returns:
@@ -2280,13 +2403,18 @@ class _ScoreBucketStats:
                 self.exclusion_reasons[key] = self.exclusion_reasons.get(key, 0) + 1
 
         if completed_payloads and len(completed_payloads) == len(outcomes):
-            forward_return = mean(float(payload["forward_return"]) for payload in completed_payloads)
+            forward_return = mean(
+                float(payload["forward_return"]) for payload in completed_payloads
+            )
             self.returns.append(forward_return)
             self.drawdowns.append(
                 min(float(payload.get("adverse_drawdown") or 0.0) for payload in completed_payloads)
             )
             self.excursions.append(
-                mean(float(payload.get("favorable_excursion") or 0.0) for payload in completed_payloads)
+                mean(
+                    float(payload.get("favorable_excursion") or 0.0)
+                    for payload in completed_payloads
+                )
             )
             self.recent_returns.append((signal_date, forward_return))
             self.returns_by_date[signal_date] = forward_return
@@ -2378,7 +2506,9 @@ class _ScoreBucketStats:
             "pending_count": self.pending_count,
             "coverage": round(coverage, 4),
             "asset_coverage": round(asset_coverage, 4),
-            "universe_coverage": round(mean(self.universe_coverages), 4) if self.universe_coverages else None,
+            "universe_coverage": round(mean(self.universe_coverages), 4)
+            if self.universe_coverages
+            else None,
             "turnover": round(mean(self.turnover_values), 6) if self.turnover_values else None,
             "cost_per_round_trip": round(mean(self.cost_values), 6) if self.cost_values else None,
             "overlapping_signal_date_count": self.overlapping_count,
@@ -2402,8 +2532,7 @@ def _date_block_bootstrap_interval(values: list[float]) -> list[float] | None:
         return None
     random = Random(f"score-bucket-bootstrap-v1:{','.join(f'{value:.12f}' for value in values)}")
     sample_means = sorted(
-        mean(values[random.randrange(len(values))] for _ in values)
-        for _ in range(1_000)
+        mean(values[random.randrange(len(values))] for _ in values) for _ in range(1_000)
     )
     return [
         round(sample_means[int((len(sample_means) - 1) * 0.025)], 6),
@@ -2468,18 +2597,22 @@ def _score_bucket_sufficiency_reasons(metrics: dict[str, Any]) -> list[str]:
         )
     ):
         reasons.append("missing_adjusted_entry_or_exit_legs")
-    if "paired_sample_count" in metrics and int(
-        metrics.get("paired_sample_count") or 0
-    ) < _SCORE_BUCKET_MIN_INDEPENDENT_DATES:
+    if (
+        "paired_sample_count" in metrics
+        and int(metrics.get("paired_sample_count") or 0) < _SCORE_BUCKET_MIN_INDEPENDENT_DATES
+    ):
         reasons.append("insufficient_paired_dates")
-    if "paired_coverage" in metrics and float(
-        metrics.get("paired_coverage") or 0.0
-    ) < _SCORE_BUCKET_MIN_COVERAGE:
+    if (
+        "paired_coverage" in metrics
+        and float(metrics.get("paired_coverage") or 0.0) < _SCORE_BUCKET_MIN_COVERAGE
+    ):
         reasons.append("low_paired_coverage")
     return reasons
 
 
-def _source_evidence_contract_groups(source_snapshots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _source_evidence_contract_groups(
+    source_snapshots: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     identity_fields = (
         "ranking_contract_hash",
         "scope_kind",
@@ -2494,7 +2627,9 @@ def _source_evidence_contract_groups(source_snapshots: list[dict[str, Any]]) -> 
     )
     grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
     for snapshot in source_snapshots:
-        grouped.setdefault(tuple(snapshot.get(field) for field in identity_fields), []).append(snapshot)
+        grouped.setdefault(tuple(snapshot.get(field) for field in identity_fields), []).append(
+            snapshot
+        )
     return [
         {
             "identity": {field: key[index] for index, field in enumerate(identity_fields)},
@@ -2503,7 +2638,9 @@ def _source_evidence_contract_groups(source_snapshots: list[dict[str, Any]]) -> 
                 key=lambda snapshot: (snapshot["source_date"], snapshot["source_signal_run_id"]),
             ),
         }
-        for key, snapshots in sorted(grouped.items(), key=lambda item: tuple(str(value) for value in item[0]))
+        for key, snapshots in sorted(
+            grouped.items(), key=lambda item: tuple(str(value) for value in item[0])
+        )
     ]
 
 
@@ -2594,7 +2731,9 @@ async def run_etf_label_historical_replay(
     started_at = utcnow()
     horizons = list(_LABEL_VALIDATION_WINDOWS)
     effective_batch_size = max(1, batch_size)
-    universe_scope = _LABEL_REPLAY_SCOPE_ALL_ELIGIBLE if max_assets is None else _LABEL_REPLAY_SCOPE_LIMITED
+    universe_scope = (
+        _LABEL_REPLAY_SCOPE_ALL_ELIGIBLE if max_assets is None else _LABEL_REPLAY_SCOPE_LIMITED
+    )
     run = EtfSignalValidationRun(
         status=RUN_STATUS_RUNNING,
         started_at=started_at,
@@ -2677,8 +2816,16 @@ async def run_etf_label_historical_replay(
         replay_indices = range(max(0, len(rows) - days), len(rows))
         for index in replay_indices:
             replay_row = rows[index]
-            replay_start = replay_row.trade_date if replay_start is None else min(replay_start, replay_row.trade_date)
-            replay_end = replay_row.trade_date if replay_end is None else max(replay_end, replay_row.trade_date)
+            replay_start = (
+                replay_row.trade_date
+                if replay_start is None
+                else min(replay_start, replay_row.trade_date)
+            )
+            replay_end = (
+                replay_row.trade_date
+                if replay_end is None
+                else max(replay_end, replay_row.trade_date)
+            )
             series = _price_points_from_rows(rows[: index + 1])
             base_exclusion: str | None
             if len(series) < 20:
@@ -2725,8 +2872,12 @@ async def run_etf_label_historical_replay(
                 else:
                     excluded_samples += 1
                     if sample.exclusion_reason:
-                        exclusion_reasons[sample.exclusion_reason] = exclusion_reasons.get(sample.exclusion_reason, 0) + 1
-                bucket_stats.setdefault((sample.label, sample.entry_timing_label, horizon), _ReplayBucketStats()).add(sample)
+                        exclusion_reasons[sample.exclusion_reason] = (
+                            exclusion_reasons.get(sample.exclusion_reason, 0) + 1
+                        )
+                bucket_stats.setdefault(
+                    (sample.label, sample.entry_timing_label, horizon), _ReplayBucketStats()
+                ).add(sample)
                 session.add(sample)
 
         if processed_assets % effective_batch_size == 0:
@@ -2942,7 +3093,9 @@ async def _score_bucket_signal_items(
         score = item.ranking_score
         if score is None:
             breakdown = (item.score_breakdown_json or {}).get(_SCORE_BUCKET_SCORE_VERSION)
-            declared_score = breakdown.get(_SCORE_BUCKET_SCORE_FIELD) if isinstance(breakdown, Mapping) else None
+            declared_score = (
+                breakdown.get(_SCORE_BUCKET_SCORE_FIELD) if isinstance(breakdown, Mapping) else None
+            )
             reason = (
                 "non_finite_ranking_score"
                 if isinstance(declared_score, int | float) and not math.isfinite(declared_score)
@@ -2975,7 +3128,13 @@ async def _score_bucket_signal_items(
             )
             continue
         scored.append((item, score))
-    scored.sort(key=lambda pair: (-pair[1], pair[0].global_rank or pair[0].rank or 999999, pair[0].asset_code))
+    scored.sort(
+        key=lambda pair: (
+            -pair[1],
+            pair[0].global_rank or pair[0].rank or 999999,
+            pair[0].asset_code,
+        )
+    )
     return scored, exclusions
 
 
@@ -3091,10 +3250,7 @@ async def _calculate_etf_score_bucket_validation(
         )
     )
     source_from_date = (
-        min(
-            source_run.as_of_trade_date or source_run.as_of_date
-            for source_run in source_runs
-        )
+        min(source_run.as_of_trade_date or source_run.as_of_date for source_run in source_runs)
         if source_runs
         else date.today() - timedelta(days=days)
     )
@@ -3140,7 +3296,9 @@ async def _calculate_etf_score_bucket_validation(
     replay_end: date | None = None
     max_horizon = max(horizons)
 
-    for source_run in sorted(source_runs, key=lambda run: (run.as_of_trade_date or run.as_of_date, run.id)):
+    for source_run in sorted(
+        source_runs, key=lambda run: (run.as_of_trade_date or run.as_of_date, run.id)
+    ):
         signal_date = source_run.as_of_trade_date or source_run.as_of_date
         source_snapshots.append(
             {
@@ -3262,7 +3420,9 @@ async def _calculate_etf_score_bucket_validation(
                 last_accepted_exit_by_horizon[horizon] = max(exit_dates)
 
     if not source_signal_run_ids:
-        stable_excluded_codes, stable_excluded_items = _stable_score_bucket_exclusions(excluded_codes, excluded_items)
+        stable_excluded_codes, stable_excluded_items = _stable_score_bucket_exclusions(
+            excluded_codes, excluded_items
+        )
         run.status = RUN_STATUS_FAILED
         run.finished_at = utcnow()
         run.error_message = "历史 ETF signal run 没有可用真实综合关注分。"
@@ -3303,9 +3463,7 @@ async def _calculate_etf_score_bucket_validation(
                 if label == "Top 10" and entry_label == "cumulative" and window == 5
                 else "exploratory"
             )
-            metrics["sufficiency_reasons"] = _score_bucket_sufficiency_reasons(
-                metrics
-            )
+            metrics["sufficiency_reasons"] = _score_bucket_sufficiency_reasons(metrics)
             windows[str(window)] = metrics
         groups.append(
             {
@@ -3367,7 +3525,10 @@ async def _calculate_etf_score_bucket_validation(
     run.as_of_date = replay_end or date.today()
     primary_source = max(
         (source_run for source_run in source_runs if source_run.id in source_signal_run_ids),
-        key=lambda source_run: (source_run.as_of_trade_date or source_run.as_of_date, source_run.id),
+        key=lambda source_run: (
+            source_run.as_of_trade_date or source_run.as_of_date,
+            source_run.id,
+        ),
     )
     run.source_signal_run_id = primary_source.id
     run.source_ranking_contract_hash = primary_source.ranking_contract_hash
@@ -3438,18 +3599,24 @@ async def latest_signal_validation_run(
     *,
     validation_mode: str | None = None,
 ) -> EtfSignalValidationRun | None:
-    query = select(EtfSignalValidationRun).where(EtfSignalValidationRun.asset_type == ASSET_TYPE_ETF)
+    query = select(EtfSignalValidationRun).where(
+        EtfSignalValidationRun.asset_type == ASSET_TYPE_ETF
+    )
     if validation_mode is not None:
         query = query.where(EtfSignalValidationRun.validation_mode == validation_mode)
     return cast(
         EtfSignalValidationRun | None,
         await session.scalar(
-            query.order_by(EtfSignalValidationRun.as_of_date.desc(), EtfSignalValidationRun.id.desc())
+            query.order_by(
+                EtfSignalValidationRun.as_of_date.desc(), EtfSignalValidationRun.id.desc()
+            )
         ),
     )
 
 
-async def _recent_outcome_examples(session: AsyncSession) -> dict[tuple[str, str], list[dict[str, Any]]]:
+async def _recent_outcome_examples(
+    session: AsyncSession,
+) -> dict[tuple[str, str], list[dict[str, Any]]]:
     rows = list(
         (
             await session.scalars(
@@ -3515,7 +3682,9 @@ async def _validation_evidence_for_run(
                 "confidence": "insufficient",
                 "confidence_label": "样本不足",
                 "horizons": {},
-                "recent_examples": examples_by_label.get(key, []) if validation_mode == VALIDATION_MODE_FORWARD_LIVE else [],
+                "recent_examples": examples_by_label.get(key, [])
+                if validation_mode == VALIDATION_MODE_FORWARD_LIVE
+                else [],
             },
         )
         metrics = dict(row.metrics_json or {})
@@ -3530,7 +3699,8 @@ async def _validation_evidence_for_run(
             "worst_forward_drawdown": row.worst_forward_drawdown,
             "favorable_excursion_median": metrics.get("favorable_excursion_median"),
             "confidence": row.confidence,
-            "confidence_label": metrics.get("confidence_label") or _validation_confidence_label(row.confidence),
+            "confidence_label": metrics.get("confidence_label")
+            or _validation_confidence_label(row.confidence),
             "exclusion_reasons": metrics.get("exclusion_reasons", {}),
         }
         evidence["horizons"][str(row.horizon_days)] = horizon
@@ -3572,13 +3742,27 @@ async def _validation_evidence_for_run(
                 reasons = horizon.get("exclusion_reasons")
                 if isinstance(reasons, dict):
                     for key, count in reasons.items():
-                        exclusion_summary[str(key)] = exclusion_summary.get(str(key), 0) + int(count or 0)
+                        exclusion_summary[str(key)] = exclusion_summary.get(str(key), 0) + int(
+                            count or 0
+                        )
         degradation_warning = None
         if isinstance(five_day, dict) and five_day.get("median_return") is not None:
-            if float(five_day["median_return"] or 0.0) < 0 or float(five_day.get("win_rate") or 0.0) < 0.45:
-                degradation_warning = "近5日历史验收样本中位收益或胜率偏弱，标签有效性需要降级观察。"
-        if degradation_warning is None and isinstance(one_day, dict) and one_day.get("median_return") is not None:
-            if float(one_day["median_return"] or 0.0) < 0 and evidence.get("confidence") == "sufficient":
+            if (
+                float(five_day["median_return"] or 0.0) < 0
+                or float(five_day.get("win_rate") or 0.0) < 0.45
+            ):
+                degradation_warning = (
+                    "近5日历史验收样本中位收益或胜率偏弱，标签有效性需要降级观察。"
+                )
+        if (
+            degradation_warning is None
+            and isinstance(one_day, dict)
+            and one_day.get("median_return") is not None
+        ):
+            if (
+                float(one_day["median_return"] or 0.0) < 0
+                and evidence.get("confidence") == "sufficient"
+            ):
                 degradation_warning = "近1日历史验收出现转弱迹象，短线标签需要结合当日走势复核。"
         evidence["freshness"] = {
             "as_of_date": run.as_of_date.isoformat(),
@@ -3596,12 +3780,20 @@ async def _validation_evidence_for_run(
     return grouped
 
 
-async def latest_validation_evidence_by_label(session: AsyncSession) -> dict[tuple[str, str], dict[str, Any]]:
-    historical_run = await latest_signal_validation_run(session, validation_mode=VALIDATION_MODE_HISTORICAL_REPLAY)
-    forward_run = await latest_signal_validation_run(session, validation_mode=VALIDATION_MODE_FORWARD_LIVE)
+async def latest_validation_evidence_by_label(
+    session: AsyncSession,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    historical_run = await latest_signal_validation_run(
+        session, validation_mode=VALIDATION_MODE_HISTORICAL_REPLAY
+    )
+    forward_run = await latest_signal_validation_run(
+        session, validation_mode=VALIDATION_MODE_FORWARD_LIVE
+    )
     examples_by_label = await _recent_outcome_examples(session) if forward_run is not None else {}
     historical = await _validation_evidence_for_run(session, historical_run)
-    forward = await _validation_evidence_for_run(session, forward_run, examples_by_label=examples_by_label)
+    forward = await _validation_evidence_for_run(
+        session, forward_run, examples_by_label=examples_by_label
+    )
     keys = set(historical) | set(forward)
     merged: dict[tuple[str, str], dict[str, Any]] = {}
     for key in keys:
@@ -3614,7 +3806,10 @@ async def latest_validation_evidence_by_label(session: AsyncSession) -> dict[tup
         primary["evidence_tracks"] = tracks
         primary["historical_replay"] = tracks.get(VALIDATION_MODE_HISTORICAL_REPLAY)
         primary["forward_live"] = tracks.get(VALIDATION_MODE_FORWARD_LIVE)
-        if VALIDATION_MODE_HISTORICAL_REPLAY in tracks and VALIDATION_MODE_FORWARD_LIVE not in tracks:
+        if (
+            VALIDATION_MODE_HISTORICAL_REPLAY in tracks
+            and VALIDATION_MODE_FORWARD_LIVE not in tracks
+        ):
             primary["degradation_warning"] = (
                 primary.get("degradation_warning")
                 or "真实前瞻样本仍在积累，历史回放只能作为研究参考。"
@@ -3624,8 +3819,12 @@ async def latest_validation_evidence_by_label(session: AsyncSession) -> dict[tup
 
 
 async def latest_label_validation_summary(session: AsyncSession) -> dict[str, Any]:
-    historical_run = await latest_signal_validation_run(session, validation_mode=VALIDATION_MODE_HISTORICAL_REPLAY)
-    forward_run = await latest_signal_validation_run(session, validation_mode=VALIDATION_MODE_FORWARD_LIVE)
+    historical_run = await latest_signal_validation_run(
+        session, validation_mode=VALIDATION_MODE_HISTORICAL_REPLAY
+    )
+    forward_run = await latest_signal_validation_run(
+        session, validation_mode=VALIDATION_MODE_FORWARD_LIVE
+    )
     if historical_run is None and forward_run is None:
         return {}
     primary = historical_run or forward_run
@@ -3652,7 +3851,9 @@ async def latest_label_validation_summary(session: AsyncSession) -> dict[str, An
 
 
 async def latest_score_bucket_validation_summary(session: AsyncSession) -> dict[str, Any]:
-    run = await latest_signal_validation_run(session, validation_mode=VALIDATION_MODE_SCORE_BUCKET_REPLAY)
+    run = await latest_signal_validation_run(
+        session, validation_mode=VALIDATION_MODE_SCORE_BUCKET_REPLAY
+    )
     if run is None:
         return {}
     summary = dict(run.summary_json or {})
@@ -3732,7 +3933,10 @@ async def run_etf_signal_validation(session: AsyncSession) -> EtfSignalValidatio
     await session.refresh(run)
     return run
 
-def _rationale(metadata: ShortResearchAsset, metrics: dict[str, Any], conclusion: str) -> dict[str, Any]:
+
+def _rationale(
+    metadata: ShortResearchAsset, metrics: dict[str, Any], conclusion: str
+) -> dict[str, Any]:
     trend_evidence = [
         f"近 5 日 {_format_percent(metrics['return_5d'])}",
         f"近 10 日 {_format_percent(metrics['return_10d'])}",
@@ -3745,7 +3949,11 @@ def _rationale(metadata: ShortResearchAsset, metrics: dict[str, Any], conclusion
     ]
     if metadata.asset_type == ASSET_TYPE_ETF:
         turnover = metrics["average_turnover_20d"]
-        risk_evidence.append(f"20 日平均成交额 {turnover / 100_000_000:.2f} 亿元" if turnover else "20 日平均成交额 暂无")
+        risk_evidence.append(
+            f"20 日平均成交额 {turnover / 100_000_000:.2f} 亿元"
+            if turnover
+            else "20 日平均成交额 暂无"
+        )
     sample_level = _sample_level(int(metrics["usable_days"]))
     reason = (
         f"{conclusion}：综合分 {float(metrics['total_score']):.1f}，"
@@ -3901,10 +4109,14 @@ def _with_final_score_v2(assets: list[ComputedAsset]) -> list[ComputedAsset]:
             "score_confidence": final_breakdown.get("confidence"),
             "score_limitation_reasons": final_breakdown.get("limitation_reasons", []),
         }
-        reliability_component = (final_breakdown.get("components") or {}).get("data_reliability") or {}
+        reliability_component = (final_breakdown.get("components") or {}).get(
+            "data_reliability"
+        ) or {}
         if isinstance(reliability_component, dict):
             metrics["data_reliability"] = reliability_component.get("reliability")
-        conclusion = _conclusion({**metrics, "risk_flags": asset.risk_flags, "total_score": final_score})
+        conclusion = _conclusion(
+            {**metrics, "risk_flags": asset.risk_flags, "total_score": final_score}
+        )
         score_breakdown = {
             **asset.score_breakdown,
             "score_version": FINAL_SCORE_VERSION,
@@ -3986,7 +4198,10 @@ async def _with_opportunity_scores(
         )
         opportunity_metrics = dict(payload["metrics"])
         combined_metrics = {**asset.metrics, **opportunity_metrics}
-        combined_score_breakdown = {**asset.score_breakdown, "opportunity_score_v2": payload["breakdown"]}
+        combined_score_breakdown = {
+            **asset.score_breakdown,
+            "opportunity_score_v2": payload["breakdown"],
+        }
         factor_payload = build_asset_factor_payload(
             asset_name=asset.metadata.name,
             theme_tags=list(asset.metadata.theme_tags),
@@ -4000,14 +4215,19 @@ async def _with_opportunity_scores(
         factor_score = factor_metrics.get("factor_profile_score")
         if isinstance(factor_score, int | float):
             factor_metrics["opportunity_score"] = round(float(factor_score), 2)
-            factor_metrics["opportunity_score_version"] = str(factor_metrics["factor_profile_version"])
+            factor_metrics["opportunity_score_version"] = str(
+                factor_metrics["factor_profile_version"]
+            )
         catalyst_summary = str(opportunity_metrics.get("catalyst_summary") or "")
         opportunity_label = str(opportunity_metrics.get("opportunity_label") or "")
         updated.append(
             replace(
                 asset,
                 metrics={**combined_metrics, **factor_metrics},
-                score_breakdown={**combined_score_breakdown, "factor_profile_v1": factor_payload["breakdown"]},
+                score_breakdown={
+                    **combined_score_breakdown,
+                    "factor_profile_v1": factor_payload["breakdown"],
+                },
                 rationale={
                     **asset.rationale,
                     "catalyst_summary": catalyst_summary,
@@ -4118,7 +4338,11 @@ def _v3_premium_inputs(
     )
     if window_status is not None:
         reliability = "stale" if window_status == "stale" else "unavailable"
-        return {**base, "premium_input_status": window_status, "premium_input_reliability": reliability}
+        return {
+            **base,
+            "premium_input_status": window_status,
+            "premium_input_reliability": reliability,
+        }
     raw = quote.raw_json if isinstance(getattr(quote, "raw_json", None), Mapping) else {}
     if (
         getattr(quote, "freshness_status", None) != "fresh"
@@ -4409,11 +4633,7 @@ async def _with_final_score_v3_shadow(
         cutoff=decision_cutoff,
     )
     underlying_by_code = {
-        code: (
-            fact.tracked_underlying_id
-            if fact.identity_state == "resolved"
-            else None
-        )
+        code: (fact.tracked_underlying_id if fact.identity_state == "resolved" else None)
         for code, fact in underlying_facts.items()
     }
     underlying_evidence_by_code = {
@@ -4457,7 +4677,9 @@ async def _with_final_score_v3_shadow(
         asset.metadata.code: theme_keys_for_asset(
             asset_name=asset.metadata.name,
             theme_tags=list(asset.metadata.theme_tags),
-            theme_profile=asset.metrics.get("theme_profile") if isinstance(asset.metrics.get("theme_profile"), Mapping) else None,
+            theme_profile=asset.metrics.get("theme_profile")
+            if isinstance(asset.metrics.get("theme_profile"), Mapping)
+            else None,
         )
         for asset in etf_assets
     }
@@ -4533,11 +4755,14 @@ async def _with_final_score_v3_shadow(
             profile_version=ranking_input.profile_version,
             values={
                 **ranking_input.values,
-                **sector_by_code.get(ranking_input.asset_code, {"sector_input_status": "unavailable"}),
+                **sector_by_code.get(
+                    ranking_input.asset_code, {"sector_input_status": "unavailable"}
+                ),
                 "component_reliability": {
                     **dict(ranking_input.values.get("component_reliability") or {}),
                     "sector_trend": str(
-                        sector_by_code.get(ranking_input.asset_code, {}).get("sector_input_status") or "unavailable"
+                        sector_by_code.get(ranking_input.asset_code, {}).get("sector_input_status")
+                        or "unavailable"
                     ),
                     "theme_catalyst": str(
                         ranking_input.values.get("catalyst_input_reliability") or "unavailable"
@@ -4555,9 +4780,7 @@ async def _with_final_score_v3_shadow(
     ]
     manifest = final_score_v3_manifest()
     results = score_final_score_v3(inputs, manifest=manifest)
-    usable_sessions_by_code = {
-        asset.metadata.code: asset.usable_days for asset in etf_assets
-    }
+    usable_sessions_by_code = {asset.metadata.code: asset.usable_days for asset in etf_assets}
     results = {
         code: enforce_history_warmup(
             result,
@@ -4567,9 +4790,7 @@ async def _with_final_score_v3_shadow(
     }
     input_by_code = {ranking_input.asset_code: ranking_input for ranking_input in inputs}
     contract_input_keys = {
-        key
-        for component in manifest.components.values()
-        for key in component.required_inputs
+        key for component in manifest.components.values() for key in component.required_inputs
     }
     contract_input_keys.update(
         {
@@ -4627,8 +4848,12 @@ async def _with_final_score_v3_shadow(
         component_source_dates["theme_catalyst"] = theme_inputs["catalyst_effective_at"]
         component_reliability = dict(asset.metrics.get("component_reliability") or {})
         component_reliability["premium_discount"] = premium_inputs["premium_input_reliability"]
-        component_reliability["structure_liquidity"] = structure_inputs["structure_input_reliability"]
-        component_reliability["sector_trend"] = sector_inputs.get("sector_input_status") or "unavailable"
+        component_reliability["structure_liquidity"] = structure_inputs[
+            "structure_input_reliability"
+        ]
+        component_reliability["sector_trend"] = (
+            sector_inputs.get("sector_input_status") or "unavailable"
+        )
         component_reliability["theme_catalyst"] = theme_inputs["catalyst_input_reliability"]
         v3_observation_label = (
             _conclusion({"risk_flags": asset.risk_flags, "total_score": result.ranking_score})
@@ -4655,6 +4880,9 @@ async def _with_final_score_v3_shadow(
             "v3_observation_label": v3_observation_label,
             "v3_observation_explanation": v3_observation_explanation,
             "v3_metric_peer_counts": dict(result.metric_peer_counts),
+            "v3_weakest_required_primitive_peer_count": (
+                result.weakest_required_primitive_peer_count
+            ),
             "v3_missing_by_component": dict(result.missing_by_component),
             "clone_policy_active": result.clone_policy_active,
             "tracked_underlying_coverage": result.tracked_underlying_coverage,
@@ -4701,13 +4929,9 @@ async def _with_final_score_v3_shadow(
                         "missing_by_component": dict(result.missing_by_component),
                         "limitation_reasons": list(result.limitation_reasons),
                         "clone_policy_active": result.clone_policy_active,
-                        "tracked_underlying_coverage": (
-                            result.tracked_underlying_coverage
-                        ),
+                        "tracked_underlying_coverage": (result.tracked_underlying_coverage),
                         "clone_group_id": result.clone_group_id,
-                        "diversified_representative": (
-                            result.diversified_representative
-                        ),
+                        "diversified_representative": (result.diversified_representative),
                         "cap_violation": result.cap_violation,
                         "non_finite_reject": result.non_finite_reject,
                     },
@@ -4745,7 +4969,9 @@ async def compute_asset(
         usable_days_override=usable_days_override,
     )
     conclusion = _conclusion(metrics)
-    source_note = "公开 ETF 日线数据" if metadata.asset_type == ASSET_TYPE_ETF else "公开基金净值数据"
+    source_note = (
+        "公开 ETF 日线数据" if metadata.asset_type == ASSET_TYPE_ETF else "公开基金净值数据"
+    )
     score_breakdown = {
         "trend": {"score": metrics["trend_score"], "weight": 0.55},
         "risk": {"score": metrics["risk_score"], "weight": 0.30},
@@ -4911,7 +5137,9 @@ def compute_asset_for_replay_from_series(
 ) -> ComputedAsset:
     metrics = _score_metrics(metadata, series, as_of_date)
     conclusion = _conclusion(metrics)
-    source_note = "历史 ETF 日线数据" if metadata.asset_type == ASSET_TYPE_ETF else "历史基金净值数据"
+    source_note = (
+        "历史 ETF 日线数据" if metadata.asset_type == ASSET_TYPE_ETF else "历史基金净值数据"
+    )
     metric_keys = (
         "return_5d",
         "return_10d",
@@ -4962,7 +5190,9 @@ def compute_asset_for_replay_from_series(
                 flag in metrics["risk_flags"] for flag in ("数据不足", "数据滞后", "流动性不足")
             ),
             "default_exclusion_reasons": [
-                flag for flag in metrics["risk_flags"] if flag in {"数据不足", "数据滞后", "流动性不足"}
+                flag
+                for flag in metrics["risk_flags"]
+                if flag in {"数据不足", "数据滞后", "流动性不足"}
             ],
             "replay_as_of_date": as_of_date,
         }
@@ -5035,11 +5265,19 @@ def _sort_key(asset: ComputedAsset, sort: str) -> tuple[int, float, str]:
 
     def descending(value: Any) -> tuple[int, float, str]:
         numeric = finite(value)
-        return (0, -numeric, asset.metadata.code) if numeric is not None else (1, 0.0, asset.metadata.code)
+        return (
+            (0, -numeric, asset.metadata.code)
+            if numeric is not None
+            else (1, 0.0, asset.metadata.code)
+        )
 
     def ascending(value: Any) -> tuple[int, float, str]:
         numeric = finite(value)
-        return (0, numeric, asset.metadata.code) if numeric is not None else (1, 0.0, asset.metadata.code)
+        return (
+            (0, numeric, asset.metadata.code)
+            if numeric is not None
+            else (1, 0.0, asset.metadata.code)
+        )
 
     metrics = asset.metrics
     if sort == "opportunity":
@@ -5107,9 +5345,7 @@ async def compute_etf_snapshot_assets(
         start_index = candidate_codes.index(resume_after_code) + 1
         if any(code not in resumed for code in candidate_codes[:start_index]):
             raise ValueError("ranking batch cursor has no persisted assets")
-    computed_by_code = {
-        code: resumed[code] for code in candidate_codes[:start_index]
-    }
+    computed_by_code = {code: resumed[code] for code in candidate_codes[:start_index]}
     for batch_start in range(start_index, len(candidates), batch_size):
         started = perf_counter()
         batch = candidates[batch_start : batch_start + batch_size]
@@ -5162,8 +5398,7 @@ async def compute_etf_snapshot_assets(
             batch_assets.append(asset)
         processed = len(batch_assets)
         research_eligible = sum(
-            asset.metrics.get("research_score_eligible") is True
-            for asset in batch_assets
+            asset.metrics.get("research_score_eligible") is True for asset in batch_assets
         )
         progress = {
             "batch_number": batch_start // batch_size + 1,
@@ -5178,18 +5413,13 @@ async def compute_etf_snapshot_assets(
             "failed": len(failed),
             "failures": failed,
             "remaining": len(candidates) - batch_start - len(batch),
-            "peak_history_row_bound": len(batch)
-            * ETF_SNAPSHOT_SCORE_HISTORY_ROWS,
+            "peak_history_row_bound": len(batch) * ETF_SNAPSHOT_SCORE_HISTORY_ROWS,
         }
         if batch_audit is not None:
             batch_audit.append(progress)
         if batch_progress_callback is not None:
             await batch_progress_callback(progress)
-    computed = [
-        computed_by_code[code]
-        for code in candidate_codes
-        if code in computed_by_code
-    ]
+    computed = [computed_by_code[code] for code in candidate_codes if code in computed_by_code]
     computed = _with_final_score_v2(computed)
     computed = _with_sector_trend_scores(computed)
     computed = await _with_opportunity_scores(session, computed, as_of_date)
@@ -5224,7 +5454,9 @@ async def list_computed_assets(
         )
         for item in candidates
     ]
-    if asset_type == ASSET_TYPE_ETF or any(item.metadata.asset_type == ASSET_TYPE_ETF for item in computed):
+    if asset_type == ASSET_TYPE_ETF or any(
+        item.metadata.asset_type == ASSET_TYPE_ETF for item in computed
+    ):
         computed = _with_final_score_v2(computed)
         computed = _with_sector_trend_scores(computed)
         computed = await _with_opportunity_scores(session, computed, effective_date)
@@ -5235,10 +5467,16 @@ async def list_computed_assets(
             effective_date,
             decision_cutoff=effective_cutoff,
         )
-    if asset_type == ASSET_TYPE_ETF and universe not in {UNIVERSE_DEFAULT, UNIVERSE_ALL, UNIVERSE_ILLIQUID}:
+    if asset_type == ASSET_TYPE_ETF and universe not in {
+        UNIVERSE_DEFAULT,
+        UNIVERSE_ALL,
+        UNIVERSE_ILLIQUID,
+    }:
         raise ValueError("ETF universe 只支持 default、all、illiquid")
     computed.sort(key=lambda item: _sort_key(item, sort))
-    globally_ranked = [replace(item, rank=index, global_rank=index) for index, item in enumerate(computed, start=1)]
+    globally_ranked = [
+        replace(item, rank=index, global_rank=index) for index, item in enumerate(computed, start=1)
+    ]
     filtered = [
         item
         for item in globally_ranked
@@ -5318,7 +5556,9 @@ async def get_asset_detail(
         or computed.rationale.get("entry_timing_reason")
         or "使用最新短线信号缓存展示当前评分。"
     )
-    risk_explanation = str(computed.rationale.get("risk_explanation") or "风险说明请结合买点、回撤和数据质量查看。")
+    risk_explanation = str(
+        computed.rationale.get("risk_explanation") or "风险说明请结合买点、回撤和数据质量查看。"
+    )
     opposing_view = str(computed.rationale.get("opposing_view") or "暂无额外反方说明。")
     sections = {
         "投资方向": computed.metadata.investment_direction,
@@ -5344,7 +5584,12 @@ async def run_signal_generation(
         status=RUN_STATUS_RUNNING,
         as_of_date=effective_date,
         scope_kind=scope_kind_for_filters(theme=theme, codes=codes),
-        config_json={"asset_type": asset_type, "theme": theme, "codes": codes or [], "language": "research_only"},
+        config_json={
+            "asset_type": asset_type,
+            "theme": theme,
+            "codes": codes or [],
+            "language": "research_only",
+        },
         summary_json={},
     )
     session.add(run)
@@ -5417,8 +5662,12 @@ async def run_signal_generation(
         raise
 
 
-async def signal_run_items_as_assets(session: AsyncSession, run: ShortResearchSignalRun) -> list[ComputedAsset]:
-    cached_assets, _total = await cached_signal_assets(session, run, sort="score", universe=UNIVERSE_ALL)
+async def signal_run_items_as_assets(
+    session: AsyncSession, run: ShortResearchSignalRun
+) -> list[ComputedAsset]:
+    cached_assets, _total = await cached_signal_assets(
+        session, run, sort="score", universe=UNIVERSE_ALL
+    )
     return cached_assets
 
 
@@ -5440,7 +5689,11 @@ async def scheduled_etf_job_freshness(session: AsyncSession) -> dict[str, dict[s
     for job_name, max_age in ETF_JOB_FRESHNESS_WINDOWS.items():
         latest_run = latest_by_name.get(job_name)
         if latest_run is None:
-            freshness[job_name] = {"status": "waiting", "finished_at": None, "last_job_status": None}
+            freshness[job_name] = {
+                "status": "waiting",
+                "finished_at": None,
+                "last_job_status": None,
+            }
             continue
         if latest_run.status == "running":
             status = "running"
@@ -5477,7 +5730,9 @@ async def status_summary(
     etf_total = int(await session.scalar(select(func.count()).select_from(TradableEtf)) or 0)
     etf_eligible = int(
         await session.scalar(
-            select(func.count()).select_from(TradableEtf).where(TradableEtf.is_short_term_eligible.is_(True))
+            select(func.count())
+            .select_from(TradableEtf)
+            .where(TradableEtf.is_short_term_eligible.is_(True))
         )
         or 0
     )
@@ -5486,11 +5741,7 @@ async def status_summary(
         if asset_type == ASSET_TYPE_ETF:
             surfaces = (latest_etf_run.summary_json or {}).get("ranking_surfaces")
             research = surfaces.get("research") if isinstance(surfaces, dict) else None
-            persisted_count = (
-                research.get("eligible_count")
-                if isinstance(research, dict)
-                else None
-            )
+            persisted_count = research.get("eligible_count") if isinstance(research, dict) else None
             if isinstance(persisted_count, int) and not isinstance(
                 persisted_count,
                 bool,
@@ -5547,19 +5798,17 @@ async def status_summary(
     )
     etf_priced_count = int(
         await session.scalar(
-            select(func.count(func.distinct(EtfDataHealth.etf_code))).where(EtfDataHealth.successful_rows > 0)
+            select(func.count(func.distinct(EtfDataHealth.etf_code))).where(
+                EtfDataHealth.successful_rows > 0
+            )
         )
         or 0
     )
     if latest_run is not None:
         if asset_type is None:
             items = await list_signal_items(session, latest_run.id)
-            observable_count = sum(
-                1 for item in items if item.conclusion == CONCLUSION_WATCH
-            )
-            high_risk_count = sum(
-                1 for item in items if item.conclusion == CONCLUSION_HIGH_WATCH
-            )
+            observable_count = sum(1 for item in items if item.conclusion == CONCLUSION_WATCH)
+            high_risk_count = sum(1 for item in items if item.conclusion == CONCLUSION_HIGH_WATCH)
         else:
             conclusion_rows = await session.execute(
                 select(
@@ -5573,25 +5822,22 @@ async def status_summary(
                 .group_by(ShortResearchSignalItem.conclusion)
             )
             conclusion_counts = {
-                str(conclusion): int(count)
-                for conclusion, count in conclusion_rows
+                str(conclusion): int(count) for conclusion, count in conclusion_rows
             }
             observable_count = conclusion_counts.get(CONCLUSION_WATCH, 0)
             high_risk_count = conclusion_counts.get(CONCLUSION_HIGH_WATCH, 0)
     else:
         observable_count = 0
         high_risk_count = 0
-    health = (
-        await data_health(session, asset_type=asset_type)
-        if include_health
-        else []
-    )
+    health = await data_health(session, asset_type=asset_type) if include_health else []
     if include_health:
         etf_data_stale_count = sum(
             1 for item in health if item["asset_type"] == ASSET_TYPE_ETF and item["is_stale"]
         )
         priced_asset_count = sum(1 for item in health if item["usable_days"] > 0)
-        data_issue_count = sum(1 for item in health if item["status"] != "success" or item["is_stale"])
+        data_issue_count = sum(
+            1 for item in health if item["status"] != "success" or item["is_stale"]
+        )
     else:
         priced_asset_count = fund_priced_count + etf_priced_count
         data_issue_count = etf_data_stale_count + etf_failed
@@ -5599,14 +5845,18 @@ async def status_summary(
     label_validation_generated_at = None
     if isinstance(label_validation, dict) and label_validation.get("generated_at"):
         try:
-            label_validation_generated_at = datetime.fromisoformat(str(label_validation["generated_at"]))
+            label_validation_generated_at = datetime.fromisoformat(
+                str(label_validation["generated_at"])
+            )
         except ValueError:
             label_validation_generated_at = None
     score_bucket_validation = await latest_score_bucket_validation_summary(session)
     score_bucket_validation_generated_at = None
     if isinstance(score_bucket_validation, dict) and score_bucket_validation.get("generated_at"):
         try:
-            score_bucket_validation_generated_at = datetime.fromisoformat(str(score_bucket_validation["generated_at"]))
+            score_bucket_validation_generated_at = datetime.fromisoformat(
+                str(score_bucket_validation["generated_at"])
+            )
         except ValueError:
             score_bucket_validation_generated_at = None
     theme_coverage = await theme_coverage_summary(session)
@@ -5616,7 +5866,9 @@ async def status_summary(
         "theme_coverage": theme_coverage,
         "label_validation": label_validation if isinstance(label_validation, dict) else {},
         "label_validation_generated_at": label_validation_generated_at,
-        "score_bucket_validation": score_bucket_validation if isinstance(score_bucket_validation, dict) else {},
+        "score_bucket_validation": score_bucket_validation
+        if isinstance(score_bucket_validation, dict)
+        else {},
         "score_bucket_validation_generated_at": score_bucket_validation_generated_at,
         "asset_count": len(DEFAULT_SHORT_RESEARCH_ASSETS),
         "fund_count": len(DEFAULT_SHORT_RESEARCH_FUND_CODES),
@@ -5712,7 +5964,9 @@ async def data_health(
             .group_by(EtfPriceHistory.etf_code)
         )
         research_count_by_code = {str(code): int(count) for code, count in research_counts}
-        health_rows = await session.scalars(select(EtfDataHealth).where(EtfDataHealth.etf_code.in_(etf_codes)))
+        health_rows = await session.scalars(
+            select(EtfDataHealth).where(EtfDataHealth.etf_code.in_(etf_codes))
+        )
         health_by_code = {row.etf_code: row for row in health_rows.all()}
 
     sync_state, deferred_count = await _latest_etf_sync_state(session)
@@ -5753,7 +6007,9 @@ async def data_health(
         etf_health = health_by_code.get(metadata.code)
         raw_latest_date = raw.trade_date if raw else None
         research_latest_date = research.trade_date if research else None
-        is_stale = research_latest_date is None or (today - research_latest_date).days > STALE_DATA_DAYS
+        is_stale = (
+            research_latest_date is None or (today - research_latest_date).days > STALE_DATA_DAYS
+        )
         issues: list[str] = []
         if raw is None:
             issues.append("missing_raw_daily_price")
@@ -5788,7 +6044,8 @@ async def data_health(
                 "raw_latest_date": raw_latest_date,
                 "research_latest_date": research_latest_date,
                 "usable_days": research_count_by_code.get(metadata.code, 0),
-                "provider": (raw.data_provider if raw else None) or (etf_health.provider if etf_health else None),
+                "provider": (raw.data_provider if raw else None)
+                or (etf_health.provider if etf_health else None),
                 "provider_version": raw.provider_version if raw else None,
                 "research_price_basis": research.research_price_basis if research else None,
                 "source_timestamp": raw.source_timestamp if raw else None,
@@ -5814,7 +6071,10 @@ def _result_count(result: dict[str, Any], key: str) -> int:
 
 def _etf_sync_batch_size() -> int:
     try:
-        return max(1, int(os.getenv("SHORT_RESEARCH_ETF_SYNC_BATCH_SIZE", str(DEFAULT_ETF_SYNC_BATCH_SIZE))))
+        return max(
+            1,
+            int(os.getenv("SHORT_RESEARCH_ETF_SYNC_BATCH_SIZE", str(DEFAULT_ETF_SYNC_BATCH_SIZE))),
+        )
     except ValueError:
         return DEFAULT_ETF_SYNC_BATCH_SIZE
 
@@ -5823,7 +6083,9 @@ def _etf_sync_max_batches() -> int:
     try:
         return max(
             1,
-            int(os.getenv("SHORT_RESEARCH_ETF_SYNC_MAX_BATCHES", str(DEFAULT_ETF_SYNC_MAX_BATCHES))),
+            int(
+                os.getenv("SHORT_RESEARCH_ETF_SYNC_MAX_BATCHES", str(DEFAULT_ETF_SYNC_MAX_BATCHES))
+            ),
         )
     except ValueError:
         return DEFAULT_ETF_SYNC_MAX_BATCHES
@@ -5849,7 +6111,9 @@ async def _prioritize_etf_sync_codes(
     if not codes:
         return []
     code_set = set(codes)
-    priority = list(dict.fromkeys(str(code) for code in (priority_codes or []) if str(code) in code_set))
+    priority = list(
+        dict.fromkeys(str(code) for code in (priority_codes or []) if str(code) in code_set)
+    )
     watchlist_rows = await session.scalars(
         select(TradableEtf.code).where(
             TradableEtf.code.in_(codes),
@@ -5888,7 +6152,9 @@ async def _select_bounded_etf_sync_codes(
     rows = await session.execute(
         select(TradableEtf.code, TradableEtf.is_watchlist).where(TradableEtf.code.in_(code_set))
     )
-    default_display_codes = {str(code) for code, is_watchlist in rows if is_watchlist} - priority_set
+    default_display_codes = {
+        str(code) for code, is_watchlist in rows if is_watchlist
+    } - priority_set
     latest_rows = await session.execute(
         select(EtfPriceHistory.etf_code, func.max(EtfPriceHistory.trade_date))
         .where(EtfPriceHistory.etf_code.in_(code_set))
@@ -5910,8 +6176,12 @@ async def _select_bounded_etf_sync_codes(
     )
     regular = sorted(selection_pool - set(priority), key=lambda code: (freshness(code), code))
     cursor = await session.get(EtfSyncCursor, ETF_DAILY_SYNC_CURSOR_SCOPE)
-    priority_codes_rotated = _rotate_sync_codes(priority, cursor.last_priority_code if cursor else None)
-    regular_codes_rotated = _rotate_sync_codes(regular, cursor.last_regular_code if cursor else None)
+    priority_codes_rotated = _rotate_sync_codes(
+        priority, cursor.last_priority_code if cursor else None
+    )
+    regular_codes_rotated = _rotate_sync_codes(
+        regular, cursor.last_regular_code if cursor else None
+    )
 
     selected_priority: list[str] = []
     selected_regular: list[str] = []
@@ -5926,13 +6196,21 @@ async def _select_bounded_etf_sync_codes(
         selected_regular = regular_codes_rotated[: limit - len(selected_priority)]
         remaining = limit - len(selected_priority) - len(selected_regular)
         if remaining:
-            selected_priority.extend(priority_codes_rotated[len(selected_priority) : len(selected_priority) + remaining])
+            selected_priority.extend(
+                priority_codes_rotated[len(selected_priority) : len(selected_priority) + remaining]
+            )
     else:
         selected_priority = priority_codes_rotated[:limit]
         selected_regular = regular_codes_rotated[: limit - len(selected_priority)]
 
-    last_priority_code = selected_priority[-1] if selected_priority else (cursor.last_priority_code if cursor else None)
-    last_regular_code = selected_regular[-1] if selected_regular else (cursor.last_regular_code if cursor else None)
+    last_priority_code = (
+        selected_priority[-1]
+        if selected_priority
+        else (cursor.last_priority_code if cursor else None)
+    )
+    last_regular_code = (
+        selected_regular[-1] if selected_regular else (cursor.last_regular_code if cursor else None)
+    )
     last_lane = "regular" if selected_regular else "priority" if selected_priority else None
     return EtfSyncSelection(
         codes=[*selected_priority, *selected_regular],
@@ -5973,7 +6251,9 @@ async def sync_short_research_data(
         and _matches_filters(item, asset_type=asset_type, codes=codes)
         and is_short_term_eligible_name(item.name)
     ]
-    etf_codes = await _dynamic_etf_codes(session, codes) if asset_type in (None, ASSET_TYPE_ETF) else []
+    etf_codes = (
+        await _dynamic_etf_codes(session, codes) if asset_type in (None, ASSET_TYPE_ETF) else []
+    )
     bounded_etf_sync = bool(etf_codes) and not sync_all_etfs and not codes
     sync_selection: EtfSyncSelection | None = None
     fund_result = {"funds": 0, "rows_inserted": 0, "rows_updated": 0, "failed": 0, "failures": []}
@@ -6006,7 +6286,9 @@ async def sync_short_research_data(
             batches = _chunks(sync_selection.codes, batch_size)
             batches_total = len(_chunks(etf_codes, batch_size))
         else:
-            prioritized_codes = await _prioritize_etf_sync_codes(session, etf_codes, priority_etf_codes)
+            prioritized_codes = await _prioritize_etf_sync_codes(
+                session, etf_codes, priority_etf_codes
+            )
             all_batches = _chunks(prioritized_codes, batch_size)
             batches = all_batches
             batches_total = len(all_batches)
@@ -6075,8 +6357,7 @@ def _portfolio_market_risk_observations(
                 ),
                 broad_equity=(
                     bool(asset.metrics.get("market_risk_broad_equity"))
-                    or
-                    asset.metadata.category in {"broad", "broad_index", "broad_market"}
+                    or asset.metadata.category in {"broad", "broad_index", "broad_market"}
                     or "宽基" in asset.metadata.theme_tags
                 ),
             )
@@ -6195,11 +6476,7 @@ def _portfolio_shadow_asset_input(
     if not isinstance(clone, str) or not clone.strip():
         clone = f"underlying:{underlying}" if isinstance(underlying, str) and underlying else None
     theme_profile = asset.metrics.get("theme_profile")
-    theme_group = (
-        theme_profile.get("theme_group")
-        if isinstance(theme_profile, Mapping)
-        else None
-    )
+    theme_group = theme_profile.get("theme_group") if isinstance(theme_profile, Mapping) else None
     return PortfolioRiskAssetInput(
         code=asset.metadata.code,
         weight=weight,
@@ -6305,7 +6582,10 @@ def _portfolio_candidate_group(asset: ComputedAsset) -> tuple[str, str | None]:
     exclusion_reason = _portfolio_exclusion_reason(asset)
     if exclusion_reason is not None:
         return PORTFOLIO_LAYER_EXCLUDED, exclusion_reason
-    if asset.conclusion == CONCLUSION_HIGH_WATCH and asset.entry_timing_label in _PORTFOLIO_ENTRY_TIMING_OK:
+    if (
+        asset.conclusion == CONCLUSION_HIGH_WATCH
+        and asset.entry_timing_label in _PORTFOLIO_ENTRY_TIMING_OK
+    ):
         return (
             PORTFOLIO_LAYER_SATELLITE,
             "高位观察但买点仍为健康回踩/趋势延续，只进入小仓观察层并降低权重。",
@@ -6322,7 +6602,9 @@ def _portfolio_fill_priority(asset: ComputedAsset) -> int:
     asset_class = asset.metadata.category or ""
     if asset_class == "broad" or "宽基" in tags or "宽基" in name:
         return 0
-    if asset_class in {"bond", "commodity"} or any(key in name for key in ("国债", "债", "黄金", "红利")):
+    if asset_class in {"bond", "commodity"} or any(
+        key in name for key in ("国债", "债", "黄金", "红利")
+    ):
         return 1
     if tags.intersection({"红利", "金融", "银行", "消费"}):
         return 2
@@ -6335,7 +6617,11 @@ def _portfolio_defensive_priority(asset: ComputedAsset) -> int:
     asset_class = asset.metadata.category or ""
     if asset_class in {"cash", "money"} or any(key in name for key in ("货币", "现金", "短融")):
         return 0
-    if asset_class == "bond" or "债券" in tags or any(key in name for key in ("国债", "政金债", "债券", "债ETF", "可转债")):
+    if (
+        asset_class == "bond"
+        or "债券" in tags
+        or any(key in name for key in ("国债", "政金债", "债券", "债ETF", "可转债"))
+    ):
         return 1
     if asset_class == "commodity" or "黄金" in tags or "黄金" in name:
         return 2
@@ -6356,9 +6642,7 @@ def _portfolio_theme_keys(asset: ComputedAsset) -> list[str]:
         str(profile.get("primary_theme") or "").strip(),
     ]
     filtered = [
-        item
-        for item in dict.fromkeys(keys)
-        if item and item not in {UNKNOWN_GROUP, UNKNOWN_THEME}
+        item for item in dict.fromkeys(keys) if item and item not in {UNKNOWN_GROUP, UNKNOWN_THEME}
     ]
     if filtered:
         return filtered
@@ -6405,6 +6689,7 @@ def _portfolio_fill_reason(asset: ComputedAsset, original_reason: str | None) ->
         return f"{base}原分组原因：{original_reason}"
     return base
 
+
 def _portfolio_decision_factors(
     asset: ComputedAsset,
     *,
@@ -6442,8 +6727,12 @@ def _portfolio_weight_explanation(
     confidence = asset.metrics.get("validation_confidence") or "未验证"
     sample_count = int(asset.metrics.get("validation_sample_count") or 0)
     turnover = float(asset.metrics.get("average_turnover_20d") or 0.0) / 100_000_000
-    cap_note = "，触及单只30%上限" if weight_reason and weight_reason.get("single_cap_applied") else ""
-    target_total = float((weight_reason or {}).get("portfolio_target_weight") or _PORTFOLIO_TOTAL_EXPOSURE_CAP)
+    cap_note = (
+        "，触及单只30%上限" if weight_reason and weight_reason.get("single_cap_applied") else ""
+    )
+    target_total = float(
+        (weight_reason or {}).get("portfolio_target_weight") or _PORTFOLIO_TOTAL_EXPOSURE_CAP
+    )
     cash_wait = float((weight_reason or {}).get("cash_wait_weight") or 0.0)
     exposure_note = (
         f"归一到当前合格 ETF 权重 {target_total * 100:.0f}%，剩余资金 {cash_wait * 100:.0f}% 等待"
@@ -6495,7 +6784,9 @@ def _portfolio_item(
         reason=reason,
         weight_reason=weight_reason,
     )
-    theme_profile = dict(asset.metrics.get("theme_profile") or asset.rationale.get("theme_profile") or {})
+    theme_profile = dict(
+        asset.metrics.get("theme_profile") or asset.rationale.get("theme_profile") or {}
+    )
     metrics = {
         **asset.metrics,
         "portfolio_theme_keys": _portfolio_theme_keys(asset),
@@ -6550,7 +6841,14 @@ def _portfolio_raw_weight(asset: ComputedAsset) -> tuple[float, dict[str, Any]]:
     turnover = max(1.0, float(asset.metrics.get("average_turnover_20d") or 0.0))
     liquidity_component = min(1.25, max(0.75, (turnover / 100_000_000) ** 0.2))
     drawdown_adjustment = max(0.55, 1.0 - drawdown * 1.5)
-    risk_adjusted = score_component * entry_multiplier * label_multiplier * liquidity_component * drawdown_adjustment / volatility
+    risk_adjusted = (
+        score_component
+        * entry_multiplier
+        * label_multiplier
+        * liquidity_component
+        * drawdown_adjustment
+        / volatility
+    )
     return risk_adjusted, {
         "score_component": round(score_component, 4),
         "entry_timing_multiplier": round(entry_multiplier, 4),
@@ -6569,7 +6867,9 @@ def _cap_normalized_weights(
     *,
     target_total: float = 1.0,
 ) -> list[float] | None:
-    return _cap_normalized_weights_by_caps(raw_weights, [cap for _item in raw_weights], target_total=target_total)
+    return _cap_normalized_weights_by_caps(
+        raw_weights, [cap for _item in raw_weights], target_total=target_total
+    )
 
 
 def _cap_normalized_weights_by_caps(
@@ -6618,6 +6918,7 @@ def _cap_normalized_weights_by_caps(
         weights = [weight * scale for weight in weights]
     return [round(weight, 4) for weight in weights]
 
+
 def _series_return_by_date(series: list[PricePoint], window: int = 60) -> dict[date, float]:
     recent = series[-(window + 1) :]
     returns: dict[date, float] = {}
@@ -6635,7 +6936,10 @@ def _correlation(left: dict[date, float], right: dict[date, float]) -> float | N
     right_values = [right[item] for item in common_dates]
     left_mean = mean(left_values)
     right_mean = mean(right_values)
-    numerator = sum((left_item - left_mean) * (right_item - right_mean) for left_item, right_item in zip(left_values, right_values, strict=True))
+    numerator = sum(
+        (left_item - left_mean) * (right_item - right_mean)
+        for left_item, right_item in zip(left_values, right_values, strict=True)
+    )
     left_denominator = sum((item - left_mean) ** 2 for item in left_values) ** 0.5
     right_denominator = sum((item - right_mean) ** 2 for item in right_values) ** 0.5
     if left_denominator == 0 or right_denominator == 0:
@@ -6677,9 +6981,7 @@ async def _portfolio_return_maps(
                 or float(value) <= 0
             ):
                 continue
-            values_by_code.setdefault(fact.etf_code, []).append(
-                (fact.trade_date, float(value))
-            )
+            values_by_code.setdefault(fact.etf_code, []).append((fact.trade_date, float(value)))
     result: dict[str, dict[date, float]] = {}
     for code, rows in values_by_code.items():
         returns: dict[date, float] = {}
@@ -6768,8 +7070,12 @@ def _allocation_contract_from_portfolio(
             "defensive_weight": portfolio.get("defensive_weight", 0.0),
             "cash_weight": portfolio.get("cash_weight", 0.0),
         },
-        constraints=dict(portfolio.get("constraints_used") or portfolio.get("constraint_summary") or {}),
-        data_as_of_time=portfolio.get("data_as_of_time") or portfolio.get("quote_time") or portfolio.get("daily_signal_date"),
+        constraints=dict(
+            portfolio.get("constraints_used") or portfolio.get("constraint_summary") or {}
+        ),
+        data_as_of_time=portfolio.get("data_as_of_time")
+        or portfolio.get("quote_time")
+        or portfolio.get("daily_signal_date"),
     )
 
 
@@ -6801,7 +7107,10 @@ async def observation_portfolio_from_snapshot(
         await session.scalars(
             select(EtfObservationPortfolioItem)
             .where(EtfObservationPortfolioItem.snapshot_id == snapshot.id)
-            .order_by(EtfObservationPortfolioItem.item_type.asc(), EtfObservationPortfolioItem.rank_order.asc())
+            .order_by(
+                EtfObservationPortfolioItem.item_type.asc(),
+                EtfObservationPortfolioItem.rank_order.asc(),
+            )
         )
     ).all()
     primary = [_snapshot_item_out(row) for row in rows if row.item_type == "primary"]
@@ -6825,19 +7134,39 @@ async def observation_portfolio_from_snapshot(
         "watch_only_items": watch_only,
         "excluded_items": excluded,
         "cash_weight": float(summary.get("cash_weight", round(max(0.0, 1.0 - weight_sum), 4))),
-        "target_invested_weight": float(summary.get("target_invested_weight", _PORTFOLIO_TOTAL_EXPOSURE_CAP)),
+        "target_invested_weight": float(
+            summary.get("target_invested_weight", _PORTFOLIO_TOTAL_EXPOSURE_CAP)
+        ),
         "weight_sum": float(summary.get("weight_sum", weight_sum)),
         "portfolio_mode": summary.get("portfolio_mode", PORTFOLIO_MODE_RISK_ON),
         "market_regime": summary.get("market_regime", MARKET_REGIME_RISK_ON),
-        "primary_weight": float(summary.get("primary_weight", round(sum(float(item.get("target_weight") or 0.0) for item in primary), 4))),
-        "satellite_weight": float(summary.get("satellite_weight", round(sum(float(item.get("target_weight") or 0.0) for item in satellite), 4))),
+        "primary_weight": float(
+            summary.get(
+                "primary_weight",
+                round(sum(float(item.get("target_weight") or 0.0) for item in primary), 4),
+            )
+        ),
+        "satellite_weight": float(
+            summary.get(
+                "satellite_weight",
+                round(sum(float(item.get("target_weight") or 0.0) for item in satellite), 4),
+            )
+        ),
         "risk_exposure_weight": float(
             summary.get(
                 "risk_exposure_weight",
-                round(sum(float(item.get("target_weight") or 0.0) for item in [*primary, *satellite]), 4),
+                round(
+                    sum(float(item.get("target_weight") or 0.0) for item in [*primary, *satellite]),
+                    4,
+                ),
             )
         ),
-        "defensive_weight": float(summary.get("defensive_weight", round(sum(float(item.get("target_weight") or 0.0) for item in defensive), 4))),
+        "defensive_weight": float(
+            summary.get(
+                "defensive_weight",
+                round(sum(float(item.get("target_weight") or 0.0) for item in defensive), 4),
+            )
+        ),
         "cash_reason": summary.get("cash_reason"),
         "single_weight_cap": summary.get("single_weight_cap", _PORTFOLIO_SINGLE_WEIGHT_CAP),
         "total_exposure_cap": summary.get("total_exposure_cap", _PORTFOLIO_TOTAL_EXPOSURE_CAP),
@@ -6849,7 +7178,9 @@ async def observation_portfolio_from_snapshot(
         "research_only": True,
         "no_trade_instruction": True,
         "note": str(summary.get("note") or "观察组合只用于手动研究参考，不连接券商、不自动下单。"),
-        "methodology": str(summary.get("methodology") or "按评分、波动、回撤、流动性、主题和相关性约束生成。"),
+        "methodology": str(
+            summary.get("methodology") or "按评分、波动、回撤、流动性、主题和相关性约束生成。"
+        ),
         "data_as_of_time": summary.get("data_as_of_time"),
         "quote_time": summary.get("quote_time"),
         "daily_signal_date": summary.get("daily_signal_date"),
@@ -6882,7 +7213,9 @@ async def persist_observation_portfolio_snapshot(
     )
     summary = {
         "cash_weight": portfolio.get("cash_weight", 0.0),
-        "target_invested_weight": portfolio.get("target_invested_weight", _PORTFOLIO_TOTAL_EXPOSURE_CAP),
+        "target_invested_weight": portfolio.get(
+            "target_invested_weight", _PORTFOLIO_TOTAL_EXPOSURE_CAP
+        ),
         "weight_sum": portfolio.get("weight_sum", 0.0),
         "portfolio_mode": portfolio.get("portfolio_mode", PORTFOLIO_MODE_RISK_ON),
         "market_regime": portfolio.get("market_regime", MARKET_REGIME_RISK_ON),
@@ -6964,7 +7297,9 @@ async def persist_observation_portfolio_snapshot(
                     data_date=item.get("data_date"),
                     evidence_json=list(item.get("evidence") or []),
                     risk_reasons_json=risk_reasons,
-                    exclusion_reason=(risk_reasons[0] if item_type != "primary" and risk_reasons else None),
+                    exclusion_reason=(
+                        risk_reasons[0] if item_type != "primary" and risk_reasons else None
+                    ),
                     metrics_json=dict(item.get("metrics") or {}),
                 )
             )
@@ -6979,7 +7314,9 @@ async def run_etf_observation_portfolio_optimization(
     limit: int = 5,
 ) -> EtfObservationPortfolioSnapshot:
     signal_run = await latest_signal_run(session, asset_type=ASSET_TYPE_ETF)
-    validation_run = await latest_signal_validation_run(session, validation_mode=VALIDATION_MODE_FORWARD_LIVE)
+    validation_run = await latest_signal_validation_run(
+        session, validation_mode=VALIDATION_MODE_FORWARD_LIVE
+    )
     portfolio = await etf_observation_portfolio(
         session,
         limit=limit,
@@ -6996,13 +7333,16 @@ async def run_etf_observation_portfolio_optimization(
     )
 
 
-async def _attach_optimized_allocation(session: AsyncSession, portfolio: dict[str, Any]) -> dict[str, Any]:
+async def _attach_optimized_allocation(
+    session: AsyncSession, portfolio: dict[str, Any]
+) -> dict[str, Any]:
     snapshot = await latest_optimized_allocation_snapshot(session)
     source_metadata = portfolio.get("source_ranking_snapshot")
-    source_signal_run_id = source_metadata.get("snapshot_id") if isinstance(source_metadata, dict) else None
-    if (
-        snapshot is not None
-        and (source_signal_run_id is None or snapshot.source_signal_run_id != source_signal_run_id)
+    source_signal_run_id = (
+        source_metadata.get("snapshot_id") if isinstance(source_metadata, dict) else None
+    )
+    if snapshot is not None and (
+        source_signal_run_id is None or snapshot.source_signal_run_id != source_signal_run_id
     ):
         snapshot = None
     portfolio["optimized_allocation"] = await optimized_allocation_payload(
@@ -7046,7 +7386,11 @@ async def etf_observation_portfolio(
             and _observation_snapshot_is_usable(snapshot)
         ):
             portfolio = await observation_portfolio_from_snapshot(session, snapshot)
-            return await _attach_optimized_allocation(session, portfolio) if include_optimized else portfolio
+            return (
+                await _attach_optimized_allocation(session, portfolio)
+                if include_optimized
+                else portfolio
+            )
     if run is None:
         portfolio = {
             "as_of_date": as_of_date or await latest_data_date(session) or date.today(),
@@ -7095,7 +7439,11 @@ async def etf_observation_portfolio(
             ),
             "source_ranking_snapshot": snapshot_metadata(None),
         }
-        return await _attach_optimized_allocation(session, portfolio) if include_optimized else portfolio
+        return (
+            await _attach_optimized_allocation(session, portfolio)
+            if include_optimized
+            else portfolio
+        )
     assets, _total = await cached_signal_assets(
         session,
         run,
@@ -7105,9 +7453,7 @@ async def etf_observation_portfolio(
         limit=max(50, min(limit * 10, 200)),
         ranking_surface="actionable",
     )
-    market_risk = classify_portfolio_market_risk(
-        _portfolio_market_risk_observations(assets)
-    )
+    market_risk = classify_portfolio_market_risk(_portfolio_market_risk_observations(assets))
     primary_candidates: list[ComputedAsset] = []
     satellite_candidates: list[tuple[ComputedAsset, str | None]] = []
     defensive_candidates: list[tuple[ComputedAsset, str | None]] = []
@@ -7162,7 +7508,9 @@ async def etf_observation_portfolio(
                     selection_reason = f"与已选 ETF {selected_code} 近60日相关性约 {correlation:.2f}，为避免重复押注转入观察。"
                     break
         if selection_reason is not None:
-            watch_only_items.append(_portfolio_item(asset, target_weight=0.0, reason=selection_reason))
+            watch_only_items.append(
+                _portfolio_item(asset, target_weight=0.0, reason=selection_reason)
+            )
             continue
         selected_assets.append(asset)
         selected_item_types[asset.metadata.code] = PORTFOLIO_LAYER_PRIMARY
@@ -7172,10 +7520,14 @@ async def etf_observation_portfolio(
             selected_return_maps[asset.metadata.code] = asset_returns
 
     satellite_selected = 0
-    satellite_limit = max(1, int(_PORTFOLIO_SATELLITE_EXPOSURE_CAP / _PORTFOLIO_SATELLITE_SINGLE_WEIGHT_CAP))
+    satellite_limit = max(
+        1, int(_PORTFOLIO_SATELLITE_EXPOSURE_CAP / _PORTFOLIO_SATELLITE_SINGLE_WEIGHT_CAP)
+    )
     for asset, original_reason in satellite_candidates:
         if len(selected_assets) >= selected_limit or satellite_selected >= satellite_limit:
-            watch_only_items.append(_portfolio_item(asset, target_weight=0.0, reason=original_reason))
+            watch_only_items.append(
+                _portfolio_item(asset, target_weight=0.0, reason=original_reason)
+            )
             continue
         selection_reason = None
         asset_themes = _portfolio_theme_keys(asset) or ["ETF"]
@@ -7189,10 +7541,14 @@ async def etf_observation_portfolio(
                     selection_reason = f"与已选 ETF {selected_code} 近60日相关性约 {correlation:.2f}，高位观察资产转入观察组。"
                     break
         if selection_reason is not None:
-            watch_only_items.append(_portfolio_item(asset, target_weight=0.0, reason=selection_reason))
+            watch_only_items.append(
+                _portfolio_item(asset, target_weight=0.0, reason=selection_reason)
+            )
             continue
         selected_assets.append(asset)
-        selected_fill_reasons[asset.metadata.code] = original_reason or "高位观察但买点仍健康，仅小仓观察。"
+        selected_fill_reasons[asset.metadata.code] = (
+            original_reason or "高位观察但买点仍健康，仅小仓观察。"
+        )
         selected_item_types[asset.metadata.code] = PORTFOLIO_LAYER_SATELLITE
         satellite_selected += 1
         for theme in asset_themes:
@@ -7205,11 +7561,15 @@ async def etf_observation_portfolio(
         key=lambda row: (_portfolio_defensive_priority(row[0]), -float(row[0].total_score or 0.0)),
     ):
         if len(selected_assets) >= 4:
-            watch_only_items.append(_portfolio_item(asset, target_weight=0.0, reason=original_reason))
+            watch_only_items.append(
+                _portfolio_item(asset, target_weight=0.0, reason=original_reason)
+            )
             continue
         fill_reason = _portfolio_defensive_reason(asset, original_reason)
         if fill_reason is None:
-            watch_only_items.append(_portfolio_item(asset, target_weight=0.0, reason=original_reason))
+            watch_only_items.append(
+                _portfolio_item(asset, target_weight=0.0, reason=original_reason)
+            )
             continue
         selection_reason = None
         asset_themes = _portfolio_theme_keys(asset) or ["ETF"]
@@ -7223,7 +7583,9 @@ async def etf_observation_portfolio(
                     selection_reason = f"补位候选与已选 ETF {selected_code} 近60日相关性约 {correlation:.2f}，继续留在观察组。"
                     break
         if selection_reason is not None:
-            watch_only_items.append(_portfolio_item(asset, target_weight=0.0, reason=selection_reason))
+            watch_only_items.append(
+                _portfolio_item(asset, target_weight=0.0, reason=selection_reason)
+            )
             continue
         selected_assets.append(asset)
         selected_fill_reasons[asset.metadata.code] = fill_reason
@@ -7237,8 +7599,7 @@ async def etf_observation_portfolio(
         watch_only_items.append(_portfolio_item(asset, target_weight=0.0, reason=original_reason))
 
     raw_weight_rows = {
-        asset.metadata.code: _portfolio_raw_weight(asset)
-        for asset in selected_assets
+        asset.metadata.code: _portfolio_raw_weight(asset) for asset in selected_assets
     }
     individual_caps = {
         asset.metadata.code: min(
@@ -7287,7 +7648,8 @@ async def etf_observation_portfolio(
                     "single_cap_applied": target >= individual_caps[asset.metadata.code] - 0.0001,
                     "single_weight_cap": individual_caps[asset.metadata.code],
                     "satellite_exposure_cap": _PORTFOLIO_SATELLITE_EXPOSURE_CAP,
-                    "theme_tags": _portfolio_theme_keys(asset) or list(asset.metadata.theme_tags[:2]),
+                    "theme_tags": _portfolio_theme_keys(asset)
+                    or list(asset.metadata.theme_tags[:2]),
                     "correlation_policy": "高相关候选按相关簇合计 50% 封顶，无法容纳的权重保留现金。",
                     "target_invested_weight": target_exposure,
                     "portfolio_target_weight": round(target_exposure, 4),
@@ -7301,7 +7663,9 @@ async def etf_observation_portfolio(
             fill_reason = selected_fill_reasons.get(asset.metadata.code)
             if fill_reason:
                 weight_reason["weight_fill_reason"] = fill_reason
-            portfolio_item = _portfolio_item(asset, target_weight=target, weight_reason=weight_reason)
+            portfolio_item = _portfolio_item(
+                asset, target_weight=target, weight_reason=weight_reason
+            )
             if item_type == PORTFOLIO_LAYER_DEFENSIVE:
                 defensive_items.append(portfolio_item)
             elif item_type == PORTFOLIO_LAYER_SATELLITE:
@@ -7323,15 +7687,13 @@ async def etf_observation_portfolio(
     else:
         portfolio_mode = PORTFOLIO_MODE_CASH_WAIT
     market_regime = portfolio_mode
-    rounding_residual = (
-        round(risk_budget.cash_weight, 4)
-        if risk_budget.status == "ready"
-        else 1.0
-    )
+    rounding_residual = round(risk_budget.cash_weight, 4) if risk_budget.status == "ready" else 1.0
     if not weighted_items:
         cash_reason = cash_reason or "当前没有可用于配置的 ETF，建议等待。"
     elif rounding_residual > 0.0001:
-        cash_reason = cash_reason or "风险预算保留部分现金等待；缩减后的 ETF 权重不会再次归一化到满仓。"
+        cash_reason = (
+            cash_reason or "风险预算保留部分现金等待；缩减后的 ETF 权重不会再次归一化到满仓。"
+        )
     primary_weight = round(sum(float(item["target_weight"]) for item in items), 4)
     satellite_weight = round(sum(float(item["target_weight"]) for item in satellite_items), 4)
     risk_exposure_weight = round(primary_weight + satellite_weight, 4)
@@ -7394,8 +7756,12 @@ async def etf_observation_portfolio(
         "defensive_count": len(defensive_items),
         "watch_only_count": len(watch_only_items),
         "excluded_count": len(excluded_items),
-        "high_volatility_count": sum(1 for item in weighted_items if "高波动" in item.get("risk_reasons", [])),
-        "max_single_weight": max((float(item["target_weight"]) for item in weighted_items), default=0.0),
+        "high_volatility_count": sum(
+            1 for item in weighted_items if "高波动" in item.get("risk_reasons", [])
+        ),
+        "max_single_weight": max(
+            (float(item["target_weight"]) for item in weighted_items), default=0.0
+        ),
         **risk_budget.metrics,
         "risk_budget_version": risk_budget.contract_version,
         "risk_budget_hash": risk_budget.contract_hash,
@@ -7499,7 +7865,9 @@ async def etf_observation_portfolio(
             "这是研究权重，不是交易指令。"
         ),
     }
-    allocation_contract = _allocation_contract_from_portfolio(portfolio, source_signal_run_id=run.id)
+    allocation_contract = _allocation_contract_from_portfolio(
+        portfolio, source_signal_run_id=run.id
+    )
     portfolio["allocation_contract"] = allocation_contract
     portfolio["evidence_status"] = EVIDENCE_STATUS_WAITING
     portfolio["evidence_summary"] = build_evidence_summary(
@@ -7510,4 +7878,6 @@ async def etf_observation_portfolio(
         run,
         evidence_detail="summary",
     )
-    return await _attach_optimized_allocation(session, portfolio) if include_optimized else portfolio
+    return (
+        await _attach_optimized_allocation(session, portfolio) if include_optimized else portfolio
+    )

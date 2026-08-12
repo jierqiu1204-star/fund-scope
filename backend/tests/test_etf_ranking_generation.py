@@ -88,9 +88,7 @@ def test_missing_intraday_preserves_research_but_excludes_action_with_field_reas
     fields["bid"] = ActionableFieldEvidence(status="missing")
     fields["iopv"] = ActionableFieldEvidence(status="stale")
 
-    surfaces = generate_dual_ranking_surfaces(
-        [_candidate("510300", sessions=250, fields=fields)]
-    )
+    surfaces = generate_dual_ranking_surfaces([_candidate("510300", sessions=250, fields=fields)])
 
     assert [row.asset_code for row in surfaces.research_rows] == ["510300"]
     assert surfaces.actionable_rows == ()
@@ -114,15 +112,20 @@ def test_low_turnover_and_unknown_taxonomy_remain_observation_only() -> None:
         ]
     )
 
-    assert [row.asset_code for row in surfaces.research_rows] == ["510003"]
-    assert surfaces.research_exclusions["510001"] == (
-        "absolute_tradability_below_threshold",
-    )
-    assert surfaces.research_exclusions["510002"] == (
-        "taxonomy_bucket_unresolved",
-    )
-    assert "research_surface:unavailable" in surfaces.actionable_exclusions["510001"]
-    assert "research_surface:unavailable" in surfaces.actionable_exclusions["510002"]
+    assert [row.asset_code for row in surfaces.research_rows] == [
+        "510001",
+        "510002",
+        "510003",
+    ]
+    assert surfaces.research_exclusions == {}
+    assert surfaces.research_quality_reasons["510001"] == ("absolute_tradability_below_threshold",)
+    assert surfaces.research_quality_reasons["510002"] == ("taxonomy_bucket_unresolved",)
+    assert surfaces.research_rows[0].observation_only is True
+    assert surfaces.research_rows[1].observation_only is True
+    assert surfaces.research_rows[2].observation_only is False
+    assert "absolute_tradability_below_threshold" in (surfaces.actionable_exclusions["510001"])
+    assert "taxonomy_bucket_unresolved" in surfaces.actionable_exclusions["510002"]
+    assert "research_surface:unavailable" not in (surfaces.actionable_exclusions["510001"])
 
 
 def test_raw_or_ineligible_decision_data_cannot_enter_research_rank() -> None:
@@ -137,19 +140,11 @@ def test_raw_or_ineligible_decision_data_cannot_enter_research_rank() -> None:
     )
 
     assert surfaces.research_rows == ()
-    assert surfaces.research_exclusions["510001"] == (
-        "price_basis:decision_ineligible",
-    )
-    assert surfaces.research_exclusions["510002"] == (
-        "price_basis:decision_ineligible",
-    )
-    assert surfaces.research_exclusions["510003"] == (
-        "price_basis:decision_ineligible",
-    )
+    assert surfaces.research_exclusions["510001"] == ("price_basis:decision_ineligible",)
+    assert surfaces.research_exclusions["510002"] == ("price_basis:decision_ineligible",)
+    assert surfaces.research_exclusions["510003"] == ("price_basis:decision_ineligible",)
     assert surfaces.research_exclusions["510004"] == ("decision_data:ineligible",)
-    assert surfaces.research_exclusions["510005"] == (
-        "adjusted_inputs:missing_or_non_finite",
-    )
+    assert surfaces.research_exclusions["510005"] == ("adjusted_inputs:missing_or_non_finite",)
 
 
 def test_surfaces_rank_independently_and_break_ties_by_code() -> None:
@@ -182,9 +177,7 @@ def test_non_finite_cap_as_of_and_contract_hash_fail_closed() -> None:
         actionable_as_of_date=date(2026, 7, 16),
     )
 
-    surfaces = generate_dual_ranking_surfaces(
-        [bad_hash, non_finite, cap, as_of_mismatch]
-    )
+    surfaces = generate_dual_ranking_surfaces([bad_hash, non_finite, cap, as_of_mismatch])
 
     assert "research_contract:identity_mismatch" in surfaces.research_exclusions["510001"]
     assert "research_score:unavailable_or_non_finite" in surfaces.research_exclusions["510002"]
@@ -238,9 +231,7 @@ def test_production_shaped_shadow_is_bounded_and_deterministic() -> None:
     assert len(first.research_rows) == 1405
     assert len(first.actionable_rows) == 1053
     assert len(first.actionable_exclusions) == 352
-    assert first.rejection_summary["actionable"] == {
-        "final_score_v3:cap_violation": 352
-    }
+    assert first.rejection_summary["actionable"] == {"final_score_v3:cap_violation": 352}
     assert first_hash == second_hash
     assert first_hash == "8711b8b98b300d831260b433e25e33587eaa8c6da8e824e9edd9760506b14bc2"
     assert latency_seconds < 5.0

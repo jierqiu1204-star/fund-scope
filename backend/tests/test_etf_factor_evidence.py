@@ -101,9 +101,7 @@ def _operational_manifest():
 
 def _ranking_result(manifest) -> RankingEndpointResult:
     candidate = FROZEN_RANKING_CANDIDATES[1]
-    independent_dates = tuple(
-        date(2025, 1, 1) + timedelta(days=index * 6) for index in range(40)
-    )
+    independent_dates = tuple(date(2025, 1, 1) + timedelta(days=index * 6) for index in range(40))
     return RankingEndpointResult(
         ranking_source_kind="research_replay",  # type: ignore[arg-type]
         source_cohort_hash=_hash("cohort"),
@@ -143,9 +141,7 @@ def _ranking_result(manifest) -> RankingEndpointResult:
         baseline_maximum_drawdown=0.09,
         maximum_drawdown_gate_passed=True,
         sample_gate_passed=True,
-        accepted_sample_hashes=tuple(
-            _hash(f"sample-{index}") for index in range(40)
-        ),
+        accepted_sample_hashes=tuple(_hash(f"sample-{index}") for index in range(40)),
         result_hash=_hash("ranking-result"),
     )
 
@@ -160,9 +156,7 @@ async def _production_counts(session: AsyncSession) -> tuple[int, ...]:
     )
     counts: list[int] = []
     for model in models:
-        counts.append(
-            int(await session.scalar(select(func.count()).select_from(model)) or 0)
-        )
+        counts.append(int(await session.scalar(select(func.count()).select_from(model)) or 0))
     return tuple(counts)
 
 
@@ -204,10 +198,7 @@ async def test_optional_family_identity_preserves_legacy_hash_and_isolates_overv
         selected = await _latest_factor_evidence(session)
 
     assert leader.experiment_family == LEADER_EXPERIMENT_FAMILY
-    assert (
-        leader.hypothesis_registry_hash
-        == LEADER_HYPOTHESIS_REGISTRY.registry_hash
-    )
+    assert leader.hypothesis_registry_hash == LEADER_HYPOTHESIS_REGISTRY.registry_hash
     assert selected is not None
     assert selected.id == legacy.id
 
@@ -229,9 +220,7 @@ async def test_read_only_evidence_endpoint_separates_splits_and_costs(
     async with app.state.db.session() as session:
         evidence = await persist_factor_evidence(session, _payload())
 
-    response = await client.get(
-        f"/api/strategy-lab/etf-factor-evidence/{evidence.manifest_hash}"
-    )
+    response = await client.get(f"/api/strategy-lab/etf-factor-evidence/{evidence.manifest_hash}")
 
     assert response.status_code == 200
     body = response.json()
@@ -289,9 +278,7 @@ async def test_factor_evidence_rejects_uncomputed_holm_claim(app) -> None:
 
 
 async def test_missing_factor_evidence_returns_404(client) -> None:
-    response = await client.get(
-        "/api/strategy-lab/etf-factor-evidence/does-not-exist"
-    )
+    response = await client.get("/api/strategy-lab/etf-factor-evidence/does-not-exist")
 
     assert response.status_code == 404
     assert response.json()["detail"] == "ETF factor evidence not found"
@@ -364,20 +351,19 @@ async def test_operational_factor_evidence_persists_explicit_promotion_state(
         evidence = await persist_factor_evidence(session, payload)
 
     assert evidence.promotion_state == "promotion_eligible"
-    assert evidence.report_json["schema_version"] == (
-        "etf_point_in_time_research_evidence_v1"
-    )
+    assert evidence.report_json["schema_version"] == ("etf_point_in_time_research_evidence_v1")
     assert evidence.report_json["primary_metric"]["primary"] is True
     assert evidence.report_json["exploratory_metrics"] == []
     assert evidence.report_json["candidate_state"] == "research_only"
     assert len(evidence.report_json["main_candidate_ids"]) == 3
     assert evidence.report_json["residual_common_support"]["trend"]["residual_ic"] == 0.011
+    assert evidence.report_json["deconfounding_evidence"]["candidate_count"] == 3
+    assert evidence.report_json["deconfounding_evidence"]["state"] == ("insufficient_data")
+    assert evidence.report_json["deconfounding_evidence"]["production_mutation_allowed"] is False
     assert evidence.report_json["primary_diagnostics"]["hit_rate"] == 0.54
     assert evidence.costs_json["candidate_cost_drag"] == pytest.approx(0.002)
     assert evidence.report_json["production_mutation_allowed"] is False
-    response = await client.get(
-        f"/api/strategy-lab/etf-factor-evidence/{manifest.manifest_hash}"
-    )
+    response = await client.get(f"/api/strategy-lab/etf-factor-evidence/{manifest.manifest_hash}")
     assert response.status_code == 200
     assert response.json()["promotion_state"] == "promotion_eligible"
 
@@ -451,4 +437,41 @@ def test_operational_evidence_rejects_shadow_ideas_from_frozen_main_registry() -
             split_reports={"holdout": {"consumed": True, "use_count": 1}},
             raw_primary_p_values=(0.01,),
             promotion=promotion,
+        )
+
+
+def test_operational_evidence_rejects_empty_deconfounding_payload() -> None:
+    manifest = _operational_manifest()
+    promotion = evaluate_research_promotion(
+        PromotionGateEvidence(
+            decision_data_coverage_ratio=0.96,
+            score_coverage_ratio=0.96,
+            eligible_point_in_time_sessions=251,
+            independent_primary_dates=39,
+            completed_walk_forward_folds=2,
+            adjusted_primary_interval_lower=None,
+            fold_sign_stable=False,
+            regime_sign_stable=False,
+            candidate_maximum_drawdown=None,
+            baseline_maximum_drawdown=None,
+            holdout_consumed=False,
+        )
+    )
+
+    with pytest.raises(
+        FactorEvidenceContractError,
+        match="deconfounding evidence is incompatible with the frozen registry",
+    ):
+        build_operational_factor_evidence(
+            manifest=manifest,
+            data_cutoff=datetime(2026, 7, 24, 15, 0),
+            primary_result=_ranking_result(manifest),
+            exploratory_results=(),
+            factor_diagnostics={},
+            coverage={},
+            exclusion_counts={},
+            split_reports={"holdout": {"consumed": False, "use_count": 0}},
+            raw_primary_p_values=(0.01,),
+            promotion=promotion,
+            deconfounding_evidence={},
         )

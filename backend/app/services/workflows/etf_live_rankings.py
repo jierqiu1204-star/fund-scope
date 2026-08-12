@@ -131,12 +131,16 @@ def _eligible_intraday_base(
         return None, "日线基座覆盖率不足。"
     if snapshot.as_of_trade_date is None or snapshot.as_of_trade_date != required_base_trade_date:
         return None, "日线基座不是最近已收盘交易日，盘中综合分不可用。"
-    score = (
-        (item.metrics_json or {}).get(_INTRADAY_BASE_SCORE_FIELD)
-        if item is not None
-        else None
-    )
-    if item is None or item.score_eligible is not True or score is None or not _is_finite_score(score):
+    metrics = dict(item.metrics_json or {}) if item is not None else {}
+    if metrics.get("observation_only") is True or metrics.get("research_quality_eligible") is False:
+        return None, "日线基座仅供研究观察，未通过行动质量门槛。"
+    score = metrics.get(_INTRADAY_BASE_SCORE_FIELD)
+    if (
+        item is None
+        or item.score_eligible is not True
+        or score is None
+        or not _is_finite_score(score)
+    ):
         return None, "日线基座缺少可用研究分。"
     return float(score), None
 
@@ -173,11 +177,16 @@ def _same_time_activity_adjustment(
     current_turnover: float | None,
     historical_turnovers: list[float],
 ) -> tuple[float | None, str]:
-    valid_history = [value for value in historical_turnovers if _is_finite_score(value) and value > 0]
+    valid_history = [
+        value for value in historical_turnovers if _is_finite_score(value) and value > 0
+    ]
     if not _is_finite_score(current_turnover) or current_turnover is None or current_turnover <= 0:
         return None, "缺少有限的当前累计成交额，活跃度调整不可用。"
     if len(valid_history) < _MIN_SAME_TIME_ACTIVITY_SAMPLES:
-        return None, f"同刻成交历史少于 {_MIN_SAME_TIME_ACTIVITY_SAMPLES} 个交易日，活跃度调整不可用。"
+        return (
+            None,
+            f"同刻成交历史少于 {_MIN_SAME_TIME_ACTIVITY_SAMPLES} 个交易日，活跃度调整不可用。",
+        )
     reference = float(median(valid_history))
     ratio = current_turnover / reference
     if ratio >= 1.25:
@@ -194,7 +203,10 @@ def _component_status(
     adjustment: float | None = None,
     value: float | None = None,
 ) -> dict[str, Any]:
-    status: dict[str, Any] = {"status": "available" if available else "unavailable", "reason": reason}
+    status: dict[str, Any] = {
+        "status": "available" if available else "unavailable",
+        "reason": reason,
+    }
     if adjustment is not None:
         status["adjustment"] = adjustment
     if value is not None:
@@ -216,29 +228,43 @@ def _quote_component_status(quote: Any, now: datetime) -> dict[str, dict[str, An
     price = _float_or_none(quote.latest_price)
     price_status = _component_status(
         _is_finite_score(price) and price is not None and price > 0,
-        None if _is_finite_score(price) and price is not None and price > 0 else "最新价非有限或不为正数。",
+        None
+        if _is_finite_score(price) and price is not None and price > 0
+        else "最新价非有限或不为正数。",
         value=price,
     )
-    timestamp_eligible = not market_data.is_etf_quote_stale(quote.quote_time, now) and not market_data.is_etf_quote_time_fallback(
-        quote
-    )
+    timestamp_eligible = not market_data.is_etf_quote_stale(
+        quote.quote_time, now
+    ) and not market_data.is_etf_quote_time_fallback(quote)
     timestamp_status = _component_status(
         timestamp_eligible,
-        None if timestamp_eligible else market_data.etf_quote_decision_limitation_reason(quote, now),
+        None
+        if timestamp_eligible
+        else market_data.etf_quote_decision_limitation_reason(quote, now),
     )
     consensus_eligible = market_data.is_fresh_etf_decision_quote(quote, now)
     consensus_status = _component_status(
         consensus_eligible,
-        None if consensus_eligible else market_data.etf_quote_decision_limitation_reason(quote, now),
+        None
+        if consensus_eligible
+        else market_data.etf_quote_decision_limitation_reason(quote, now),
     )
 
     premium = _float_or_none(quote.premium_discount_pct)
     if premium is None:
         iopv = _float_or_none(quote.iopv)
-        if _is_finite_score(iopv) and iopv is not None and iopv > 0 and price is not None and price > 0:
+        if (
+            _is_finite_score(iopv)
+            and iopv is not None
+            and iopv > 0
+            and price is not None
+            and price > 0
+        ):
             premium = (price / iopv - 1) * 100
     premium_available = consensus_eligible and _is_finite_score(premium)
-    premium_adjustment = -1.0 if premium_available and premium is not None and abs(premium) >= 1.0 else 0.0
+    premium_adjustment = (
+        -1.0 if premium_available and premium is not None and abs(premium) >= 1.0 else 0.0
+    )
     premium_status = _component_status(
         premium_available,
         None if premium_available else "缺少可决策的有限溢折价。",
@@ -253,8 +279,15 @@ def _quote_component_status(quote: Any, now: datetime) -> dict[str, dict[str, An
         midpoint = (bid + ask) / 2
         if midpoint > 0:
             spread_bps = ((ask - bid) / midpoint) * 10_000
-    spread_available = consensus_eligible and _is_finite_score(spread_bps) and spread_bps is not None and spread_bps >= 0
-    spread_adjustment = -1.0 if spread_available and spread_bps is not None and spread_bps > 50 else 0.0
+    spread_available = (
+        consensus_eligible
+        and _is_finite_score(spread_bps)
+        and spread_bps is not None
+        and spread_bps >= 0
+    )
+    spread_adjustment = (
+        -1.0 if spread_available and spread_bps is not None and spread_bps > 50 else 0.0
+    )
     spread_status = _component_status(
         spread_available,
         None if spread_available else "缺少可决策的有限买卖价差。",
@@ -372,7 +405,9 @@ def _entry_filter_labels(
     return {label for label in labels if label}
 
 
-async def _build_research_watchlist(session: AsyncSession, *, now: datetime | None = None) -> WatchlistResult:
+async def _build_research_watchlist(
+    session: AsyncSession, *, now: datetime | None = None
+) -> WatchlistResult:
     watchlist = await build_watchlist(session)
     watch_map = {item.etf_code: item for item in watchlist.items}
     selection = await current_etf_ranking_surface_selection(
@@ -402,7 +437,9 @@ async def _build_research_watchlist(session: AsyncSession, *, now: datetime | No
             )
         ).all()
         for item in signal_items:
-            watch_item = watch_map.setdefault(item.asset_code, WatchItem(etf_code=item.asset_code, sources={SOURCE_ALL_ETF}))
+            watch_item = watch_map.setdefault(
+                item.asset_code, WatchItem(etf_code=item.asset_code, sources={SOURCE_ALL_ETF})
+            )
             actionable_rank = (item.metrics_json or {}).get("actionable_rank")
             watch_item.rank = (
                 actionable_rank
@@ -423,7 +460,9 @@ async def _build_research_watchlist(session: AsyncSession, *, now: datetime | No
             "盘中仅展示全部可交易 ETF 与独立持仓观察。"
         )
 
-    items = sorted(watch_map.values(), key=lambda item: (item.rank is None, item.rank or 9999, item.etf_code))
+    items = sorted(
+        watch_map.values(), key=lambda item: (item.rank is None, item.rank or 9999, item.etf_code)
+    )
     return WatchlistResult(items, signal_run_id, signal_as_of_date, signal_status, message)
 
 
@@ -460,7 +499,9 @@ async def live_rankings(
         return EtfLiveRankingListOut(
             market_status=state.status,
             market_session=state.session,
-            message=watchlist.message if is_open else f"{watchlist.message} 当前休市，页面不会自动刷新盘中行情。",
+            message=watchlist.message
+            if is_open
+            else f"{watchlist.message} 当前休市，页面不会自动刷新盘中行情。",
             quote_refresh_seconds=WATCH_REFRESH_SECONDS if is_open else 0,
             page_poll_seconds=PAGE_POLL_SECONDS if is_open else 0,
             next_poll_seconds=state.next_poll_seconds,
@@ -468,7 +509,9 @@ async def live_rankings(
             total=0,
             signal_as_of_date=watchlist.signal_as_of_date,
             signal_status=watchlist.signal_status,
-            latest_run=market_data.etf_watch_run_out(latest_run) if latest_run is not None else None,
+            latest_run=market_data.etf_watch_run_out(latest_run)
+            if latest_run is not None
+            else None,
             items=[],
             snapshot=EtfRankingSnapshotMetadataOut.model_validate(
                 snapshot_metadata(source_snapshot, selection_state=watchlist.signal_status)
@@ -489,15 +532,23 @@ async def live_rankings(
             )
         )
         signal_items_by_code = {item.asset_code: item for item in signal_rows.all()}
-    scope_score_version = str(source_snapshot.score_version or "legacy") if source_snapshot is not None else "unavailable"
+    scope_score_version = (
+        str(source_snapshot.score_version or "legacy")
+        if source_snapshot is not None
+        else "unavailable"
+    )
     live_scope_hash = _live_scope_hash(watch_codes, scope_score_version)
     base_scope_hash = _live_scope_hash(list(signal_items_by_code), scope_score_version)
-    same_time_turnovers = await _same_time_turnover_history(session, watch_codes, state.now) if is_open else {}
+    same_time_turnovers = (
+        await _same_time_turnover_history(session, watch_codes, state.now) if is_open else {}
+    )
     selected_theme = theme.strip() if theme else None
     if selected_theme in {"", "all", "全部"}:
         selected_theme = None
     states_by_code = (
-        await tracking_states_by_code(session, user_id=user_id, as_of_date=source_snapshot.as_of_date)
+        await tracking_states_by_code(
+            session, user_id=user_id, as_of_date=source_snapshot.as_of_date
+        )
         if tracking_filters and user_id is not None and source_snapshot is not None
         else {}
     )
@@ -512,16 +563,28 @@ async def live_rankings(
             else None
         )
         signal_metrics = dict(signal_item.metrics_json or {}) if signal_item is not None else {}
-        signal_breakdown = dict(signal_item.score_breakdown_json or {}) if signal_item is not None else {}
-        final_score_breakdown = signal_breakdown.get("final_score_v3") or signal_breakdown.get("final_score_v2")
+        signal_breakdown = (
+            dict(signal_item.score_breakdown_json or {}) if signal_item is not None else {}
+        )
+        final_score_breakdown = signal_breakdown.get("final_score_v3") or signal_breakdown.get(
+            "final_score_v2"
+        )
         item_score_version = (
             signal_metrics.get("score_version")
             or signal_breakdown.get("score_version")
-            or (final_score_breakdown.get("score_version") if isinstance(final_score_breakdown, dict) else None)
+            or (
+                final_score_breakdown.get("score_version")
+                if isinstance(final_score_breakdown, dict)
+                else None
+            )
         )
-        score_version = item_score_version or (source_snapshot.score_version if source_snapshot is not None else None)
+        score_version = item_score_version or (
+            source_snapshot.score_version if source_snapshot is not None else None
+        )
         base_global_rank = (
-            signal_item.global_rank if signal_item is not None and signal_item.global_rank is not None else watch_item.rank
+            signal_item.global_rank
+            if signal_item is not None and signal_item.global_rank is not None
+            else watch_item.rank
         )
         conclusion = signal_item.conclusion if signal_item is not None else None
         quote = latest_quotes.get(watch_item.etf_code)
@@ -541,7 +604,9 @@ async def live_rankings(
             score_contribution_reasons.append(f"日线基础分 {reference_base_score:.1f}")
         if state.status == "lunch_break":
             live_label = ENTRY_STATE_LUNCH_BREAK
-            live_reason = "当前是午休时段，不产生新的盘中买点；页面展示上午最近行情，日线买点只作参考。"
+            live_reason = (
+                "当前是午休时段，不产生新的盘中买点；页面展示上午最近行情，日线买点只作参考。"
+            )
             score_contribution_reasons.append("午休时段，仅使用日线基础分和上午最近行情展示。")
         elif (
             not is_open
@@ -604,12 +669,16 @@ async def live_rankings(
             for component_name in ("premium_discount", "spread"):
                 adjustment = component_status[component_name].get("adjustment")
                 if adjustment:
-                    score_contribution_reasons.append(f"{component_name} 结构调整 {adjustment:+.1f} 分。")
+                    score_contribution_reasons.append(
+                        f"{component_name} 结构调整 {adjustment:+.1f} 分。"
+                    )
             intraday_adjustment_score = sum(adjustments) if adjustments else None
             live_total_score = _clamp_score(intraday_base_score + sum(adjustments))
 
         if "activity" not in component_status:
-            component_status["activity"] = _component_status(False, "当前不是可计算盘中活跃度的时段。")
+            component_status["activity"] = _component_status(
+                False, "当前不是可计算盘中活跃度的时段。"
+            )
 
         scored_rows.append(
             {
@@ -621,8 +690,12 @@ async def live_rankings(
                 "live_total_score": live_total_score,
                 "intraday_adjustment_score": intraday_adjustment_score,
                 "score_source": score_source,
-                "score_version": str(score_version or "legacy") if signal_item is not None else None,
-                "item_score_version": str(item_score_version) if item_score_version is not None else None,
+                "score_version": str(score_version or "legacy")
+                if signal_item is not None
+                else None,
+                "item_score_version": str(item_score_version)
+                if item_score_version is not None
+                else None,
                 "score_breakdown": signal_breakdown,
                 "score_contribution_reasons": score_contribution_reasons,
                 "intraday_component_status": component_status,
@@ -631,7 +704,9 @@ async def live_rankings(
                 "daily_entry_timing_label": daily_entry_timing_label,
                 "daily_entry_timing_reason": daily_entry_timing_reason,
                 "sources": sorted(watch_item.sources),
-                "quote": market_data.etf_quote_out(quote, etf_name=name, now=now) if quote is not None else None,
+                "quote": market_data.etf_quote_out(quote, etf_name=name, now=now)
+                if quote is not None
+                else None,
                 "theme_values": _signal_item_theme_values(signal_item),
                 "tracking_states": states_by_code.get(watch_item.etf_code, set()),
                 "keyword_matches": not keyword
@@ -704,7 +779,9 @@ async def live_rankings(
     return EtfLiveRankingListOut(
         market_status=state.status,
         market_session=state.session,
-        message=watchlist.message if is_open else f"{watchlist.message} 当前休市，页面不会自动刷新盘中行情。",
+        message=watchlist.message
+        if is_open
+        else f"{watchlist.message} 当前休市，页面不会自动刷新盘中行情。",
         quote_refresh_seconds=WATCH_REFRESH_SECONDS if is_open else 0,
         page_poll_seconds=PAGE_POLL_SECONDS if is_open else 0,
         next_poll_seconds=state.next_poll_seconds,

@@ -51,6 +51,7 @@ class FinalScoreV3Result:
     missing_by_component: Mapping[str, tuple[str, ...]]
     metric_peer_counts: Mapping[str, int]
     limitation_reasons: tuple[str, ...]
+    weakest_required_primitive_peer_count: int = 0
     clone_policy_active: bool = False
     tracked_underlying_coverage: float = 0.0
     cap_violation: bool = False
@@ -121,7 +122,9 @@ def _quantile(values: Sequence[float], percentile: float) -> float:
     return ordered[lower] + (ordered[upper] - ordered[lower]) * (index - lower)
 
 
-def _primitive_score(primitive: RankingPrimitive, value: float, values: Sequence[float]) -> float | None:
+def _primitive_score(
+    primitive: RankingPrimitive, value: float, values: Sequence[float]
+) -> float | None:
     normalization = primitive.normalization
     transformed_value = value
     transformed_values = list(values)
@@ -150,7 +153,10 @@ def _reliability_missing(
     if ranking_input.values.get("quality_gate_rejected") is True:
         for component_id, component in manifest.components.items():
             if component.score_bearing:
-                missing_by_component[component_id] = (*missing_by_component.get(component_id, ()), "quality_gate_rejected")
+                missing_by_component[component_id] = (
+                    *missing_by_component.get(component_id, ()),
+                    "quality_gate_rejected",
+                )
         return
     reliabilities = ranking_input.values.get("component_reliability")
     if not isinstance(reliabilities, Mapping):
@@ -161,7 +167,10 @@ def _reliability_missing(
         reliability = str(reliabilities.get(component_id) or "unavailable")
         if reliability in _DECISION_RELIABILITIES:
             continue
-        missing_by_component[component_id] = (*missing_by_component.get(component_id, ()), "unreliable_input")
+        missing_by_component[component_id] = (
+            *missing_by_component.get(component_id, ()),
+            "unreliable_input",
+        )
 
 
 def _cluster_distributions(
@@ -238,10 +247,7 @@ def _shared_clone_price_values(
                 for member in members
                 if member.values.get("quality_gate_rejected") is not True
                 and isinstance(member.values.get("component_reliability"), Mapping)
-                and str(
-                    member.values["component_reliability"].get(component_id)
-                    or "unavailable"
-                )
+                and str(member.values["component_reliability"].get(component_id) or "unavailable")
                 in _DECISION_RELIABILITIES
             ]
             usable = [value for value in values if value is not None]
@@ -258,9 +264,7 @@ def _clone_representatives(inputs: Sequence[RankingInput]) -> dict[str, str]:
 
     groups: dict[str, list[RankingInput]] = defaultdict(list)
     for ranking_input in inputs:
-        groups[_clone_key(ranking_input, clone_policy_active=True)].append(
-            ranking_input
-        )
+        groups[_clone_key(ranking_input, clone_policy_active=True)].append(ranking_input)
 
     def sort_key(ranking_input: RankingInput) -> tuple[float, float, float, float, str]:
         turnover = _numeric(ranking_input.values.get("average_turnover_20d"))
@@ -275,10 +279,7 @@ def _clone_representatives(inputs: Sequence[RankingInput]) -> dict[str, str]:
             ranking_input.asset_code,
         )
 
-    return {
-        group_id: min(members, key=sort_key).asset_code
-        for group_id, members in groups.items()
-    }
+    return {group_id: min(members, key=sort_key).asset_code for group_id, members in groups.items()}
 
 
 def _input_with_derived_peer_count(
@@ -292,7 +293,9 @@ def _input_with_derived_peer_count(
         if component.score_bearing and "eligible_peer_count" in component.required_inputs
         for primitive in component.primitive_inputs
     }
-    peer_counts = [len(bucket_distributions.get(primitive_id, ())) for primitive_id in peer_primitives]
+    peer_counts = [
+        len(bucket_distributions.get(primitive_id, ())) for primitive_id in peer_primitives
+    ]
     eligible_peer_count = (
         max(peer_counts)
         if peer_counts and max(peer_counts) >= manifest.minimum_peer_count
@@ -305,6 +308,20 @@ def _input_with_derived_peer_count(
         profile_version=ranking_input.profile_version,
         values={**ranking_input.values, "eligible_peer_count": eligible_peer_count},
     )
+
+
+def _weakest_required_primitive_peer_count(
+    manifest: RankingManifest,
+    bucket_distributions: Mapping[str, Sequence[float]],
+) -> int:
+    peer_primitives = {
+        primitive.primitive_id
+        for component in manifest.components.values()
+        if component.score_bearing and "eligible_peer_count" in component.required_inputs
+        for primitive in component.primitive_inputs
+    }
+    counts = [len(bucket_distributions.get(primitive_id, ())) for primitive_id in peer_primitives]
+    return min(counts) if counts else 0
 
 
 def build_final_score_v3_sector_inputs(inputs: Sequence[RankingInput]) -> dict[str, dict[str, Any]]:
@@ -328,9 +345,15 @@ def build_final_score_v3_sector_inputs(inputs: Sequence[RankingInput]) -> dict[s
                 if member.values.get("quality_gate_rejected") is not True
             ]
             returns = [_numeric(member.values.get("return_20d")) for member in eligible_clones]
-            turnovers_20 = [_numeric(member.values.get("average_turnover_20d")) for member in eligible_clones]
-            turnovers_60 = [_numeric(member.values.get("average_turnover_60d")) for member in eligible_clones]
-            sources = {str(member.values.get("source_trade_date") or "") for member in eligible_clones}
+            turnovers_20 = [
+                _numeric(member.values.get("average_turnover_20d")) for member in eligible_clones
+            ]
+            turnovers_60 = [
+                _numeric(member.values.get("average_turnover_60d")) for member in eligible_clones
+            ]
+            sources = {
+                str(member.values.get("source_trade_date") or "") for member in eligible_clones
+            }
             clone_reliabilities = {
                 str(member.values.get("market_data_reliability") or "unavailable")
                 for member in eligible_clones
@@ -355,15 +378,29 @@ def build_final_score_v3_sector_inputs(inputs: Sequence[RankingInput]) -> dict[s
                 )
             )
         peer_count = len(peer_values)
-        available = peer_count >= 2 and len(source_dates) == 1 and reliabilities.issubset(_DECISION_RELIABILITIES)
+        available = (
+            peer_count >= 2
+            and len(source_dates) == 1
+            and reliabilities.issubset(_DECISION_RELIABILITIES)
+        )
         payload = {
-            "sector_breadth_20d": round(sum(value > 0 for value, _ in peer_values) / peer_count * 100, 4)
+            "sector_breadth_20d": round(
+                sum(value > 0 for value, _ in peer_values) / peer_count * 100, 4
+            )
             if available
             else None,
-            "sector_momentum_20d": round(mean(value for value, _ in peer_values), 8) if available else None,
-            "sector_turnover_ratio_20_60": round(mean(value for _, value in peer_values), 8) if available else None,
+            "sector_momentum_20d": round(mean(value for value, _ in peer_values), 8)
+            if available
+            else None,
+            "sector_turnover_ratio_20_60": round(mean(value for _, value in peer_values), 8)
+            if available
+            else None,
             "sector_eligible_peer_count": peer_count if available else None,
-            "sector_input_status": "alternate_provider" if available and "alternate_provider" in reliabilities else "verified" if available else "unavailable",
+            "sector_input_status": "alternate_provider"
+            if available and "alternate_provider" in reliabilities
+            else "verified"
+            if available
+            else "unavailable",
             "sector_source_trade_date": next(iter(source_dates)) if available else None,
         }
         for member in members:
@@ -377,16 +414,11 @@ def score_final_score_v3(
     manifest: RankingManifest,
 ) -> dict[str, FinalScoreV3Result]:
     resolved_underlying_count = sum(
-        bool(str(item.values.get("tracked_underlying_id") or "").strip())
-        for item in inputs
+        bool(str(item.values.get("tracked_underlying_id") or "").strip()) for item in inputs
     )
-    tracked_underlying_coverage = (
-        resolved_underlying_count / len(inputs) if inputs else 0.0
-    )
+    tracked_underlying_coverage = resolved_underlying_count / len(inputs) if inputs else 0.0
     clone_policy_active = (
-        bool(inputs)
-        and tracked_underlying_coverage
-        >= manifest.clone_activation_minimum_coverage
+        bool(inputs) and tracked_underlying_coverage >= manifest.clone_activation_minimum_coverage
     )
     distributions = _cluster_distributions(
         inputs,
@@ -398,9 +430,7 @@ def score_final_score_v3(
         manifest,
         clone_policy_active=clone_policy_active,
     )
-    representative_by_group = (
-        _clone_representatives(inputs) if clone_policy_active else {}
-    )
+    representative_by_group = _clone_representatives(inputs) if clone_policy_active else {}
     results: dict[str, FinalScoreV3Result] = {}
     for ranking_input in inputs:
         bucket_distributions = distributions.get(ranking_input.asset_bucket, {})
@@ -430,9 +460,18 @@ def score_final_score_v3(
             primitive_scores: list[tuple[RankingPrimitive, float]] = []
             for primitive in component.primitive_inputs:
                 value = _numeric(effective_input.values.get(primitive.primitive_id))
-                score = _primitive_score(primitive, value, bucket_distributions.get(primitive.primitive_id, [])) if value is not None else None
+                score = (
+                    _primitive_score(
+                        primitive, value, bucket_distributions.get(primitive.primitive_id, [])
+                    )
+                    if value is not None
+                    else None
+                )
                 if score is None:
-                    missing_by_component[component_id] = (*missing_by_component.get(component_id, ()), "insufficient_bucket_peers")
+                    missing_by_component[component_id] = (
+                        *missing_by_component.get(component_id, ()),
+                        "insufficient_bucket_peers",
+                    )
                     primitive_scores = []
                     break
                 if not math.isfinite(score):
@@ -464,11 +503,16 @@ def score_final_score_v3(
                     missing_by_component[component_id] = ("component_score_out_of_bounds",)
                 else:
                     component_scores[component_id] = round(component_score, 4)
-        score_bearing_count = sum(component.score_bearing for component in manifest.components.values())
+        score_bearing_count = sum(
+            component.score_bearing for component in manifest.components.values()
+        )
         score_eligible = not missing_by_component and len(component_scores) == score_bearing_count
         ranking_score = (
             round(
-                sum(manifest.components[component_id].weight * score for component_id, score in component_scores.items()),
+                sum(
+                    manifest.components[component_id].weight * score
+                    for component_id, score in component_scores.items()
+                ),
                 4,
             )
             if score_eligible
@@ -487,13 +531,16 @@ def score_final_score_v3(
             risk_flags = ranking_input.values.get("risk_flags")
             bounded_score, limitations = apply_final_score_limits(
                 ranking_score,
-                risk_flags=[str(flag) for flag in risk_flags] if isinstance(risk_flags, Sequence) else [],
+                risk_flags=[str(flag) for flag in risk_flags]
+                if isinstance(risk_flags, Sequence)
+                else [],
             )
             ranking_score = round(bounded_score, 4) if math.isfinite(bounded_score) else None
             limitation_reasons = tuple(limitations)
         if ranking_score is None and not score_eligible:
             limitation_reasons = tuple(
-                f"{component_id}:{','.join(reasons)}" for component_id, reasons in sorted(missing_by_component.items())
+                f"{component_id}:{','.join(reasons)}"
+                for component_id, reasons in sorted(missing_by_component.items())
             )
         results[ranking_input.asset_code] = FinalScoreV3Result(
             asset_bucket=ranking_input.asset_bucket,
@@ -503,19 +550,21 @@ def score_final_score_v3(
             missing_by_component=missing_by_component,
             metric_peer_counts=metric_peer_counts,
             limitation_reasons=limitation_reasons,
+            weakest_required_primitive_peer_count=(
+                _weakest_required_primitive_peer_count(
+                    manifest,
+                    bucket_distributions,
+                )
+            ),
             clone_policy_active=clone_policy_active,
             tracked_underlying_coverage=round(tracked_underlying_coverage, 6),
             cap_violation=cap_violation,
             non_finite_reject=non_finite_reject,
             clone_group_id=(
-                _clone_key(ranking_input, clone_policy_active=True)
-                if clone_policy_active
-                else None
+                _clone_key(ranking_input, clone_policy_active=True) if clone_policy_active else None
             ),
             diversified_representative=(
-                representative_by_group.get(
-                    _clone_key(ranking_input, clone_policy_active=True)
-                )
+                representative_by_group.get(_clone_key(ranking_input, clone_policy_active=True))
                 == ranking_input.asset_code
                 if clone_policy_active
                 else None
@@ -525,7 +574,11 @@ def score_final_score_v3(
 
 
 def build_v3_shadow_comparison(assets: Sequence[Any], *, top_n: int = 10) -> dict[str, Any]:
-    etf_assets = [asset for asset in assets if str(getattr(getattr(asset, "metadata", None), "asset_type", "")) == "etf"]
+    etf_assets = [
+        asset
+        for asset in assets
+        if str(getattr(getattr(asset, "metadata", None), "asset_type", "")) == "etf"
+    ]
     v2_scores: list[tuple[str, float]] = []
     v3_scores: list[tuple[str, float]] = []
     component_available: Counter[str] = Counter()
@@ -551,12 +604,21 @@ def build_v3_shadow_comparison(assets: Sequence[Any], *, top_n: int = 10) -> dic
         if isinstance(limitations, Sequence) and not isinstance(limitations, str):
             exclusions.update(str(reason) for reason in limitations if reason)
             capped_count += sum(
-                reason in {"数据不足不能形成高分排序。", "旧数据不能提高最终排序。", "不可决策数据不能提高最终排序。"}
+                reason
+                in {
+                    "数据不足不能形成高分排序。",
+                    "旧数据不能提高最终排序。",
+                    "不可决策数据不能提高最终排序。",
+                }
                 for reason in limitations
             )
         elif isinstance(metrics.get("v3_missing_by_component"), Mapping):
             for component_id, reasons in metrics["v3_missing_by_component"].items():
-                for reason in reasons if isinstance(reasons, Sequence) and not isinstance(reasons, str) else [reasons]:
+                for reason in (
+                    reasons
+                    if isinstance(reasons, Sequence) and not isinstance(reasons, str)
+                    else [reasons]
+                ):
                     exclusions[f"{component_id}:{reason}"] += 1
     v2_ordered = sorted(v2_scores, key=lambda item: (-item[1], item[0]))
     v3_ordered = sorted(v3_scores, key=lambda item: (-item[1], item[0]))
@@ -572,7 +634,11 @@ def build_v3_shadow_comparison(assets: Sequence[Any], *, top_n: int = 10) -> dic
     v3_top = [code for code, _score in v3_ordered[:top_n]]
     total = len(etf_assets)
     return {
-        "coverage": {"total": total, "eligible": len(v3_scores), "ratio": round(len(v3_scores) / total, 4) if total else 0.0},
+        "coverage": {
+            "total": total,
+            "eligible": len(v3_scores),
+            "ratio": round(len(v3_scores) / total, 4) if total else 0.0,
+        },
         "component_availability": {
             component_id: {"available": count, "total": total}
             for component_id, count in sorted(

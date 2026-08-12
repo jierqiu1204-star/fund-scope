@@ -10,6 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.entities import EtfFactorExperimentEvidence
 from app.services.etf_research_evidence import stable_contract_hash
+from app.services.strategy_lab.etf_factor_deconfounding import (
+    DeconfoundingContractError,
+    build_deconfounding_evidence,
+    validate_deconfounding_evidence,
+)
 from app.services.strategy_lab.etf_factor_validation import (
     PromotionDecision,
     holm_bonferroni,
@@ -64,24 +69,16 @@ class FactorEvidencePayload:
     hypothesis_registry_hash: str | None = None
 
     def validate(self) -> None:
-        if (self.experiment_family is None) != (
-            self.hypothesis_registry_hash is None
-        ):
+        if (self.experiment_family is None) != (self.hypothesis_registry_hash is None):
             raise FactorEvidenceContractError(
                 "factor evidence family and hypothesis identity must be paired"
             )
         if self.experiment_family is not None:
-            if not self.experiment_family.strip() or not _is_sha256(
-                self.hypothesis_registry_hash
-            ):
-                raise FactorEvidenceContractError(
-                    "factor evidence family identity is invalid"
-                )
+            if not self.experiment_family.strip() or not _is_sha256(self.hypothesis_registry_hash):
+                raise FactorEvidenceContractError("factor evidence family identity is invalid")
         multiplicity = self.intervals.get("multiplicity")
         if not isinstance(multiplicity, dict):
-            raise FactorEvidenceContractError(
-                "factor evidence must include multiplicity metadata"
-            )
+            raise FactorEvidenceContractError("factor evidence must include multiplicity metadata")
         if multiplicity.get("method") != "holm_bonferroni":
             raise FactorEvidenceContractError(
                 "factor evidence multiplicity method must be Holm-Bonferroni"
@@ -89,16 +86,12 @@ class FactorEvidencePayload:
         raw = multiplicity.get("raw_primary_p_values")
         adjusted = multiplicity.get("adjusted_primary_p_values")
         if not isinstance(raw, list) or not isinstance(adjusted, list):
-            raise FactorEvidenceContractError(
-                "raw and adjusted primary p-values are required"
-            )
+            raise FactorEvidenceContractError("raw and adjusted primary p-values are required")
         try:
             raw_values = tuple(float(value) for value in raw)
             adjusted_values = tuple(float(value) for value in adjusted)
         except (TypeError, ValueError) as exc:
-            raise FactorEvidenceContractError(
-                "primary p-values must be numeric"
-            ) from exc
+            raise FactorEvidenceContractError("primary p-values must be numeric") from exc
         expected = holm_bonferroni(raw_values)
         if len(adjusted_values) != len(expected) or any(
             abs(actual - target) > 1e-12
@@ -263,11 +256,7 @@ def _residual_common_support_summary(
         value = factor_diagnostics[name]
         if not isinstance(value, Mapping):
             continue
-        supported = {
-            field: value[field]
-            for field in fields
-            if field in value
-        }
+        supported = {field: value[field] for field in fields if field in value}
         if supported:
             output[str(name)] = supported
     return output
@@ -296,6 +285,7 @@ def build_operational_factor_evidence(
     policy_shadow: dict[str, Any] | None = None,
     limitations: tuple[str, ...] = (),
     primary_diagnostics: Mapping[str, Any] | None = None,
+    deconfounding_evidence: Mapping[str, Any] | None = None,
 ) -> FactorEvidencePayload:
     """Build current evidence from existing result objects without rescoring."""
 
@@ -306,8 +296,7 @@ def build_operational_factor_evidence(
         primary_result.endpoint_role != "primary"
         or primary_result.top_n != 10
         or primary_result.horizon_sessions != 5
-        or primary_result.candidate_registry_hash
-        != manifest.candidate_registry_hash
+        or primary_result.candidate_registry_hash != manifest.candidate_registry_hash
         or manifest.candidate_registry_hash != registry.registry_hash
         or primary_result.candidate_id not in frozen_candidate_ids
         or primary_result.cost_contract_hash != RANKING_COST_CONTRACT_HASH
@@ -321,18 +310,25 @@ def build_operational_factor_evidence(
         or result.candidate_id not in frozen_candidate_ids
         for result in exploratory_results
     ):
-        raise FactorEvidenceContractError(
-            "auxiliary ranking results must remain exploratory"
-        )
+        raise FactorEvidenceContractError("auxiliary ranking results must remain exploratory")
     if not 1 <= len(raw_primary_p_values) <= 3:
         raise FactorEvidenceContractError(
             "operational evidence permits one to three frozen comparisons"
         )
     if any(count < 0 for count in exclusion_counts.values()):
-        raise FactorEvidenceContractError(
-            "operational exclusion counts must be non-negative"
-        )
+        raise FactorEvidenceContractError("operational exclusion counts must be non-negative")
     adjusted_p_values = holm_bonferroni(raw_primary_p_values)
+    try:
+        raw_deconfounding_evidence = (
+            build_deconfounding_evidence()
+            if deconfounding_evidence is None
+            else deconfounding_evidence
+        )
+        deconfounding_payload = validate_deconfounding_evidence(raw_deconfounding_evidence)
+    except DeconfoundingContractError as exc:
+        raise FactorEvidenceContractError(
+            "deconfounding evidence is incompatible with the frozen registry"
+        ) from exc
     residual_common_support = _residual_common_support_summary(factor_diagnostics)
     immutable_primary_diagnostics = dict(primary_diagnostics or {})
     primary_metric = _ranking_metric(
@@ -362,6 +358,7 @@ def build_operational_factor_evidence(
         "exploratory_metrics": exploratory_metrics,
         "factor_diagnostics": factor_diagnostics,
         "residual_common_support": residual_common_support,
+        "deconfounding_evidence": deconfounding_payload,
         "primary_diagnostics": immutable_primary_diagnostics,
         "main_candidate_ids": frozen_candidate_ids,
         "candidate_state": _candidate_state(promotion),
@@ -390,17 +387,15 @@ def build_operational_factor_evidence(
             "average_rank_churn": primary_result.average_rank_churn,
             "candidate_cost_drag": primary_result.mean_candidate_cost_drag,
             "baseline_cost_drag": primary_result.mean_baseline_cost_drag,
-            "candidate_maximum_drawdown": (
-                primary_result.candidate_maximum_drawdown
-            ),
+            "candidate_maximum_drawdown": (primary_result.candidate_maximum_drawdown),
             "baseline_maximum_drawdown": primary_result.baseline_maximum_drawdown,
             "coverage_ratio": primary_result.coverage_ratio,
             "residual_common_support": residual_common_support,
+            "deconfounding_evidence": deconfounding_payload,
             "primary_diagnostics": immutable_primary_diagnostics,
         },
         exclusions=tuple(
-            {"reason": reason, "count": count}
-            for reason, count in sorted(exclusion_counts.items())
+            {"reason": reason, "count": count} for reason, count in sorted(exclusion_counts.items())
         ),
         intervals={
             "primary": {

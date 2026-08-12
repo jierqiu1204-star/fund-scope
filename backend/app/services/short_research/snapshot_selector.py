@@ -59,6 +59,13 @@ class SnapshotMetadata(TypedDict):
     decision_data_coverage_ratio: float | None
     score_eligible_item_count: int | None
     score_coverage_ratio: float | None
+    research_ranked_item_count: int | None
+    research_coverage_ratio: float | None
+    research_quality_eligible_item_count: int | None
+    research_quality_coverage_ratio: float | None
+    observation_only_item_count: int | None
+    actionable_eligible_item_count: int | None
+    actionable_coverage_ratio: float | None
     coverage_ratio: float | None
     coverage_policy_mode: EtfCoveragePolicyMode | None
     readiness_state: EtfCoveragePolicyMode | None
@@ -102,11 +109,7 @@ def _summary_provider_health_identity(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     candidate_records = value.get("candidate_records")
-    summary = {
-        key: item
-        for key, item in value.items()
-        if key != "candidate_records"
-    }
+    summary = {key: item for key, item in value.items() if key != "candidate_records"}
     if isinstance(candidate_records, list):
         summary["candidate_record_count"] = len(candidate_records)
     summary["detail_level"] = "summary"
@@ -132,11 +135,7 @@ def _summary_ranking_surfaces(value: Any) -> dict[str, Any]:
         if not isinstance(surface_value, dict):
             continue
         excluded = surface_value.get("excluded")
-        surface_summary = {
-            key: item
-            for key, item in surface_value.items()
-            if key != "excluded"
-        }
+        surface_summary = {key: item for key, item in surface_value.items() if key != "excluded"}
         if isinstance(excluded, list):
             surface_summary["excluded_count"] = len(excluded)
         surface_summary["detail_level"] = "summary"
@@ -164,6 +163,13 @@ def snapshot_metadata(
             "decision_data_coverage_ratio": None,
             "score_eligible_item_count": None,
             "score_coverage_ratio": None,
+            "research_ranked_item_count": None,
+            "research_coverage_ratio": None,
+            "research_quality_eligible_item_count": None,
+            "research_quality_coverage_ratio": None,
+            "observation_only_item_count": None,
+            "actionable_eligible_item_count": None,
+            "actionable_coverage_ratio": None,
             "coverage_ratio": None,
             "coverage_policy_mode": None,
             "readiness_state": None,
@@ -208,16 +214,11 @@ def snapshot_metadata(
     readiness = _persisted_readiness_for_run(run)
     policy_version = readiness.policy_version
     if readiness.state == "degraded":
-        snapshot_state: Literal["unavailable", "provisional", "complete"] = (
-            "provisional"
-        )
-        limitations.extend(
-            ["provisional_research_only", "actionable_surface_unavailable"]
-        )
+        snapshot_state: Literal["unavailable", "provisional", "complete"] = "provisional"
+        limitations.extend(["provisional_research_only", "actionable_surface_unavailable"])
         freshness_status = "provisional"
         unavailable_reason = str(
-            summary.get("unavailable_reason")
-            or "history_depth_61_coverage_below_90pct"
+            summary.get("unavailable_reason") or "history_depth_61_coverage_below_90pct"
         )
     elif (
         readiness.complete_publication_allowed
@@ -241,24 +242,24 @@ def snapshot_metadata(
         freshness_status = selection_state or "ready"
         unavailable_reason = "snapshot_readiness_incompatible"
     cutoff_provenance = summary.get("cutoff_provenance")
-    cutoff_payload = (
-        cutoff_provenance if isinstance(cutoff_provenance, dict) else {}
-    )
+    cutoff_payload = cutoff_provenance if isinstance(cutoff_provenance, dict) else {}
     resource_profile = summary.get("resource_profile")
     provider_health_identity = summary.get("provider_health_identity")
     observation_only = summary.get("observation_only", {})
     ranking_surfaces = summary.get("ranking_surfaces", {})
+    research_surface = (
+        ranking_surfaces.get("research") if isinstance(ranking_surfaces, dict) else None
+    )
+    actionable_surface = (
+        ranking_surfaces.get("actionable") if isinstance(ranking_surfaces, dict) else None
+    )
     if evidence_detail == "summary":
-        provider_health_payload = _summary_provider_health_identity(
-            provider_health_identity
-        )
+        provider_health_payload = _summary_provider_health_identity(provider_health_identity)
         observation_only_payload = _summary_observation_only(observation_only)
         ranking_surfaces_payload = _summary_ranking_surfaces(ranking_surfaces)
     else:
         provider_health_payload = (
-            dict(provider_health_identity)
-            if isinstance(provider_health_identity, dict)
-            else {}
+            dict(provider_health_identity) if isinstance(provider_health_identity, dict) else {}
         )
         observation_only_payload = observation_only
         ranking_surfaces_payload = ranking_surfaces
@@ -286,6 +287,35 @@ def snapshot_metadata(
         "decision_data_coverage_ratio": run.decision_data_coverage_ratio,
         "score_eligible_item_count": run.eligible_item_count,
         "score_coverage_ratio": run.coverage_ratio,
+        "research_ranked_item_count": (
+            research_surface.get("eligible_count") if isinstance(research_surface, dict) else None
+        ),
+        "research_coverage_ratio": (
+            research_surface.get("coverage_ratio") if isinstance(research_surface, dict) else None
+        ),
+        "research_quality_eligible_item_count": (
+            research_surface.get("quality_eligible_count")
+            if isinstance(research_surface, dict)
+            else None
+        ),
+        "research_quality_coverage_ratio": (
+            research_surface.get("quality_coverage_ratio")
+            if isinstance(research_surface, dict)
+            else None
+        ),
+        "observation_only_item_count": (
+            observation_only.get("count") if isinstance(observation_only, dict) else None
+        ),
+        "actionable_eligible_item_count": (
+            actionable_surface.get("eligible_count")
+            if isinstance(actionable_surface, dict)
+            else None
+        ),
+        "actionable_coverage_ratio": (
+            actionable_surface.get("coverage_ratio")
+            if isinstance(actionable_surface, dict)
+            else None
+        ),
         "coverage_ratio": run.coverage_ratio,
         "coverage_policy_mode": readiness.state,
         "readiness_state": readiness.state,
@@ -309,17 +339,13 @@ def snapshot_metadata(
             "replay_visibility_cutoff",
             config.get("replay_visibility_cutoff"),
         ),
-        "resource_profile": (
-            dict(resource_profile) if isinstance(resource_profile, dict) else {}
-        ),
+        "resource_profile": (dict(resource_profile) if isinstance(resource_profile, dict) else {}),
         "provider_health_identity": provider_health_payload,
         "quality_evidence": quality_evidence,
         "publication_evidence": dict(summary.get("publication_evidence") or {}),
         "pit_evidence": dict(summary.get("pit_evidence") or {}),
         "cost_evidence": dict(summary.get("cost_evidence") or {}),
-        "concentration_evidence": dict(
-            summary.get("concentration_evidence") or {}
-        ),
+        "concentration_evidence": dict(summary.get("concentration_evidence") or {}),
         "freshness_status": freshness_status,
         "limitations": limitations,
     }
@@ -331,18 +357,12 @@ def etf_ranking_surface_selection_from_run(
     ranking_surface: Literal["research", "actionable"],
 ) -> CanonicalSnapshotSelection:
     readiness = _persisted_readiness_for_run(run)
-    if (
-        readiness.complete_publication_allowed
-        and run.publication_state == "published"
-    ):
+    if readiness.complete_publication_allowed and run.publication_state == "published":
         if ranking_surface == "research":
             return CanonicalSnapshotSelection("ready", run)
         surfaces = (run.summary_json or {}).get("ranking_surfaces")
         actionable = surfaces.get("actionable") if isinstance(surfaces, dict) else None
-        if (
-            isinstance(actionable, dict)
-            and int(actionable.get("eligible_count") or 0) > 0
-        ):
+        if isinstance(actionable, dict) and int(actionable.get("eligible_count") or 0) > 0:
             return CanonicalSnapshotSelection("ready", run)
     if ranking_surface == "research" and readiness.state == "degraded":
         return CanonicalSnapshotSelection("provisional", run)
@@ -387,7 +407,9 @@ def _current_contract_fields() -> dict[str, Any]:
     if not isinstance(selector, dict) or not isinstance(calculation, dict):
         raise ValueError("final_score_v3 selector contract is invalid")
     return {
-        "score_version": str(selector.get("target_score_version") or contract.get("contract_id") or ""),
+        "score_version": str(
+            selector.get("target_score_version") or contract.get("contract_id") or ""
+        ),
         "rule_version": str(contract.get("rule_version") or ""),
         "score_field": str(selector.get("score_field") or ""),
         "scope_kind": str(selector.get("required_scope") or ""),
@@ -412,11 +434,9 @@ def _current_contract_clauses() -> tuple[ColumnElement[bool], ...]:
         ShortResearchSignalRun.data_cutoff.is_not(None),
         ShortResearchSignalRun.expected_item_count.is_not(None),
         ShortResearchSignalRun.decision_data_item_count.is_not(None),
-        ShortResearchSignalRun.decision_data_coverage_ratio
-        >= ETF_DAILY_DECISION_MIN_COVERAGE,
+        ShortResearchSignalRun.decision_data_coverage_ratio >= ETF_DAILY_DECISION_MIN_COVERAGE,
         ShortResearchSignalRun.eligible_item_count.is_not(None),
-        ShortResearchSignalRun.coverage_ratio
-        >= ETF_COMPLETE_SCORE_COVERAGE,
+        ShortResearchSignalRun.coverage_ratio >= ETF_COMPLETE_SCORE_COVERAGE,
         ShortResearchSignalRun.idempotency_key.is_not(None),
     )
 
@@ -432,8 +452,7 @@ async def select_current_canonical_etf_snapshot(
             select(ShortResearchSignalRun)
             .join(
                 EtfCanonicalPublicationRegistry,
-                EtfCanonicalPublicationRegistry.source_signal_run_id
-                == ShortResearchSignalRun.id,
+                EtfCanonicalPublicationRegistry.source_signal_run_id == ShortResearchSignalRun.id,
             )
             .where(
                 *_current_contract_clauses(),
@@ -462,11 +481,7 @@ async def select_current_canonical_etf_snapshot(
         .order_by(ShortResearchSignalRun.published_at.desc(), ShortResearchSignalRun.id.desc())
     )
     return next(
-        (
-            run
-            for run in rows
-            if snapshot_metadata(run)["snapshot_state"] == "complete"
-        ),
+        (run for run in rows if snapshot_metadata(run)["snapshot_state"] == "complete"),
         None,
     )
 
@@ -551,8 +566,7 @@ async def resolve_current_etf_ranking_surface_snapshot(
             select(ShortResearchSignalRun)
             .join(
                 EtfCanonicalPublicationRegistry,
-                EtfCanonicalPublicationRegistry.source_signal_run_id
-                == ShortResearchSignalRun.id,
+                EtfCanonicalPublicationRegistry.source_signal_run_id == ShortResearchSignalRun.id,
             )
             .where(
                 *base,
@@ -615,22 +629,19 @@ async def select_canonical_etf_snapshot(
             select(ShortResearchSignalRun)
             .join(
                 EtfCanonicalPublicationRegistry,
-                EtfCanonicalPublicationRegistry.source_signal_run_id
-                == ShortResearchSignalRun.id,
+                EtfCanonicalPublicationRegistry.source_signal_run_id == ShortResearchSignalRun.id,
             )
             .where(
                 ShortResearchSignalRun.status == "success",
                 ShortResearchSignalRun.publication_state == "published",
                 ShortResearchSignalRun.scope_kind == "full",
                 ShortResearchSignalRun.score_version == score_version,
-                ShortResearchSignalRun.ranking_contract_hash
-                == ranking_contract_hash,
+                ShortResearchSignalRun.ranking_contract_hash == ranking_contract_hash,
                 ShortResearchSignalRun.price_basis == price_basis,
                 ShortResearchSignalRun.as_of_trade_date == required_trade_date,
                 ShortResearchSignalRun.decision_data_coverage_ratio
                 >= ETF_DAILY_DECISION_MIN_COVERAGE,
-                ShortResearchSignalRun.coverage_ratio
-                >= ETF_COMPLETE_SCORE_COVERAGE,
+                ShortResearchSignalRun.coverage_ratio >= ETF_COMPLETE_SCORE_COVERAGE,
                 EtfCanonicalPublicationRegistry.is_current.is_(True),
                 has_etf_item,
                 ~has_non_etf_item,
@@ -654,21 +665,15 @@ async def select_canonical_etf_snapshot(
             ShortResearchSignalRun.ranking_contract_hash == ranking_contract_hash,
             ShortResearchSignalRun.price_basis == price_basis,
             ShortResearchSignalRun.as_of_trade_date == required_trade_date,
-            ShortResearchSignalRun.decision_data_coverage_ratio
-            >= ETF_DAILY_DECISION_MIN_COVERAGE,
-            ShortResearchSignalRun.coverage_ratio
-            >= ETF_COMPLETE_SCORE_COVERAGE,
+            ShortResearchSignalRun.decision_data_coverage_ratio >= ETF_DAILY_DECISION_MIN_COVERAGE,
+            ShortResearchSignalRun.coverage_ratio >= ETF_COMPLETE_SCORE_COVERAGE,
             has_etf_item,
             ~has_non_etf_item,
         )
         .order_by(ShortResearchSignalRun.published_at.desc(), ShortResearchSignalRun.id.desc())
     )
     return next(
-        (
-            run
-            for run in rows
-            if snapshot_metadata(run)["snapshot_state"] == "complete"
-        ),
+        (run for run in rows if snapshot_metadata(run)["snapshot_state"] == "complete"),
         None,
     )
 

@@ -5,7 +5,9 @@ from types import SimpleNamespace
 import pytest
 
 from app.services.short_research.final_score_v3 import (
+    _input_with_derived_peer_count,
     _percentile,
+    _weakest_required_primitive_peer_count,
     build_final_score_v3_sector_inputs,
     build_v3_shadow_comparison,
     score_final_score_v3,
@@ -89,9 +91,10 @@ def test_v3_cluster_weights_clones_once_inside_their_asset_bucket() -> None:
     assert first_clone.metric_peer_counts["return_5d"] == 2
     assert first_clone.clone_policy_active is True
     assert first_clone.tracked_underlying_coverage == 1.0
-    assert first_clone.component_scores["technical_momentum_cross_section"] == second_clone.component_scores[
-        "technical_momentum_cross_section"
-    ]
+    assert (
+        first_clone.component_scores["technical_momentum_cross_section"]
+        == second_clone.component_scores["technical_momentum_cross_section"]
+    )
 
 
 def test_v3_keeps_wrapper_execution_primitives_product_specific() -> None:
@@ -101,19 +104,33 @@ def test_v3_keeps_wrapper_execution_primitives_product_specific() -> None:
     first_values = {**first.values, "spread_bps": 1.0, "average_turnover_20d": 300_000_000}
     second_values = {**second.values, "spread_bps": 12.0, "average_turnover_20d": 60_000_000}
     inputs = [
-        RankingInput(first.asset_code, first.asset_bucket, first.price_basis, first.profile_version, first_values),
-        RankingInput(second.asset_code, second.asset_bucket, second.price_basis, second.profile_version, second_values),
+        RankingInput(
+            first.asset_code,
+            first.asset_bucket,
+            first.price_basis,
+            first.profile_version,
+            first_values,
+        ),
+        RankingInput(
+            second.asset_code,
+            second.asset_bucket,
+            second.price_basis,
+            second.profile_version,
+            second_values,
+        ),
         third,
     ]
 
     results = score_final_score_v3(inputs, manifest=_manifest())
 
-    assert results["510300"].component_scores["technical_momentum_cross_section"] == results["510310"].component_scores[
-        "technical_momentum_cross_section"
-    ]
-    assert results["510300"].component_scores["structure_liquidity"] != results["510310"].component_scores[
-        "structure_liquidity"
-    ]
+    assert (
+        results["510300"].component_scores["technical_momentum_cross_section"]
+        == results["510310"].component_scores["technical_momentum_cross_section"]
+    )
+    assert (
+        results["510300"].component_scores["structure_liquidity"]
+        != results["510310"].component_scores["structure_liquidity"]
+    )
     assert results["510300"].clone_group_id == "underlying:000300"
     assert results["510300"].diversified_representative is True
     assert results["510310"].diversified_representative is False
@@ -131,7 +148,10 @@ def test_v3_clone_policy_stays_shadow_until_underlying_coverage_gate_passes() ->
     )
 
     assert all(result.clone_policy_active is False for result in results.values())
-    assert all(result.tracked_underlying_coverage == pytest.approx(2 / 3, abs=1e-6) for result in results.values())
+    assert all(
+        result.tracked_underlying_coverage == pytest.approx(2 / 3, abs=1e-6)
+        for result in results.values()
+    )
     assert all(result.clone_group_id is None for result in results.values())
     assert all(result.diversified_representative is None for result in results.values())
     assert results["510300"].metric_peer_counts["return_5d"] == 3
@@ -209,16 +229,45 @@ def test_v3_rejects_missing_and_incompatible_inputs_without_neutral_fill() -> No
 
     assert results["510300"].ranking_score is None
     assert results["510300"].score_eligible is False
-    assert results["510300"].missing_by_component == {"structure_liquidity": ("average_turnover_60d",)}
+    assert results["510300"].missing_by_component == {
+        "structure_liquidity": ("average_turnover_60d",)
+    }
     assert results["518880"].score_eligible is False
     assert results["518880"].missing_by_component["contract"] == ("incompatible_asset_bucket",)
 
 
 def test_v3_derives_peer_count_instead_of_accepting_fixture_count() -> None:
-    result = score_final_score_v3([_input("510300", underlying_id="000300")], manifest=_manifest())["510300"]
+    result = score_final_score_v3([_input("510300", underlying_id="000300")], manifest=_manifest())[
+        "510300"
+    ]
 
     assert result.score_eligible is False
-    assert result.missing_by_component["technical_momentum_cross_section"] == ("eligible_peer_count",)
+    assert result.missing_by_component["technical_momentum_cross_section"] == (
+        "eligible_peer_count",
+    )
+
+
+def test_v3_reports_weakest_required_primitive_peer_count() -> None:
+    manifest = _manifest()
+    peer_primitives = {
+        primitive.primitive_id
+        for component in manifest.components.values()
+        if component.score_bearing and "eligible_peer_count" in component.required_inputs
+        for primitive in component.primitive_inputs
+    }
+    distributions = {primitive_id: [1.0] * 25 for primitive_id in peer_primitives}
+    weakest = min(peer_primitives)
+    distributions[weakest] = [1.0, 2.0]
+
+    derived = _input_with_derived_peer_count(
+        _input("510300"),
+        manifest,
+        distributions,
+    )
+
+    assert derived.values["eligible_peer_count"] == 25
+    assert _weakest_required_primitive_peer_count(manifest, distributions) == 2
+    assert manifest.minimum_peer_count == 2
 
 
 def test_v3_rejects_non_finite_input_without_weight_renormalization() -> None:
@@ -233,7 +282,9 @@ def test_v3_rejects_non_finite_input_without_weight_renormalization() -> None:
         values=invalid_values,
     )
 
-    result = score_final_score_v3([invalid, _input("510500"), _input("510880")], manifest=_manifest())["510300"]
+    result = score_final_score_v3(
+        [invalid, _input("510500"), _input("510880")], manifest=_manifest()
+    )["510300"]
 
     assert result.ranking_score is None
     assert result.score_eligible is False
@@ -272,14 +323,18 @@ def test_v3_keeps_unimplemented_factor_groups_explanatory_only() -> None:
         profile_version=explanatory.profile_version,
         values=explanatory_values,
     )
-    baseline = score_final_score_v3([_input("510300"), _input("510500"), _input("510880")], manifest=_manifest())
+    baseline = score_final_score_v3(
+        [_input("510300"), _input("510500"), _input("510880")], manifest=_manifest()
+    )
     with_explanatory = score_final_score_v3(
         [explanatory, _input("510500"), _input("510880")],
         manifest=_manifest(),
     )
 
     assert with_explanatory["510300"].ranking_score == baseline["510300"].ranking_score
-    assert all("factor" not in component for component in with_explanatory["510300"].component_scores)
+    assert all(
+        "factor" not in component for component in with_explanatory["510300"].component_scores
+    )
 
 
 def test_v3_quality_gate_cannot_be_restored_by_later_enrichment() -> None:
@@ -302,10 +357,14 @@ def test_v3_quality_gate_cannot_be_restored_by_later_enrichment() -> None:
         values=gated_values,
     )
 
-    result = score_final_score_v3([gated, _input("510500"), _input("510880")], manifest=_manifest())["510300"]
+    result = score_final_score_v3(
+        [gated, _input("510500"), _input("510880")], manifest=_manifest()
+    )["510300"]
 
     assert result.ranking_score is None
-    assert result.missing_by_component["technical_momentum_cross_section"] == ("quality_gate_rejected",)
+    assert result.missing_by_component["technical_momentum_cross_section"] == (
+        "quality_gate_rejected",
+    )
 
 
 def test_v3_missing_sparse_theme_catalyst_remains_explanatory_without_neutral_fill() -> None:
@@ -402,7 +461,9 @@ def test_v3_applies_final_risk_cap_once_after_component_aggregation() -> None:
         values=stale_values,
     )
 
-    result = score_final_score_v3([stale, _input("510500"), _input("510880")], manifest=_manifest())["510300"]
+    result = score_final_score_v3(
+        [stale, _input("510500"), _input("510880")], manifest=_manifest()
+    )["510300"]
 
     assert result.score_eligible is True
     assert result.ranking_score is not None
@@ -421,7 +482,11 @@ def test_v3_shadow_comparison_reports_coverage_components_and_rank_changes() -> 
                 "v3_missing_by_component": {},
                 "v3_score_limitation_reasons": [],
             },
-            score_breakdown={"final_score_v3_shadow": {"component_scores": {"technical_momentum_cross_section": 80.0}}},
+            score_breakdown={
+                "final_score_v3_shadow": {
+                    "component_scores": {"technical_momentum_cross_section": 80.0}
+                }
+            },
         ),
         SimpleNamespace(
             metadata=SimpleNamespace(asset_type="etf", code="510500"),
@@ -435,14 +500,21 @@ def test_v3_shadow_comparison_reports_coverage_components_and_rank_changes() -> 
                     "数据不足不能形成高分排序。",
                 ],
             },
-            score_breakdown={"final_score_v3_shadow": {"component_scores": {"technical_momentum_cross_section": 70.0}}},
+            score_breakdown={
+                "final_score_v3_shadow": {
+                    "component_scores": {"technical_momentum_cross_section": 70.0}
+                }
+            },
         ),
     ]
 
     comparison = build_v3_shadow_comparison(assets)
 
     assert comparison["coverage"] == {"total": 2, "eligible": 1, "ratio": 0.5}
-    assert comparison["component_availability"]["technical_momentum_cross_section"] == {"available": 2, "total": 2}
+    assert comparison["component_availability"]["technical_momentum_cross_section"] == {
+        "available": 2,
+        "total": 2,
+    }
     assert comparison["component_availability"]["premium_discount"] == {"available": 0, "total": 2}
     assert comparison["caps"] == {"applied_count": 1}
     assert comparison["exclusion_reasons"] == {

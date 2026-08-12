@@ -671,6 +671,19 @@ function actionableStateText(
   return reasons.length ? `暂无可行动资格：${reasons.slice(0, 2).join("；")}` : "暂无可行动资格：缺少行动证据";
 }
 
+function researchQualityStateText(asset: ShortResearchAsset) {
+  if (!asset.observation_only && asset.research_quality_eligible !== false) {
+    return "研究质量门槛通过";
+  }
+  const labels: Record<string, string> = {
+    absolute_tradability_below_threshold: "成交额低于行动门槛",
+    taxonomy_bucket_unresolved: "分类证据不足",
+    canonical_quality_gate_failed: "行动质量门槛未通过"
+  };
+  const reasons = (asset.research_quality_reasons ?? []).map((reason) => labels[reason] ?? reason);
+  return `研究可见 · 仅观察${reasons.length ? `：${reasons.slice(0, 2).join("；")}` : ""}`;
+}
+
 function actionableFieldLabel(field: string) {
   const labels: Record<string, string> = {
     bid: "买一价",
@@ -3176,6 +3189,16 @@ function ShortTermClient() {
                 ? ` · 状态原因：${shortAssetData.snapshot.unavailable_reason}`
                 : ""}
             </p>
+            <p className="mt-1 text-xs text-ink/45">
+              研究入榜：{shortAssetData?.snapshot?.research_ranked_item_count ?? "暂无"}
+              {shortAssetData?.snapshot?.expected_item_count
+                ? ` / ${shortAssetData.snapshot.expected_item_count}`
+                : ""}
+              {" · "}行动质量达标：
+              {shortAssetData?.snapshot?.research_quality_eligible_item_count ?? "暂无"}
+              {" · "}仅观察：{shortAssetData?.snapshot?.observation_only_item_count ?? "暂无"}
+              {" · "}盘中可行动：{shortAssetData?.snapshot?.actionable_eligible_item_count ?? "暂无"}
+            </p>
             {etfSnapshotStateMessages(shortAssetData?.snapshot).map((message) => (
               <p key={message.key} className="mt-2 rounded-md bg-amber-50 px-2.5 py-2 text-xs leading-5 text-amber-800">
                 {message.text}
@@ -3391,6 +3414,9 @@ function ShortTermClient() {
                           <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
                             {historyTierText(item.history_confidence_tier)}
                           </span>
+                          <span className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : item.observation_only ? "bg-amber-50 text-amber-800" : "bg-paper"}`}>
+                            {researchQualityStateText(item)}
+                          </span>
                           <span className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
                             {actionableStateText(
                               item,
@@ -3520,6 +3546,9 @@ function ShortTermClient() {
                     selectedAsset,
                     shortAssetData?.snapshot?.snapshot_state
                   )}
+                </p>
+                <p className={`mt-1 text-sm leading-6 ${selectedAsset.observation_only ? "text-amber-700" : "text-ink/65"}`}>
+                  {researchQualityStateText(selectedAsset)}
                 </p>
                 {etfAssetStateMessages(selectedAsset).map((message) => (
                   <p key={message.key} className="mt-1 text-sm leading-6 text-ink/65">
@@ -5085,6 +5114,9 @@ function ShortTermClient() {
                           selectedAsset,
                           shortAssetData?.snapshot?.snapshot_state
                         )}
+                      </p>
+                      <p className={`mt-1 text-sm leading-6 ${selectedAsset.observation_only ? "text-amber-700" : "text-ink/65"}`}>
+                        {researchQualityStateText(selectedAsset)}
                       </p>
                       {etfAssetStateMessages(selectedAsset).map((message) => (
                         <p key={message.key} className="mt-1 text-sm leading-6 text-ink/65">

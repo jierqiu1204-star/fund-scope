@@ -54,6 +54,9 @@ from app.services.strategy_lab.etf_action_replay.artifact_store import (
 from app.services.strategy_lab.etf_action_replay.features import (
     BoundedWorkLimitError,
 )
+from app.services.strategy_lab.etf_factor_deconfounding import (
+    build_deconfounding_evidence,
+)
 from app.services.strategy_lab.etf_factor_evidence import (
     build_operational_factor_evidence,
 )
@@ -276,19 +279,11 @@ def _source_cutoff_provenance(
     persisted = _mapping(summary.get("cutoff_provenance"))
     market_cutoff = _parse_local_cutoff(config.get("market_decision_cutoff"))
     receipt_cutoff = _parse_local_cutoff(persisted.get("data_receipt_cutoff"))
-    config_receipt_cutoff = _parse_local_cutoff(
-        config.get("source_availability_cutoff")
-    )
+    config_receipt_cutoff = _parse_local_cutoff(config.get("source_availability_cutoff"))
     explicit_visibility_cutoff = _parse_local_cutoff(replay_visibility_cutoff)
-    persisted_visibility_cutoff = _parse_local_cutoff(
-        persisted.get("replay_visibility_cutoff")
-    )
+    persisted_visibility_cutoff = _parse_local_cutoff(persisted.get("replay_visibility_cutoff"))
 
-    if (
-        market_cutoff is None
-        or receipt_cutoff is None
-        or explicit_visibility_cutoff is None
-    ):
+    if market_cutoff is None or receipt_cutoff is None or explicit_visibility_cutoff is None:
         return None, PIT_UNAVAILABLE_CUTOFF_MISSING
     if (
         config_receipt_cutoff is None
@@ -327,16 +322,10 @@ async def _latest_provider_health_identity(
     *,
     trade_date: date,
 ) -> dict[str, Any] | None:
-    job_name = (
-        "etf_history_continuation:"
-        f"publication_readiness:{trade_date.isoformat()}"
-    )
+    job_name = f"etf_history_continuation:publication_readiness:{trade_date.isoformat()}"
     rows = (
         await session.scalars(
-            select(JobRun)
-            .where(JobRun.job_name == job_name)
-            .order_by(JobRun.id.desc())
-            .limit(10)
+            select(JobRun).where(JobRun.job_name == job_name).order_by(JobRun.id.desc()).limit(10)
         )
     ).all()
     for row in rows:
@@ -349,9 +338,7 @@ async def _latest_provider_health_identity(
             "job_name": row.job_name,
             "job_status": row.status,
             "started_at": row.started_at.isoformat(),
-            "finished_at": (
-                row.finished_at.isoformat() if row.finished_at is not None else None
-            ),
+            "finished_at": (row.finished_at.isoformat() if row.finished_at is not None else None),
             "provider_health": dict(provider_health),
         }
     return None
@@ -388,12 +375,8 @@ async def preflight_production_pit_capture(
     if unavailable_reason is not None:
         return PitCapturePreflight(False, unavailable_reason, trade_date)
 
-    persisted_cutoffs = _mapping(
-        _mapping(run.summary_json).get("cutoff_provenance")
-    )
-    receipt_cutoff = _parse_local_cutoff(
-        persisted_cutoffs.get("data_receipt_cutoff")
-    )
+    persisted_cutoffs = _mapping(_mapping(run.summary_json).get("cutoff_provenance"))
+    receipt_cutoff = _parse_local_cutoff(persisted_cutoffs.get("data_receipt_cutoff"))
     cutoffs, cutoff_reason = _source_cutoff_provenance(
         run,
         replay_visibility_cutoff=receipt_cutoff,
@@ -420,9 +403,7 @@ async def preflight_production_pit_capture(
         )
     provider_health_hash = stable_contract_hash(provider_health_identity)
     source = await session.scalar(
-        select(EtfPitCaptureSource).where(
-            EtfPitCaptureSource.source_signal_run_id == run.id
-        )
+        select(EtfPitCaptureSource).where(EtfPitCaptureSource.source_signal_run_id == run.id)
     )
     if source is None:
         return PitCapturePreflight(
@@ -490,8 +471,7 @@ async def preflight_production_pit_capture(
     if (
         checkpoint is not None
         and checkpoint.updated_at is not None
-        and checkpoint.updated_at
-        > effective_now - timedelta(minutes=PIT_SCHEDULER_CADENCE_MINUTES)
+        and checkpoint.updated_at > effective_now - timedelta(minutes=PIT_SCHEDULER_CADENCE_MINUTES)
     ):
         return PitCapturePreflight(
             False,
@@ -534,9 +514,7 @@ def complete_dual_snapshot_unavailable_reason(
     )
     readiness = evaluate_persisted_etf_readiness(
         policy_version=(
-            str(persisted_policy_version)
-            if isinstance(persisted_policy_version, str)
-            else None
+            str(persisted_policy_version) if isinstance(persisted_policy_version, str) else None
         ),
         daily_coverage_ratio=daily_coverage,
         warmup_coverage_ratio=warmup_coverage,
@@ -611,12 +589,8 @@ def _source_context_payload(
         "universe_manifest_hash": run.universe_snapshot_hash,
         "input_snapshot_hash": run.input_snapshot_hash,
         "ranking_contract_hash": run.ranking_contract_hash,
-        "research_contract_hash": _mapping(surfaces.get("research")).get(
-            "contract_hash"
-        ),
-        "actionable_contract_hash": _mapping(surfaces.get("actionable")).get(
-            "contract_hash"
-        ),
+        "research_contract_hash": _mapping(surfaces.get("research")).get("contract_hash"),
+        "actionable_contract_hash": _mapping(surfaces.get("actionable")).get("contract_hash"),
         "readiness_policy_version": readiness.get("policy_version"),
         "readiness_state": summary.get("readiness_state"),
         "target_date_coverage_ratio": run.decision_data_coverage_ratio,
@@ -626,9 +600,7 @@ def _source_context_payload(
         "provider_health_identity": dict(provider_health_identity),
         "prospective_evidence": {
             "source_trade_dates": (
-                [run.as_of_trade_date.isoformat()]
-                if run.as_of_trade_date is not None
-                else []
+                [run.as_of_trade_date.isoformat()] if run.as_of_trade_date is not None else []
             ),
             "eligible_primary_dates": [],
             "independent_primary_date_count": 0,
@@ -675,8 +647,7 @@ def _captured_source_is_valid(source: EtfPitCaptureSource) -> bool:
     provider_health_identity = _mapping(context.get("provider_health_identity"))
     if (
         not provider_health_identity
-        or stable_contract_hash(provider_health_identity)
-        != source.provider_health_hash
+        or stable_contract_hash(provider_health_identity) != source.provider_health_hash
     ):
         return False
     return (
@@ -812,16 +783,10 @@ async def capture_complete_pit_source(
         universe_manifest_hash=str(run.universe_snapshot_hash),
         input_snapshot_hash=str(run.input_snapshot_hash),
         ranking_contract_hash=str(run.ranking_contract_hash),
-        research_contract_hash=str(
-            _mapping(surfaces.get("research")).get("contract_hash")
-        ),
-        actionable_contract_hash=str(
-            _mapping(surfaces.get("actionable")).get("contract_hash")
-        ),
+        research_contract_hash=str(_mapping(surfaces.get("research")).get("contract_hash")),
+        actionable_contract_hash=str(_mapping(surfaces.get("actionable")).get("contract_hash")),
         readiness_policy_version=str(
-            _mapping(_mapping(run.summary_json).get("readiness_policy")).get(
-                "policy_version"
-            )
+            _mapping(_mapping(run.summary_json).get("readiness_policy")).get("policy_version")
         ),
         readiness_state="complete",
         target_date_coverage_ratio=float(run.decision_data_coverage_ratio),
@@ -903,7 +868,10 @@ def build_production_pit_manifest(
 
 
 def _handler_timeout(timeout_seconds: float) -> float:
-    if not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= PIT_MAX_CONTINUATION_SECONDS:
+    if (
+        not math.isfinite(timeout_seconds)
+        or not 0 < timeout_seconds <= PIT_MAX_CONTINUATION_SECONDS
+    ):
         raise ValueError("PIT continuation timeout must be within (0, 50]")
     return min(_PIT_HANDLER_WORK_SECONDS, max(1.0, timeout_seconds - 2.0))
 
@@ -1006,8 +974,7 @@ def _phase_artifact_payload(
         "predecessor_hash": _phase_predecessor_hash(checkpoint),
         "candidate_hash": candidate_hash
         or _phase_absence_hash(manifest, phase=phase, kind="candidate"),
-        "outcome_hash": outcome_hash
-        or _phase_absence_hash(manifest, phase=phase, kind="outcome"),
+        "outcome_hash": outcome_hash or _phase_absence_hash(manifest, phase=phase, kind="outcome"),
         "cost_hash": manifest.ranking_cost_contract_hash,
         "source_context_hash": source.source_context_hash,
         "source_snapshot_hash": source.source_snapshot_hash,
@@ -1186,15 +1153,10 @@ def _selection_from_artifact_payload(
             str(item) for item in selection.get("selected_asset_codes") or ()
         ),
         underlying_hysteresis_asset_codes=tuple(
-            str(item)
-            for item in selection.get("underlying_hysteresis_asset_codes") or ()
+            str(item) for item in selection.get("underlying_hysteresis_asset_codes") or ()
         ),
-        entered_asset_codes=tuple(
-            str(item) for item in selection.get("entered_asset_codes") or ()
-        ),
-        exited_asset_codes=tuple(
-            str(item) for item in selection.get("exited_asset_codes") or ()
-        ),
+        entered_asset_codes=tuple(str(item) for item in selection.get("entered_asset_codes") or ()),
+        exited_asset_codes=tuple(str(item) for item in selection.get("exited_asset_codes") or ()),
         retained_asset_codes=tuple(
             str(item) for item in selection.get("retained_asset_codes") or ()
         ),
@@ -1216,9 +1178,7 @@ def _hashes_from_phase_artifacts(
             if _is_sha256(_mapping(item.payload).get(key))
         )
     )
-    return stable_contract_hash(
-        {"key": key, "values": values, "fallback": fallback}
-    )
+    return stable_contract_hash({"key": key, "values": values, "fallback": fallback})
 
 
 def _prospective_count(
@@ -1702,9 +1662,7 @@ def build_production_pit_phase_handlers(
                 source=source,
             ):
                 raise ValueError("Stage B event is outside the immutable PIT source")
-            registry = freeze_ranking_candidate_registry(
-                FROZEN_RANKING_CANDIDATES
-            )
+            registry = freeze_ranking_candidate_registry(FROZEN_RANKING_CANDIDATES)
             if registry.registry_hash != manifest.candidate_registry_hash:
                 raise ValueError("frozen candidate registry is incompatible")
             batch = evaluate_ranking_candidates(
@@ -1767,9 +1725,7 @@ def build_production_pit_phase_handlers(
                                 else "not_required_or_satisfied"
                             ),
                             "unavailable_inputs": (
-                                ["regime_liquidity_gate_facts"]
-                                if selection.gate_exclusions
-                                else []
+                                ["regime_liquidity_gate_facts"] if selection.gate_exclusions else []
                             ),
                         },
                     ),
@@ -1867,16 +1823,14 @@ def build_production_pit_phase_handlers(
                             details={
                                 "unavailable_inputs": ["valid_candidate_selection"],
                                 "reason": (
-                                    "pit_candidate_selection_contract_pending:"
-                                    f"{type(exc).__name__}"
+                                    f"pit_candidate_selection_contract_pending:{type(exc).__name__}"
                                 ),
                             },
                         ),
                     )
                 )
                 exclusions["pit_candidate_selection_contract_pending"] = (
-                    exclusions.get("pit_candidate_selection_contract_pending", 0)
-                    + 1
+                    exclusions.get("pit_candidate_selection_contract_pending", 0) + 1
                 )
                 continue
             if bundle.pending_outcome_count:
@@ -1889,11 +1843,7 @@ def build_production_pit_phase_handlers(
                     f"candidate:{selection.candidate_id}",
                     _phase_artifact_payload(
                         phase="forward_outcomes",
-                        status=(
-                            "pending"
-                            if bundle.pending_outcome_count
-                            else "completed"
-                        ),
+                        status=("pending" if bundle.pending_outcome_count else "completed"),
                         manifest=manifest,
                         checkpoint=checkpoint,
                         source=source,
@@ -2022,9 +1972,7 @@ def build_production_pit_phase_handlers(
                     price_basis="total_return_adjusted",
                     publication_state=None,
                     scope_kind="research_replay",
-                    availability_cutoff=source.replay_visibility_cutoff.replace(
-                        tzinfo=_SHANGHAI
-                    ),
+                    availability_cutoff=source.replay_visibility_cutoff.replace(tzinfo=_SHANGHAI),
                     immutable_hash="pending",
                 )
             )
@@ -2151,6 +2099,7 @@ def build_production_pit_phase_handlers(
                 candidate_hash=manifest.candidate_registry_hash,
                 details={
                     "component": build_operational_factor_evidence.__name__,
+                    "deconfounding_evidence": build_deconfounding_evidence(),
                     "unavailable_inputs": ["ranking_validation_artifact"],
                     "reason": PIT_PENDING_FACTOR_INPUTS,
                 },
@@ -2195,6 +2144,7 @@ def build_production_pit_phase_handlers(
             outcome_hash=outcome_hash,
             details={
                 "component": build_operational_factor_evidence.__name__,
+                "deconfounding_evidence": build_deconfounding_evidence(),
                 "promotion": {
                     "state": readiness["promotion_state"],
                     "failed_gates": readiness["promotion_blockers"],
@@ -2204,6 +2154,7 @@ def build_production_pit_phase_handlers(
                     "primary_ranking_endpoint_result",
                     "exploratory_ranking_endpoint_results",
                     "residual_common_support_factor_diagnostics",
+                    "deconfounding_common_support_observations",
                     "holm_adjusted_primary_intervals",
                 ],
                 "reason": PIT_PENDING_FACTOR_INPUTS,
@@ -2413,15 +2364,9 @@ def build_production_pit_phase_handlers(
             details={
                 "readiness": readiness,
                 "unavailable_inputs": (
-                    list(readiness["promotion_blockers"])
-                    if not readiness["research_ready"]
-                    else []
+                    list(readiness["promotion_blockers"]) if not readiness["research_ready"] else []
                 ),
-                "reason": (
-                    PIT_PENDING_FINAL_INPUTS
-                    if not readiness["research_ready"]
-                    else None
-                ),
+                "reason": (PIT_PENDING_FINAL_INPUTS if not readiness["research_ready"] else None),
                 "holdout_mutated": False,
                 "production_weights_mutated": False,
                 "notification_or_execution_mutated": False,
@@ -2440,11 +2385,7 @@ def build_production_pit_phase_handlers(
                 "ranking_ready": readiness["ranking_ready"],
                 "research_ready": readiness["research_ready"],
             },
-            exclusions=(
-                {PIT_PENDING_FINAL_INPUTS: 1}
-                if not readiness["research_ready"]
-                else {}
-            ),
+            exclusions=({PIT_PENDING_FINAL_INPUTS: 1} if not readiness["research_ready"] else {}),
         )
 
     return ResearchLoopPhaseHandlers(
@@ -2636,9 +2577,7 @@ async def run_scheduled_production_pit_capture(
         "manifest_hash": result.manifest_hash,
         "checkpoint": result.checkpoint,
         "provider_health_hash": preflight.provider_health_hash,
-        "replay_visibility_cutoff": (
-            preflight.replay_visibility_cutoff.isoformat()
-        ),
+        "replay_visibility_cutoff": (preflight.replay_visibility_cutoff.isoformat()),
         "artifact_path": str(store_path),
         "research_only": True,
         "production_mutation_allowed": False,

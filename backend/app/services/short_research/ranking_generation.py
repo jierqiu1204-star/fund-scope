@@ -57,6 +57,9 @@ class RankingSurfaceRow:
     contract_hash: str
     as_of_date: date
     history_tier: str
+    research_quality_eligible: bool = True
+    research_quality_reasons: tuple[str, ...] = ()
+    observation_only: bool = False
     actionable_evidence: ActionableRankResult | None = None
 
 
@@ -65,21 +68,24 @@ class DualRankingSurfaces:
     research_rows: tuple[RankingSurfaceRow, ...]
     actionable_rows: tuple[RankingSurfaceRow, ...]
     research_exclusions: Mapping[str, tuple[str, ...]]
+    research_quality_reasons: Mapping[str, tuple[str, ...]]
     actionable_exclusions: Mapping[str, tuple[str, ...]]
     rejection_summary: Mapping[str, Mapping[str, int]]
 
 
-def _research_exclusion_reasons(candidate: RankingSurfaceCandidate) -> tuple[str, ...]:
+def _research_eligibility_reasons(
+    candidate: RankingSurfaceCandidate,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
     manifest = daily_reconstructable_manifest()
-    reasons: list[str] = []
+    score_reasons: list[str] = []
     if candidate.eligible_sessions < manifest.required_bar_count:
-        reasons.append("history:insufficient_61_eligible_adjusted_sessions")
+        score_reasons.append("history:insufficient_61_eligible_adjusted_sessions")
     if not manifest.matches_identity(
         contract_id=candidate.research_contract_id,
         score_field=candidate.research_score_field,
         manifest_hash=candidate.research_manifest_hash,
     ):
-        reasons.append("research_contract:identity_mismatch")
+        score_reasons.append("research_contract:identity_mismatch")
     score = candidate.research_score
     if (
         score is None
@@ -87,7 +93,7 @@ def _research_exclusion_reasons(candidate: RankingSurfaceCandidate) -> tuple[str
         or not isinstance(score, int | float)
         or not math.isfinite(float(score))
     ):
-        reasons.append("research_score:unavailable_or_non_finite")
+        score_reasons.append("research_score:unavailable_or_non_finite")
     eligibility = evaluate_canonical_research_eligibility(
         eligible_sessions=candidate.eligible_sessions,
         price_basis=candidate.price_basis,
@@ -98,8 +104,11 @@ def _research_exclusion_reasons(candidate: RankingSurfaceCandidate) -> tuple[str
         taxonomy_evidence_valid=candidate.taxonomy_evidence_valid,
         default_display_eligible=candidate.default_display_eligible,
     )
-    reasons.extend(eligibility.reasons)
-    return tuple(sorted(set(reasons)))
+    score_reasons.extend(eligibility.score_reasons)
+    return (
+        tuple(sorted(set(score_reasons))),
+        eligibility.quality_reasons,
+    )
 
 
 def _rank_rows(rows: list[RankingSurfaceRow]) -> tuple[RankingSurfaceRow, ...]:
@@ -114,6 +123,9 @@ def _rank_rows(rows: list[RankingSurfaceRow]) -> tuple[RankingSurfaceRow, ...]:
             contract_hash=row.contract_hash,
             as_of_date=row.as_of_date,
             history_tier=row.history_tier,
+            research_quality_eligible=row.research_quality_eligible,
+            research_quality_reasons=row.research_quality_reasons,
+            observation_only=row.observation_only,
             actionable_evidence=row.actionable_evidence,
         )
         for rank, row in enumerate(ordered, start=1)
@@ -122,9 +134,7 @@ def _rank_rows(rows: list[RankingSurfaceRow]) -> tuple[RankingSurfaceRow, ...]:
 
 def _summary(exclusions: Mapping[str, tuple[str, ...]]) -> dict[str, int]:
     return dict(
-        sorted(
-            Counter(reason for reasons in exclusions.values() for reason in reasons).items()
-        )
+        sorted(Counter(reason for reasons in exclusions.values() for reason in reasons).items())
     )
 
 
@@ -135,12 +145,13 @@ def generate_dual_ranking_surfaces(
     research_rows: list[RankingSurfaceRow] = []
     actionable_rows: list[RankingSurfaceRow] = []
     research_exclusions: dict[str, tuple[str, ...]] = {}
+    research_quality_reasons: dict[str, tuple[str, ...]] = {}
     actionable_exclusions: dict[str, tuple[str, ...]] = {}
 
     for candidate in sorted(candidates, key=lambda item: item.asset_code):
-        research_reasons = _research_exclusion_reasons(candidate)
-        if research_reasons:
-            research_exclusions[candidate.asset_code] = research_reasons
+        score_reasons, quality_reasons = _research_eligibility_reasons(candidate)
+        if score_reasons:
+            research_exclusions[candidate.asset_code] = score_reasons
         else:
             assert candidate.research_score is not None
             tier = history_confidence_tier(candidate.eligible_sessions)
@@ -155,11 +166,22 @@ def generate_dual_ranking_surfaces(
                     contract_hash=research_manifest.manifest_hash,
                     as_of_date=candidate.research_as_of_date,
                     history_tier=tier,
+                    research_quality_eligible=not quality_reasons,
+                    research_quality_reasons=quality_reasons,
+                    observation_only=bool(quality_reasons),
                 )
             )
+            if quality_reasons:
+                research_quality_reasons[candidate.asset_code] = quality_reasons
 
+        action_reasons: list[str] = []
+        if score_reasons:
+            action_reasons.append("research_surface:unavailable")
+        else:
+            action_reasons.extend(quality_reasons)
         if candidate.final_score_v3 is None:
-            actionable_exclusions[candidate.asset_code] = ("final_score_v3:missing",)
+            action_reasons.append("final_score_v3:missing")
+            actionable_exclusions[candidate.asset_code] = tuple(sorted(set(action_reasons)))
             continue
         actionable = evaluate_actionable_rank(
             candidate.final_score_v3,
@@ -169,9 +191,7 @@ def generate_dual_ranking_surfaces(
             cap_violation=candidate.cap_violation,
             non_finite_reject=candidate.non_finite_reject,
         )
-        action_reasons = list(actionable.exclusion_reasons)
-        if research_reasons:
-            action_reasons.append("research_surface:unavailable")
+        action_reasons.extend(actionable.exclusion_reasons)
         if candidate.actionable_as_of_date != candidate.research_as_of_date:
             action_reasons.append("as_of_context:mismatch")
         if action_reasons:
@@ -197,9 +217,11 @@ def generate_dual_ranking_surfaces(
         research_rows=_rank_rows(research_rows),
         actionable_rows=_rank_rows(actionable_rows),
         research_exclusions=research_exclusions,
+        research_quality_reasons=research_quality_reasons,
         actionable_exclusions=actionable_exclusions,
         rejection_summary={
             "research": _summary(research_exclusions),
+            "research_quality": _summary(research_quality_reasons),
             "actionable": _summary(actionable_exclusions),
         },
     )

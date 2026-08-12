@@ -262,15 +262,8 @@ async def test_ninety_percent_materialization_is_complete_and_publishable(
     assert persisted_run.publication_state == "published"
     assert persisted_run.summary_json["readiness_state"] == "complete"
     assert persisted_run.summary_json["snapshot_state"] == "complete_candidate"
-    assert persisted_run.summary_json["readiness_policy_version"] == (
-        "etf_readiness_policy_v4"
-    )
-    assert (
-        persisted_run.summary_json["ranking_surfaces"]["actionable"][
-            "eligible_count"
-        ]
-        == 9
-    )
+    assert persisted_run.summary_json["readiness_policy_version"] == ("etf_readiness_policy_v4")
+    assert persisted_run.summary_json["ranking_surfaces"]["actionable"]["eligible_count"] == 9
     assert all(item.metrics_json["actionable_rank"] is not None for item in items)
     assert all(item.metrics_json["actionable_score"] is not None for item in items)
     assert research.state == "ready"
@@ -293,9 +286,9 @@ async def test_low_turnover_top_score_is_persisted_as_observation_only(
     rejected = assets[0]
     rejected.metrics["average_turnover_20d"] = 10_000_000.0
     rejected.metrics["default_display_eligible"] = False
-    rejected.metrics["default_exclusion_reasons"] = [
-        "近 20 日平均成交额偏低，流动性不足"
-    ]
+    rejected.metrics["default_exclusion_reasons"] = ["近 20 日平均成交额偏低，流动性不足"]
+    rejected.metrics["actionable_field_statuses"] = {}
+    rejected.metrics["actionable_source_times"] = {}
     _install(monkeypatch, assets, universe_codes=universe_codes)
     monkeypatch.setattr(
         short_research_service,
@@ -326,22 +319,31 @@ async def test_low_turnover_top_score_is_persisted_as_observation_only(
         )
         items = (
             await session.scalars(
-                select(ShortResearchSignalItem).where(
-                    ShortResearchSignalItem.run_id == run.id
-                )
+                select(ShortResearchSignalItem).where(ShortResearchSignalItem.run_id == run.id)
             )
         ).all()
         await session.commit()
         await publish_dual_ranking_snapshot(session, run_id=run.id)
 
-    assert len(items) == 9
-    assert rejected.metadata.code not in {item.asset_code for item in items}
+    assert len(items) == 10
+    rejected_item = next(item for item in items if item.asset_code == rejected.metadata.code)
+    assert rejected_item.global_rank == 1
+    assert rejected_item.metrics_json["observation_only"] is True
+    assert rejected_item.metrics_json["research_quality_eligible"] is False
+    assert rejected_item.metrics_json["research_quality_reasons"] == [
+        "absolute_tradability_below_threshold"
+    ]
+    assert rejected_item.metrics_json["actionable_rank"] is None
+    assert (
+        "absolute_tradability_below_threshold"
+        in (rejected_item.metrics_json["actionable_exclusion_reasons"])
+    )
     observation = run.summary_json["observation_only"]
     assert observation["count"] == 1
     assert observation["items"][0]["asset_code"] == rejected.metadata.code
-    assert observation["items"][0]["reasons"] == [
-        "absolute_tradability_below_threshold"
-    ]
+    assert observation["items"][0]["research_rank"] == 1
+    assert observation["items"][0]["research_score"] == 99.0
+    assert observation["items"][0]["reasons"] == ["absolute_tradability_below_threshold"]
     assert observation["items"][0]["evidence"] == {
         "eligible_adjusted_sessions": 250,
         "price_basis": "total_return_adjusted",
@@ -362,25 +364,34 @@ async def test_low_turnover_top_score_is_persisted_as_observation_only(
     body = response.json()
     assert body["total"] == 1
     assert body["items"][0]["code"] == rejected.metadata.code
-    assert body["items"][0]["reasons"] == [
-        "absolute_tradability_below_threshold"
-    ]
+    assert body["items"][0]["research_rank"] == 1
+    assert body["items"][0]["research_score"] == 99.0
+    assert body["items"][0]["reasons"] == ["absolute_tradability_below_threshold"]
     assert body["items"][0]["evidence"]["average_turnover_20d"] == 10_000_000.0
     assert body["snapshot"]["quality_evidence"]["observation_only"]["count"] == 1
     assert "items" not in body["snapshot"]["quality_evidence"]["observation_only"]
-    assert (
-        "excluded"
-        not in body["snapshot"]["quality_evidence"]["ranking_surfaces"][
-            "research"
-        ]
-    )
+    assert "excluded" not in body["snapshot"]["quality_evidence"]["ranking_surfaces"]["research"]
     assert run.eligible_item_count == 10
     assert run.coverage_ratio == 1.0
     assert run.summary_json["score_coverage"]["eligible_count"] == 10
-    assert run.summary_json["ranking_surfaces"]["research"]["coverage_ratio"] == 0.9
+    research_surface = run.summary_json["ranking_surfaces"]["research"]
+    assert research_surface["coverage_ratio"] == 1.0
+    assert research_surface["quality_eligible_count"] == 9
+    assert research_surface["quality_coverage_ratio"] == 0.9
+    assert research_surface["observation_only_count"] == 1
+    assert research_surface["quality_reason_counts"] == {"absolute_tradability_below_threshold": 1}
     assert body["snapshot"]["score_eligible_item_count"] == 10
     assert body["snapshot"]["score_coverage_ratio"] == 1.0
-    assert body["snapshot"]["coverage_ratio"] == 0.9
+    assert body["snapshot"]["research_ranked_item_count"] == 10
+    assert body["snapshot"]["research_coverage_ratio"] == 1.0
+    assert body["snapshot"]["research_quality_eligible_item_count"] == 9
+    assert body["snapshot"]["research_quality_coverage_ratio"] == 0.9
+    assert body["snapshot"]["observation_only_item_count"] == 1
+    assert body["snapshot"]["actionable_eligible_item_count"] == 9
+    assert body["snapshot"]["actionable_coverage_ratio"] == 0.9
+    assert body["snapshot"]["coverage_ratio"] == 1.0
+    assert run.summary_json["provider_health_identity"]["state"] == "compatible"
+    assert len(run.summary_json["provider_health_identity"]["candidate_records"]) == 9
 
 
 @pytest.mark.asyncio
@@ -408,19 +419,22 @@ async def test_quality_exclusions_do_not_reduce_score_readiness_coverage(
         published = await publish_dual_ranking_snapshot(session, run_id=run.id)
         items = (
             await session.scalars(
-                select(ShortResearchSignalItem).where(
-                    ShortResearchSignalItem.run_id == run.id
-                )
+                select(ShortResearchSignalItem).where(ShortResearchSignalItem.run_id == run.id)
             )
         ).all()
 
     assert published.publication_state == "published"
     assert run.eligible_item_count == 10
     assert run.coverage_ratio == 1.0
-    assert len(items) == 3
-    assert run.summary_json["item_count"] == 3
+    assert len(items) == 10
+    assert run.summary_json["item_count"] == 10
     assert run.summary_json["observation_only"]["count"] == 7
-    assert run.summary_json["ranking_surfaces"]["research"]["coverage_ratio"] == 0.3
+    research_surface = run.summary_json["ranking_surfaces"]["research"]
+    assert research_surface["coverage_ratio"] == 1.0
+    assert research_surface["quality_eligible_count"] == 3
+    assert research_surface["quality_coverage_ratio"] == 0.3
+    assert research_surface["observation_only_count"] == 7
+    assert run.summary_json["ranking_surfaces"]["actionable"]["eligible_count"] == 3
 
 
 @pytest.mark.asyncio
@@ -557,9 +571,9 @@ async def test_dual_snapshot_publishes_research_when_actionable_surface_is_empty
         published.summary_json["surface_availability_state"]
         == "research_complete_actionable_unavailable"
     )
-    assert published.summary_json["ranking_surfaces"]["actionable"][
-        "blocker_counts"
-    ] == {"provider_health:unhealthy": 1}
+    assert published.summary_json["ranking_surfaces"]["actionable"]["blocker_counts"] == {
+        "provider_health:unhealthy": 1
+    }
 
     async with app.state.db.session() as session:
         research = await resolve_current_etf_ranking_surface_snapshot(
@@ -609,9 +623,7 @@ async def test_cached_assets_api_defaults_to_research_and_filters_actionable(
         lambda _now=None: TRADE_DATE,
     )
     selected_surfaces: list[str] = []
-    original_selection = (
-        short_research_routes.current_etf_ranking_surface_selection
-    )
+    original_selection = short_research_routes.current_etf_ranking_surface_selection
 
     async def recording_selection(*args, **kwargs):
         selected_surfaces.append(str(kwargs.get("ranking_surface") or "research"))
@@ -652,26 +664,20 @@ async def test_cached_assets_api_defaults_to_research_and_filters_actionable(
         "/api/short-research/assets?asset_type=etf&universe=all&include_theme_heat=false"
     )
     actionable_response = await client.get(
-        "/api/short-research/assets"
-        "?asset_type=etf&universe=all&ranking_surface=actionable"
+        "/api/short-research/assets?asset_type=etf&universe=all&ranking_surface=actionable"
     )
-    theme_response = await client.get(
-        "/api/short-research/assets/theme-heat?universe=all"
-    )
+    theme_response = await client.get("/api/short-research/assets/theme-heat?universe=all")
 
     assert research_response.status_code == 200
     research = research_response.json()
     assert research["theme_heat"] == []
     assert research["ranking_surface"] == "research"
     assert research["snapshot"]["ranking_surface"] == "research"
-    assert (
-        research["snapshot"]["score_version"] == "daily_reconstructable_v1"
-    ), research["snapshot"]
+    assert research["snapshot"]["score_version"] == "daily_reconstructable_v1", research["snapshot"]
     assert research["snapshot"]["score_field"] == "research_score"
     assert [item["code"] for item in research["items"]] == ["510002", "510001"]
     assert [
-        (item["rank"], item["research_rank"], item["research_score"])
-        for item in research["items"]
+        (item["rank"], item["research_rank"], item["research_score"]) for item in research["items"]
     ] == [(1, 1, 80.0), (2, 2, 70.0)]
     assert research["items"][0]["actionable_rank"] is None
     assert research["items"][0]["actionable_exclusion_reasons"] == ["bid:missing"]
@@ -769,12 +775,9 @@ async def test_ninety_percent_assets_api_exposes_complete_dual_ranking(
         await publish_dual_ranking_snapshot(session, run_id=run.id)
         watchlist = await _build_research_watchlist(session)
 
-    research_response = await client.get(
-        "/api/short-research/assets?asset_type=etf&universe=all"
-    )
+    research_response = await client.get("/api/short-research/assets?asset_type=etf&universe=all")
     actionable_response = await client.get(
-        "/api/short-research/assets"
-        "?asset_type=etf&universe=all&ranking_surface=actionable"
+        "/api/short-research/assets?asset_type=etf&universe=all&ranking_surface=actionable"
     )
 
     assert research_response.status_code == 200
@@ -903,9 +906,7 @@ async def test_missing_provider_health_seal_publishes_research_only(
         )
         actionable = run.summary_json["ranking_surfaces"]["actionable"]
         assert actionable["eligible_count"] == 0
-        assert actionable["blocker_counts"] == {
-            "provider_health_seal_missing": 1
-        }
+        assert actionable["blocker_counts"] == {"provider_health_seal_missing": 1}
         await session.commit()
 
         published = await publish_dual_ranking_snapshot(session, run_id=run.id)
@@ -919,12 +920,11 @@ async def test_missing_provider_health_seal_publishes_research_only(
     assert published.publication_state == "published"
     assert registry is not None
     assert registry.provider_health_state == "missing"
-    assert registry.provider_health_unavailable_reason == (
-        "provider_health_seal_missing"
+    assert registry.provider_health_unavailable_reason == ("provider_health_seal_missing")
+    assert (
+        published.summary_json["publication_evidence"]["publication_identity"]
+        == registry.publication_identity_hash
     )
-    assert published.summary_json["publication_evidence"][
-        "publication_identity"
-    ] == registry.publication_identity_hash
 
 
 @pytest.mark.asyncio
@@ -1020,6 +1020,4 @@ async def test_new_same_date_identity_supersedes_without_rewriting_prior_run(
     assert registries[1].supersedes_publication_id == registries[0].id
     assert persisted_first is not None
     assert persisted_first.publication_state == "published"
-    assert persisted_first.summary_json["ranking_surfaces"]["research"][
-        "eligible_count"
-    ] == 1
+    assert persisted_first.summary_json["ranking_surfaces"]["research"]["eligible_count"] == 1

@@ -67,6 +67,13 @@ class EtfRankingSnapshotMetadataOut(BaseModel):
     decision_data_coverage_ratio: float | None = None
     score_eligible_item_count: int | None = None
     score_coverage_ratio: float | None = None
+    research_ranked_item_count: int | None = None
+    research_coverage_ratio: float | None = None
+    research_quality_eligible_item_count: int | None = None
+    research_quality_coverage_ratio: float | None = None
+    observation_only_item_count: int | None = None
+    actionable_eligible_item_count: int | None = None
+    actionable_coverage_ratio: float | None = None
     coverage_ratio: float | None = None
     coverage_policy_mode: Literal["blocked", "degraded", "complete"] | None = None
     readiness_state: Literal["blocked", "degraded", "complete"] | None = None
@@ -91,6 +98,8 @@ class EtfRankingSnapshotMetadataOut(BaseModel):
 class EtfObservationOnlyItemOut(BaseModel):
     code: str
     name: str
+    research_rank: int | None = None
+    research_score: float | None = None
     reasons: list[str] = Field(default_factory=list)
     evidence: dict[str, Any] = Field(default_factory=dict)
 
@@ -194,8 +203,7 @@ class EtfSignalValidationRunOut(BaseModel):
             or self.source_event_count != len(self.source_events)
             or [event.event_order for event in self.source_events]
             != list(range(self.source_event_count))
-            or len({event.source_date for event in self.source_events})
-            != self.source_event_count
+            or len({event.source_date for event in self.source_events}) != self.source_event_count
             or any(
                 event.ranking_source_kind != self.ranking_source_kind
                 for event in self.source_events
@@ -289,6 +297,8 @@ class ShortResearchAssetOut(BaseModel):
     research_rank: int | None = None
     research_score: float | None = None
     research_eligible: bool | None = None
+    research_quality_eligible: bool | None = None
+    research_quality_reasons: list[str] = Field(default_factory=list)
     research_contract_hash: str | None = None
     actionable_rank: int | None = None
     actionable_score: float | None = None

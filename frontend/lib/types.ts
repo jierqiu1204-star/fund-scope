@@ -661,6 +661,8 @@ export type ShortResearchAsset = {
   research_rank?: number | null;
   research_score?: number | null;
   research_eligible?: boolean | null;
+  research_quality_eligible?: boolean | null;
+  research_quality_reasons?: string[];
   research_contract_hash?: string | null;
   actionable_rank?: number | null;
   actionable_score?: number | null;
@@ -1649,6 +1651,13 @@ export type EtfRankingSnapshotMetadata = {
   decision_data_coverage_ratio?: number | null;
   score_eligible_item_count?: number | null;
   score_coverage_ratio?: number | null;
+  research_ranked_item_count?: number | null;
+  research_coverage_ratio?: number | null;
+  research_quality_eligible_item_count?: number | null;
+  research_quality_coverage_ratio?: number | null;
+  observation_only_item_count?: number | null;
+  actionable_eligible_item_count?: number | null;
+  actionable_coverage_ratio?: number | null;
   coverage_ratio?: number | null;
   coverage_policy_mode?: "blocked" | "degraded" | "complete" | null;
   readiness_state?: "blocked" | "degraded" | "complete" | null;

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import date, datetime, time, timedelta
+from types import SimpleNamespace
 
 import httpx
 import pandas as pd
@@ -75,6 +76,37 @@ from app.services.tracked_positions.service import (
 from app.services.workflows import etf_live_rankings as live_ranking_workflow
 
 
+def test_observation_only_research_row_cannot_be_used_as_intraday_action_base() -> None:
+    snapshot = SimpleNamespace(
+        status="success",
+        publication_state="published",
+        scope_kind="full",
+        score_version="daily_reconstructable_v1",
+        ranking_contract_hash="contract",
+        price_basis="total_return_adjusted",
+        score_field="research_score",
+        coverage_ratio=1.0,
+        as_of_trade_date=date(2026, 8, 10),
+    )
+    item = SimpleNamespace(
+        score_eligible=True,
+        metrics_json={
+            "research_score": 88.0,
+            "research_quality_eligible": False,
+            "observation_only": True,
+        },
+    )
+
+    score, reason = live_ranking_workflow._eligible_intraday_base(
+        snapshot,
+        item,
+        date(2026, 8, 10),
+    )
+
+    assert score is None
+    assert reason == "日线基座仅供研究观察，未通过行动质量门槛。"
+
+
 def _etf(code: str, name: str | None = None) -> TradableEtf:
     return TradableEtf(
         code=code,
@@ -128,7 +160,12 @@ async def _seed_signal_run(
             started_at=utcnow(),
             finished_at=utcnow(),
             as_of_date=signal_date,
-            config_json={"asset_type": "etf", "theme": None, "codes": [], "language": "research_only"},
+            config_json={
+                "asset_type": "etf",
+                "theme": None,
+                "codes": [],
+                "language": "research_only",
+            },
             summary_json={
                 "item_count": count,
                 "etf_count": count,
@@ -169,7 +206,9 @@ async def _seed_signal_run(
             decision_data_coverage_ratio=1.0 if canonical else None,
             eligible_item_count=count if canonical else None,
             coverage_ratio=1.0 if canonical else None,
-            idempotency_key=f"live-test-{signal_date}-{count}-{utcnow().isoformat()}" if canonical else None,
+            idempotency_key=f"live-test-{signal_date}-{count}-{utcnow().isoformat()}"
+            if canonical
+            else None,
             publication_state=None,
             published_at=None,
         )
@@ -185,7 +224,9 @@ async def _seed_signal_run(
                     rank=i + 1,
                     global_rank=i + 1 if canonical else None,
                     total_score=total_scores[i] if i < len(total_scores) else 100.0 - i,
-                    ranking_score=(total_scores[i] if i < len(total_scores) else 100.0 - i) if canonical else None,
+                    ranking_score=(total_scores[i] if i < len(total_scores) else 100.0 - i)
+                    if canonical
+                    else None,
                     score_eligible=True if canonical else None,
                     conclusion=conclusions[i] if i < len(conclusions) else CONCLUSION_WATCH,
                     score_breakdown_json={},
@@ -204,15 +245,11 @@ async def _seed_signal_run(
                                 "score_version": research_manifest.contract_id,
                                 "research_rank": i + 1,
                                 "research_score": (
-                                    total_scores[i]
-                                    if i < len(total_scores)
-                                    else 100.0 - i
+                                    total_scores[i] if i < len(total_scores) else 100.0 - i
                                 ),
                                 "actionable_rank": i + 1,
                                 "actionable_score": (
-                                    total_scores[i]
-                                    if i < len(total_scores)
-                                    else 100.0 - i
+                                    total_scores[i] if i < len(total_scores) else 100.0 - i
                                 ),
                             }
                             if canonical
@@ -293,13 +330,25 @@ async def _seed_price_history_from_closes(
 
 
 def test_current_market_state_uses_half_open_trading_sessions() -> None:
-    assert current_market_state(datetime(2026, 6, 17, 11, 29, 59, tzinfo=ASIA_SHANGHAI)).status == "open"
+    assert (
+        current_market_state(datetime(2026, 6, 17, 11, 29, 59, tzinfo=ASIA_SHANGHAI)).status
+        == "open"
+    )
     lunch_state = current_market_state(datetime(2026, 6, 17, 11, 30, 0, tzinfo=ASIA_SHANGHAI))
     assert lunch_state.status == "lunch_break"
     assert lunch_state.session == "lunch"
-    assert current_market_state(datetime(2026, 6, 17, 12, 59, 59, tzinfo=ASIA_SHANGHAI)).status == "lunch_break"
-    assert current_market_state(datetime(2026, 6, 17, 14, 59, 59, tzinfo=ASIA_SHANGHAI)).status == "open"
-    assert current_market_state(datetime(2026, 6, 17, 15, 0, 0, tzinfo=ASIA_SHANGHAI)).status == "closed"
+    assert (
+        current_market_state(datetime(2026, 6, 17, 12, 59, 59, tzinfo=ASIA_SHANGHAI)).status
+        == "lunch_break"
+    )
+    assert (
+        current_market_state(datetime(2026, 6, 17, 14, 59, 59, tzinfo=ASIA_SHANGHAI)).status
+        == "open"
+    )
+    assert (
+        current_market_state(datetime(2026, 6, 17, 15, 0, 0, tzinfo=ASIA_SHANGHAI)).status
+        == "closed"
+    )
 
 
 def test_exchange_calendar_handles_holidays_boundaries_and_lunch_freshness() -> None:
@@ -310,20 +359,32 @@ def test_exchange_calendar_handles_holidays_boundaries_and_lunch_freshness() -> 
     before_open = current_market_state(datetime(2026, 6, 17, 9, 29, tzinfo=ASIA_SHANGHAI))
     assert before_open.status == "closed"
     assert before_open.next_poll_seconds == 60
-    assert current_market_state(datetime(2026, 6, 17, 9, 30, tzinfo=ASIA_SHANGHAI)).session == "morning"
+    assert (
+        current_market_state(datetime(2026, 6, 17, 9, 30, tzinfo=ASIA_SHANGHAI)).session
+        == "morning"
+    )
     lunch = current_market_state(datetime(2026, 6, 17, 11, 30, tzinfo=ASIA_SHANGHAI))
     assert lunch.session == "lunch"
     assert lunch.next_poll_seconds == 90 * 60
-    assert current_market_state(datetime(2026, 6, 17, 13, 0, tzinfo=ASIA_SHANGHAI)).session == "afternoon"
+    assert (
+        current_market_state(datetime(2026, 6, 17, 13, 0, tzinfo=ASIA_SHANGHAI)).session
+        == "afternoon"
+    )
 
-    assert is_quote_stale(
-        datetime(2026, 6, 17, 11, 29, tzinfo=ASIA_SHANGHAI),
-        datetime(2026, 6, 17, 12, 50, tzinfo=ASIA_SHANGHAI),
-    ) is False
-    assert is_quote_stale(
-        datetime(2026, 6, 17, 11, 29, tzinfo=ASIA_SHANGHAI),
-        datetime(2026, 6, 17, 13, 5, tzinfo=ASIA_SHANGHAI),
-    ) is True
+    assert (
+        is_quote_stale(
+            datetime(2026, 6, 17, 11, 29, tzinfo=ASIA_SHANGHAI),
+            datetime(2026, 6, 17, 12, 50, tzinfo=ASIA_SHANGHAI),
+        )
+        is False
+    )
+    assert (
+        is_quote_stale(
+            datetime(2026, 6, 17, 11, 29, tzinfo=ASIA_SHANGHAI),
+            datetime(2026, 6, 17, 13, 5, tzinfo=ASIA_SHANGHAI),
+        )
+        is True
+    )
 
 
 def test_exchange_calendar_fails_closed_for_unknown_year() -> None:
@@ -372,7 +433,9 @@ def test_intraday_adjustments_are_volatility_and_same_time_normalized() -> None:
 
 
 @pytest.mark.asyncio
-async def test_live_rankings_compare_turnover_with_same_exchange_minute_history(client, app, monkeypatch) -> None:
+async def test_live_rankings_compare_turnover_with_same_exchange_minute_history(
+    client, app, monkeypatch
+) -> None:
     now = datetime(2026, 6, 17, 10, 0, 0)
     await _seed_signal_run(app, count=1, canonical=True, as_of_date=date(2026, 6, 16))
     monkeypatch.setattr(
@@ -497,7 +560,9 @@ async def test_live_rankings_reject_unreliable_same_minute_history(
 
 
 @pytest.mark.asyncio
-async def test_live_rankings_reports_unavailable_structure_components_without_weight_transfer(client, app, monkeypatch) -> None:
+async def test_live_rankings_reports_unavailable_structure_components_without_weight_transfer(
+    client, app, monkeypatch
+) -> None:
     now = datetime(2026, 6, 17, 10, 0, 0)
     await _seed_signal_run(app, count=1, canonical=True, as_of_date=date(2026, 6, 16))
     monkeypatch.setattr(
@@ -532,7 +597,9 @@ async def test_live_rankings_reports_unavailable_structure_components_without_we
 
 
 @pytest.mark.asyncio
-async def test_scheduled_intraday_watch_skips_closed_market_without_fetching(app, monkeypatch) -> None:
+async def test_scheduled_intraday_watch_skips_closed_market_without_fetching(
+    app, monkeypatch
+) -> None:
     called = False
 
     def fake_fetcher() -> pd.DataFrame:
@@ -679,7 +746,9 @@ async def test_live_rankings_order_and_rank_change(client, app, monkeypatch) -> 
 
 
 @pytest.mark.asyncio
-async def test_live_rankings_exposes_fresh_quote_without_score_from_stale_daily_base(client, app, monkeypatch) -> None:
+async def test_live_rankings_exposes_fresh_quote_without_score_from_stale_daily_base(
+    client, app, monkeypatch
+) -> None:
     await _seed_signal_run(
         app,
         count=1,
@@ -739,7 +808,9 @@ async def test_live_rankings_keep_base_rank_for_equal_scores(client, app, monkey
 
 
 @pytest.mark.asyncio
-async def test_live_rankings_pins_the_signal_run_selected_for_its_watchlist(client, app, monkeypatch) -> None:
+async def test_live_rankings_pins_the_signal_run_selected_for_its_watchlist(
+    client, app, monkeypatch
+) -> None:
     run_id = await _seed_signal_run(app, count=1)
     calls = 0
 
@@ -870,7 +941,9 @@ async def test_validation_summary_uses_only_the_pinned_source_run(app) -> None:
 async def test_live_rankings_search_keeps_global_rank_and_does_not_rank_incomparable_item(
     client, app, monkeypatch
 ) -> None:
-    await _seed_signal_run(app, count=3, total_scores=[60.0, 70.0, 80.0], canonical=True, as_of_date=date.today())
+    await _seed_signal_run(
+        app, count=3, total_scores=[60.0, 70.0, 80.0], canonical=True, as_of_date=date.today()
+    )
     now = datetime.now().replace(microsecond=0)
     monkeypatch.setattr(
         "app.services.intraday_etf.service.current_market_state",
@@ -926,7 +999,9 @@ async def test_live_rankings_search_keeps_global_rank_and_does_not_rank_incompar
 
 
 @pytest.mark.asyncio
-async def test_live_rank_change_requires_matching_scope_and_score_version(client, app, monkeypatch) -> None:
+async def test_live_rank_change_requires_matching_scope_and_score_version(
+    client, app, monkeypatch
+) -> None:
     await _seed_signal_run(app, count=2, total_scores=[80.0, 70.0])
     now = datetime(2026, 6, 12, 16, 0, 0)
     monkeypatch.setattr(
@@ -937,7 +1012,6 @@ async def test_live_rank_change_requires_matching_scope_and_score_version(client
     comparable = await client.get("/api/etf-quotes/live-rankings?q=510000")
     assert comparable.status_code == 200
     assert comparable.json()["items"][0]["rank_change"] == 0
-
 
 
 @pytest.mark.asyncio
@@ -990,7 +1064,11 @@ async def test_live_tracking_filter_is_limited_to_current_user(client, app, monk
     async with app.state.db.session() as session:
         owner = await session.get(User, 1)
         assert owner is not None
-        other = User(email="live-tracking-other@example.com", recipient_email="live-tracking-other@example.com", is_approved=True)
+        other = User(
+            email="live-tracking-other@example.com",
+            recipient_email="live-tracking-other@example.com",
+            is_approved=True,
+        )
         session.add(other)
         await session.flush()
         session.add_all(
@@ -1035,7 +1113,9 @@ async def test_live_tracking_filter_is_limited_to_current_user(client, app, monk
 
 
 @pytest.mark.asyncio
-async def test_live_rankings_keeps_intraday_entry_timing_when_daily_cache_is_high_chase(client, app, monkeypatch) -> None:
+async def test_live_rankings_keeps_intraday_entry_timing_when_daily_cache_is_high_chase(
+    client, app, monkeypatch
+) -> None:
     daily_timing = {
         "entry_timing_label": "冲高别追",
         "entry_timing_reason": "今天 3.09%，且近20日 22.23%、近60日 44.86% 已经不低，追高风险上升。",
@@ -1124,9 +1204,7 @@ async def test_live_rankings_filters_labels_before_pagination_and_keeps_daily_en
     assert high_body["items"][0]["filtered_position"] == 1
     assert high_body["items"][0]["rank_change"] == 0
 
-    entry_response = await client.get(
-        "/api/etf-quotes/live-rankings?limit=1&entry_labels=健康回踩"
-    )
+    entry_response = await client.get("/api/etf-quotes/live-rankings?limit=1&entry_labels=健康回踩")
     assert entry_response.status_code == 200
     entry_body = entry_response.json()
     assert entry_body["total"] == 1
@@ -1171,7 +1249,9 @@ def test_quote_raw_accepts_json_text_from_postgresql_bulk_insert() -> None:
 
 
 @pytest.mark.asyncio
-async def test_live_rankings_marks_data_insufficient_without_faking_quote(client, app, monkeypatch) -> None:
+async def test_live_rankings_marks_data_insufficient_without_faking_quote(
+    client, app, monkeypatch
+) -> None:
     now = datetime(2026, 6, 17, 10, 0, 0)
     await _seed_signal_run(app, count=1, canonical=True, as_of_date=date(2026, 6, 16))
     monkeypatch.setattr(
@@ -1249,8 +1329,12 @@ async def test_quote_normalization_stale_handling_and_persist_all_eligible_etfs(
         session.add(_etf("510999", "Non Signal ETF"))
         await session.commit()
 
-        result = await intraday_etf_watch_job(session, run_type="manual", force=True, fetcher=fake_fetcher)
-        rows = (await session.scalars(select(EtfIntradayQuote).order_by(EtfIntradayQuote.etf_code))).all()
+        result = await intraday_etf_watch_job(
+            session, run_type="manual", force=True, fetcher=fake_fetcher
+        )
+        rows = (
+            await session.scalars(select(EtfIntradayQuote).order_by(EtfIntradayQuote.etf_code))
+        ).all()
 
     assert result["details"]["signal_run_id"] is None
     assert result["details"]["signal_status"] == "all_etf"
@@ -1367,7 +1451,9 @@ async def test_eastmoney_spot_row_fetch_has_total_wall_clock_timeout(monkeypatch
             await asyncio.Event().wait()
 
     monkeypatch.setattr("app.services.intraday_etf.service.httpx.AsyncClient", FakeAsyncClient)
-    monkeypatch.setattr(intraday_service, "EASTMONEY_PROVIDER_TOTAL_TIMEOUT_SECONDS", 0.01, raising=False)
+    monkeypatch.setattr(
+        intraday_service, "EASTMONEY_PROVIDER_TOTAL_TIMEOUT_SECONDS", 0.01, raising=False
+    )
 
     result = await intraday_service.fetch_eastmoney_etf_spot_rows()
 
@@ -1540,16 +1626,15 @@ async def test_intraday_watch_reports_watch_codes_missing_from_provider(app) -> 
         )
 
     async with app.state.db.session() as session:
-        result = await intraday_etf_watch_job(session, run_type="manual", force=True, fetcher=fake_fetcher)
+        result = await intraday_etf_watch_job(
+            session, run_type="manual", force=True, fetcher=fake_fetcher
+        )
 
     assert result["updated_quote_count"] == 1
     assert result["details"]["missing_watch_count"] == 1
     assert result["details"]["missing_watch_codes"] == ["510001"]
     assert result["details"]["quote_audit"]["510000"]["decision_eligible"] is True
-    assert (
-        result["details"]["quote_audit"]["510000"]["quote_time_is_fallback"]
-        is False
-    )
+    assert result["details"]["quote_audit"]["510000"]["quote_time_is_fallback"] is False
     assert result["details"]["quote_audit"]["510001"]["decision_eligible"] is False
     assert result["details"]["quote_audit"]["510001"]["quote_freshness"] == "unavailable"
 
@@ -1634,7 +1719,9 @@ async def test_dynamic_hard_stop_and_intraday_cooldown(app, settings, monkeypatc
     now = datetime.now().replace(microsecond=0)
     sent: list[dict] = []
 
-    async def fake_send_template(self, session, *, recipient: str, template_name: str, payload: dict) -> str:
+    async def fake_send_template(
+        self, session, *, recipient: str, template_name: str, payload: dict
+    ) -> str:
         sent.append(payload)
         return "sent"
 
@@ -1674,8 +1761,12 @@ async def test_dynamic_hard_stop_and_intraday_cooldown(app, settings, monkeypatc
         await session.commit()
         await session.refresh(position)
 
-        first_alert, first_status = await create_alert_if_needed(session, position, settings, evaluation_mode="intraday")
-        second_alert, second_status = await create_alert_if_needed(session, position, settings, evaluation_mode="intraday")
+        first_alert, first_status = await create_alert_if_needed(
+            session, position, settings, evaluation_mode="intraday"
+        )
+        second_alert, second_status = await create_alert_if_needed(
+            session, position, settings, evaluation_mode="intraday"
+        )
         alerts = (await session.scalars(select(TrackedPositionAlert))).all()
 
     assert first_status == "email_sent"
@@ -1685,9 +1776,15 @@ async def test_dynamic_hard_stop_and_intraday_cooldown(app, settings, monkeypatc
     assert first_alert.alert_source == "intraday_quote"
     assert first_alert.threshold_context_json["alert_type"] == "hard_stop"
     assert first_alert.threshold_context_json["hard_stop_pct"] is not None
-    assert first_alert.threshold_context_json["threshold_mode"] in {"rule_dynamic", "fixed_fallback"}
+    assert first_alert.threshold_context_json["threshold_mode"] in {
+        "rule_dynamic",
+        "fixed_fallback",
+    }
     assert sent[0]["threshold_context"]["alert_type"] == "hard_stop"
-    assert sent[0]["threshold_context"]["hard_stop_pct"] == first_alert.threshold_context_json["hard_stop_pct"]
+    assert (
+        sent[0]["threshold_context"]["hard_stop_pct"]
+        == first_alert.threshold_context_json["hard_stop_pct"]
+    )
     assert second_status == "suppressed"
     assert second_alert is not None
     assert second_alert.id == first_alert.id
@@ -1696,7 +1793,9 @@ async def test_dynamic_hard_stop_and_intraday_cooldown(app, settings, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_intraday_email_requires_fresh_quote_and_skips_daily_close_fallback(app, settings, monkeypatch) -> None:
+async def test_intraday_email_requires_fresh_quote_and_skips_daily_close_fallback(
+    app, settings, monkeypatch
+) -> None:
     await _seed_signal_run(app, count=1)
     await _seed_price_history_from_closes(
         app,
@@ -1706,7 +1805,9 @@ async def test_intraday_email_requires_fresh_quote_and_skips_daily_close_fallbac
     )
     sent: list[dict] = []
 
-    async def fake_send_template(self, session, *, recipient: str, template_name: str, payload: dict) -> str:
+    async def fake_send_template(
+        self, session, *, recipient: str, template_name: str, payload: dict
+    ) -> str:
         sent.append(payload)
         return "sent"
 
@@ -1732,7 +1833,9 @@ async def test_intraday_email_requires_fresh_quote_and_skips_daily_close_fallbac
         await session.commit()
         await session.refresh(position)
 
-        alert, status = await create_alert_if_needed(session, position, settings, evaluation_mode="intraday")
+        alert, status = await create_alert_if_needed(
+            session, position, settings, evaluation_mode="intraday"
+        )
         alerts = (await session.scalars(select(TrackedPositionAlert))).all()
         analysis = await position_analysis(session, position)
 
@@ -1758,7 +1861,9 @@ async def test_intraday_structure_warning_is_web_only(app, settings, monkeypatch
     now = datetime.now().replace(microsecond=0)
     sent: list[dict] = []
 
-    async def fake_send_template(self, session, *, recipient: str, template_name: str, payload: dict) -> str:
+    async def fake_send_template(
+        self, session, *, recipient: str, template_name: str, payload: dict
+    ) -> str:
         sent.append(payload)
         return "sent"
 
@@ -1997,7 +2102,9 @@ async def test_high_volatility_etf_receives_wider_dynamic_thresholds(app) -> Non
     assert high.dynamic_thresholds.trailing_giveback_pct is not None
     assert low.dynamic_thresholds.trailing_giveback_pct is not None
     assert high.dynamic_thresholds.hard_stop_pct < low.dynamic_thresholds.hard_stop_pct
-    assert high.dynamic_thresholds.trailing_giveback_pct > low.dynamic_thresholds.trailing_giveback_pct
+    assert (
+        high.dynamic_thresholds.trailing_giveback_pct > low.dynamic_thresholds.trailing_giveback_pct
+    )
 
 
 @pytest.mark.asyncio
@@ -2013,7 +2120,9 @@ async def test_missing_iopv_warning_is_web_only(app, settings, monkeypatch) -> N
     )
     sent: list[dict[str, object]] = []
 
-    async def fake_send_template(self, session, *, recipient: str, template_name: str, payload: dict) -> str:
+    async def fake_send_template(
+        self, session, *, recipient: str, template_name: str, payload: dict
+    ) -> str:
         sent.append(payload)
         return "sent"
 
@@ -2063,7 +2172,9 @@ async def test_missing_iopv_warning_is_web_only(app, settings, monkeypatch) -> N
 
 
 @pytest.mark.asyncio
-async def test_intraday_watch_status_api_and_tracked_position_fields(client, app, monkeypatch) -> None:
+async def test_intraday_watch_status_api_and_tracked_position_fields(
+    client, app, monkeypatch
+) -> None:
     await _seed_signal_run(app, count=1)
     await _seed_price_history(app, "510000")
     now = datetime.now().replace(microsecond=0)
@@ -2144,7 +2255,9 @@ async def test_intraday_provider_failure_falls_back_to_cached_quote(app, monkeyp
         def broken_fetcher() -> pd.DataFrame:
             raise RuntimeError("provider down")
 
-        result = await intraday_etf_watch_job(session, run_type="manual", force=True, fetcher=broken_fetcher)
+        result = await intraday_etf_watch_job(
+            session, run_type="manual", force=True, fetcher=broken_fetcher
+        )
         quote_count = await session.scalar(select(func.count()).select_from(EtfIntradayQuote))
 
     assert result["status"] == "degraded"
@@ -2175,7 +2288,9 @@ async def test_persist_quotes_writes_latest_snapshot_and_dedupes_history(app) ->
         assert await persist_quotes(session, watchlist, {"510001": second}) == 1
         assert await persist_quotes(session, watchlist, {"510001": conflicting_second}) == 1
 
-        latest_count = await session.scalar(select(func.count()).select_from(EtfIntradayLatestQuote))
+        latest_count = await session.scalar(
+            select(func.count()).select_from(EtfIntradayLatestQuote)
+        )
         history_count = await session.scalar(select(func.count()).select_from(EtfIntradayQuote))
         latest = await session.get(EtfIntradayLatestQuote, "510001")
         frozen_history = await session.scalar(
@@ -2402,7 +2517,9 @@ async def test_intraday_cleanup_summarizes_and_deletes_old_raw_quotes(app) -> No
             evidence_seal_complete=True,
         )
         raw_count = await session.scalar(select(func.count()).select_from(EtfIntradayQuote))
-        summary_count = await session.scalar(select(func.count()).select_from(EtfIntradayDailySummary))
+        summary_count = await session.scalar(
+            select(func.count()).select_from(EtfIntradayDailySummary)
+        )
         first_summary = await session.scalar(
             select(EtfIntradayDailySummary).where(
                 EtfIntradayDailySummary.trade_date == date(2026, 6, 10)
@@ -2499,9 +2616,7 @@ async def test_intraday_cleanup_never_deletes_protected_quote_and_persists_check
             batch_size=4,
             evidence_seal_complete=True,
         )
-        remaining_ids = set(
-            await session.scalars(select(EtfIntradayQuote.id))
-        )
+        remaining_ids = set(await session.scalars(select(EtfIntradayQuote.id)))
         checkpoint = await session.get(EtfIntradayCleanupCheckpoint, 1)
 
     assert result["deleted_rows"] == 3
@@ -2542,8 +2657,9 @@ async def test_intraday_cleanup_rejects_non_positive_price_without_deleting(app)
     assert raw_count == 3
 
 
-
-def _normalized_provider_quote(code: str, price: float, source: str, quote_time: datetime) -> object:
+def _normalized_provider_quote(
+    code: str, price: float, source: str, quote_time: datetime
+) -> object:
     quote = normalize_spot_record(
         {
             "code": code,
@@ -2705,7 +2821,9 @@ def test_select_consensus_quotes_blocks_diverged_and_missing_time_quotes() -> No
         source="akshare",
     )
     assert fallback_quote is not None
-    stale = select_consensus_quotes([ProviderQuoteResult("akshare", {"510002": fallback_quote})], now=now)
+    stale = select_consensus_quotes(
+        [ProviderQuoteResult("akshare", {"510002": fallback_quote})], now=now
+    )
 
     assert stale.quotes["510002"].raw["consensus_status"] == CONSENSUS_STALE
     assert stale.quotes["510002"].raw["decision_eligible"] is False
@@ -2713,7 +2831,9 @@ def test_select_consensus_quotes_blocks_diverged_and_missing_time_quotes() -> No
 
 
 @pytest.mark.asyncio
-async def test_diverged_quote_does_not_drive_live_ranking_or_tracked_email(client, app, settings, monkeypatch) -> None:
+async def test_diverged_quote_does_not_drive_live_ranking_or_tracked_email(
+    client, app, settings, monkeypatch
+) -> None:
     now = datetime(2026, 6, 17, 10, 0, 0)
     await _seed_signal_run(
         app,
@@ -2725,7 +2845,9 @@ async def test_diverged_quote_does_not_drive_live_ranking_or_tracked_email(clien
     await _seed_price_history(app, "510000")
     sent: list[dict] = []
 
-    async def fake_send_template(self, session, *, recipient: str, template_name: str, payload: dict) -> str:
+    async def fake_send_template(
+        self, session, *, recipient: str, template_name: str, payload: dict
+    ) -> str:
         sent.append(payload)
         return "sent"
 
@@ -2771,7 +2893,9 @@ async def test_diverged_quote_does_not_drive_live_ranking_or_tracked_email(clien
         await session.commit()
         await session.refresh(position)
 
-        alert, status = await create_alert_if_needed(session, position, settings, evaluation_mode="intraday")
+        alert, status = await create_alert_if_needed(
+            session, position, settings, evaluation_mode="intraday"
+        )
 
     ranking_response = await client.get("/api/etf-quotes/live-rankings")
     item = ranking_response.json()["items"][0]

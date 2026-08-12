@@ -196,9 +196,7 @@ def _asset_catalyst_theme_ids(asset: ComputedAsset) -> tuple[str, ...]:
     ]
     return tuple(
         dict.fromkeys(
-            str(value).strip()
-            for value in values
-            if value is not None and str(value).strip()
+            str(value).strip() for value in values if value is not None and str(value).strip()
         )
     )
 
@@ -215,11 +213,7 @@ async def _catalyst_shadow_by_asset_code(
         if asset.metadata.asset_type == "etf"
     }
     all_theme_ids = tuple(
-        dict.fromkeys(
-            theme_id
-            for theme_ids in themes_by_code.values()
-            for theme_id in theme_ids
-        )
+        dict.fromkeys(theme_id for theme_ids in themes_by_code.values() for theme_id in theme_ids)
     )
     contexts = await catalyst_shadow_contexts(
         session,
@@ -249,11 +243,7 @@ async def _catalyst_shadow_by_asset_code(
                 ["没有已完成的缓存催化影子快照。"]
                 if not themes
                 else sorted(
-                    {
-                        limitation
-                        for theme in themes
-                        for limitation in theme.get("limitations", [])
-                    }
+                    {limitation for theme in themes for limitation in theme.get("limitations", [])}
                 )
             ),
             "shadow_only": True,
@@ -310,17 +300,19 @@ def _asset_out(
                 "actionable_source_times": {},
             }
         )
-    catalyst_unavailable = asset.metadata.asset_type == "etf" and has_unavailable_theme_catalyst(metrics)
-    opportunity_score = metrics.get("opportunity_score") if has_available_opportunity_score(metrics) else None
-    opportunity_label = str(metrics.get("opportunity_label")) if metrics.get("opportunity_label") else None
+    catalyst_unavailable = asset.metadata.asset_type == "etf" and has_unavailable_theme_catalyst(
+        metrics
+    )
+    opportunity_score = (
+        metrics.get("opportunity_score") if has_available_opportunity_score(metrics) else None
+    )
+    opportunity_label = (
+        str(metrics.get("opportunity_label")) if metrics.get("opportunity_label") else None
+    )
     if opportunity_score is None and catalyst_unavailable and opportunity_label not in {"等待数据"}:
         opportunity_label = "暂无主题辅助"
     sector_trend_score = metrics.get("sector_trend_score")
-    theme_profile = dict(
-        metrics.get("theme_profile")
-        or asset.rationale.get("theme_profile")
-        or {}
-    )
+    theme_profile = dict(metrics.get("theme_profile") or asset.rationale.get("theme_profile") or {})
     signal_contract: dict[str, Any] = {}
     evidence_summary: dict[str, Any] = {}
     evidence_status = EVIDENCE_STATUS_WAITING
@@ -344,9 +336,13 @@ def _asset_out(
             score=asset.total_score,
             observation_label=asset.conclusion,
             entry_timing_label=asset.entry_timing_label,
-            data_reliability=str(metrics.get("data_reliability") or metrics.get("score_source") or "verified"),
+            data_reliability=str(
+                metrics.get("data_reliability") or metrics.get("score_source") or "verified"
+            ),
             source_data_time=source_data_time,
-            rule_version=str(signal_rule_version) if signal_rule_version else "short_research_signal_v1",
+            rule_version=str(signal_rule_version)
+            if signal_rule_version
+            else "short_research_signal_v1",
             ranking_contract_hash=signal_run.ranking_contract_hash if signal_run else None,
             score_version=signal_run.score_version if signal_run else None,
             score_field=signal_run.score_field if signal_run else None,
@@ -384,6 +380,12 @@ def _asset_out(
             if isinstance(metrics.get("research_score_eligible"), bool)
             else None
         ),
+        research_quality_eligible=(
+            metrics.get("research_quality_eligible")
+            if isinstance(metrics.get("research_quality_eligible"), bool)
+            else None
+        ),
+        research_quality_reasons=list(metrics.get("research_quality_reasons") or []),
         research_contract_hash=(
             str(metrics["research_contract_hash"])
             if metrics.get("research_contract_hash")
@@ -405,12 +407,8 @@ def _asset_out(
             if metrics.get("actionable_contract_hash")
             else None
         ),
-        actionable_exclusion_reasons=list(
-            metrics.get("actionable_exclusion_reasons") or []
-        ),
-        actionable_field_statuses=dict(
-            metrics.get("actionable_field_statuses") or {}
-        ),
+        actionable_exclusion_reasons=list(metrics.get("actionable_exclusion_reasons") or []),
+        actionable_field_statuses=dict(metrics.get("actionable_field_statuses") or {}),
         actionable_source_times=dict(metrics.get("actionable_source_times") or {}),
         canonical_research_rank=(
             int(metrics["canonical_research_rank"])
@@ -434,14 +432,10 @@ def _asset_out(
             else None
         ),
         taxonomy_bucket=(
-            str(metrics["ranking_asset_bucket"])
-            if metrics.get("ranking_asset_bucket")
-            else None
+            str(metrics["ranking_asset_bucket"]) if metrics.get("ranking_asset_bucket") else None
         ),
         tracked_underlying_id=(
-            str(metrics["tracked_underlying_id"])
-            if metrics.get("tracked_underlying_id")
-            else None
+            str(metrics["tracked_underlying_id"]) if metrics.get("tracked_underlying_id") else None
         ),
         tracked_underlying_coverage=(
             float(metrics["tracked_underlying_coverage"])
@@ -449,11 +443,7 @@ def _asset_out(
             else None
         ),
         underlying_evidence=dict(metrics.get("underlying_evidence") or {}),
-        clone_group_id=(
-            str(metrics["clone_group_id"])
-            if metrics.get("clone_group_id")
-            else None
-        ),
+        clone_group_id=(str(metrics["clone_group_id"]) if metrics.get("clone_group_id") else None),
         clone_policy_active=(
             metrics.get("clone_policy_active")
             if isinstance(metrics.get("clone_policy_active"), bool)
@@ -471,7 +461,9 @@ def _asset_out(
         ),
         peer_diagnostics=dict(metrics.get("peer_diagnostics") or {}),
         total_score=round(asset.total_score, 2),
-        technical_score=round(float(metrics["technical_score"]), 2) if isinstance(metrics.get("technical_score"), (int, float)) else None,
+        technical_score=round(float(metrics["technical_score"]), 2)
+        if isinstance(metrics.get("technical_score"), (int, float))
+        else None,
         opportunity_score=round(float(opportunity_score), 2)
         if isinstance(opportunity_score, int | float)
         else None,
@@ -482,11 +474,21 @@ def _asset_out(
         sector_trend_score=round(float(sector_trend_score), 2)
         if isinstance(sector_trend_score, int | float)
         else None,
-        sector_trend_label=str(metrics.get("sector_trend_label")) if metrics.get("sector_trend_label") else None,
-        sector_trend_summary=str(metrics.get("sector_trend_summary")) if metrics.get("sector_trend_summary") else None,
-        sector_trend_reason=str(metrics.get("sector_trend_reason")) if metrics.get("sector_trend_reason") else None,
-        sector_trend_status=str(metrics.get("sector_trend_status")) if metrics.get("sector_trend_status") else None,
-        sector_peer_count=int(metrics["sector_peer_count"]) if isinstance(metrics.get("sector_peer_count"), int | float) else None,
+        sector_trend_label=str(metrics.get("sector_trend_label"))
+        if metrics.get("sector_trend_label")
+        else None,
+        sector_trend_summary=str(metrics.get("sector_trend_summary"))
+        if metrics.get("sector_trend_summary")
+        else None,
+        sector_trend_reason=str(metrics.get("sector_trend_reason"))
+        if metrics.get("sector_trend_reason")
+        else None,
+        sector_trend_status=str(metrics.get("sector_trend_status"))
+        if metrics.get("sector_trend_status")
+        else None,
+        sector_peer_count=int(metrics["sector_peer_count"])
+        if isinstance(metrics.get("sector_peer_count"), int | float)
+        else None,
         catalyst_score=(
             None
             if asset.metadata.asset_type == "etf"
@@ -509,9 +511,7 @@ def _asset_out(
             else None
         ),
         catalyst_events=(
-            []
-            if asset.metadata.asset_type == "etf"
-            else list(metrics.get("catalyst_events") or [])
+            [] if asset.metadata.asset_type == "etf" else list(metrics.get("catalyst_events") or [])
         ),
         catalyst_limitations=(
             ["旧主题催化评分已停用；请查看独立的催化影子证据。"]
@@ -626,7 +626,9 @@ async def _theme_heat_for_run(
     return [dict(item) for item in result]
 
 
-def _validation_for_asset(asset: ComputedAsset, evidence_by_label: dict[tuple[str, str], dict[str, Any]]) -> dict[str, Any]:
+def _validation_for_asset(
+    asset: ComputedAsset, evidence_by_label: dict[tuple[str, str], dict[str, Any]]
+) -> dict[str, Any]:
     return evidence_by_label.get((asset.conclusion, asset.entry_timing_label), {})
 
 
@@ -661,7 +663,9 @@ def _portfolio_contexts(portfolio: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return result
 
 
-async def _validation_run_out(session: AsyncSession, run: EtfSignalValidationRun) -> EtfSignalValidationRunOut:
+async def _validation_run_out(
+    session: AsyncSession, run: EtfSignalValidationRun
+) -> EtfSignalValidationRunOut:
     source_snapshot = (
         await session.get(ShortResearchSignalRun, run.source_signal_run_id)
         if run.source_signal_run_id is not None
@@ -696,9 +700,7 @@ async def _validation_run_out(session: AsyncSession, run: EtfSignalValidationRun
                 (
                     await session.scalars(
                         select(EtfSignalValidationSourceEvent)
-                        .where(
-                            EtfSignalValidationSourceEvent.validation_run_id == run.id
-                        )
+                        .where(EtfSignalValidationSourceEvent.validation_run_id == run.id)
                         .order_by(EtfSignalValidationSourceEvent.event_order)
                     )
                 ).all()
@@ -711,16 +713,12 @@ async def _validation_run_out(session: AsyncSession, run: EtfSignalValidationRun
         validation_mode=run.validation_mode or VALIDATION_MODE_FORWARD_LIVE,
         ranking_source_kind=ranking_source_kind,
         source_replay_run_key=(
-            run.source_replay_run_key
-            if ranking_source_kind == "research_replay"
-            else None
+            run.source_replay_run_key if ranking_source_kind == "research_replay" else None
         ),
         source_manifest_hash=(
             run.source_manifest_hash if ranking_source_kind is not None else None
         ),
-        source_event_count=(
-            run.source_event_count if ranking_source_kind is not None else None
-        ),
+        source_event_count=(run.source_event_count if ranking_source_kind is not None else None),
         source_events=[
             EtfSignalValidationSourceEventOut(
                 event_order=event.event_order,
@@ -751,7 +749,9 @@ async def _validation_run_out(session: AsyncSession, run: EtfSignalValidationRun
         price_basis=run.price_basis,
         execution_model=run.execution_model,
         data_cutoff=run.data_cutoff,
-        source_ranking_snapshot=EtfRankingSnapshotMetadataOut.model_validate(snapshot_metadata(source_snapshot)),
+        source_ranking_snapshot=EtfRankingSnapshotMetadataOut.model_validate(
+            snapshot_metadata(source_snapshot)
+        ),
         summary=dict(run.summary_json or {}),
         created_at=run.created_at,
         items=[
@@ -798,8 +798,12 @@ async def _signal_run_out(
         summary["etf_count"] = sum(1 for item in assets if item.metadata.asset_type == "etf")
     else:
         summary.setdefault("item_count", len(assets))
-        summary.setdefault("fund_count", sum(1 for item in assets if item.metadata.asset_type == "fund"))
-        summary.setdefault("etf_count", sum(1 for item in assets if item.metadata.asset_type == "etf"))
+        summary.setdefault(
+            "fund_count", sum(1 for item in assets if item.metadata.asset_type == "fund")
+        )
+        summary.setdefault(
+            "etf_count", sum(1 for item in assets if item.metadata.asset_type == "etf")
+        )
     return ShortResearchSignalRunOut(
         id=run.id,
         status=run.status,
@@ -862,11 +866,7 @@ async def get_short_research_data_issues(
     session: AsyncSession = Depends(get_db_session),
 ) -> list[dict[str, Any]]:
     health = await data_health(session, asset_type=asset_type)
-    return [
-        item
-        for item in health
-        if item["status"] != "success" or item["is_stale"]
-    ][:limit]
+    return [item for item in health if item["status"] != "success" or item["is_stale"]][:limit]
 
 
 def _ranking_surface_snapshot_metadata(
@@ -928,7 +928,7 @@ async def list_etf_observation_only_assets(
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_db_session),
 ) -> EtfObservationOnlyListOut:
-    """Return persisted quality exclusions without assigning a ranking."""
+    """Return ranked research rows downgraded to observation-only."""
 
     selection = await current_etf_ranking_surface_selection(
         session,
@@ -952,30 +952,34 @@ async def list_etf_observation_only_assets(
         rows = [
             item
             for item in rows
-            if normalized_reason in {
-                str(value) for value in item.get("reasons") or []
-            }
+            if normalized_reason in {str(value) for value in item.get("reasons") or []}
         ]
     codes = [str(item.get("asset_code") or "") for item in rows]
-    names = {
-        item.code: item.name
-        for item in (
-            await session.scalars(
-                select(TradableEtf).where(TradableEtf.code.in_(codes))
-            )
-        ).all()
-    } if codes else {}
+    names = (
+        {
+            item.code: item.name
+            for item in (
+                await session.scalars(select(TradableEtf).where(TradableEtf.code.in_(codes)))
+            ).all()
+        }
+        if codes
+        else {}
+    )
     keyword = q.strip().casefold() if q else None
     payload = [
         EtfObservationOnlyItemOut(
             code=code,
             name=names.get(code, code),
-            reasons=[str(value) for value in item.get("reasons") or []],
-            evidence=(
-                dict(item.get("evidence"))
-                if isinstance(item.get("evidence"), dict)
-                else {}
+            research_rank=(
+                int(item["research_rank"]) if isinstance(item.get("research_rank"), int) else None
             ),
+            research_score=(
+                float(item["research_score"])
+                if isinstance(item.get("research_score"), int | float)
+                else None
+            ),
+            reasons=[str(value) for value in item.get("reasons") or []],
+            evidence=(dict(item.get("evidence")) if isinstance(item.get("evidence"), dict) else {}),
         )
         for item in rows
         if (code := str(item.get("asset_code") or ""))
@@ -985,7 +989,13 @@ async def list_etf_observation_only_assets(
             or keyword in names.get(code, code).casefold()
         )
     ]
-    payload.sort(key=lambda item: item.code)
+    payload.sort(
+        key=lambda item: (
+            item.research_rank is None,
+            item.research_rank or 0,
+            item.code,
+        )
+    )
     return EtfObservationOnlyListOut(
         items=payload[offset : offset + limit],
         total=len(payload),
@@ -1073,10 +1083,14 @@ async def list_short_research_assets(
             if asset_type == "etf"
             else None
         )
-        run = selection.run if selection is not None else await latest_signal_run(
-            session,
-            asset_type=asset_type,
-            theme=theme,
+        run = (
+            selection.run
+            if selection is not None
+            else await latest_signal_run(
+                session,
+                asset_type=asset_type,
+                theme=theme,
+            )
         )
         if run is None and theme is not None and asset_type != "etf":
             run = await latest_signal_run(session, asset_type=asset_type)
@@ -1112,13 +1126,18 @@ async def list_short_research_assets(
         )
         if tracking_filters:
             assert user is not None
-            states_by_code = await tracking_states_by_code(session, user_id=user.id, as_of_date=run.as_of_date)
+            states_by_code = await tracking_states_by_code(
+                session, user_id=user.id, as_of_date=run.as_of_date
+            )
             assets = [
                 asset
                 for asset in assets
                 if tracking_filters & states_by_code.get(asset.metadata.code, set())
             ]
-            assets = [replace(asset, filtered_position=index) for index, asset in enumerate(assets, start=1)]
+            assets = [
+                replace(asset, filtered_position=index)
+                for index, asset in enumerate(assets, start=1)
+            ]
             total = len(assets)
             assets = assets[offset : offset + limit]
     except ValueError as exc:
@@ -1132,7 +1151,9 @@ async def list_short_research_assets(
         if run is not None
         else {}
     )
-    validation_by_label = await latest_validation_evidence_by_label(session) if asset_type in {None, "etf"} else {}
+    validation_by_label = (
+        await latest_validation_evidence_by_label(session) if asset_type in {None, "etf"} else {}
+    )
     if asset_type == "etf" and selection is not None:
         actionable_selection = etf_ranking_surface_selection_from_run(
             run,
@@ -1184,9 +1205,7 @@ async def list_short_research_assets(
                     item.metadata.code,
                     {},
                 ),
-                provisional_research=(
-                    selection is not None and selection.state == "provisional"
-                ),
+                provisional_research=(selection is not None and selection.state == "provisional"),
             )
             for item in assets
         ],
@@ -1198,9 +1217,7 @@ async def list_short_research_assets(
             _ranking_surface_snapshot_metadata(
                 run,
                 ranking_surface=ranking_surface,
-                selection_state=(
-                    selection.state if selection is not None else None
-                ),
+                selection_state=(selection.state if selection is not None else None),
             )
             if asset_type == "etf"
             else snapshot_metadata(run)
@@ -1282,7 +1299,11 @@ async def start_etf_portfolio_backtest(
     user: User = Depends(require_approved_user),
 ) -> dict[str, Any]:
     payload = payload or EtfPortfolioBacktestRequest()
-    run_factory = run_etf_intraday_alert_backtest if payload.execution_model == "intraday_alert" else run_etf_portfolio_backtest
+    run_factory = (
+        run_etf_intraday_alert_backtest
+        if payload.execution_model == "intraday_alert"
+        else run_etf_portfolio_backtest
+    )
     run = await run_factory(
         session,
         user=user,
@@ -1476,7 +1497,9 @@ async def get_latest_short_research_validation(
 async def get_latest_short_research_historical_replay(
     session: AsyncSession = Depends(get_db_session),
 ) -> EtfSignalValidationRunOut | None:
-    run = await latest_signal_validation_run(session, validation_mode=VALIDATION_MODE_HISTORICAL_REPLAY)
+    run = await latest_signal_validation_run(
+        session, validation_mode=VALIDATION_MODE_HISTORICAL_REPLAY
+    )
     if run is None:
         return None
     return await _validation_run_out(session, run)
@@ -1486,7 +1509,9 @@ async def get_latest_short_research_historical_replay(
 async def get_latest_short_research_score_bucket_validation(
     session: AsyncSession = Depends(get_db_session),
 ) -> EtfSignalValidationRunOut | None:
-    run = await latest_signal_validation_run(session, validation_mode=VALIDATION_MODE_SCORE_BUCKET_REPLAY)
+    run = await latest_signal_validation_run(
+        session, validation_mode=VALIDATION_MODE_SCORE_BUCKET_REPLAY
+    )
     if run is None:
         return None
     return await _validation_run_out(session, run)
@@ -1503,8 +1528,9 @@ async def list_short_research_validations(
         query = query.where(EtfSignalValidationRun.validation_mode == validation_mode)
     runs = (
         await session.scalars(
-            query.order_by(EtfSignalValidationRun.as_of_date.desc(), EtfSignalValidationRun.id.desc())
-            .limit(limit)
+            query.order_by(
+                EtfSignalValidationRun.as_of_date.desc(), EtfSignalValidationRun.id.desc()
+            ).limit(limit)
         )
     ).all()
     return [await _validation_run_out(session, run) for run in runs]
@@ -1544,7 +1570,11 @@ async def get_short_research_asset_detail(
         if run is not None
         else {}
     )
-    validation_by_label = await latest_validation_evidence_by_label(session) if asset.metadata.asset_type == "etf" else {}
+    validation_by_label = (
+        await latest_validation_evidence_by_label(session)
+        if asset.metadata.asset_type == "etf"
+        else {}
+    )
     portfolio_context_by_code = (
         _portfolio_contexts(await observation_portfolio_for_run(session, run))
         if asset.metadata.asset_type == "etf" and run is not None

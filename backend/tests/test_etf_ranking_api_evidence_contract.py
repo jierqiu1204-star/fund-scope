@@ -35,13 +35,15 @@ def test_etf_asset_api_exposes_non_aliasing_quality_and_identity_fields() -> Non
             "research_rank": 1,
             "research_score": 88.0,
             "research_score_eligible": True,
+            "research_quality_eligible": False,
+            "research_quality_reasons": ["absolute_tradability_below_threshold"],
             "research_contract_hash": "a" * 64,
             "actionable_rank": 2,
             "actionable_score": 86.0,
             "actionable_eligible": True,
             "actionable_contract_hash": "b" * 64,
             "canonical_research_rank": 1,
-            "observation_only": False,
+            "observation_only": True,
             "history_confidence_tier": "established_120_plus",
             "default_display_eligible": True,
             "average_turnover_20d": 800_000_000.0,
@@ -83,7 +85,9 @@ def test_etf_asset_api_exposes_non_aliasing_quality_and_identity_fields() -> Non
 
     assert payload.canonical_research_rank == 1
     assert payload.actionable_rank == 2
-    assert payload.observation_only is False
+    assert payload.observation_only is True
+    assert payload.research_quality_eligible is False
+    assert payload.research_quality_reasons == ["absolute_tradability_below_threshold"]
     assert payload.tradability_eligible is True
     assert payload.taxonomy_bucket == "broad-equity"
     assert payload.tracked_underlying_id == "CSI-000300"
@@ -115,11 +119,7 @@ def test_snapshot_api_keeps_provider_publication_pit_cost_and_concentration_sepa
 def test_canonical_quality_contract_versions_observation_only_reasons() -> None:
     contract = canonical_research_eligibility_policy()
 
-    assert contract["policy_version"] == "etf_canonical_research_eligibility_v1"
-    assert (
-        contract["observation_only_state_contract_version"]
-        == "etf_observation_only_state_v1"
-    )
-    assert contract["stable_exclusion_reason_semantics"] == (
-        "etf_quality_exclusion_reasons_v1"
-    )
+    assert contract["policy_version"] == "etf_canonical_research_eligibility_v2"
+    assert contract["observation_only_state_contract_version"] == "etf_observation_only_state_v2"
+    assert contract["stable_exclusion_reason_semantics"] == ("etf_quality_exclusion_reasons_v2")
+    assert contract["eligibility_layers"]["research"] == ("same_as_score_eligibility")
