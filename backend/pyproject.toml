@@ -2,7 +2,7 @@
 name = "fundscope-backend"
 version = "0.1.0"
 description = "FundScope backend service"
-readme = "../README.md"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "aiosmtplib>=4.0.0",

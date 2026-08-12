@@ -14,12 +14,11 @@ WORKDIR /app
 RUN useradd --create-home --shell /bin/bash appuser
 
 COPY pyproject.toml ./
+COPY README.md ./
 COPY app ./app
 COPY alembic.ini ./alembic.ini
 COPY alembic ./alembic
 COPY scripts ./scripts
-
-RUN printf 'FundScope backend\n' > /README.md
 
 RUN pip install --no-cache-dir \
   -i https://mirrors.cloud.tencent.com/pypi/simple \
