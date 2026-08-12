@@ -31,6 +31,13 @@ from app.services.tracked_positions.lifecycle import (
     ActionStatus,
     stable_contract_hash,
 )
+from app.services.tracked_positions.sleeve_repository import (
+    AppendSleeveLedgerEventCommand,
+    SleeveLedgerConflictError,
+    SleeveRepositoryValidationError,
+    append_owner_ledger_event,
+    latest_owner_ledger_event,
+)
 
 TRANSITION_CONTRACT_VERSION = "tracked_position_action_transition_v1"
 MAX_FUTURE_CLOCK_SKEW = timedelta(minutes=5)
@@ -206,6 +213,8 @@ def _validate_execution_numbers(facts: ActionExecutionFacts) -> None:
         raise ActionTransitionValidationError("price must be positive")
     if facts.fees < 0 or facts.resulting_shares < 0:
         raise ActionTransitionValidationError("fees and resulting_shares must be non-negative")
+    if facts.fees >= facts.quantity * facts.price:
+        raise ActionTransitionValidationError("fees must be below gross sell proceeds")
     if not isinstance(facts.price_source, str) or facts.price_source.strip() not in OWNER_PRICE_SOURCES:
         raise ActionTransitionValidationError("price_source is not an owner execution source")
 
@@ -274,7 +283,12 @@ def _validate_execution(
         raise ActionTransitionValidationError("close_fact is inconsistent with resulting shares")
 
     factor = state.get("current_adjustment_factor", action.baseline_adjustment_factor)
-    if not isinstance(factor, (int, float)) or not math.isfinite(factor) or factor <= 0:
+    if (
+        isinstance(factor, bool)
+        or not isinstance(factor, int | float)
+        or not math.isfinite(factor)
+        or factor <= 0
+    ):
         raise ActionTransitionConflictError("current adjustment factor is unavailable")
     normalized_before = before_shares / factor
     normalized_execution = facts.quantity / factor
@@ -372,6 +386,53 @@ async def _persist_audit_and_receipt(
         )
     )
     await session.flush()
+
+
+async def _append_sleeve_sell_if_initialized(
+    session: AsyncSession,
+    *,
+    command: ActionTransitionCommand,
+    position: TrackedPosition,
+    facts: ActionExecutionFacts,
+    adjustment_factor: float,
+) -> None:
+    head = await latest_owner_ledger_event(session, owner_id=command.owner_id)
+    if head is None:
+        return
+    identity_hash = stable_contract_hash(
+        {
+            "contract": "tracked_etf_sleeve_action_execution_v1",
+            "owner_id": command.owner_id,
+            "action_id": command.action_id,
+            "idempotency_key": command.idempotency_key,
+        }
+    )
+    try:
+        await append_owner_ledger_event(
+            session,
+            AppendSleeveLedgerEventCommand(
+                owner_id=command.owner_id,
+                idempotency_key=f"sleeve-exec:{identity_hash}",
+                event_type="sell",
+                effective_date=_utc_naive(facts.executed_at).date(),
+                occurred_at=_utc_naive(facts.executed_at),
+                provenance="owner_confirmed",
+                expected_predecessor_event_hash=head.event_hash,
+                tracked_position_id=position.id,
+                asset_code=position.asset_code,
+                cash_delta=facts.quantity * facts.price - facts.fees,
+                quantity_delta=-facts.quantity,
+                quantity_after=facts.resulting_shares,
+                execution_price=facts.price,
+                fees=facts.fees,
+                adjustment_factor=adjustment_factor,
+                reason_code="owner_confirmed_action_execution",
+            ),
+        )
+    except SleeveLedgerConflictError as exc:
+        raise ActionTransitionConflictError(str(exc)) from exc
+    except SleeveRepositoryValidationError as exc:
+        raise ActionTransitionValidationError(str(exc)) from exc
 
 
 async def _perform_transition(
@@ -533,6 +594,15 @@ async def _perform_transition(
                 actor_id=command.actor_id,
                 request_id=command.idempotency_key,
             )
+        )
+        await _append_sleeve_sell_if_initialized(
+            session,
+            command=command,
+            position=position,
+            facts=facts,
+            adjustment_factor=float(
+                state.get("current_adjustment_factor", action.baseline_adjustment_factor)
+            ),
         )
         executed_at_text = executed_at.isoformat()
 

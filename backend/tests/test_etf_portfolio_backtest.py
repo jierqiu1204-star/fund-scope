@@ -10,13 +10,17 @@ from sqlalchemy import func, select
 from app.defaults.short_research import ASSET_TYPE_ETF, ShortResearchAsset
 from app.models.entities import (
     EtfIntradayQuote,
+    EtfPortfolioBacktestTrade,
     EtfPriceHistory,
     TrackedPosition,
     TradableEtf,
 )
+from app.services.short_research import backtest as backtest_service
 from app.services.short_research.backtest import (
     ReplayPosition,
     _comparison_target_weights,
+    _daily_execution_resolution,
+    _execution_cost_evidence,
     _first_execution_quote_after,
     _generate_target_weights,
     _risk_action,
@@ -29,6 +33,7 @@ from app.services.short_research.service import (
     PricePoint,
     compute_asset_for_replay_from_series,
 )
+from app.services.strategy_lab.etf_action_replay import DailyExecutionBar, ExecutionStatus
 
 
 def _metadata(code: str, *, asset_class: str = "sector", tags: tuple[str, ...] = ("科技",)) -> ShortResearchAsset:
@@ -47,12 +52,13 @@ def _metadata(code: str, *, asset_class: str = "sector", tags: tuple[str, ...] =
 def _computed_asset(
     code: str,
     *,
+    asset_class: str = "sector",
     conclusion: str = "短线观察",
     entry: str = "健康回踩",
     score: float = 85.0,
     flags: list[str] | None = None,
 ) -> ComputedAsset:
-    metadata = _metadata(code)
+    metadata = _metadata(code, asset_class=asset_class)
     metrics = {
         "return_5d": 0.02,
         "return_10d": 0.03,
@@ -95,6 +101,17 @@ def _computed_asset(
     )
 
 
+def _risk_return_maps(codes: list[str], *, days: int = 60) -> dict[str, dict[date, float]]:
+    start = date(2026, 1, 1)
+    return {
+        code: {
+            start + timedelta(days=offset): ((offset * (index + 2)) % 17 - 8) / 10000
+            for offset in range(days)
+        }
+        for index, code in enumerate(codes)
+    }
+
+
 async def _seed_backtest_etfs(app, *, codes: list[str], days: int = 120, future_spike: bool = False) -> None:
     start = date(2026, 1, 1)
     async with app.state.db.session() as session:
@@ -114,7 +131,11 @@ async def _seed_backtest_etfs(app, *, codes: list[str], days: int = 120, future_
             close = 1.0 + index * 0.02
             for offset in range(days):
                 current = start + timedelta(days=offset)
-                daily = 0.001 + (index % 4) * 0.0002
+                daily = (
+                    0.001
+                    + (index % 4) * 0.0002
+                    + (((offset * (index + 2)) % 11) - 5) * 0.00002
+                )
                 close = close * (1 + daily)
                 if future_spike and offset == days - 1:
                     close *= 5
@@ -156,20 +177,36 @@ async def _seed_intraday_quotes(app, *, codes: list[str], start_date: date, days
                             trade_date=current,
                             quote_time=quote_time,
                             latest_price=day_price * price_multiplier,
+                            bid_price=day_price * price_multiplier * 0.999,
+                            ask_price=day_price * price_multiplier * 1.001,
                             change_percent=(price_multiplier - 1) * 100,
                             volume=1_000_000,
                             turnover=80_000_000,
                             source="test_intraday",
                             freshness_status="historical_replay",
+                            raw_json={
+                                "decision_eligible": True,
+                                "consensus_status": "consistent",
+                                "provider_count": 2,
+                            },
                         )
                     )
         await session.commit()
 
 
 @pytest.mark.asyncio
-async def test_etf_portfolio_backtest_writes_only_backtest_tables(app) -> None:
+async def test_etf_portfolio_backtest_writes_only_backtest_tables(app, monkeypatch) -> None:
     codes = [f"51{index:04d}" for index in range(20)]
     await _seed_backtest_etfs(app, codes=codes, days=150)
+    monkeypatch.setattr(
+        backtest_service,
+        "_generate_target_weights",
+        lambda assets, **_kwargs: (
+            {asset.metadata.code: 0.2 for asset in assets[:4]},
+            "risk_on",
+            {"cash_weight": 0.2, "cash_reason": "frozen_execution_fixture"},
+        ),
+    )
 
     async with app.state.db.session() as session:
         tracked_before = await session.scalar(select(func.count()).select_from(TrackedPosition))
@@ -180,12 +217,30 @@ async def test_etf_portfolio_backtest_writes_only_backtest_tables(app) -> None:
             days=90,
             max_assets=20,
         )
+        first_trade = await session.scalar(
+            select(EtfPortfolioBacktestTrade)
+            .where(EtfPortfolioBacktestTrade.run_id == run.id)
+            .order_by(EtfPortfolioBacktestTrade.trade_date.asc(), EtfPortfolioBacktestTrade.id.asc())
+            .limit(1)
+        )
         tracked_after = await session.scalar(select(func.count()).select_from(TrackedPosition))
 
     assert tracked_before == tracked_after
-    assert run.status == "success"
-    assert run.metrics_json["trade_count"] > 0
+    assert run.status == "success", run.error_message
+    assert run.metrics_json["trade_count"] > 0, {
+        "metrics": run.metrics_json,
+        "coverage": run.data_coverage_json,
+    }
     assert run.data_coverage_json["trading_days"] >= 30
+    assert first_trade is not None
+    execution = first_trade.metadata_json["execution_evidence"]
+    assert first_trade.trade_date > date.fromisoformat(execution["signal_date"])
+    assert execution["price_basis"] == "total_return_adjusted_open"
+    assert execution["fee_bps_per_side"] == 5
+    assert execution["base_slippage_bps_per_side"] == 5
+    assert execution["stress_slippage_bps_per_side"] == 20
+    assert execution["simulated_not_observed"] is True
+    assert first_trade.shares % 100 == 0
 
 
 @pytest.mark.asyncio
@@ -213,6 +268,11 @@ async def test_etf_portfolio_backtest_api_create_list_and_detail(client, app) ->
     assert created_body["research_only"] is True
     assert created_body["promotion_eligible"] is False
     assert created_body["action_evidence"]["policy_semantics"] == "legacy_current_position"
+    risk_shadow = created_body["metrics"]["portfolio_risk_budget"][
+        "portfolio_risk_shadow_v1"
+    ]
+    assert risk_shadow["contract_version"] == "portfolio_risk_shadow_v1"
+    assert risk_shadow["marginal_risk_contribution"]["metrics"]["asset_count"] <= 20
 
     listed = await client.get("/api/short-research/etf-backtests?limit=5")
     assert listed.status_code == 200
@@ -281,13 +341,23 @@ async def test_etf_intraday_alert_backtest_api_uses_intraday_execution_model(cli
 
 
 def test_backtest_portfolio_partially_allocates_when_candidates_are_insufficient() -> None:
-    weights, mode, context = _generate_target_weights([_computed_asset("510300"), _computed_asset("512880")])
+    assets = [
+        _computed_asset("512880"),
+        _computed_asset("513520"),
+        _computed_asset("510300", asset_class="broad_index", conclusion="谨慎观察", entry="冲高别追"),
+        _computed_asset("510500", asset_class="broad_index", conclusion="谨慎观察", entry="冲高别追"),
+    ]
+    weights, mode, context = _generate_target_weights(
+        assets,
+        return_maps=_risk_return_maps([asset.metadata.code for asset in assets]),
+    )
 
     assert weights
     assert mode == "risk_on"
     assert round(sum(weights.values()), 4) == 0.6
     assert context["cash_weight"] == 0.4
-    assert "候选" in context["cash_reason"]
+    assert "风险预算" in context["cash_reason"]
+    assert context["risk_summary"]["common_sample_count"] == 60
 
 
 def test_backtest_portfolio_cash_wait_when_no_candidate_passes_filters() -> None:
@@ -304,11 +374,23 @@ def test_backtest_portfolio_cash_wait_when_no_candidate_passes_filters() -> None
 
 
 def test_strategy_comparison_optimized_and_equal_weight_are_independent() -> None:
-    assets = [_computed_asset(code) for code in ("510300", "512880", "513520", "588220")]
+    assets = [
+        _computed_asset("510300", asset_class="broad_index"),
+        _computed_asset("510500", asset_class="broad_index"),
+        _computed_asset("513520"),
+        _computed_asset("588220"),
+    ]
     for asset, theme in zip(assets, ("宽基", "金融", "跨境", "科技"), strict=False):
         asset.metrics["theme_profile"] = {"theme_group": theme}
+    for index, asset in enumerate(assets, start=1):
+        asset.metrics["volatility_20d"] = 0.01 * index
+    return_maps = _risk_return_maps([asset.metadata.code for asset in assets])
 
-    optimized_weights, optimized_mode = _comparison_target_weights("optimized_min_volatility", assets)
+    optimized_weights, optimized_mode = _comparison_target_weights(
+        "optimized_min_volatility",
+        assets,
+        return_maps=return_maps,
+    )
     equal_weights, equal_mode = _comparison_target_weights("equal_weight_benchmark", assets)
 
     assert optimized_mode == "risk_on"
@@ -401,18 +483,38 @@ def test_legacy_current_semantics_fixture_is_research_only_and_non_promotable() 
 def test_intraday_alert_execution_uses_first_quote_after_delay() -> None:
     signal_time = datetime(2026, 6, 30, 10, 0, 0)
     quotes = [
-        EtfIntradayQuote(etf_code="513520", quote_time=signal_time, trade_date=signal_time.date(), latest_price=2.50),
+        EtfIntradayQuote(
+            etf_code="513520",
+            quote_time=signal_time,
+            trade_date=signal_time.date(),
+            latest_price=2.50,
+            bid_price=2.49,
+            ask_price=2.51,
+            volume=1_000,
+            freshness_status="historical_replay",
+            raw_json={"decision_eligible": True, "consensus_status": "consistent"},
+        ),
         EtfIntradayQuote(
             etf_code="513520",
             quote_time=signal_time + timedelta(minutes=2),
             trade_date=signal_time.date(),
             latest_price=2.48,
+            bid_price=2.47,
+            ask_price=2.49,
+            volume=1_000,
+            freshness_status="historical_replay",
+            raw_json={"decision_eligible": True, "consensus_status": "consistent"},
         ),
         EtfIntradayQuote(
             etf_code="513520",
             quote_time=signal_time + timedelta(minutes=4),
             trade_date=signal_time.date(),
             latest_price=2.46,
+            bid_price=2.45,
+            ask_price=2.47,
+            volume=1_000,
+            freshness_status="historical_replay",
+            raw_json={"decision_eligible": True, "consensus_status": "consistent"},
         ),
     ]
 
@@ -429,6 +531,181 @@ def test_intraday_alert_execution_does_not_fallback_without_later_quote() -> Non
     ]
 
     assert _first_execution_quote_after(quotes, signal_time, delay_minutes=3) is None
+
+
+def test_daily_execution_resolution_skips_signal_close_and_waits_for_eligible_open() -> None:
+    signal_date = date(2026, 7, 1)
+    resolution = _daily_execution_resolution(
+        signal_date=signal_date,
+        through_date=date(2026, 7, 4),
+        bars=(
+            DailyExecutionBar(signal_date, 99.0, 1.0, 1_000),
+            DailyExecutionBar(date(2026, 7, 2), 10.0, 1.0, 0),
+            DailyExecutionBar(date(2026, 7, 3), None, 1.0, 1_000),
+            DailyExecutionBar(date(2026, 7, 4), 10.5, 1.2, 1_000),
+        ),
+    )
+
+    assert resolution.status is ExecutionStatus.FILLED
+    assert resolution.fill is not None
+    assert resolution.fill.session_date == date(2026, 7, 4)
+    assert resolution.fill.adjusted_open == pytest.approx(12.6)
+    assert resolution.fill.signal_to_fill_trading_sessions == 3
+    assert [item.reason for item in resolution.deferred_sessions] == [
+        "zero_or_missing_volume",
+        "missing_or_invalid_open",
+    ]
+
+
+def test_execution_cost_evidence_separates_base_and_stress() -> None:
+    evidence = _execution_cost_evidence(
+        side="buy",
+        signal_date=date(2026, 7, 1),
+        fill_date=date(2026, 7, 2),
+        signal_price=10.0,
+        reference_price=11.0,
+        shares=100.0,
+        signal_to_fill_sessions=1,
+        deferred_reasons=(),
+        price_basis="total_return_adjusted_open",
+    )
+
+    assert evidence["simulated_not_observed"] is True
+    assert evidence["signal_to_fill_gap_return"] == pytest.approx(0.1)
+    assert evidence["spread_cost"] is None
+    assert evidence["spread_evidence"] == "modeled_sensitivity_not_observed"
+    assert evidence["base"]["fee"] == pytest.approx(0.55)
+    assert evidence["base"]["slippage_cost"] == pytest.approx(0.55)
+    assert evidence["stress"]["slippage_cost"] == pytest.approx(2.2)
+    assert evidence["stress"]["total_cost"] > evidence["base"]["total_cost"]
+
+
+def test_daily_buy_is_capped_by_pit_turnover_capacity() -> None:
+    positions: dict[str, ReplayPosition] = {}
+    order = backtest_service.PendingDailyOrder(
+        order_id=1,
+        signal_date=date(2026, 7, 1),
+        code="513520",
+        name="日经ETF",
+        side="buy",
+        reason="rebalance_buy",
+        signal_price=10.0,
+        requested_amount=5_000.0,
+    )
+
+    attempt = backtest_service._attempt_daily_order(
+        order,
+        through_date=date(2026, 7, 2),
+        bars=(
+            DailyExecutionBar(
+                date(2026, 7, 2),
+                10.0,
+                1.0,
+                100_000,
+                median_turnover_20d=200_000.0,
+            ),
+        ),
+        positions=positions,
+        metadata=_metadata("513520"),
+        cash=10_000.0,
+    )
+
+    assert attempt.status is ExecutionStatus.FILLED
+    assert attempt.trade is not None
+    assert attempt.trade.amount <= 2_000.0
+    capacity = (attempt.execution_evidence or {})["liquidity_capacity_stress"]
+    assert capacity["status"] == "capped"
+    assert capacity["fill_capped"] is True
+    assert capacity["entry_capacity_exceeded"] is True
+    assert capacity["requested_notional"] == 5_000.0
+
+
+def test_daily_exit_is_partial_when_pit_turnover_cannot_support_full_order() -> None:
+    positions = {
+        "513520": ReplayPosition(
+            code="513520",
+            name="日经ETF",
+            shares=1_000.0,
+            avg_cost=9.0,
+            entry_date=date(2026, 6, 1),
+        )
+    }
+    order = backtest_service.PendingDailyOrder(
+        order_id=2,
+        signal_date=date(2026, 7, 1),
+        code="513520",
+        name="日经ETF",
+        side="sell",
+        reason="hard_stop",
+        signal_price=10.0,
+        requested_fraction=1.0,
+    )
+
+    attempt = backtest_service._attempt_daily_order(
+        order,
+        through_date=date(2026, 7, 2),
+        bars=(
+            DailyExecutionBar(
+                date(2026, 7, 2),
+                10.0,
+                1.0,
+                100_000,
+                median_turnover_20d=100_000.0,
+            ),
+        ),
+        positions=positions,
+        metadata=_metadata("513520"),
+        cash=0.0,
+    )
+
+    assert attempt.status is ExecutionStatus.FILLED
+    assert attempt.trade is not None
+    assert attempt.trade.shares == 500.0
+    assert positions["513520"].shares == 500.0
+    capacity = (attempt.execution_evidence or {})["liquidity_capacity_stress"]
+    assert capacity["status"] == "capped"
+    assert capacity["normal_exit_days"] == pytest.approx(2.0)
+    assert capacity["unfilled_notional"] == pytest.approx(5_000.0)
+
+
+def test_daily_entry_is_excluded_when_pit_turnover_capacity_is_unavailable() -> None:
+    order = backtest_service.PendingDailyOrder(
+        order_id=3,
+        signal_date=date(2026, 7, 1),
+        code="513520",
+        name="日经ETF",
+        side="buy",
+        reason="rebalance_buy",
+        signal_price=10.0,
+        requested_amount=1_000.0,
+    )
+
+    attempt = backtest_service._attempt_daily_order(
+        order,
+        through_date=date(2026, 7, 2),
+        bars=(DailyExecutionBar(date(2026, 7, 2), 10.0, 1.0, 100_000),),
+        positions={},
+        metadata=_metadata("513520"),
+        cash=10_000.0,
+    )
+
+    assert attempt.status is ExecutionStatus.REJECTED
+    assert attempt.reason == "liquidity_capacity_turnover_unavailable"
+
+
+def test_intraday_execution_rejects_latest_price_without_explicit_eligible_book() -> None:
+    signal_time = datetime(2026, 7, 1, 10, 0)
+    display_only = EtfIntradayQuote(
+        etf_code="513520",
+        quote_time=signal_time + timedelta(minutes=4),
+        trade_date=signal_time.date(),
+        latest_price=2.46,
+        volume=1_000,
+        freshness_status="historical_replay",
+        raw_json={},
+    )
+
+    assert _first_execution_quote_after([display_only], signal_time, delay_minutes=3, side="sell") is None
 
 
 def test_replay_compute_uses_supplied_date_slice_not_future_price() -> None:

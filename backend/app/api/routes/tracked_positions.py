@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from datetime import date
+import math
+from datetime import UTC, date, timedelta
+from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from sqlalchemy import func, select
@@ -9,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import require_approved_user
 from app.core.db import get_db_session
 from app.models.entities import (
+    TrackedEtfSleeveLedgerEvent,
     TrackedPosition,
     TrackedPositionActionDecision,
     TrackedPositionAlert,
@@ -16,6 +19,8 @@ from app.models.entities import (
     utcnow,
 )
 from app.schemas.tracked_positions import (
+    TrackedEtfSleeveReconciliationInput,
+    TrackedEtfSleeveReconciliationOut,
     TrackedPositionActionSummaryOut,
     TrackedPositionActionTransitionOut,
     TrackedPositionActionTransitionRequest,
@@ -61,13 +66,20 @@ from app.services.tracked_positions.lifecycle_read_repository import (
     list_alert_audit_page,
     list_legacy_alert_page,
 )
+from app.services.tracked_positions.owner_risk import (
+    EtfOwnerRiskContext,
+    owner_risk_contexts_for_read,
+)
 from app.services.tracked_positions.service import (
     SignalContext,
     alert_out,
+    apply_etf_liquidity_capacity_guard,
+    batch_etf_liquidity_inputs,
     cost_basis_for_position,
     create_position,
     current_snapshot,
     email_configured,
+    etf_liquidity_capacity_for_position,
     latest_alert_for_position,
     latest_alerts_for_positions,
     latest_signal_context,
@@ -78,6 +90,13 @@ from app.services.tracked_positions.service import (
     recalculate_entry,
     recent_intraday_alerts_for_position,
     recent_intraday_alerts_for_positions,
+)
+from app.services.tracked_positions.sleeve_repository import (
+    AppendSleeveLedgerEventCommand,
+    SleeveLedgerConflictError,
+    SleeveRepositoryValidationError,
+    append_owner_ledger_event,
+    latest_owner_ledger_event,
 )
 
 router = APIRouter(prefix="/api/tracked-positions", tags=["tracked-positions"])
@@ -97,6 +116,10 @@ async def _position_out(
     current_action_loaded: bool = False,
     latest_audit_data: LatestAuditDataState | None = None,
     latest_audit_data_loaded: bool = False,
+    liquidity_turnovers: tuple[float, ...] = (),
+    liquidity_quote: Any | None = None,
+    liquidity_inputs_loaded: bool = False,
+    owner_risk_context: EtfOwnerRiskContext | None = None,
 ) -> TrackedPositionOut:
     if signal_context is None:
         _run, item, report = await latest_signal_context(session, row)
@@ -141,7 +164,20 @@ async def _position_out(
         snapshot,
         analysis.exit_signal,
         trend_weakening=bool(analysis.technical_metrics.get('trend_weakening')),
+        owner_risk_context=owner_risk_context,
     )
+    if not liquidity_inputs_loaded and row.asset_type == "etf":
+        turnover_by_code, quote_by_code = await batch_etf_liquidity_inputs(session, [row])
+        liquidity_turnovers = turnover_by_code.get(row.asset_code, ())
+        liquidity_quote = quote_by_code.get(row.asset_code)
+    liquidity_capacity = etf_liquidity_capacity_for_position(
+        row,
+        snapshot,
+        sizing,
+        daily_turnovers=liquidity_turnovers,
+        quote=liquidity_quote,
+    )
+    sizing = apply_etf_liquidity_capacity_guard(sizing, liquidity_capacity)
     analysis.exit_signal.position_action = sizing.action
     analysis.exit_signal.action_version = sizing.action_version
     analysis.exit_signal.reentry_rule_version = sizing.reentry_rule_version
@@ -199,6 +235,10 @@ async def _position_out(
         current_action=(
             _action_summary_out(current_action) if current_action is not None else None
         ),
+        etf_liquidity_capacity=(
+            liquidity_capacity.as_context() if liquidity_capacity is not None else None
+        ),
+        risk_control=sizing.owner_risk_control,
     )
 
 
@@ -301,6 +341,13 @@ async def list_tracked_positions(
         owner_id=user.id,
         position_ids=position_ids,
     )
+    turnover_by_code, quote_by_code = await batch_etf_liquidity_inputs(session, rows)
+    owner_risk_by_id = await owner_risk_contexts_for_read(
+        session,
+        users=(user,),
+        now=utcnow(),
+    )
+    owner_risk = owner_risk_by_id.get(user.id)
     return TrackedPositionListOut(
         items=[
             await _position_out(
@@ -316,12 +363,17 @@ async def list_tracked_positions(
                 current_action_loaded=True,
                 latest_audit_data=latest_audit_data_by_id.get(row.id),
                 latest_audit_data_loaded=True,
+                liquidity_turnovers=turnover_by_code.get(row.asset_code, ()),
+                liquidity_quote=quote_by_code.get(row.asset_code),
+                liquidity_inputs_loaded=True,
+                owner_risk_context=owner_risk,
             )
             for row in rows
         ],
         total=total,
         email_configured=email_configured(user, request.app.state.settings),
         recipient_email=user.recipient_email,
+        owner_etf_risk=(owner_risk.as_context() if owner_risk is not None else None),
     )
 
 
@@ -348,6 +400,150 @@ async def create_tracked_position(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return await _position_out(session, row, user=user)
+
+
+@router.post(
+    "/etf-sleeve/reconcile",
+    response_model=TrackedEtfSleeveReconciliationOut,
+)
+async def reconcile_tracked_etf_sleeve(
+    payload: TrackedEtfSleeveReconciliationInput,
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=1, max_length=128),
+    user: User = Depends(require_approved_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> TrackedEtfSleeveReconciliationOut:
+    if user.etf_trading_capital_confirmed_at is None:
+        raise HTTPException(status_code=422, detail="请先显式确认 ETF 交易资金")
+    now = utcnow()
+    occurred_at = (
+        payload.occurred_at.replace(tzinfo=None)
+        if payload.occurred_at.tzinfo is None
+        else payload.occurred_at.astimezone(UTC).replace(tzinfo=None)
+    )
+    if occurred_at > now + timedelta(minutes=5):
+        raise HTTPException(status_code=422, detail="对账时间不能晚于服务器时间")
+    positions = tuple(
+        (
+            await session.scalars(
+                select(TrackedPosition)
+                .where(
+                    TrackedPosition.user_id == user.id,
+                    TrackedPosition.asset_type == "etf",
+                    TrackedPosition.status == "active",
+                )
+                .order_by(TrackedPosition.id.asc())
+                .limit(101)
+            )
+        ).all()
+    )
+    if len(positions) > 100:
+        raise HTTPException(status_code=422, detail="活动 ETF 持仓超过单次对账上限")
+    positions_by_id = {position.id: position for position in positions}
+    submitted_by_id = {holding.position_id: holding for holding in payload.holdings}
+    if set(positions_by_id) != set(submitted_by_id):
+        raise HTTPException(status_code=422, detail="必须一次性对账全部活动 ETF 持仓")
+    holdings_after: list[dict[str, Any]] = []
+    for position_id, position in positions_by_id.items():
+        submitted = submitted_by_id[position_id]
+        shares = position.confirmed_shares
+        if (
+            isinstance(shares, bool)
+            or not isinstance(shares, int | float)
+            or not math.isfinite(float(shares))
+            or float(shares) <= 0
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=f"持仓 {position_id} 缺少用户确认份额",
+            )
+        tolerance = max(1e-6, float(shares) * 1e-8)
+        if not math.isclose(
+            float(submitted.quantity),
+            float(shares),
+            rel_tol=0.0,
+            abs_tol=tolerance,
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=f"持仓 {position_id} 的对账份额与确认份额不一致",
+            )
+        state = dict(position.exit_state_json or {})
+        raw_adjustment_factor = state.get("current_adjustment_factor")
+        if raw_adjustment_factor is None:
+            adjustment_factor = 1.0
+        elif (
+            isinstance(raw_adjustment_factor, bool)
+            or not isinstance(raw_adjustment_factor, int | float)
+            or not math.isfinite(float(raw_adjustment_factor))
+            or float(raw_adjustment_factor) <= 0
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=f"持仓 {position_id} 的复权因子无效，不能建立对账证据",
+            )
+        else:
+            adjustment_factor = float(raw_adjustment_factor)
+        holdings_after.append(
+            {
+                "tracked_position_id": position.id,
+                "position_episode_id": state.get("position_episode_id"),
+                "asset_code": position.asset_code,
+                "quantity": float(submitted.quantity),
+                "remaining_cost_basis": float(submitted.remaining_cost_basis),
+                "adjustment_factor": adjustment_factor,
+            }
+        )
+    existing = await session.scalar(
+        select(TrackedEtfSleeveLedgerEvent).where(
+            TrackedEtfSleeveLedgerEvent.user_id == user.id,
+            TrackedEtfSleeveLedgerEvent.idempotency_key == idempotency_key,
+        )
+    )
+    head = await latest_owner_ledger_event(session, owner_id=user.id)
+    try:
+        persisted = await append_owner_ledger_event(
+            session,
+            AppendSleeveLedgerEventCommand(
+                owner_id=user.id,
+                idempotency_key=idempotency_key,
+                event_type=(
+                    existing.event_type
+                    if existing is not None
+                    else ("opening_reconciliation" if head is None else "reconciliation")
+                ),
+                effective_date=payload.trade_session,
+                occurred_at=occurred_at,
+                provenance=(
+                    "owner_documented"
+                    if payload.source_reference_hash is not None
+                    else "owner_confirmed"
+                ),
+                expected_predecessor_event_hash=(
+                    existing.predecessor_event_hash
+                    if existing is not None
+                    else (head.event_hash if head is not None else None)
+                ),
+                cash_balance_after=float(payload.cash_balance),
+                holdings_after=tuple(holdings_after),
+                evidence_ref=payload.source_reference_hash,
+                reason_code="owner_full_sleeve_reconciliation",
+            ),
+        )
+        await session.commit()
+    except SleeveLedgerConflictError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SleeveRepositoryValidationError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return TrackedEtfSleeveReconciliationOut(
+        ledger_event_id=persisted.event.id,
+        event_hash=persisted.event.event_hash,
+        status="accepted" if persisted.created else "replayed",
+        trade_session=payload.trade_session,
+        risk_state="data_halt",
+        reason_codes=["sleeve_snapshot_pending"],
+    )
 
 
 @router.get("/{position_id}/audit", response_model=TrackedPositionAlertAuditListOut)

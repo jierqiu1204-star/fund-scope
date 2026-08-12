@@ -20,6 +20,77 @@ ExposureMutationIntentInput = Literal[
 ActionTransitionInput = Literal["acknowledge", "execute", "cancel"]
 
 
+class TrackedEtfSleeveHoldingReconciliationInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    position_id: int = Field(gt=0)
+    quantity: FiniteFloat = Field(gt=0)
+    remaining_cost_basis: FiniteFloat = Field(ge=0)
+
+
+class TrackedEtfSleeveReconciliationInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    trade_session: date
+    occurred_at: datetime
+    cash_balance: FiniteFloat = Field(ge=0)
+    holdings: list[TrackedEtfSleeveHoldingReconciliationInput] = Field(
+        default_factory=list,
+        max_length=100,
+    )
+    source_reference_hash: str | None = Field(default=None, min_length=16, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_unique_positions(self) -> TrackedEtfSleeveReconciliationInput:
+        position_ids = [item.position_id for item in self.holdings]
+        if len(position_ids) != len(set(position_ids)):
+            raise ValueError("holdings must contain each tracked position exactly once")
+        return self
+
+
+class TrackedEtfSleeveReconciliationOut(BaseModel):
+    ledger_event_id: int
+    event_hash: str
+    status: Literal["accepted", "replayed"]
+    trade_session: date
+    risk_state: Literal["normal", "reduce_only", "data_halt"] = "data_halt"
+    reason_codes: list[str] = Field(default_factory=list)
+
+
+class TrackedEtfSleeveRiskOut(BaseModel):
+    status: Literal["ready", "unavailable"] = "unavailable"
+    state: Literal["normal", "reduce_only", "data_halt"] = "data_halt"
+    trade_session: date | None = None
+    equity: float | None = None
+    flow_adjusted_nav: float | None = None
+    high_water_nav: float | None = None
+    drawdown: float | None = None
+    valuation_coverage: float = 0.0
+    execution_coverage: float = 0.0
+    unavailable_reasons: list[str] = Field(default_factory=list)
+    contract_version: str | None = None
+    contract_hash: str | None = None
+    source_hash: str | None = None
+
+
+class TrackedEtfLiquidityCapacityOut(BaseModel):
+    status: str
+    side: str
+    entry_allowed: bool
+    trade_amount: float | None = None
+    median_turnover_20d: float | None = None
+    turnover_sample_count: int = 0
+    adv_participation: float | None = None
+    stress_adv_participation: float | None = None
+    normal_liquidation_days: float | None = None
+    stress_liquidation_days: float | None = None
+    spread_pct: float | None = None
+    premium_discount_pct: float | None = None
+    reason_codes: list[str] = Field(default_factory=list)
+    contract_version: str
+    contract_hash: str
+
+
 class TrackedPositionActionExecutionInput(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
@@ -309,6 +380,8 @@ class TrackedPositionOut(BaseModel):
     exit_state_version: int = 0
     lifecycle_state: TrackedPositionLifecycleStateOut
     current_action: TrackedPositionActionSummaryOut | None = None
+    etf_liquidity_capacity: TrackedEtfLiquidityCapacityOut | None = None
+    risk_control: TrackedEtfSleeveRiskOut | None = None
 
 
 class TrackedPositionDetailOut(TrackedPositionOut):
@@ -323,3 +396,4 @@ class TrackedPositionListOut(BaseModel):
     total: int
     email_configured: bool
     recipient_email: str
+    owner_etf_risk: TrackedEtfSleeveRiskOut | None = None

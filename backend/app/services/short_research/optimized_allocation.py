@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.defaults.short_research import ASSET_TYPE_ETF
 from app.models.entities import (
+    EtfObservationPortfolioItem,
     EtfObservationPortfolioSnapshot,
     EtfOptimizedAllocationItem,
     EtfOptimizedAllocationSnapshot,
@@ -24,12 +25,30 @@ from app.services.etf_research_evidence import stable_contract_hash
 from app.services.market_data import ASIA_SHANGHAI
 from app.services.portfolio_allocation import (
     BLACK_LITTERMAN_METHOD,
+    PORTFOLIO_CORRELATION_CLUSTER_CAP,
+    PORTFOLIO_LAYER_DEFENSIVE,
+    PORTFOLIO_LAYER_PRIMARY,
+    PORTFOLIO_LAYER_SATELLITE,
+    PORTFOLIO_MODE_CASH_WAIT,
+    PORTFOLIO_RISK_BUDGET_VERSION,
     PORTFOLIO_RISK_FLAGS_FORBIDDEN,
+    PORTFOLIO_SATELLITE_EXPOSURE_CAP,
+    PORTFOLIO_SATELLITE_SINGLE_WEIGHT_CAP,
     PORTFOLIO_SINGLE_WEIGHT_CAP,
     PORTFOLIO_THEME_EXPOSURE_CAP,
     BlackLittermanCandidate,
+    MarketRiskStateResult,
+    PortfolioRiskBudgetResult,
+    apply_portfolio_risk_budget,
     black_litterman_covariance_summary,
     build_black_litterman_allocation,
+    portfolio_asset_risk_cap,
+    portfolio_risk_budget_manifest,
+    proportional_capped_redistribution,
+)
+from app.services.portfolio_risk_shadow import (
+    PortfolioRiskAssetInput,
+    build_portfolio_risk_shadow,
 )
 from app.services.short_research.ranking_surfaces import (
     ACTIONABLE_CONTRACT_ID,
@@ -42,7 +61,7 @@ from app.services.short_research.snapshot_selector import (
     resolve_current_etf_ranking_surface_snapshot,
 )
 
-OPTIMIZED_ALLOCATION_METHOD_SET = "stable_min_vol_risk_parity_black_litterman_v1"
+OPTIMIZED_ALLOCATION_METHOD_SET = "stable_min_vol_risk_parity_black_litterman_v2_risk_budget"
 OPTIMIZED_ALLOCATION_MIN_ASSETS = 4
 OPTIMIZED_ALLOCATION_MIN_HISTORY_DAYS = 60
 OPTIMIZED_ALLOCATION_LOOKBACK_DAYS = 120
@@ -58,6 +77,9 @@ class OptimizerCandidate:
     expected_return: float | None
     volatility: float | None
     returns: tuple[float, ...] = ()
+    dated_returns: tuple[tuple[date, float], ...] = ()
+    clone_group_id: str | None = None
+    asset_bucket: str | None = None
     adjusted_input_hash: str | None = None
     observation_label: str = ""
     entry_timing_label: str = ""
@@ -68,6 +90,10 @@ class OptimizerCandidate:
     liquidity_score: float | None = None
     market_regime: str | None = None
     validation_sample_count: int | None = None
+    portfolio_layer: str = PORTFOLIO_LAYER_PRIMARY
+    risk_flags: tuple[str, ...] = ()
+    max_drawdown_60d: float | None = None
+    display_eligible: bool = True
 
 
 def _positive(value: float | None, default: float) -> float:
@@ -111,57 +137,177 @@ def cap_theme_weights(
     target_total: float = 1.0,
 ) -> dict[str, float] | None:
     cleaned = {code: max(0.0, float(weight)) for code, weight in raw_weights.items() if weight > 0}
-    if len(cleaned) * single_cap + 1e-9 < target_total:
+    if not cleaned:
         return None
-    theme_capacity: dict[str, float] = defaultdict(float)
+    theme_members: dict[str, list[str]] = defaultdict(list)
     for code in cleaned:
-        theme_capacity[theme_by_code.get(code) or "unknown"] += single_cap
-    if sum(min(theme_cap, capacity) for capacity in theme_capacity.values()) + 1e-9 < target_total:
-        return None
-
-    weights = dict.fromkeys(cleaned, 0.0)
-    theme_used: dict[str, float] = defaultdict(float)
-    remaining = target_total
-    ranked = sorted(cleaned.items(), key=lambda item: item[1], reverse=True)
-    while remaining > 1e-6:
-        changed = False
-        for code, _raw in ranked:
-            if remaining <= 1e-6:
-                break
-            theme = theme_by_code.get(code) or "unknown"
-            capacity = min(single_cap - weights[code], theme_cap - theme_used[theme], remaining)
-            if capacity <= 1e-6:
-                continue
-            step = min(capacity, remaining)
-            weights[code] += step
-            theme_used[theme] += step
-            remaining -= step
-            changed = True
-        if not changed:
-            break
-    if remaining > 1e-4:
-        return None
-    return {code: round(weight, 6) for code, weight in weights.items() if weight > 1e-6}
+        theme_members[theme_by_code.get(code) or "unknown"].append(code)
+    allocation = proportional_capped_redistribution(
+        cleaned,
+        {code: single_cap for code in cleaned},
+        group_caps={
+            f"theme:{theme}": (members, theme_cap)
+            for theme, members in theme_members.items()
+        },
+        target_total=target_total,
+    )
+    return allocation.weights or None
 
 
-def optimized_method_weights(
+def _optimized_raw_weights(
     method: str,
     candidates: list[OptimizerCandidate],
 ) -> dict[str, float] | None:
     if len(candidates) < OPTIMIZED_ALLOCATION_MIN_ASSETS:
         return None
     if method == "equal_weight":
-        raw = {candidate.code: 1.0 for candidate in candidates}
-    elif method == "minimum_volatility":
-        raw = {
+        return {candidate.code: 1.0 for candidate in candidates}
+    if method == "minimum_volatility":
+        return {
             candidate.code: 1.0 / (_positive(candidate.volatility, 0.03) ** 2)
             for candidate in candidates
         }
-    elif method == "risk_parity":
-        raw = {candidate.code: 1.0 / _positive(candidate.volatility, 0.03) for candidate in candidates}
-    else:
+    if method == "risk_parity":
+        return {
+            candidate.code: 1.0 / _positive(candidate.volatility, 0.03)
+            for candidate in candidates
+        }
+    return None
+
+
+def optimized_method_weights(
+    method: str,
+    candidates: list[OptimizerCandidate],
+) -> dict[str, float] | None:
+    raw = _optimized_raw_weights(method, candidates)
+    if raw is None:
         return None
     return cap_theme_weights(raw, {candidate.code: candidate.theme_group for candidate in candidates})
+
+
+@dataclass(frozen=True)
+class SourcePortfolioRiskPolicy:
+    status: str
+    market_risk: MarketRiskStateResult
+    max_total_exposure: float
+    source_allocation_contract_hash: str | None
+    unavailable_reason: str | None = None
+
+
+def _source_portfolio_risk_policy(
+    snapshot: EtfObservationPortfolioSnapshot | None,
+) -> SourcePortfolioRiskPolicy:
+    manifest = portfolio_risk_budget_manifest()
+    unavailable_market = MarketRiskStateResult(
+        state=PORTFOLIO_MODE_CASH_WAIT,
+        status="unavailable",
+        metrics={},
+        unavailable_reasons=("source_observation_risk_policy_unavailable",),
+        contract_version=PORTFOLIO_RISK_BUDGET_VERSION,
+        contract_hash=str(manifest["contract_hash"]),
+    )
+    if snapshot is None:
+        return SourcePortfolioRiskPolicy(
+            status="unavailable",
+            market_risk=unavailable_market,
+            max_total_exposure=0.0,
+            source_allocation_contract_hash=None,
+            unavailable_reason="同源观察组合快照不存在，不能推断优化组合风险状态。",
+        )
+    summary = dict(snapshot.summary_json or {})
+    constraints = dict(summary.get("constraints_used") or summary.get("constraint_summary") or {})
+    risk_summary = dict(summary.get("risk_summary") or {})
+    allocation_contract = dict(summary.get("allocation_contract") or {})
+    version = constraints.get("risk_budget_version")
+    contract_hash = constraints.get("risk_budget_hash")
+    state = str(summary.get("market_regime") or PORTFOLIO_MODE_CASH_WAIT)
+    market_status = str(constraints.get("market_risk_status") or "unavailable")
+    if (
+        version != PORTFOLIO_RISK_BUDGET_VERSION
+        or contract_hash != manifest["contract_hash"]
+        or market_status != "ready"
+    ):
+        return SourcePortfolioRiskPolicy(
+            status="unavailable",
+            market_risk=unavailable_market,
+            max_total_exposure=0.0,
+            source_allocation_contract_hash=allocation_contract.get("contract_hash"),
+            unavailable_reason="同源观察组合缺少当前版本的市场风险和现金约束证据。",
+        )
+    try:
+        max_total_exposure = float(
+            summary.get("target_invested_weight", 1.0 - float(summary.get("cash_weight", 1.0)))
+        )
+    except (TypeError, ValueError):
+        max_total_exposure = -1.0
+    if not math.isfinite(max_total_exposure) or not 0.0 <= max_total_exposure <= 1.0:
+        return SourcePortfolioRiskPolicy(
+            status="unavailable",
+            market_risk=unavailable_market,
+            max_total_exposure=0.0,
+            source_allocation_contract_hash=allocation_contract.get("contract_hash"),
+            unavailable_reason="同源观察组合的目标风险暴露无效。",
+        )
+    return SourcePortfolioRiskPolicy(
+        status="ready",
+        market_risk=MarketRiskStateResult(
+            state=state,
+            status="ready" if state != PORTFOLIO_MODE_CASH_WAIT else "unavailable",
+            metrics=dict(risk_summary.get("market_state_metrics") or {}),
+            unavailable_reasons=("source_market_state_cash_wait",)
+            if state == PORTFOLIO_MODE_CASH_WAIT
+            else (),
+            contract_version=PORTFOLIO_RISK_BUDGET_VERSION,
+            contract_hash=str(manifest["contract_hash"]),
+        ),
+        max_total_exposure=max_total_exposure,
+        source_allocation_contract_hash=allocation_contract.get("contract_hash"),
+    )
+
+
+def _candidate_risk_budget(
+    raw_weights: dict[str, float],
+    candidates: list[OptimizerCandidate],
+    source_policy: SourcePortfolioRiskPolicy,
+) -> PortfolioRiskBudgetResult:
+    by_code = {candidate.code: candidate for candidate in candidates}
+    layers = {
+        code: by_code[code].portfolio_layer
+        for code in raw_weights
+        if code in by_code
+    }
+    caps = {}
+    for code, layer in layers.items():
+        candidate = by_code[code]
+        base_cap = (
+            PORTFOLIO_SATELLITE_SINGLE_WEIGHT_CAP
+            if layer == PORTFOLIO_LAYER_SATELLITE
+            else PORTFOLIO_SINGLE_WEIGHT_CAP
+        )
+        caps[code] = portfolio_asset_risk_cap(
+            base_cap=base_cap,
+            risk_flags=candidate.risk_flags,
+            volatility_20d=candidate.volatility,
+            max_drawdown_60d=candidate.max_drawdown_60d,
+            display_eligible=candidate.display_eligible,
+        )
+    return apply_portfolio_risk_budget(
+        raw_weights,
+        layer_by_code=layers,
+        theme_by_code={
+            code: by_code[code].theme_group
+            for code in raw_weights
+            if code in by_code
+        },
+        returns_by_code={
+            code: by_code[code].returns
+            for code in raw_weights
+            if code in by_code
+        },
+        market_risk=source_policy.market_risk,
+        individual_caps=caps,
+        max_total_exposure=source_policy.max_total_exposure,
+    )
 
 
 async def _current_canonical_etf_selection(session: AsyncSession) -> CanonicalSnapshotSelection:
@@ -308,6 +454,26 @@ async def _latest_observation_snapshot(
     )
 
 
+async def _observation_snapshot_weights(
+    session: AsyncSession,
+    snapshot: EtfObservationPortfolioSnapshot | None,
+) -> dict[str, float] | None:
+    if snapshot is None:
+        return None
+    rows = (
+        await session.execute(
+            select(
+                EtfObservationPortfolioItem.asset_code,
+                EtfObservationPortfolioItem.target_weight,
+            ).where(
+                EtfObservationPortfolioItem.snapshot_id == snapshot.id,
+                EtfObservationPortfolioItem.target_weight > 0,
+            )
+        )
+    ).all()
+    return {str(code): float(weight) for code, weight in rows}
+
+
 def _source_cutoff_utc(signal_run: ShortResearchSignalRun) -> datetime | None:
     cutoff = signal_run.data_cutoff
     if cutoff is None:
@@ -425,6 +591,10 @@ async def _eligible_candidates(session: AsyncSession, signal_run: ShortResearchS
         ]
         if len(returns) < OPTIMIZED_ALLOCATION_MIN_HISTORY_DAYS - 1:
             continue
+        dated_returns = tuple(
+            (rows[index].trade_date, returns[index - 1])
+            for index in range(1, len(rows))
+        )[-OPTIMIZED_ALLOCATION_LOOKBACK_DAYS:]
         adjusted_input_hash = stable_contract_hash(
             {
                 "schema_version": "optimizer_adjusted_history_v1",
@@ -476,6 +646,20 @@ async def _eligible_candidates(session: AsyncSession, signal_run: ShortResearchS
         except (TypeError, ValueError):
             validation_sample_count = None
         etf = etfs.get(signal.asset_code)
+        asset_class = str(etf.asset_class or "") if etf is not None else ""
+        if asset_class in {"bond", "commodity", "cash", "money", "dividend"}:
+            portfolio_layer = PORTFOLIO_LAYER_DEFENSIVE
+        elif signal.conclusion == "高位观察":
+            portfolio_layer = PORTFOLIO_LAYER_SATELLITE
+        else:
+            portfolio_layer = PORTFOLIO_LAYER_PRIMARY
+        max_drawdown_value = metrics.get("max_drawdown_60d")
+        try:
+            max_drawdown_60d = float(max_drawdown_value)
+        except (TypeError, ValueError):
+            max_drawdown_60d = None
+        if max_drawdown_60d is not None and not math.isfinite(max_drawdown_60d):
+            max_drawdown_60d = None
         candidates.append(
             OptimizerCandidate(
                 code=signal.asset_code,
@@ -486,6 +670,27 @@ async def _eligible_candidates(session: AsyncSession, signal_run: ShortResearchS
                 expected_return=mean(returns[-60:]) if returns[-60:] else None,
                 volatility=pstdev(returns[-60:]) if len(returns[-60:]) > 1 else None,
                 returns=tuple(returns[-OPTIMIZED_ALLOCATION_LOOKBACK_DAYS:]),
+                dated_returns=dated_returns,
+                clone_group_id=(
+                    str(metrics.get("clone_group_id"))
+                    if metrics.get("clone_group_id")
+                    else (
+                        f"underlying:{metrics.get('tracked_underlying_id')}"
+                        if metrics.get("tracked_underlying_id")
+                        else None
+                    )
+                ),
+                asset_bucket=(
+                    "bond"
+                    if asset_class == "bond"
+                    else "money"
+                    if asset_class in {"cash", "money"}
+                    else "commodity"
+                    if asset_class == "commodity"
+                    else "cross_border"
+                    if asset_class == "cross_border"
+                    else "equity"
+                ),
                 adjusted_input_hash=adjusted_input_hash,
                 observation_label=signal.conclusion or "",
                 entry_timing_label=entry_timing_label,
@@ -496,6 +701,10 @@ async def _eligible_candidates(session: AsyncSession, signal_run: ShortResearchS
                 liquidity_score=liquidity_score,
                 market_regime=str(metrics.get("market_regime") or ""),
                 validation_sample_count=validation_sample_count,
+                portfolio_layer=portfolio_layer,
+                risk_flags=tuple(sorted(str(flag) for flag in risk_flags)),
+                max_drawdown_60d=max_drawdown_60d,
+                display_eligible=bool(metrics.get("default_display_eligible", False)),
             )
         )
     return candidates
@@ -531,13 +740,22 @@ async def run_etf_optimized_allocation(session: AsyncSession) -> EtfOptimizedAll
         session,
         source_signal_run_id=signal_run.id,
     )
+    source_risk_policy = _source_portfolio_risk_policy(observation_snapshot)
+    risk_budget_manifest = portfolio_risk_budget_manifest()
     candidates = await _eligible_candidates(session, signal_run)
     candidate_input_hash = _candidate_input_hash(candidates)
     constraints = {
         "single_weight_cap": PORTFOLIO_SINGLE_WEIGHT_CAP,
+        "satellite_single_weight_cap": PORTFOLIO_SATELLITE_SINGLE_WEIGHT_CAP,
+        "satellite_exposure_cap": PORTFOLIO_SATELLITE_EXPOSURE_CAP,
         "theme_exposure_cap": PORTFOLIO_THEME_EXPOSURE_CAP,
+        "correlation_cluster_cap": PORTFOLIO_CORRELATION_CLUSTER_CAP,
         "min_assets": OPTIMIZED_ALLOCATION_MIN_ASSETS,
         "min_history_days": OPTIMIZED_ALLOCATION_MIN_HISTORY_DAYS,
+        "risk_budget_version": PORTFOLIO_RISK_BUDGET_VERSION,
+        "risk_budget_hash": risk_budget_manifest["contract_hash"],
+        "source_market_state": source_risk_policy.market_risk.state,
+        "source_target_exposure": source_risk_policy.max_total_exposure,
     }
     contract_hash = stable_contract_hash(
         {
@@ -552,15 +770,24 @@ async def run_etf_optimized_allocation(session: AsyncSession) -> EtfOptimizedAll
             "source_ranking_contract_hash": actionable_rank_manifest().manifest_hash,
             "price_basis": signal_run.price_basis,
             "candidate_input_hash": candidate_input_hash,
+            "source_allocation_contract_hash": (
+                source_risk_policy.source_allocation_contract_hash
+            ),
             "constraints": constraints,
         }
     )
     methods = ("equal_weight", "minimum_volatility", "risk_parity")
     method_weights: dict[str, dict[str, float]] = {}
-    for method in methods:
-        weights = optimized_method_weights(method, candidates)
-        if weights:
-            method_weights[method] = weights
+    method_budgets: dict[str, PortfolioRiskBudgetResult] = {}
+    if source_risk_policy.status == "ready":
+        for method in methods:
+            raw_weights = _optimized_raw_weights(method, candidates)
+            if raw_weights is None:
+                continue
+            budget = _candidate_risk_budget(raw_weights, candidates, source_risk_policy)
+            method_budgets[method] = budget
+            if budget.status == "ready" and budget.weights:
+                method_weights[method] = budget.weights
     bl_candidates = [
         BlackLittermanCandidate(
             code=candidate.code,
@@ -583,13 +810,21 @@ async def run_etf_optimized_allocation(session: AsyncSession) -> EtfOptimizedAll
         for candidate in candidates
     ]
     black_litterman_result = build_black_litterman_allocation(bl_candidates)
-    if black_litterman_result.status == "success":
-        method_weights[BLACK_LITTERMAN_METHOD] = {
+    if black_litterman_result.status == "success" and source_risk_policy.status == "ready":
+        black_litterman_raw = {
             item.code: item.target_weight for item in black_litterman_result.items
         }
+        black_litterman_budget = _candidate_risk_budget(
+            black_litterman_raw,
+            candidates,
+            source_risk_policy,
+        )
+        method_budgets[BLACK_LITTERMAN_METHOD] = black_litterman_budget
+        if black_litterman_budget.status == "ready" and black_litterman_budget.weights:
+            method_weights[BLACK_LITTERMAN_METHOD] = black_litterman_budget.weights
 
-    unavailable_reason = None
-    if not method_weights:
+    unavailable_reason = source_risk_policy.unavailable_reason
+    if unavailable_reason is None and not method_weights:
         unavailable_reason = (
             f"满足数据可靠性、历史长度和约束的 ETF 只有 {len(candidates)} 只，暂不能生成优化权重。"
         )
@@ -608,21 +843,78 @@ async def run_etf_optimized_allocation(session: AsyncSession) -> EtfOptimizedAll
         "latest_data_date": max(latest_dates).isoformat() if latest_dates else None,
         "lookback_days": OPTIMIZED_ALLOCATION_LOOKBACK_DAYS,
         "covariance": black_litterman_covariance_summary(bl_candidates),
+        "source_observation_portfolio_snapshot_id": (
+            observation_snapshot.id if observation_snapshot else None
+        ),
+        "source_allocation_contract_hash": (
+            source_risk_policy.source_allocation_contract_hash
+        ),
+        "risk_budget_version": PORTFOLIO_RISK_BUDGET_VERSION,
+        "risk_budget_hash": risk_budget_manifest["contract_hash"],
     }
     summary_methods: dict[str, Any] = {}
+    candidate_by_code = {candidate.code: candidate for candidate in candidates}
+    dated_return_maps = {
+        candidate.code: dict(candidate.dated_returns)
+        for candidate in candidates
+    }
+    previous_weights = await _observation_snapshot_weights(session, observation_snapshot)
     for method, weights in method_weights.items():
+        budget = method_budgets[method]
+        risk_shadow = build_portfolio_risk_shadow(
+            [
+                PortfolioRiskAssetInput(
+                    code=code,
+                    weight=float(weight),
+                    clone_group_id=candidate_by_code[code].clone_group_id,
+                    theme_group=candidate_by_code[code].theme_group,
+                    asset_bucket=candidate_by_code[code].asset_bucket,
+                )
+                for code, weight in sorted(weights.items())
+            ],
+            dated_return_maps,
+            {},
+            previous_weights=previous_weights,
+        )
         summary_methods[method] = {
             "status": "success",
             "weight_sum": round(sum(weights.values()), 6),
+            "cash_weight": budget.cash_weight,
             "asset_count": len(weights),
             "max_single_weight": max(weights.values()) if weights else 0.0,
+            "market_state": budget.market_state,
+            "risk_metrics": budget.metrics,
+            "binding_constraints": list(budget.binding_constraints),
+            "risk_budget_version": budget.contract_version,
+            "risk_budget_hash": budget.contract_hash,
+            "risk_shadow": risk_shadow.as_dict(),
+        }
+    for method, budget in method_budgets.items():
+        if method in summary_methods:
+            continue
+        summary_methods[method] = {
+            "status": "unavailable",
+            "weight_sum": 0.0,
+            "cash_weight": 1.0,
+            "asset_count": 0,
+            "unavailable_reason": "、".join(budget.unavailable_reasons),
+            "risk_metrics": budget.metrics,
+            "risk_budget_version": budget.contract_version,
+            "risk_budget_hash": budget.contract_hash,
         }
     summary_methods[BLACK_LITTERMAN_METHOD] = {
         **black_litterman_result.summary,
-        "status": black_litterman_result.status,
+        **summary_methods.get(BLACK_LITTERMAN_METHOD, {}),
+        "status": summary_methods.get(BLACK_LITTERMAN_METHOD, {}).get(
+            "status",
+            black_litterman_result.status,
+        ),
         "weight_sum": round(sum(method_weights.get(BLACK_LITTERMAN_METHOD, {}).values()), 6),
         "asset_count": len(method_weights.get(BLACK_LITTERMAN_METHOD, {})),
-        "unavailable_reason": black_litterman_result.unavailable_reason,
+        "unavailable_reason": summary_methods.get(BLACK_LITTERMAN_METHOD, {}).get(
+            "unavailable_reason",
+            black_litterman_result.unavailable_reason,
+        ),
     }
     snapshot = EtfOptimizedAllocationSnapshot(
         status="success" if method_weights else "unavailable",
@@ -638,6 +930,17 @@ async def run_etf_optimized_allocation(session: AsyncSession) -> EtfOptimizedAll
             "methods": summary_methods,
             "black_litterman": black_litterman_result.summary,
             "black_litterman_excluded_items": list(black_litterman_result.excluded_items),
+            "source_risk_policy": {
+                "status": source_risk_policy.status,
+                "market_state": source_risk_policy.market_risk.state,
+                "target_exposure": source_risk_policy.max_total_exposure,
+                "allocation_contract_hash": (
+                    source_risk_policy.source_allocation_contract_hash
+                ),
+                "risk_budget_version": PORTFOLIO_RISK_BUDGET_VERSION,
+                "risk_budget_hash": risk_budget_manifest["contract_hash"],
+                "unavailable_reason": source_risk_policy.unavailable_reason,
+            },
             "research_only": True,
             "no_trade_instruction": True,
         },
@@ -674,6 +977,9 @@ async def run_etf_optimized_allocation(session: AsyncSession) -> EtfOptimizedAll
                         "adjusted_input_hash": candidate.adjusted_input_hash,
                         "observation_label": candidate.observation_label,
                         "entry_timing_label": candidate.entry_timing_label,
+                        "portfolio_layer": candidate.portfolio_layer,
+                        "risk_budget_version": PORTFOLIO_RISK_BUDGET_VERSION,
+                        "risk_budget_hash": risk_budget_manifest["contract_hash"],
                         **(
                             {
                                 "prior_weight": bl_item.prior_weight,

@@ -446,6 +446,63 @@ async def latest_etf_quotes_by_code(
     return await intraday_quotes.latest_quotes_by_code(session, codes)
 
 
+async def recent_decision_eligible_etf_turnovers_by_code(
+    session: AsyncSession,
+    codes: list[str],
+    *,
+    lookback_sessions: int = 20,
+    max_codes: int = 100,
+) -> dict[str, tuple[float, ...]]:
+    """Load bounded, decision-eligible ETF turnover histories in one query."""
+
+    unique_codes = list(dict.fromkeys(str(code).strip() for code in codes if str(code).strip()))
+    if len(unique_codes) > max_codes:
+        raise MarketDataReadLimitExceededError(
+            f"ETF turnover batch exceeds {max_codes} codes"
+        )
+    if not unique_codes:
+        return {}
+    if lookback_sessions < 1 or lookback_sessions > 60:
+        raise MarketDataReadLimitExceededError(
+            "ETF turnover lookback must be between 1 and 60 sessions"
+        )
+    row_number = func.row_number().over(
+        partition_by=EtfPriceHistory.etf_code,
+        order_by=(EtfPriceHistory.trade_date.desc(), EtfPriceHistory.id.desc()),
+    )
+    ranked = (
+        select(
+            EtfPriceHistory.etf_code.label("etf_code"),
+            EtfPriceHistory.trade_date.label("trade_date"),
+            EtfPriceHistory.turnover.label("turnover"),
+            row_number.label("row_number"),
+        )
+        .where(
+            EtfPriceHistory.etf_code.in_(unique_codes),
+            EtfPriceHistory.decision_eligible.is_(True),
+            EtfPriceHistory.research_price_basis == "total_return_adjusted",
+            EtfPriceHistory.turnover.is_not(None),
+            EtfPriceHistory.turnover > 0,
+        )
+        .subquery()
+    )
+    rows = (
+        await session.execute(
+            select(ranked.c.etf_code, ranked.c.trade_date, ranked.c.turnover)
+            .where(ranked.c.row_number <= lookback_sessions)
+            .order_by(ranked.c.etf_code, ranked.c.trade_date)
+        )
+    ).all()
+    result: dict[str, list[float]] = {code: [] for code in unique_codes}
+    for code, _trade_date, turnover in rows:
+        if isinstance(turnover, bool) or not isinstance(turnover, int | float):
+            continue
+        value = float(turnover)
+        if math.isfinite(value) and value > 0:
+            result.setdefault(str(code), []).append(value)
+    return {code: tuple(values) for code, values in result.items()}
+
+
 async def etf_quotes_at_decision_cutoff(
     session: AsyncSession,
     codes: list[str],

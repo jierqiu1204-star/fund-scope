@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import date
+from types import SimpleNamespace
 
 import pytest
 
 from app.models.entities import TrackedPosition
 from app.schemas.etf_quotes import TrackedEtfIntradaySnapshotOut
 from app.schemas.tracked_positions import TrackedPositionExitSignal
+from app.services.intraday_etf.service import quote_decision_eligible_flag
 from app.services.risk_alerts import (
     ACTION_CLASS_ACTIONABLE_EXIT,
     ACTION_CLASS_GUARD_ONLY,
@@ -18,10 +20,14 @@ from app.services.risk_alerts import (
     ALERT_TAKE_PROFIT_WATCH,
     ALERT_TRAILING_TAKE_PROFIT,
     ALERT_TREND_WEAKENING,
+    AlertDecision,
+    evaluate_exit_execution_evidence,
     map_exit_signal_to_position_action,
 )
 from app.services.tracked_positions.service import (
     _annotate_exit_signal_email_eligibility,
+    _audit_decision_context,
+    _decision_email_data_eligible,
 )
 
 
@@ -31,6 +37,16 @@ def test_hard_stop_always_maps_to_absolute_zero_target() -> None:
     assert decision.action == "exit"
     assert decision.action_class == ACTION_CLASS_ACTIONABLE_EXIT
     assert decision.target_remaining_fraction == 0.0
+
+
+def test_legacy_quote_without_explicit_eligibility_fails_closed() -> None:
+    assert quote_decision_eligible_flag(SimpleNamespace(raw_json={})) is False
+    assert (
+        quote_decision_eligible_flag(
+            SimpleNamespace(raw_json={"decision_eligible": True})
+        )
+        is True
+    )
 
 
 @pytest.mark.parametrize(
@@ -132,6 +148,8 @@ def test_tracked_position_exit_email_does_not_require_research_rank_membership()
         email_eligible=True,
         decision_eligible=True,
         is_stale=False,
+        bid_price=0.899,
+        ask_price=0.901,
     )
 
     result = _annotate_exit_signal_email_eligibility(_tracked_etf(), signal, quote)
@@ -163,3 +181,133 @@ def test_tracked_position_exit_email_still_fails_closed_on_its_own_quote_gate() 
 
     assert result.email_eligible is False
     assert "不会用日线兜底或旧行情触发" in str(result.email_eligibility_reason)
+
+
+def _hard_stop_decision() -> AlertDecision:
+    return AlertDecision(
+        alert_type=ALERT_HARD_STOP,
+        trigger_label="硬止损提醒",
+        reasons=["触及动态硬止损线"],
+        risk_flags=[],
+        advisor_summary=None,
+        signal_item=None,
+        advisor_report=None,
+    )
+
+
+def test_daily_etf_email_requires_fresh_explicit_executable_quote() -> None:
+    fresh_quote = TrackedEtfIntradaySnapshotOut(
+        current_price=0.9,
+        price_source="intraday_quote",
+        reliability_level="fresh_consensus",
+        email_eligible=True,
+        decision_eligible=True,
+        is_stale=False,
+        bid_price=0.899,
+        ask_price=0.901,
+    )
+
+    assert _decision_email_data_eligible(
+        _tracked_etf(),
+        _hard_stop_decision(),
+        fresh_quote,
+        evaluation_mode="daily",
+    )
+    assert not _decision_email_data_eligible(
+        _tracked_etf(),
+        _hard_stop_decision(),
+        None,
+        evaluation_mode="daily",
+    )
+
+
+def test_daily_fund_email_keeps_confirmed_nav_path() -> None:
+    position = TrackedPosition(
+        user_id=1,
+        asset_type="fund",
+        asset_code="270042",
+        asset_name="测试基金",
+        buy_date=date(2026, 7, 1),
+        buy_amount=1_000,
+    )
+
+    assert _decision_email_data_eligible(
+        position,
+        _hard_stop_decision(),
+        None,
+        evaluation_mode="daily",
+    )
+
+
+def test_sell_execution_evidence_uses_bid_and_records_gap() -> None:
+    evidence = evaluate_exit_execution_evidence(
+        signal_price=0.90,
+        bid_price=0.88,
+        ask_price=0.89,
+        entry_price=1.00,
+        hard_stop_pct=-10.0,
+        quote_eligible=True,
+    )
+
+    assert evidence.status == "observable"
+    assert evidence.executable_reference_price == 0.88
+    assert evidence.price_basis == "intraday_bid"
+    assert evidence.signal_to_executable_gap_bps == pytest.approx(-222.2222, abs=0.001)
+    assert evidence.gap_through_stop_bps == pytest.approx(-222.2222, abs=0.001)
+    assert evidence.slippage_reserve_bps == 5.0
+
+
+def test_alert_audit_context_keeps_execution_non_automatic() -> None:
+    position = _tracked_etf()
+    position.entry_price = 1.0
+    position.exit_state_json = {"dynamic_thresholds": {"hard_stop_pct": -10.0}}
+    quote = TrackedEtfIntradaySnapshotOut(
+        current_price=0.90,
+        price_source="intraday_quote",
+        reliability_level="fresh_consensus",
+        email_eligible=True,
+        decision_eligible=True,
+        is_stale=False,
+        bid_price=0.88,
+        ask_price=0.89,
+    )
+
+    context = _audit_decision_context(
+        position,
+        _hard_stop_decision(),
+        quote,
+        evaluation_mode="daily",
+        outcome="sent",
+    )
+
+    assert context["email_eligible"] is True
+    assert context["execution_risk"]["executable_reference_price"] == 0.88
+    assert context["execution_risk"]["automatic_execution"] is False
+    assert context["execution_risk"]["execution_provenance"] == "none"
+
+
+@pytest.mark.parametrize(
+    ("bid_price", "ask_price", "reason_code"),
+    [
+        (None, 0.91, "missing_executable_bid_ask"),
+        (0.92, 0.91, "crossed_or_invalid_bid_ask"),
+        (float("nan"), 0.91, "missing_executable_bid_ask"),
+    ],
+)
+def test_sell_execution_evidence_fails_closed(
+    bid_price: float | None,
+    ask_price: float | None,
+    reason_code: str,
+) -> None:
+    evidence = evaluate_exit_execution_evidence(
+        signal_price=0.90,
+        bid_price=bid_price,
+        ask_price=ask_price,
+        entry_price=1.00,
+        hard_stop_pct=-10.0,
+        quote_eligible=True,
+    )
+
+    assert evidence.status == "not_observable"
+    assert evidence.executable_reference_price is None
+    assert evidence.reason_code == reason_code

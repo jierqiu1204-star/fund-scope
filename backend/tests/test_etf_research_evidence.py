@@ -5,12 +5,14 @@ from datetime import date
 import pytest
 
 from app.services.etf_research_evidence import (
+    ALLOCATION_CONTRACT_VERSION,
     EVIDENCE_STATUS_INSUFFICIENT,
     EVIDENCE_STATUS_LEGACY,
     EVIDENCE_STATUS_SAME_CONTRACT,
     EVIDENCE_STATUS_VERSION_MISMATCH,
     EVIDENCE_STATUS_WAITING,
     EXECUTION_MODEL_INTRADAY_ALERT,
+    build_allocation_contract,
     build_evidence_summary,
     build_exit_v2_baseline_comparison,
     build_exit_v2_evidence_contract,
@@ -33,6 +35,39 @@ def test_contract_hash_is_stable_for_equivalent_payloads() -> None:
     }
 
     assert stable_contract_hash(left) == stable_contract_hash(right)
+
+
+def test_allocation_contract_v2_hash_includes_risk_budget_policy() -> None:
+    base = build_allocation_contract(
+        portfolio_run_id=1,
+        source_signal_run_id=2,
+        portfolio_mode="neutral",
+        market_regime="neutral",
+        target_weights={"510300": 0.3},
+        allocation_layers={"primary_weight": 0.3, "cash_weight": 0.7},
+        constraints={
+            "risk_budget_version": "portfolio_risk_budget_v1",
+            "risk_budget_hash": "risk-policy-a",
+        },
+        data_as_of_time="2026-08-11T15:00:00",
+    )
+    revised = build_allocation_contract(
+        portfolio_run_id=1,
+        source_signal_run_id=2,
+        portfolio_mode="neutral",
+        market_regime="neutral",
+        target_weights={"510300": 0.3},
+        allocation_layers={"primary_weight": 0.3, "cash_weight": 0.7},
+        constraints={
+            "risk_budget_version": "portfolio_risk_budget_v1",
+            "risk_budget_hash": "risk-policy-b",
+        },
+        data_as_of_time="2026-08-11T15:00:00",
+    )
+
+    assert base["allocation_version"] == ALLOCATION_CONTRACT_VERSION
+    assert ALLOCATION_CONTRACT_VERSION == "etf_portfolio_allocation_contract_v2"
+    assert base["contract_hash"] != revised["contract_hash"]
 
 
 def test_evidence_status_distinguishes_waiting_legacy_mismatch_and_verified() -> None:

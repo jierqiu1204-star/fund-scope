@@ -10,7 +10,7 @@ from typing import Any
 
 EVIDENCE_SCHEMA_VERSION = "etf_research_evidence_v1"
 SIGNAL_CONTRACT_VERSION = "short_research_signal_v1"
-ALLOCATION_CONTRACT_VERSION = "etf_portfolio_allocation_contract_v1"
+ALLOCATION_CONTRACT_VERSION = "etf_portfolio_allocation_contract_v2"
 REPLAY_CONTRACT_VERSION = "etf_replay_contract_v2"
 EXIT_CALIBRATION_CONTRACT_VERSION = "etf_exit_calibration_contract_v1"
 EXIT_ACTION_CONTRACT_VERSION = "etf_exit_action_v2"

@@ -54,11 +54,13 @@ from app.services.etf_research_evidence import (
 from app.services.jobs import sync_fund_nav_history
 from app.services.market_data import (
     ASIA_SHANGHAI,
+    etf_adjusted_daily_facts_on_or_before,
     etf_adjusted_price_provenance_issue,
     etf_decision_adjusted_provider_versions,
     etf_quotes_at_decision_cutoff,
 )
 from app.services.portfolio_allocation import (
+    PORTFOLIO_CORRELATION_CLUSTER_CAP,
     PORTFOLIO_CORRELATION_MIN_POINTS,
     PORTFOLIO_ENTRY_TIMING_FORBIDDEN,
     PORTFOLIO_ENTRY_TIMING_OK,
@@ -72,14 +74,28 @@ from app.services.portfolio_allocation import (
     PORTFOLIO_MODE_DEFENSIVE,
     PORTFOLIO_MODE_NEUTRAL,
     PORTFOLIO_MODE_RISK_ON,
+    PORTFOLIO_RISK_BUDGET_VERSION,
     PORTFOLIO_RISK_FLAGS_FORBIDDEN,
-    PORTFOLIO_RISK_FLAGS_REDUCE_WEIGHT,
     PORTFOLIO_RISK_FLAGS_WATCH_ONLY,
     PORTFOLIO_SATELLITE_EXPOSURE_CAP,
     PORTFOLIO_SATELLITE_SINGLE_WEIGHT_CAP,
     PORTFOLIO_SINGLE_WEIGHT_CAP,
     PORTFOLIO_THEME_EXPOSURE_CAP,
     PORTFOLIO_TOTAL_EXPOSURE_CAP,
+    MarketRiskObservation,
+    apply_portfolio_risk_budget,
+    classify_portfolio_market_risk,
+    portfolio_asset_risk_cap,
+    portfolio_risk_budget_manifest,
+)
+from app.services.portfolio_risk_shadow import (
+    PORTFOLIO_RISK_FACTOR_NAMES,
+    MarketRiskPoolObservation,
+    PortfolioRiskAssetInput,
+    RiskShadowComponentResult,
+    build_portfolio_risk_shadow,
+    evaluate_market_risk_regime_shadow,
+    select_independent_market_risk_pool,
 )
 from app.services.short_etf.data import sync_etf_price_history
 from app.services.short_research.daily_reconstructable import (
@@ -202,12 +218,18 @@ _PORTFOLIO_ENTRY_TIMING_OK = PORTFOLIO_ENTRY_TIMING_OK
 _PORTFOLIO_ENTRY_TIMING_FORBIDDEN = PORTFOLIO_ENTRY_TIMING_FORBIDDEN
 _PORTFOLIO_RISK_FLAGS_FORBIDDEN = PORTFOLIO_RISK_FLAGS_FORBIDDEN
 _PORTFOLIO_RISK_FLAGS_WATCH_ONLY = PORTFOLIO_RISK_FLAGS_WATCH_ONLY
-_PORTFOLIO_RISK_FLAGS_REDUCE_WEIGHT = PORTFOLIO_RISK_FLAGS_REDUCE_WEIGHT
 MARKET_REGIME_RISK_ON = "risk_on"
 MARKET_REGIME_NEUTRAL = "neutral"
 MARKET_REGIME_DEFENSIVE = "defensive"
 MARKET_REGIME_CASH_WAIT = "cash_wait"
 V3_THEME_CATALYST_MAX_AGE = timedelta(hours=72)
+_MARKET_RISK_POOL_CODES: dict[str, tuple[str, ...]] = {
+    "large": ("510300", "510310", "159919"),
+    "mid": ("510500", "159922"),
+    "small": ("512100", "159845"),
+    "growth": ("159915", "159949"),
+    "star": ("588000", "588080"),
+}
 
 
 @dataclass(frozen=True)
@@ -6016,16 +6038,232 @@ async def refresh_dynamic_etf_universe(session: AsyncSession) -> dict[str, Any]:
 
 
 def _portfolio_exposure_for_asset(asset: ComputedAsset) -> float:
-    exposure = _PORTFOLIO_SINGLE_WEIGHT_CAP
-    if any(flag in asset.risk_flags for flag in _PORTFOLIO_RISK_FLAGS_REDUCE_WEIGHT):
-        exposure -= 0.05
-    if (asset.metrics.get("volatility_20d") or 0.0) > 0.025:
-        exposure -= 0.03
-    if (asset.metrics.get("max_drawdown_60d") or 0.0) < -0.12:
-        exposure -= 0.03
-    if not asset.metrics.get("default_display_eligible", False):
-        exposure -= 0.05
-    return float(max(0.05, min(_PORTFOLIO_SINGLE_WEIGHT_CAP, exposure)))
+    return portfolio_asset_risk_cap(
+        base_cap=_PORTFOLIO_SINGLE_WEIGHT_CAP,
+        risk_flags=asset.risk_flags,
+        volatility_20d=asset.metrics.get("volatility_20d"),
+        max_drawdown_60d=asset.metrics.get("max_drawdown_60d"),
+        display_eligible=bool(asset.metrics.get("default_display_eligible", False)),
+    )
+
+
+def _portfolio_market_risk_observations(
+    assets: list[ComputedAsset],
+) -> list[MarketRiskObservation]:
+    observations: list[MarketRiskObservation] = []
+    for asset in assets:
+        distance = asset.metrics.get("distance_to_ma20_pct")
+        if distance is None:
+            latest = asset.metrics.get("latest_value", asset.latest_value)
+            ma20 = asset.metrics.get("ma20")
+            if (
+                isinstance(latest, int | float)
+                and not isinstance(latest, bool)
+                and isinstance(ma20, int | float)
+                and not isinstance(ma20, bool)
+                and float(ma20) > 0
+            ):
+                distance = float(latest) / float(ma20) - 1.0
+        observations.append(
+            MarketRiskObservation(
+                code=asset.metadata.code,
+                return_20d=asset.metrics.get("return_20d"),
+                distance_to_ma20=distance,
+                decision_eligible=(
+                    asset.score_eligible is not False
+                    and bool(asset.metrics.get("default_display_eligible", False))
+                ),
+                broad_equity=(
+                    bool(asset.metrics.get("market_risk_broad_equity"))
+                    or
+                    asset.metadata.category in {"broad", "broad_index", "broad_market"}
+                    or "宽基" in asset.metadata.theme_tags
+                ),
+            )
+        )
+    return observations
+
+
+def _market_pool_distance_to_ma20(asset: ComputedAsset) -> float | None:
+    distance = asset.metrics.get("distance_to_ma20_pct")
+    if isinstance(distance, int | float) and not isinstance(distance, bool):
+        value = float(distance)
+        return value if math.isfinite(value) else None
+    latest = asset.metrics.get("latest_value", asset.latest_value)
+    ma20 = asset.metrics.get("ma20")
+    if (
+        isinstance(latest, int | float)
+        and not isinstance(latest, bool)
+        and isinstance(ma20, int | float)
+        and not isinstance(ma20, bool)
+        and math.isfinite(float(latest))
+        and math.isfinite(float(ma20))
+        and float(ma20) > 0
+    ):
+        return float(latest) / float(ma20) - 1.0
+    return None
+
+
+async def _independent_market_risk_shadow_inputs(
+    session: AsyncSession,
+    run: ShortResearchSignalRun,
+) -> tuple[RiskShadowComponentResult, dict[str, dict[date, float]]]:
+    pool_codes = [code for codes in _MARKET_RISK_POOL_CODES.values() for code in codes]
+    assets, _total = await cached_signal_assets(
+        session,
+        run,
+        asset_type=ASSET_TYPE_ETF,
+        codes=pool_codes,
+        universe=UNIVERSE_ALL,
+        ranking_surface=None,
+    )
+    by_code = {asset.metadata.code: asset for asset in assets}
+    observations: list[MarketRiskPoolObservation] = []
+    for bucket, codes in _MARKET_RISK_POOL_CODES.items():
+        for priority, code in enumerate(codes, start=1):
+            asset = by_code.get(code)
+            if asset is None:
+                continue
+            underlying = asset.metrics.get("tracked_underlying_id")
+            observations.append(
+                MarketRiskPoolObservation(
+                    code=code,
+                    bucket=bucket,
+                    tracked_underlying_id=(
+                        str(underlying).strip() if isinstance(underlying, str) else None
+                    ),
+                    return_20d=asset.metrics.get("return_20d"),
+                    distance_to_ma20=_market_pool_distance_to_ma20(asset),
+                    decision_eligible=(
+                        asset.score_eligible is not False
+                        and bool(asset.metrics.get("default_display_eligible", False))
+                    ),
+                    data_date=asset.latest_date,
+                    data_cutoff=run.data_cutoff,
+                    priority=priority,
+                )
+            )
+    market_pool = select_independent_market_risk_pool(
+        observations,
+        required_data_date=run.as_of_date,
+        required_data_cutoff=run.data_cutoff,
+    )
+    return_maps = await _portfolio_return_maps(
+        session,
+        assets,
+        run.as_of_date,
+        data_cutoff=run.data_cutoff,
+    )
+    selected_by_bucket = {
+        str(item["bucket"]): str(item["code"])
+        for item in market_pool.metrics.get("selected_observations", [])
+        if isinstance(item, dict) and item.get("bucket") and item.get("code")
+    }
+
+    def spread(left: str, right: str) -> dict[date, float]:
+        left_series = return_maps.get(selected_by_bucket.get(left, ""), {})
+        right_series = return_maps.get(selected_by_bucket.get(right, ""), {})
+        return {
+            point_date: left_series[point_date] - right_series[point_date]
+            for point_date in sorted(set(left_series).intersection(right_series))
+        }
+
+    factor_returns = {
+        "market": return_maps.get(selected_by_bucket.get("large", ""), {}),
+        "small_vs_large": spread("small", "large"),
+        "growth_vs_large": spread("growth", "large"),
+    }
+    assert set(factor_returns) == set(PORTFOLIO_RISK_FACTOR_NAMES)
+    return market_pool, factor_returns
+
+
+def _portfolio_shadow_asset_bucket(asset: ComputedAsset) -> str | None:
+    value = asset.metrics.get("ranking_asset_bucket")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    if asset.metadata.category in {"bond", "money", "commodity", "cross_border"}:
+        return asset.metadata.category
+    return "equity" if asset.metadata.category else None
+
+
+def _portfolio_shadow_asset_input(
+    asset: ComputedAsset,
+    weight: float,
+) -> PortfolioRiskAssetInput:
+    underlying = asset.metrics.get("tracked_underlying_id")
+    clone = asset.metrics.get("clone_group_id")
+    if not isinstance(clone, str) or not clone.strip():
+        clone = f"underlying:{underlying}" if isinstance(underlying, str) and underlying else None
+    theme_profile = asset.metrics.get("theme_profile")
+    theme_group = (
+        theme_profile.get("theme_group")
+        if isinstance(theme_profile, Mapping)
+        else None
+    )
+    return PortfolioRiskAssetInput(
+        code=asset.metadata.code,
+        weight=weight,
+        clone_group_id=str(clone) if clone else None,
+        theme_group=str(theme_group) if theme_group else None,
+        asset_bucket=_portfolio_shadow_asset_bucket(asset),
+    )
+
+
+async def _latest_observation_portfolio_weights(
+    session: AsyncSession,
+) -> dict[str, float] | None:
+    snapshot = await latest_observation_portfolio_snapshot(session)
+    if snapshot is None:
+        return None
+    rows = (
+        await session.execute(
+            select(
+                EtfObservationPortfolioItem.asset_code,
+                EtfObservationPortfolioItem.target_weight,
+            ).where(
+                EtfObservationPortfolioItem.snapshot_id == snapshot.id,
+                EtfObservationPortfolioItem.target_weight > 0,
+            )
+        )
+    ).all()
+    return {str(code): float(weight) for code, weight in rows}
+
+
+async def _previous_market_risk_regime_shadow_state(
+    session: AsyncSession,
+    *,
+    before_date: date,
+) -> tuple[str, date | None, tuple[date, ...]]:
+    snapshot = await session.scalar(
+        select(EtfObservationPortfolioSnapshot)
+        .where(EtfObservationPortfolioSnapshot.as_of_date < before_date)
+        .order_by(
+            EtfObservationPortfolioSnapshot.as_of_date.desc(),
+            EtfObservationPortfolioSnapshot.id.desc(),
+        )
+        .limit(1)
+    )
+    if snapshot is None:
+        return "risk_on", None, ()
+    summary = dict(snapshot.summary_json or {})
+    risk_summary = summary.get("risk_summary")
+    regime = (
+        risk_summary.get("market_risk_regime_shadow_v1")
+        if isinstance(risk_summary, Mapping)
+        else None
+    )
+    if not isinstance(regime, Mapping):
+        return "risk_on", snapshot.as_of_date, ()
+    state = str(regime.get("state") or "risk_on")
+    recovery_sessions: list[date] = []
+    for raw_value in regime.get("recovery_sessions") or ():
+        try:
+            parsed = date.fromisoformat(str(raw_value))
+        except ValueError:
+            continue
+        if parsed < before_date:
+            recovery_sessions.append(parsed)
+    return state, snapshot.as_of_date, tuple(sorted(set(recovery_sessions))[-2:])
 
 
 def _portfolio_exclusion_reason(asset: ComputedAsset) -> str | None:
@@ -6185,7 +6423,9 @@ def _portfolio_decision_factors(
         "risk_flags": list(asset.risk_flags),
         "single_weight_cap": _PORTFOLIO_SINGLE_WEIGHT_CAP,
         "target_weight": round(target_weight, 4),
-        "target_invested_weight": _PORTFOLIO_TOTAL_EXPOSURE_CAP,
+        "target_invested_weight": float(
+            (weight_reason or {}).get("target_invested_weight", _PORTFOLIO_TOTAL_EXPOSURE_CAP)
+        ),
         "exclusion_reason": reason,
         "weight_reason": weight_reason or {},
     }
@@ -6410,17 +6650,45 @@ async def _portfolio_return_maps(
     *,
     data_cutoff: datetime | None,
 ) -> dict[str, dict[date, float]]:
-    result: dict[str, dict[date, float]] = {}
-    for asset in assets:
-        series = await _etf_series(
+    if as_of_date is None or data_cutoff is None:
+        return {}
+    codes = list(dict.fromkeys(asset.metadata.code for asset in assets))
+    values_by_code: dict[str, list[tuple[date, float]]] = {code: [] for code in codes}
+    batch_size = 40
+    rows_per_code = 121
+    for offset in range(0, len(codes), batch_size):
+        batch = tuple(codes[offset : offset + batch_size])
+        facts = await etf_adjusted_daily_facts_on_or_before(
             session,
-            asset.metadata.code,
-            as_of_date,
-            data_cutoff=data_cutoff,
+            etf_codes=batch,
+            replay_date=as_of_date,
+            rows_per_code=rows_per_code,
+            max_source_rows=len(batch) * rows_per_code,
+            decision_cutoff=data_cutoff,
+            compatible_provider_versions=etf_decision_adjusted_provider_versions(),
         )
-        returns = _series_return_by_date(series)
+        for fact in facts:
+            value = fact.adjusted_close
+            if (
+                fact.decision_eligible is not True
+                or isinstance(value, bool)
+                or not isinstance(value, int | float)
+                or not math.isfinite(float(value))
+                or float(value) <= 0
+            ):
+                continue
+            values_by_code.setdefault(fact.etf_code, []).append(
+                (fact.trade_date, float(value))
+            )
+    result: dict[str, dict[date, float]] = {}
+    for code, rows in values_by_code.items():
+        returns: dict[date, float] = {}
+        ordered = sorted(rows)
+        for previous, current in zip(ordered, ordered[1:], strict=False):
+            if previous[1] > 0:
+                returns[current[0]] = current[1] / previous[1] - 1.0
         if len(returns) >= _PORTFOLIO_CORRELATION_MIN_POINTS:
-            result[asset.metadata.code] = returns
+            result[code] = returns
     return result
 
 
@@ -6652,17 +6920,27 @@ async def persist_observation_portfolio_snapshot(
             "total_exposure_cap": _PORTFOLIO_TOTAL_EXPOSURE_CAP,
             "theme_exposure_cap": _PORTFOLIO_THEME_EXPOSURE_CAP,
             "high_correlation_threshold": _PORTFOLIO_HIGH_CORRELATION,
+            "correlation_cluster_cap": PORTFOLIO_CORRELATION_CLUSTER_CAP,
+            "risk_budget_version": PORTFOLIO_RISK_BUDGET_VERSION,
+            "risk_budget_hash": portfolio_risk_budget_manifest()["contract_hash"],
         },
         summary_json=summary,
     )
     session.add(snapshot)
     await session.flush()
-    summary["allocation_contract"] = _allocation_contract_from_portfolio(
-        portfolio,
-        portfolio_run_id=snapshot.id,
-        source_signal_run_id=source_signal_run_id,
-    )
-    snapshot.summary_json = summary
+    # JSON columns are not mutable-tracked by default.  Replacing the entire
+    # object after the generated snapshot id is known guarantees that the
+    # allocation contract is persisted even when the portfolio deliberately
+    # retains cash and therefore cannot use the legacy full-investment
+    # compatibility check.
+    snapshot.summary_json = {
+        **summary,
+        "allocation_contract": _allocation_contract_from_portfolio(
+            portfolio,
+            portfolio_run_id=snapshot.id,
+            source_signal_run_id=source_signal_run_id,
+        ),
+    }
     for item_type, key in (
         ("primary", "items"),
         ("satellite", "satellite_items"),
@@ -6779,7 +7057,7 @@ async def etf_observation_portfolio(
             "watch_only_items": [],
             "excluded_items": [],
             "cash_weight": 1.0,
-            "target_invested_weight": _PORTFOLIO_TOTAL_EXPOSURE_CAP,
+            "target_invested_weight": 0.0,
             "weight_sum": 0.0,
             "portfolio_mode": PORTFOLIO_MODE_CASH_WAIT,
             "market_regime": MARKET_REGIME_CASH_WAIT,
@@ -6798,7 +7076,7 @@ async def etf_observation_portfolio(
             },
             "constraints_used": {
                 "single_weight_cap": _PORTFOLIO_SINGLE_WEIGHT_CAP,
-                "target_invested_weight": _PORTFOLIO_TOTAL_EXPOSURE_CAP,
+                "target_invested_weight": 0.0,
                 "theme_exposure_cap": _PORTFOLIO_THEME_EXPOSURE_CAP,
                 "high_correlation_threshold": _PORTFOLIO_HIGH_CORRELATION,
             },
@@ -6826,6 +7104,9 @@ async def etf_observation_portfolio(
         universe=universe,
         limit=max(50, min(limit * 10, 200)),
         ranking_surface="actionable",
+    )
+    market_risk = classify_portfolio_market_risk(
+        _portfolio_market_risk_observations(assets)
     )
     primary_candidates: list[ComputedAsset] = []
     satellite_candidates: list[tuple[ComputedAsset, str | None]] = []
@@ -6955,20 +7236,32 @@ async def etf_observation_portfolio(
     for asset, original_reason in watch_only_candidates:
         watch_only_items.append(_portfolio_item(asset, target_weight=0.0, reason=original_reason))
 
-    raw_weight_rows = [_portfolio_raw_weight(asset) for asset in selected_assets]
-    layer_caps = [
-        _portfolio_layer_cap(selected_item_types.get(asset.metadata.code, PORTFOLIO_LAYER_PRIMARY))
+    raw_weight_rows = {
+        asset.metadata.code: _portfolio_raw_weight(asset)
         for asset in selected_assets
-    ]
-    target_exposure = min(
-        _PORTFOLIO_TOTAL_EXPOSURE_CAP,
-        sum(layer_caps),
+    }
+    individual_caps = {
+        asset.metadata.code: min(
+            _portfolio_layer_cap(
+                selected_item_types.get(asset.metadata.code, PORTFOLIO_LAYER_PRIMARY)
+            ),
+            _portfolio_exposure_for_asset(asset),
+        )
+        for asset in selected_assets
+    }
+    risk_budget = apply_portfolio_risk_budget(
+        {code: row[0] for code, row in raw_weight_rows.items()},
+        layer_by_code=selected_item_types,
+        theme_by_code={
+            asset.metadata.code: (_portfolio_theme_keys(asset) or ["unknown"])[0]
+            for asset in selected_assets
+        },
+        returns_by_code=selected_return_maps,
+        market_risk=market_risk,
+        individual_caps=individual_caps,
+        max_total_exposure=_PORTFOLIO_TOTAL_EXPOSURE_CAP,
     )
-    normalized_weights = _cap_normalized_weights_by_caps(
-        [row[0] for row in raw_weight_rows],
-        layer_caps,
-        target_total=target_exposure,
-    )
+    target_exposure = risk_budget.invested_weight
     items: list[dict[str, Any]] = []
     satellite_items: list[dict[str, Any]] = []
     defensive_items: list[dict[str, Any]] = []
@@ -6977,25 +7270,32 @@ async def etf_observation_portfolio(
     if not selected_assets:
         unavailable_reason = "当前没有满足数据可靠性、流动性和风险约束的进攻/防守 ETF。"
         cash_reason = "当前没有足够满足条件的 ETF，建议等待，不硬凑标的。"
-    elif normalized_weights is None:
-        unavailable_reason = "组合约束不可行：单只 30% 上限和候选数量无法形成有效仓位。"
-        cash_reason = "组合约束不可行，建议等待下一次数据更新。"
+    elif risk_budget.status != "ready":
+        unavailable_reason = "组合风险证据不足：" + "、".join(risk_budget.unavailable_reasons)
+        cash_reason = "组合风险预算无法形成可验证仓位，保留现金等待数据。"
     else:
-        for asset, target, raw_row in zip(selected_assets, normalized_weights, raw_weight_rows, strict=True):
+        for asset in selected_assets:
+            target = float(risk_budget.weights.get(asset.metadata.code, 0.0))
+            if target <= 0:
+                continue
+            raw_row = raw_weight_rows[asset.metadata.code]
             weight_reason = dict(raw_row[1])
             item_type = selected_item_types.get(asset.metadata.code, "primary")
             weight_reason.update(
                 {
                     "final_weight": round(target, 4),
-                    "single_cap_applied": target >= _portfolio_layer_cap(item_type) - 0.0001,
-                    "single_weight_cap": _portfolio_layer_cap(item_type),
+                    "single_cap_applied": target >= individual_caps[asset.metadata.code] - 0.0001,
+                    "single_weight_cap": individual_caps[asset.metadata.code],
                     "satellite_exposure_cap": _PORTFOLIO_SATELLITE_EXPOSURE_CAP,
                     "theme_tags": _portfolio_theme_keys(asset) or list(asset.metadata.theme_tags[:2]),
-                    "correlation_policy": "高相关候选转入观察组，主组合只保留分散后的候选。",
-                    "target_invested_weight": _PORTFOLIO_TOTAL_EXPOSURE_CAP,
+                    "correlation_policy": "高相关候选按相关簇合计 50% 封顶，无法容纳的权重保留现金。",
+                    "target_invested_weight": target_exposure,
                     "portfolio_target_weight": round(target_exposure, 4),
-                    "cash_wait_weight": round(max(0.0, _PORTFOLIO_TOTAL_EXPOSURE_CAP - target_exposure), 4),
+                    "cash_wait_weight": round(risk_budget.cash_weight, 4),
                     "portfolio_item_type": item_type,
+                    "risk_budget_version": risk_budget.contract_version,
+                    "risk_budget_hash": risk_budget.contract_hash,
+                    "risk_budget_binding_constraints": list(risk_budget.binding_constraints),
                 }
             )
             fill_reason = selected_fill_reasons.get(asset.metadata.code)
@@ -7009,40 +7309,85 @@ async def etf_observation_portfolio(
             else:
                 items.append(portfolio_item)
 
+    if unavailable_reason is not None:
+        target_exposure = 0.0
+
     weighted_items = [*items, *satellite_items, *defensive_items]
     weight_sum = round(sum(float(item["target_weight"]) for item in weighted_items), 4)
-    rounding_residual = round(max(0.0, 1.0 - weight_sum), 4) if weighted_items else 0.0
     if defensive_items and not items and not satellite_items:
         portfolio_mode = PORTFOLIO_MODE_DEFENSIVE
-        market_regime = MARKET_REGIME_DEFENSIVE
     elif satellite_items or defensive_items:
         portfolio_mode = PORTFOLIO_MODE_NEUTRAL
-        market_regime = MARKET_REGIME_NEUTRAL
     elif items:
         portfolio_mode = PORTFOLIO_MODE_RISK_ON
-        market_regime = MARKET_REGIME_RISK_ON
     else:
         portfolio_mode = PORTFOLIO_MODE_CASH_WAIT
-        market_regime = MARKET_REGIME_CASH_WAIT
-        rounding_residual = 1.0
+    market_regime = portfolio_mode
+    rounding_residual = (
+        round(risk_budget.cash_weight, 4)
+        if risk_budget.status == "ready"
+        else 1.0
+    )
+    if not weighted_items:
         cash_reason = cash_reason or "当前没有可用于配置的 ETF，建议等待。"
-    if rounding_residual > 0.0001 and portfolio_mode != PORTFOLIO_MODE_CASH_WAIT:
-        cash_reason = cash_reason or "满足条件的 ETF 不足以用满账户资金；剩余资金等待，不硬凑标的。"
+    elif rounding_residual > 0.0001:
+        cash_reason = cash_reason or "风险预算保留部分现金等待；缩减后的 ETF 权重不会再次归一化到满仓。"
     primary_weight = round(sum(float(item["target_weight"]) for item in items), 4)
     satellite_weight = round(sum(float(item["target_weight"]) for item in satellite_items), 4)
     risk_exposure_weight = round(primary_weight + satellite_weight, 4)
     defensive_weight = round(sum(float(item["target_weight"]) for item in defensive_items), 4)
     constraints_used = {
-        "target_invested_weight": _PORTFOLIO_TOTAL_EXPOSURE_CAP,
+        "target_invested_weight": target_exposure,
         "single_weight_cap": _PORTFOLIO_SINGLE_WEIGHT_CAP,
         "satellite_single_weight_cap": _PORTFOLIO_SATELLITE_SINGLE_WEIGHT_CAP,
         "satellite_exposure_cap": _PORTFOLIO_SATELLITE_EXPOSURE_CAP,
         "theme_exposure_cap": _PORTFOLIO_THEME_EXPOSURE_CAP,
         "high_correlation_threshold": _PORTFOLIO_HIGH_CORRELATION,
+        "correlation_cluster_cap": PORTFOLIO_CORRELATION_CLUSTER_CAP,
         "minimum_full_exposure_holdings": 4,
         "partial_allocation_allowed": True,
         "weight_model": "score_tilted_inverse_volatility",
+        "risk_budget_version": risk_budget.contract_version,
+        "risk_budget_hash": risk_budget.contract_hash,
+        "market_risk_state": market_risk.state,
+        "market_risk_status": market_risk.status,
+        "minimum_cash_weight": risk_budget.constraints.get("minimum_cash_weight", 1.0),
+        "risk_exposure_cap": risk_budget.constraints.get("risk_exposure_cap", 0.0),
+        "binding_constraints": list(risk_budget.binding_constraints),
     }
+    market_risk_pool_shadow, factor_returns = await _independent_market_risk_shadow_inputs(
+        session,
+        run,
+    )
+    (
+        previous_market_state,
+        previous_market_session,
+        previous_market_recovery_sessions,
+    ) = await _previous_market_risk_regime_shadow_state(
+        session,
+        before_date=run.as_of_date,
+    )
+    market_risk_regime_shadow = evaluate_market_risk_regime_shadow(
+        market_risk_pool_shadow,
+        trade_session=run.as_of_date,
+        previous_state=previous_market_state,
+        previous_evaluated_session=previous_market_session,
+        previous_recovery_sessions=previous_market_recovery_sessions,
+    )
+    shadow_assets = [
+        _portfolio_shadow_asset_input(
+            asset,
+            float(risk_budget.weights.get(asset.metadata.code, 0.0)),
+        )
+        for asset in selected_assets
+        if float(risk_budget.weights.get(asset.metadata.code, 0.0)) > 0
+    ]
+    portfolio_risk_shadow = build_portfolio_risk_shadow(
+        shadow_assets,
+        selected_return_maps,
+        factor_returns,
+        previous_weights=await _latest_observation_portfolio_weights(session),
+    )
     risk_summary = {
         "primary_count": len(items),
         "satellite_count": len(satellite_items),
@@ -7051,6 +7396,15 @@ async def etf_observation_portfolio(
         "excluded_count": len(excluded_items),
         "high_volatility_count": sum(1 for item in weighted_items if "高波动" in item.get("risk_reasons", [])),
         "max_single_weight": max((float(item["target_weight"]) for item in weighted_items), default=0.0),
+        **risk_budget.metrics,
+        "risk_budget_version": risk_budget.contract_version,
+        "risk_budget_hash": risk_budget.contract_hash,
+        "binding_constraints": list(risk_budget.binding_constraints),
+        "unavailable_reasons": list(risk_budget.unavailable_reasons),
+        "policy_mode": "shadow",
+        "market_risk_pool_shadow_v1": market_risk_pool_shadow.as_dict(),
+        "market_risk_regime_shadow_v1": market_risk_regime_shadow.as_dict(),
+        "portfolio_risk_shadow_v1": portfolio_risk_shadow.as_dict(),
     }
     data_reliability_summary = {
         "eligible_candidates": len(primary_candidates),
@@ -7099,7 +7453,7 @@ async def etf_observation_portfolio(
         "watch_only_items": watch_only_items[:10],
         "excluded_items": excluded_items[:10],
         "cash_weight": rounding_residual,
-        "target_invested_weight": _PORTFOLIO_TOTAL_EXPOSURE_CAP,
+        "target_invested_weight": target_exposure,
         "weight_sum": weight_sum,
         "portfolio_mode": portfolio_mode,
         "market_regime": market_regime,
@@ -7125,6 +7479,7 @@ async def etf_observation_portfolio(
             "satellite_single_weight_cap": _PORTFOLIO_SATELLITE_SINGLE_WEIGHT_CAP,
             "satellite_exposure_cap": _PORTFOLIO_SATELLITE_EXPOSURE_CAP,
             "total_exposure_cap": _PORTFOLIO_TOTAL_EXPOSURE_CAP,
+            "correlation_cluster_cap": PORTFOLIO_CORRELATION_CLUSTER_CAP,
         },
         "data_reliability_summary": {
             **data_reliability_summary,
@@ -7139,8 +7494,9 @@ async def etf_observation_portfolio(
         "no_trade_instruction": True,
         "note": note,
         "methodology": (
-            "先生成进攻候选；进攻不足时再用货币、债券、黄金、红利或低波动宽基 ETF 做防守候选；"
-            "若候选不足以用满资金，则部分配置、剩余现金等待；进攻和防守都不足时才全现金等待。这是研究权重，不是交易指令。"
+            "先用同一 PIT 快照的宽基广度、20 日收益和 MA20 状态确定市场风险模式，再生成进攻/防守候选；"
+            "按单只、卫星、主题、相关簇和资产风险上限做比例截帽，无法容纳的权重保留现金，且不再归一化回满仓。"
+            "这是研究权重，不是交易指令。"
         ),
     }
     allocation_contract = _allocation_contract_from_portfolio(portfolio, source_signal_run_id=run.id)

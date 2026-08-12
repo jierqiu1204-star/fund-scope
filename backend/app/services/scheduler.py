@@ -43,7 +43,6 @@ from app.services.short_research.jobs import (
     publication_readiness_decision_context,
 )
 from app.services.strategy_lab.jobs import daily_strategy_paper_job
-from app.services.tracked_positions.jobs import daily_tracked_position_alerts_job
 from app.services.workflows.etf_intraday_retention import intraday_etf_retention_job
 from app.services.workflows.etf_leader_tactics_shadow import (
     LEADER_CONTINUATION_JOB_NAME,
@@ -57,6 +56,9 @@ from app.services.workflows.etf_publish_readiness import (
     preflight_post_close_etf_publication_readiness,
 )
 from app.services.workflows.intraday_etf import intraday_etf_watch_with_alerts_job
+from app.services.workflows.tracked_position_lifecycle_shadow import (
+    daily_tracked_position_alerts_with_shadow_job,
+)
 
 V2_JOB_MODULE = "app.services.workflows.dual_universe_leader_tactics_v2_jobs"
 V2_CAPTURE_JOB_NAME = "dual_universe_leader_tactics_v2_capture"
@@ -178,11 +180,18 @@ def register_default_jobs(
         return await monthly_dca_reminder_job(session, settings)
 
     async def daily_tracked_position_alerts_tracked(session: AsyncSession) -> dict[str, Any]:
-        return await daily_tracked_position_alerts_job(session, settings)
+        return await daily_tracked_position_alerts_with_shadow_job(
+            session,
+            settings=settings,
+            session_factory=db.session,
+        )
 
     async def intraday_etf_watch_tracked(session: AsyncSession) -> dict[str, Any]:
         return await intraday_etf_watch_with_alerts_job(
-            session, settings=settings, run_type="scheduled"
+            session,
+            settings=settings,
+            run_type="scheduled",
+            session_factory=db.session,
         )
 
     async def post_close_etf_adjusted_sync_preflight(

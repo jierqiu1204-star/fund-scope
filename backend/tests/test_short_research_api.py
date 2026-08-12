@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import func, select
 
 from app.models.entities import (
+    EtfAdjustedPriceRevision,
     EtfExitHyperoptItem,
     EtfExitHyperoptRun,
     EtfLabelReplaySample,
@@ -30,7 +31,13 @@ from app.models.entities import (
     authorize_snapshot_publication,
     utcnow,
 )
+from app.services.short_research.coverage_policy import ETF_READINESS_POLICY_VERSION
+from app.services.short_research.daily_reconstructable import daily_reconstructable_manifest
 from app.services.short_research.ranking_contract import final_score_v3_contract
+from app.services.short_research.ranking_surfaces import (
+    DUAL_RANKING_RULE_VERSION,
+    actionable_rank_manifest,
+)
 from app.services.short_research.service import (
     _completed_outcome_payload,
     _etf_series,
@@ -201,24 +208,23 @@ async def _seed_observation_portfolio_signal_run(
     items: list[dict[str, Any]],
 ) -> None:
     async with app.state.db.session() as session:
-        contract = final_score_v3_contract()
-        selector = contract["selector"]
-        calculation = contract["calculation"]
+        research = daily_reconstructable_manifest()
+        actionable = actionable_rank_manifest()
         trade_date = run_as_of_date or required_etf_snapshot_trade_date()
         run = ShortResearchSignalRun(
             status="success",
             as_of_date=trade_date,
-            scope_kind=str(selector["required_scope"]),
+            scope_kind="full",
             scope_hash="api-observation-etf-full-scope",
             universe_snapshot_hash="api-observation-etf-universe",
             input_snapshot_hash="api-observation-etf-input",
-            score_version=str(selector["target_score_version"]),
-            rule_version=str(contract["rule_version"]),
-            ranking_contract_hash="api-observation-etf-contract",
-            score_field=str(selector["score_field"]),
+            score_version=research.contract_id,
+            rule_version=DUAL_RANKING_RULE_VERSION,
+            ranking_contract_hash=research.manifest_hash,
+            score_field=research.score_field,
             data_cutoff=datetime.combine(trade_date, time(15, 0)),
             as_of_trade_date=trade_date,
-            price_basis=str(calculation["price_basis"]),
+            price_basis=research.price_basis,
             expected_item_count=len(items),
             decision_data_item_count=len(items),
             decision_data_coverage_ratio=1.0,
@@ -226,12 +232,32 @@ async def _seed_observation_portfolio_signal_run(
             coverage_ratio=1.0,
             publication_state="unpublished",
             idempotency_key=f"api-observation-etf-{trade_date.isoformat()}-{len(items)}",
-            config_json={"asset_type": "etf", "language": "research_only"},
+            config_json={
+                "asset_type": "etf",
+                "language": "research_only",
+                "readiness_policy_version": ETF_READINESS_POLICY_VERSION,
+            },
             summary_json={
                 "item_count": len(items),
                 "fund_count": 0,
                 "etf_count": len(items),
-                "score_version": str(selector["target_score_version"]),
+                "score_version": research.contract_id,
+                "readiness_policy_version": ETF_READINESS_POLICY_VERSION,
+                "readiness_state": "complete",
+                "ranking_surfaces": {
+                    "research": {
+                        "contract_id": research.contract_id,
+                        "score_field": research.score_field,
+                        "contract_hash": research.manifest_hash,
+                        "eligible_count": len(items),
+                    },
+                    "actionable": {
+                        "contract_id": actionable.contract_id,
+                        "score_field": actionable.score_field,
+                        "contract_hash": actionable.manifest_hash,
+                        "eligible_count": len(items),
+                    },
+                },
             },
         )
         session.add(run)
@@ -251,12 +277,58 @@ async def _seed_observation_portfolio_signal_run(
                     exchange="SH",
                     theme_tags_json=item.get("theme_tags", [f"观察组合测试{code}"]),
                     trading_rule_label="证券账户 T+1 ETF",
-                    asset_class="sector",
+                    asset_class=item.get("asset_class", "sector"),
                     is_short_term_eligible=True,
                     is_watchlist=True,
                 )
             )
 
+        await session.commit()
+
+        history_start = trade_date - timedelta(days=60)
+        session.add_all(
+            [
+                EtfAdjustedPriceRevision(
+                    etf_code=item["code"],
+                    trade_date=history_start + timedelta(days=offset),
+                    open=close * 0.995,
+                    high=close * 1.01,
+                    low=close * 0.99,
+                    close=close,
+                    volume=10_000_000 + offset * 10_000,
+                    turnover=150_000_000 + offset * 100_000,
+                    pct_change=0.1,
+                    raw_price_basis="raw_close",
+                    research_adjusted_value=close,
+                    research_price_basis="total_return_adjusted",
+                    data_provider="eastmoney",
+                    provider_version="eastmoney.push2his.kline.hfq_v1",
+                    source_timestamp=datetime.combine(
+                        history_start + timedelta(days=offset),
+                        time(14, 30),
+                    ),
+                    adjustment_version="eastmoney.push2his.kline.hfq_v1",
+                    decision_eligible=True,
+                    first_seen_at=datetime.combine(
+                        history_start + timedelta(days=offset),
+                        time(14, 31),
+                    ),
+                    observed_at=datetime.combine(
+                        history_start + timedelta(days=offset),
+                        time(14, 31),
+                    ),
+                    payload_hash=f"observation-payload-{item['code']}-{offset}",
+                    revision_hash=f"observation-revision-{item['code']}-{offset}",
+                )
+                for item_index, item in enumerate(items)
+                for offset in range(61)
+                for close in (
+                    1.0
+                    + offset * 0.0005
+                    + (((offset * (item_index * 2 + 3)) % 13) - 6) * 0.004,
+                )
+            ]
+        )
         await session.commit()
 
         session.add_all(
@@ -273,7 +345,7 @@ async def _seed_observation_portfolio_signal_run(
                     conclusion=item["conclusion"],
                     score_breakdown_json={
                         "final_score_v3": {
-                            "score_version": str(selector["target_score_version"]),
+                            "score_version": research.contract_id,
                             "ranking_score": float(item["total_score"]),
                             "score_eligible": True,
                         }
@@ -284,13 +356,27 @@ async def _seed_observation_portfolio_signal_run(
                         "entry_timing_label": item["entry_timing_label"],
                         "entry_timing_reason": item["entry_timing_reason"],
                         "return_20d": 0.09,
+                        "distance_to_ma20_pct": 0.02,
+                        "market_risk_broad_equity": item.get(
+                            "market_risk_broad_equity",
+                            index < 2,
+                        ),
                         "average_turnover_20d": 150_000_000,
                         "max_drawdown_60d": item.get("max_drawdown_60d", -0.04),
                         "volatility_20d": item.get("volatility_20d", 0.015),
                         "default_display_eligible": item.get("default_display_eligible", True),
-                        "score_version": str(selector["target_score_version"]),
+                        "score_version": research.contract_id,
                         "ranking_score": float(item["total_score"]),
                         "score_eligible": True,
+                        "research_score_eligible": True,
+                        "research_rank": index + 1,
+                        "research_score": float(item["total_score"]),
+                        "actionable_contract_id": actionable.contract_id,
+                        "actionable_contract_hash": actionable.manifest_hash,
+                        "actionable_as_of_date": trade_date.isoformat(),
+                        "actionable_eligible": True,
+                        "actionable_rank": index + 1,
+                        "actionable_score": float(item["total_score"]),
                     },
                 )
                 for index, item in enumerate(items)
@@ -1212,6 +1298,31 @@ async def _seed_observation_price_series(
                     source_timestamp=datetime.combine(trade_date, time(7, 0)),
                     adjustment_version="eastmoney.push2his.kline.hfq_v1",
                     decision_eligible=True,
+                )
+            )
+            session.add(
+                EtfAdjustedPriceRevision(
+                    etf_code=code,
+                    trade_date=trade_date,
+                    open=close * 0.995,
+                    high=close * 1.01,
+                    low=close * 0.99,
+                    close=close,
+                    volume=2_000_000,
+                    turnover=160_000_000,
+                    pct_change=period_return * 100,
+                    raw_price_basis="raw_close",
+                    research_adjusted_value=close,
+                    research_price_basis="total_return_adjusted",
+                    data_provider="eastmoney",
+                    provider_version="eastmoney.push2his.kline.hfq_v1",
+                    source_timestamp=datetime.combine(trade_date, time(14, 40)),
+                    adjustment_version="eastmoney.push2his.kline.hfq_v1",
+                    decision_eligible=True,
+                    first_seen_at=datetime.combine(trade_date, time(14, 45)),
+                    observed_at=datetime.combine(trade_date, time(14, 45)),
+                    payload_hash=f"series-payload-{code}-{trade_date.isoformat()}",
+                    revision_hash=f"series-revision-{code}-{trade_date.isoformat()}",
                 )
             )
         await session.commit()
@@ -2512,6 +2623,14 @@ async def test_short_research_observation_portfolio_persists_snapshot(client, ap
     assert first_item["weight_reason_json"]["final_weight"] == first_item["target_weight"]
     assert first_item["metrics"]["portfolio_weight_explanation"] == first_item["weight_explanation"]
     assert body["risk_summary"]["single_weight_cap"] == 0.3
+    assert body["risk_summary"]["policy_mode"] == "shadow"
+    assert "market_risk_pool_shadow_v1" in body["risk_summary"]
+    assert "market_risk_regime_shadow_v1" in body["risk_summary"]
+    assert body["risk_summary"]["market_risk_regime_shadow_v1"]["trade_session"] == (
+        body["as_of_date"]
+    )
+    assert "portfolio_risk_shadow_v1" in body["risk_summary"]
+    assert body["allocation_contract"]["contract_hash"]
     assert body["data_reliability_summary"]["item_count"] == len(body["items"])
 
 
@@ -2654,8 +2773,19 @@ async def test_short_research_observation_portfolio_reduces_theme_and_correlatio
             },
         ],
     )
-    await _seed_observation_price_series(app, code="561001", daily_return=0.002)
-    await _seed_observation_price_series(app, code="561002", daily_return=0.002)
+    current_trade_date = required_etf_snapshot_trade_date()
+    await _seed_observation_price_series(
+        app,
+        code="561001",
+        daily_return=0.002,
+        latest_date=current_trade_date,
+    )
+    await _seed_observation_price_series(
+        app,
+        code="561002",
+        daily_return=0.002,
+        latest_date=current_trade_date,
+    )
 
     response = await client.get("/api/short-research/observation-portfolio?limit=5")
     assert response.status_code == 200
@@ -2670,6 +2800,3 @@ async def test_short_research_observation_portfolio_reduces_theme_and_correlatio
     assert all(item["target_weight"] <= 0.3 for item in body["items"])
     assert body["weight_sum"] == 1.0
     assert body["cash_weight"] == 0.0
-
-
-

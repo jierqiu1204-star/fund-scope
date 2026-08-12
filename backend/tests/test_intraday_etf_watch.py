@@ -618,7 +618,7 @@ async def test_live_rankings_order_and_rank_change(client, app, monkeypatch) -> 
                 change_percent=1.0,
                 source="test",
                 freshness_status="fresh",
-                raw_json={},
+                raw_json={"decision_eligible": True},
             )
         )
         session.add(
@@ -630,7 +630,7 @@ async def test_live_rankings_order_and_rank_change(client, app, monkeypatch) -> 
                 change_percent=3.0,
                 source="test",
                 freshness_status="fresh",
-                raw_json={},
+                raw_json={"decision_eligible": True},
             )
         )
         session.add(
@@ -642,7 +642,7 @@ async def test_live_rankings_order_and_rank_change(client, app, monkeypatch) -> 
                 change_percent=-1.0,
                 source="test",
                 freshness_status="fresh",
-                raw_json={},
+                raw_json={"decision_eligible": True},
             )
         )
         await session.commit()
@@ -887,7 +887,7 @@ async def test_live_rankings_search_keeps_global_rank_and_does_not_rank_incompar
                     change_percent=3.0,
                     source="test",
                     freshness_status="fresh",
-                    raw_json={},
+                    raw_json={"decision_eligible": True},
                 ),
                 EtfIntradayQuote(
                     etf_code="510002",
@@ -897,7 +897,7 @@ async def test_live_rankings_search_keeps_global_rank_and_does_not_rank_incompar
                     change_percent=-1.0,
                     source="test",
                     freshness_status="fresh",
-                    raw_json={},
+                    raw_json={"decision_eligible": True},
                 ),
             ]
         )
@@ -1071,7 +1071,7 @@ async def test_live_rankings_keeps_intraday_entry_timing_when_daily_cache_is_hig
                 change_percent=-6.1,
                 source="test",
                 freshness_status="fresh",
-                raw_json={},
+                raw_json={"decision_eligible": True},
             )
         )
         await session.commit()
@@ -1093,12 +1093,18 @@ async def test_live_rankings_keeps_intraday_entry_timing_when_daily_cache_is_hig
 async def test_live_rankings_filters_labels_before_pagination_and_keeps_daily_entry_when_closed(
     client, app, monkeypatch
 ) -> None:
-    run_id = await _seed_signal_run(
+    await _seed_signal_run(
         app,
         count=3,
         conclusions=[CONCLUSION_WATCH, CONCLUSION_HIGH_WATCH, CONCLUSION_WATCH],
         total_scores=[100.0, 99.0, 98.0],
         canonical=True,
+        metrics_overrides={
+            "510002": {
+                "entry_timing_label": "健康回踩",
+                "entry_timing_reason": "休市后仍按日线健康回踩筛选。",
+            }
+        },
     )
 
     now = datetime(2026, 6, 12, 16, 0, 0)
@@ -1106,21 +1112,6 @@ async def test_live_rankings_filters_labels_before_pagination_and_keeps_daily_en
         "app.services.intraday_etf.service.current_market_state",
         lambda: MarketState("closed", "after_close", now.replace(tzinfo=ASIA_SHANGHAI)),
     )
-    async with app.state.db.session() as session:
-        healthy_item = await session.scalar(
-            select(ShortResearchSignalItem).where(
-                ShortResearchSignalItem.run_id == run_id,
-                ShortResearchSignalItem.asset_code == "510002",
-            )
-        )
-        assert healthy_item is not None
-        healthy_item.metrics_json = {
-            **dict(healthy_item.metrics_json or {}),
-            "entry_timing_label": "健康回踩",
-            "entry_timing_reason": "休市后仍按日线健康回踩筛选。",
-        }
-        await session.commit()
-
     high_response = await client.get(
         "/api/etf-quotes/live-rankings?limit=1&observation_labels=高位观察"
     )
@@ -1580,7 +1571,7 @@ async def test_etf_entry_uses_manual_price_then_fresh_intraday_fallback(app, mon
                 latest_price=0.814,
                 source="test",
                 freshness_status="fresh",
-                raw_json={},
+                raw_json={"decision_eligible": True},
             )
         )
         await session.commit()
@@ -1674,7 +1665,7 @@ async def test_dynamic_hard_stop_and_intraday_cooldown(app, settings, monkeypatc
                 turnover=100_000_000,
                 source="test",
                 freshness_status="fresh",
-                raw_json={},
+                raw_json={"decision_eligible": True},
             )
         )
         user = await session.get(User, 1)
@@ -1895,7 +1886,7 @@ async def test_dynamic_trailing_profit_trend_and_structure_warnings(app) -> None
                     iopv=1.055,
                     source="test",
                     freshness_status="fresh",
-                    raw_json={},
+                    raw_json={"decision_eligible": True},
                 ),
                 EtfIntradayQuote(
                     etf_code="510881",
@@ -1908,7 +1899,7 @@ async def test_dynamic_trailing_profit_trend_and_structure_warnings(app) -> None
                     iopv=0.99,
                     source="test",
                     freshness_status="fresh",
-                    raw_json={},
+                    raw_json={"decision_eligible": True},
                 ),
                 EtfIntradayQuote(
                     etf_code="510882",
@@ -1922,7 +1913,7 @@ async def test_dynamic_trailing_profit_trend_and_structure_warnings(app) -> None
                     premium_discount_pct=1.2,
                     source="test",
                     freshness_status="fresh",
-                    raw_json={},
+                    raw_json={"decision_eligible": True},
                 ),
             ]
         )

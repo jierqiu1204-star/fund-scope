@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import math
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from statistics import mean, median, pstdev
@@ -23,6 +25,7 @@ from app.models.entities import (
     utcnow,
 )
 from app.services.etf_research_evidence import (
+    ALLOCATION_CONTRACT_VERSION,
     BUCKET_THRESHOLD_CONTRACT_VERSION,
     EVIDENCE_STATUS_LEGACY,
     EVIDENCE_STATUS_SAME_CONTRACT,
@@ -40,18 +43,31 @@ from app.services.etf_research_evidence import (
     build_replay_contract,
     stable_contract_hash,
 )
+from app.services.intraday_etf.service import (
+    DISPLAY_ONLY_CONSENSUS,
+    is_quote_time_fallback,
+    quote_consensus_status,
+    quote_decision_eligible_flag,
+)
 from app.services.portfolio_allocation import (
+    PORTFOLIO_CORRELATION_CLUSTER_CAP,
     PORTFOLIO_LAYER_DEFENSIVE,
     PORTFOLIO_LAYER_PRIMARY,
     PORTFOLIO_LAYER_SATELLITE,
     PORTFOLIO_LAYER_WATCH_ONLY,
     PORTFOLIO_MODE_CASH_WAIT,
-    PORTFOLIO_MODE_DEFENSIVE,
-    PORTFOLIO_MODE_NEUTRAL,
     PORTFOLIO_MODE_RISK_ON,
+    PORTFOLIO_RISK_BUDGET_VERSION,
     PORTFOLIO_SATELLITE_EXPOSURE_CAP,
     PORTFOLIO_SATELLITE_SINGLE_WEIGHT_CAP,
     PORTFOLIO_SINGLE_WEIGHT_CAP,
+    apply_portfolio_risk_budget,
+    classify_portfolio_market_risk,
+    portfolio_risk_budget_manifest,
+)
+from app.services.portfolio_risk_shadow import (
+    PortfolioRiskAssetInput,
+    build_portfolio_risk_shadow,
 )
 from app.services.risk_alerts import (
     ALERT_EXIT_WATCH,
@@ -59,6 +75,11 @@ from app.services.risk_alerts import (
     ALERT_TAKE_PROFIT_WATCH,
     ALERT_TRAILING_TAKE_PROFIT,
     ALERT_TREND_WEAKENING,
+    ETF_ENTRY_MAX_ADV_PARTICIPATION,
+    ETF_ENTRY_STRESS_MAX_ADV_PARTICIPATION,
+    ETF_EXIT_NORMAL_ADV_PARTICIPATION,
+    ETF_EXIT_STRESS_ADV_PARTICIPATION,
+    ETF_LIQUIDITY_STRESS_TURNOVER_MULTIPLIER,
     ETF_TRAILING_GIVEBACK_MAX_PCT,
     ETF_TRAILING_GIVEBACK_MIN_PCT,
     ETF_TRAILING_GIVEBACK_VOL_MULTIPLIER,
@@ -66,6 +87,7 @@ from app.services.risk_alerts import (
     ETF_TRAILING_PROFIT_START_MIN_PCT,
     ETF_TRAILING_PROFIT_START_VOL_MULTIPLIER,
     HARD_STOP_LOSS_PCT,
+    etf_liquidity_capacity_manifest,
 )
 from app.services.short_research.optimized_allocation import (
     OptimizerCandidate,
@@ -81,21 +103,39 @@ from app.services.short_research.service import (
     _portfolio_candidate_group,
     _portfolio_defensive_priority,
     _portfolio_defensive_reason,
+    _portfolio_exposure_for_asset,
     _portfolio_layer_cap,
+    _portfolio_market_risk_observations,
     _portfolio_raw_weight,
+    _portfolio_theme_keys,
     _research_adjusted_value,
     compute_asset_for_replay_from_series,
 )
+from app.services.strategy_lab.etf_action_replay import (
+    DailyExecutionBar,
+    ExecutionResolution,
+    ExecutionStatus,
+    select_adjusted_open_fill,
+)
+from app.services.strategy_lab.etf_ranking_candidates import (
+    RANKING_COST_CONTRACT_HASH,
+    RANKING_FEE_BPS_PER_SIDE,
+    RANKING_SLIPPAGE_BPS_PER_SIDE,
+)
 
-BACKTEST_RULE_VERSION = "etf_portfolio_backtest_v1"
+BACKTEST_RULE_VERSION = "etf_portfolio_backtest_v2"
 BACKTEST_RANKING_VERSION = "short_research_daily_replay_v1"
-BACKTEST_ALLOCATION_VERSION = "etf_portfolio_allocation_v3_layered"
+BACKTEST_ALLOCATION_VERSION = ALLOCATION_CONTRACT_VERSION
 BACKTEST_EXIT_RULE_VERSION = "risk_alerts_daily_v1"
 INTRADAY_BACKTEST_EXIT_RULE_VERSION = "risk_alerts_intraday_v1"
 STRATEGY_COMPARISON_RULE_VERSION = "etf_strategy_comparison_v1"
 EXIT_V2_STRATEGY_COMPARISON_VERSION = "etf_exit_v2_strategy_comparison_v1"
 DEFAULT_BACKTEST_DAYS = 180
-DEFAULT_BACKTEST_FEE_RATE = 0.001
+EXECUTION_MODEL_DAILY_ADJUSTED_OPEN = "adjusted_open_next_eligible_v1"
+EXECUTION_RISK_CONTRACT_VERSION = "etf_backtest_execution_risk_v2"
+DEFAULT_BACKTEST_FEE_RATE = RANKING_FEE_BPS_PER_SIDE / 10_000
+STRESS_SLIPPAGE_BPS_PER_SIDE = 20
+ETF_LOT_SIZE = 100
 DEFAULT_BACKTEST_INITIAL_CASH = 10000.0
 DEFAULT_INTRADAY_EXECUTION_DELAY_MINUTES = 3
 MAX_BACKTEST_HOLDINGS = 6
@@ -136,12 +176,265 @@ class ReplayTrade:
     metadata: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class PendingDailyOrder:
+    order_id: int
+    signal_date: date
+    code: str
+    name: str
+    side: str
+    reason: str
+    signal_price: float
+    requested_amount: float = 0.0
+    requested_fraction: float = 0.0
+    metadata: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class DailyOrderAttempt:
+    status: ExecutionStatus
+    trade: ReplayTrade | None = None
+    cash_delta: float = 0.0
+    reason: str | None = None
+    execution_evidence: dict[str, Any] | None = None
+
+
 def _clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
 
 
 def _round_money(value: float) -> float:
     return round(float(value), 2)
+
+
+def _finite_positive(value: float | None) -> bool:
+    return bool(
+        value is not None
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0
+    )
+
+
+def _rate_from_bps(value: int | float) -> float:
+    return float(value) / 10_000
+
+
+def _slipped_price(reference_price: float, *, side: str, slippage_bps: int) -> float:
+    if side not in {"buy", "sell"}:
+        raise ValueError("execution side must be buy or sell")
+    direction = 1.0 if side == "buy" else -1.0
+    return reference_price * (1.0 + direction * _rate_from_bps(slippage_bps))
+
+
+def _round_down_to_lot(*, gross_limit: float, price: float, lot_size: int = ETF_LOT_SIZE) -> float:
+    if not _finite_positive(gross_limit) or not _finite_positive(price) or lot_size < 1:
+        return 0.0
+    lots = math.floor(float(gross_limit) / float(price) / lot_size)
+    return float(lots * lot_size)
+
+
+def _execution_cost_evidence(
+    *,
+    side: str,
+    signal_date: date,
+    fill_date: date,
+    signal_price: float,
+    reference_price: float,
+    shares: float,
+    signal_to_fill_sessions: int,
+    deferred_reasons: tuple[str, ...],
+    price_basis: str,
+    execution_time: datetime | None = None,
+    spread_pct: float | None = None,
+    spread_observed: bool = False,
+    median_turnover_20d: float | None = None,
+    requested_notional: float | None = None,
+) -> dict[str, Any]:
+    if side not in {"buy", "sell"}:
+        raise ValueError("execution side must be buy or sell")
+    invalid_fields = [
+        name
+        for name, value in (
+            ("signal_price", signal_price),
+            ("reference_price", reference_price),
+            ("shares", shares),
+        )
+        if not _finite_positive(value)
+    ]
+    if invalid_fields:
+        raise ValueError(f"execution evidence requires positive finite values: {','.join(invalid_fields)}")
+    reference_notional = float(reference_price) * float(shares)
+    fee = reference_notional * _rate_from_bps(RANKING_FEE_BPS_PER_SIDE)
+    base_slippage = reference_notional * _rate_from_bps(RANKING_SLIPPAGE_BPS_PER_SIDE)
+    stress_slippage = reference_notional * _rate_from_bps(STRESS_SLIPPAGE_BPS_PER_SIDE)
+    spread_cost = (
+        reference_notional * abs(float(spread_pct)) / 2
+        if spread_observed and spread_pct is not None and math.isfinite(spread_pct)
+        else None
+    )
+    # Bid/ask is the executable reference itself for intraday fills; reporting the
+    # half-spread again in total cost would double count it.
+    base_total = fee + base_slippage
+    stress_total = fee + stress_slippage
+    adv = float(median_turnover_20d) if _finite_positive(median_turnover_20d) else None
+    requested = (
+        float(requested_notional)
+        if _finite_positive(requested_notional)
+        else reference_notional
+    )
+    base_participation = reference_notional / adv if adv is not None else None
+    requested_participation = requested / adv if adv is not None else None
+    stress_participation = (
+        requested / (adv * ETF_LIQUIDITY_STRESS_TURNOVER_MULTIPLIER)
+        if adv is not None
+        else None
+    )
+    fill_capped = requested > reference_notional + max(0.01, requested * 1e-9)
+    capacity_manifest = etf_liquidity_capacity_manifest()
+    capacity_stress = {
+        "status": "unavailable" if adv is None else ("capped" if fill_capped else "ready"),
+        "contract_version": capacity_manifest["version"],
+        "contract_hash": capacity_manifest["contract_hash"],
+        "median_turnover_20d": adv,
+        "requested_notional": round(requested, 2),
+        "filled_notional": round(reference_notional, 2),
+        "unfilled_notional": round(max(requested - reference_notional, 0.0), 2),
+        "fill_capped": fill_capped,
+        "base_adv_participation": base_participation,
+        "requested_adv_participation": requested_participation,
+        "stress_adv_participation": stress_participation,
+        "entry_capacity_exceeded": (
+            side == "buy"
+            and requested_participation is not None
+            and requested_participation > ETF_ENTRY_MAX_ADV_PARTICIPATION
+        ),
+        "stress_entry_capacity_exceeded": (
+            side == "buy"
+            and stress_participation is not None
+            and stress_participation > ETF_ENTRY_STRESS_MAX_ADV_PARTICIPATION
+        ),
+        "normal_exit_days": (
+            requested / (adv * ETF_EXIT_NORMAL_ADV_PARTICIPATION)
+            if side == "sell" and adv is not None
+            else None
+        ),
+        "stress_exit_days": (
+            requested
+            / (
+                adv
+                * ETF_LIQUIDITY_STRESS_TURNOVER_MULTIPLIER
+                * ETF_EXIT_STRESS_ADV_PARTICIPATION
+            )
+            if side == "sell" and adv is not None
+            else None
+        ),
+        "simulation_only": True,
+    }
+    return {
+        "contract_version": EXECUTION_RISK_CONTRACT_VERSION,
+        "cost_contract_hash": RANKING_COST_CONTRACT_HASH,
+        "execution_provenance": "simulated_fill_base",
+        "simulated_not_observed": True,
+        "side": side,
+        "signal_date": signal_date.isoformat(),
+        "fill_date": fill_date.isoformat(),
+        "execution_time": execution_time.isoformat() if execution_time else None,
+        "price_basis": price_basis,
+        "signal_price": float(signal_price),
+        "reference_price": float(reference_price),
+        "signal_to_fill_gap_return": float(reference_price) / float(signal_price) - 1.0,
+        "signal_to_fill_trading_sessions": signal_to_fill_sessions,
+        "deferred_reasons": list(deferred_reasons),
+        "fee_bps_per_side": RANKING_FEE_BPS_PER_SIDE,
+        "base_slippage_bps_per_side": RANKING_SLIPPAGE_BPS_PER_SIDE,
+        "stress_slippage_bps_per_side": STRESS_SLIPPAGE_BPS_PER_SIDE,
+        "spread_pct": spread_pct if spread_observed else None,
+        "spread_cost": spread_cost,
+        "spread_evidence": "observed_bid_ask" if spread_observed else "modeled_sensitivity_not_observed",
+        "liquidity_capacity_stress": capacity_stress,
+        "base": {
+            "provenance": "simulated_fill_base",
+            "fill_price": _slipped_price(
+                float(reference_price),
+                side=side,
+                slippage_bps=RANKING_SLIPPAGE_BPS_PER_SIDE,
+            ),
+            "fee": fee,
+            "slippage_cost": base_slippage,
+            "spread_cost": spread_cost,
+            "total_cost": base_total,
+        },
+        "stress": {
+            "provenance": "simulated_fill_stress",
+            "fill_price": _slipped_price(
+                float(reference_price),
+                side=side,
+                slippage_bps=STRESS_SLIPPAGE_BPS_PER_SIDE,
+            ),
+            "fee": fee,
+            "slippage_cost": stress_slippage,
+            "spread_cost": spread_cost,
+            "total_cost": stress_total,
+        },
+    }
+
+
+def _daily_execution_resolution(
+    *,
+    signal_date: date,
+    through_date: date,
+    bars: tuple[DailyExecutionBar, ...] | list[DailyExecutionBar],
+) -> ExecutionResolution:
+    visible_bars = tuple(bar for bar in bars if bar.session_date <= through_date)
+    return select_adjusted_open_fill(signal_session=signal_date, bars=visible_bars)
+
+
+def _intraday_execution_price(quote: EtfIntradayQuote | None, *, side: str) -> tuple[float | None, str | None]:
+    if side not in {"buy", "sell"}:
+        raise ValueError("execution side must be buy or sell")
+    if quote is None:
+        return None, "missing_quote"
+    if quote.quote_time is None or quote.trade_date is None or quote.quote_time.date() != quote.trade_date:
+        return None, "invalid_quote_time"
+    if quote.freshness_status not in {"fresh", "historical_replay"}:
+        return None, "stale_or_display_only_quote"
+    if (
+        not quote_decision_eligible_flag(quote)
+        or is_quote_time_fallback(quote)
+        or quote_consensus_status(quote) in DISPLAY_ONLY_CONSENSUS
+    ):
+        return None, "decision_ineligible_quote"
+    if not _finite_positive(quote.volume):
+        return None, "zero_or_missing_volume"
+    if not _finite_positive(quote.bid_price) or not _finite_positive(quote.ask_price):
+        return None, "missing_executable_book"
+    bid = float(quote.bid_price)
+    ask = float(quote.ask_price)
+    if bid > ask:
+        return None, "crossed_book"
+    return (ask if side == "buy" else bid), None
+
+
+def _first_eligible_intraday_quote(
+    quotes: list[EtfIntradayQuote],
+    *,
+    side: str,
+) -> EtfIntradayQuote | None:
+    for quote in sorted(quotes, key=lambda item: item.quote_time or datetime.max):
+        price, _reason = _intraday_execution_price(quote, side=side)
+        if price is not None:
+            return quote
+    return None
+
+
+def _intraday_spread_fraction(quote: EtfIntradayQuote) -> float | None:
+    if not _finite_positive(quote.bid_price) or not _finite_positive(quote.ask_price):
+        return None
+    bid = float(quote.bid_price)
+    ask = float(quote.ask_price)
+    midpoint = (bid + ask) / 2
+    return (ask - bid) / midpoint if midpoint > 0 and bid <= ask else None
 
 
 async def _create_backtest_run(
@@ -153,16 +446,21 @@ async def _create_backtest_run(
     initial_cash: float,
     fee_rate: float,
     max_assets: int,
-    execution_model: str = EXECUTION_MODEL_DAILY_CLOSE,
-    execution_label: str = "daily_close",
+    execution_model: str = EXECUTION_MODEL_DAILY_ADJUSTED_OPEN,
+    execution_label: str = "next_eligible_adjusted_open",
     exit_rule_version: str = BACKTEST_EXIT_RULE_VERSION,
     execution_delay_minutes: int | None = None,
 ) -> EtfPortfolioBacktestRun:
+    risk_budget_manifest = portfolio_risk_budget_manifest()
+    liquidity_capacity_manifest = etf_liquidity_capacity_manifest()
     config: dict[str, Any] = {
         "max_assets": max_assets,
         "single_weight_cap": PORTFOLIO_SINGLE_WEIGHT_CAP,
         "min_holdings_for_full_exposure": MIN_WEIGHTABLE_HOLDINGS,
         "partial_allocation_allowed": True,
+        "correlation_cluster_cap": PORTFOLIO_CORRELATION_CLUSTER_CAP,
+        "risk_budget_version": PORTFOLIO_RISK_BUDGET_VERSION,
+        "risk_budget_hash": risk_budget_manifest["contract_hash"],
         "execution": execution_label,
         "run_role": LEGACY_BACKTEST_ROLE,
         "action_lifecycle_version": exit_rule_version,
@@ -170,9 +468,26 @@ async def _create_backtest_run(
         "action_event_source": LEGACY_ACTION_EVENT_SOURCE,
         "research_only": True,
         "promotion_eligible": False,
+        "requested_fee_rate": fee_rate,
+        "execution_risk_contract_version": EXECUTION_RISK_CONTRACT_VERSION,
+        "liquidity_capacity_contract_version": liquidity_capacity_manifest["version"],
+        "liquidity_capacity_contract_hash": liquidity_capacity_manifest["contract_hash"],
+        "capacity_unavailable_policy": "exclude_entry_without_fallback",
+        "capacity_constrained_exit_policy": "partial_fill_at_normal_adv_limit",
+        "execution_cost_contract_hash": RANKING_COST_CONTRACT_HASH,
+        "fee_bps_per_side": RANKING_FEE_BPS_PER_SIDE,
+        "base_slippage_bps_per_side": RANKING_SLIPPAGE_BPS_PER_SIDE,
+        "stress_slippage_bps_per_side": STRESS_SLIPPAGE_BPS_PER_SIDE,
+        "lot_size": ETF_LOT_SIZE,
+        "simulated_not_observed": True,
     }
-    if execution_model == EXECUTION_MODEL_DAILY_CLOSE:
-        config["no_intraday_fill"] = True
+    if execution_model == EXECUTION_MODEL_DAILY_ADJUSTED_OPEN:
+        config.update(
+            no_intraday_fill=True,
+            base_fill_field="next_eligible_total_return_adjusted_open",
+            same_day_close_fill_allowed=False,
+            unavailable_execution_policy="defer_without_fallback",
+        )
     if execution_delay_minutes is not None:
         config["execution_delay_minutes"] = execution_delay_minutes
     run = EtfPortfolioBacktestRun(
@@ -186,7 +501,7 @@ async def _create_backtest_run(
         allocation_version=BACKTEST_ALLOCATION_VERSION,
         exit_rule_version=exit_rule_version,
         initial_cash=initial_cash,
-        fee_rate=fee_rate,
+        fee_rate=DEFAULT_BACKTEST_FEE_RATE,
         config_json=config,
         metrics_json={},
         benchmark_json={},
@@ -222,12 +537,17 @@ async def mark_backtest_failed(
     run: EtfPortfolioBacktestRun,
     message: str,
 ) -> EtfPortfolioBacktestRun:
-    run.status = "failed"
-    run.finished_at = utcnow()
-    run.error_message = message
+    run_id = run.id
+    await session.rollback()
+    persisted = await session.get(EtfPortfolioBacktestRun, run_id)
+    if persisted is None:
+        raise LookupError("ETF backtest run disappeared before failure recording")
+    persisted.status = "failed"
+    persisted.finished_at = utcnow()
+    persisted.error_message = message
     await session.commit()
-    await session.refresh(run)
-    return run
+    await session.refresh(persisted)
+    return persisted
 
 
 async def latest_completed_backtest_run(session: AsyncSession) -> EtfPortfolioBacktestRun | None:
@@ -309,6 +629,70 @@ async def _load_price_series(
     return dict(series)
 
 
+async def _load_daily_execution_bars(
+    session: AsyncSession,
+    *,
+    codes: list[str],
+    from_date: date,
+    to_date: date,
+) -> dict[str, tuple[DailyExecutionBar, ...]]:
+    rows = (
+        await session.scalars(
+            select(EtfPriceHistory)
+            .where(
+                EtfPriceHistory.etf_code.in_(codes),
+                EtfPriceHistory.trade_date >= from_date,
+                EtfPriceHistory.trade_date <= to_date,
+            )
+            .order_by(EtfPriceHistory.etf_code.asc(), EtfPriceHistory.trade_date.asc())
+        )
+    ).all()
+    grouped: dict[str, list[DailyExecutionBar]] = defaultdict(list)
+    turnover_windows: dict[str, list[float]] = defaultdict(list)
+    for row in rows:
+        adjusted_close = _research_adjusted_value(row)
+        if (
+            adjusted_close is not None
+            and row.decision_eligible is True
+            and _finite_positive(row.turnover)
+        ):
+            turnover_windows[row.etf_code].append(float(row.turnover))
+        recent_turnovers = turnover_windows[row.etf_code][-20:]
+        adjustment_factor = (
+            float(adjusted_close) / float(row.close)
+            if adjusted_close is not None and _finite_positive(row.close)
+            else None
+        )
+        finite_ohlc = all(_finite_positive(value) for value in (row.open, row.high, row.low, row.close))
+        limit_locked = bool(
+            finite_ohlc
+            and math.isclose(float(row.open), float(row.high), rel_tol=0.0, abs_tol=1e-12)
+            and math.isclose(float(row.open), float(row.low), rel_tol=0.0, abs_tol=1e-12)
+            and math.isclose(float(row.open), float(row.close), rel_tol=0.0, abs_tol=1e-12)
+        )
+        grouped[row.etf_code].append(
+            DailyExecutionBar(
+                session_date=row.trade_date,
+                raw_open=float(row.open) if _finite_positive(row.open) else None,
+                adjustment_factor=adjustment_factor,
+                volume=float(row.volume) if row.volume is not None else None,
+                suspended=False,
+                limit_locked=limit_locked,
+                # A daily one-price bar cannot prove queue-side liquidity.
+                demonstrably_tradable=False,
+                raw_high=float(row.high) if _finite_positive(row.high) else None,
+                raw_low=float(row.low) if _finite_positive(row.low) else None,
+                raw_close=float(row.close) if _finite_positive(row.close) else None,
+                median_turnover_20d=(
+                    float(median(recent_turnovers))
+                    if len(recent_turnovers) >= 10
+                    else None
+                ),
+            )
+        )
+    return {code: tuple(items) for code, items in grouped.items()}
+
+
 async def _load_intraday_quotes(
     session: AsyncSession,
     *,
@@ -341,10 +725,12 @@ def _first_execution_quote_after(
     signal_time: datetime,
     *,
     delay_minutes: int = DEFAULT_INTRADAY_EXECUTION_DELAY_MINUTES,
+    side: str = "sell",
 ) -> EtfIntradayQuote | None:
     earliest_execution_time = signal_time + timedelta(minutes=delay_minutes)
     for quote in sorted(quotes, key=lambda item: item.quote_time or datetime.max):
-        if quote.quote_time is not None and quote.quote_time >= earliest_execution_time and quote.latest_price > 0:
+        execution_price, _reason = _intraday_execution_price(quote, side=side)
+        if quote.quote_time is not None and quote.quote_time >= earliest_execution_time and execution_price is not None:
             return quote
     return None
 
@@ -401,7 +787,29 @@ def _build_daily_assets(
     return [replace(asset, rank=index) for index, asset in enumerate(assets, start=1)]
 
 
-def _generate_target_weights(assets: list[ComputedAsset]) -> tuple[dict[str, float], str, dict[str, Any]]:
+def _risk_return_maps_for_date(
+    series_by_code: Mapping[str, list[PricePoint]],
+    signal_date: date,
+) -> dict[str, dict[date, float]]:
+    result: dict[str, dict[date, float]] = {}
+    for code, series in series_by_code.items():
+        visible = [point for point in series if point.point_date <= signal_date][-61:]
+        returns = {
+            current.point_date: current.value / previous.value - 1.0
+            for previous, current in zip(visible, visible[1:], strict=False)
+            if previous.value > 0
+        }
+        if returns:
+            result[code] = returns
+    return result
+
+
+def _generate_target_weights(
+    assets: list[ComputedAsset],
+    *,
+    return_maps: Mapping[str, Mapping[date, float]] | None = None,
+    previous_weights: Mapping[str, float] | None = None,
+) -> tuple[dict[str, float], str, dict[str, Any]]:
     primary: list[ComputedAsset] = []
     satellite: list[tuple[ComputedAsset, str | None]] = []
     defensive: list[tuple[ComputedAsset, str]] = []
@@ -465,37 +873,96 @@ def _generate_target_weights(assets: list[ComputedAsset]) -> tuple[dict[str, flo
             },
         )
 
-    raw_rows = [_portfolio_raw_weight(asset) for asset in selected]
-    layer_caps = [_portfolio_layer_cap(item_types.get(asset.metadata.code, PORTFOLIO_LAYER_PRIMARY)) for asset in selected]
-    target_exposure = min(1.0, sum(layer_caps))
-    normalized = _cap_normalized_weights_by_caps(
-        [row[0] for row in raw_rows],
-        layer_caps,
-        target_total=target_exposure,
+    market_risk = classify_portfolio_market_risk(
+        _portfolio_market_risk_observations(assets)
     )
-    if normalized is None:
+    raw_rows = {
+        asset.metadata.code: _portfolio_raw_weight(asset)
+        for asset in selected
+    }
+    individual_caps = {
+        asset.metadata.code: min(
+            _portfolio_layer_cap(
+                item_types.get(asset.metadata.code, PORTFOLIO_LAYER_PRIMARY)
+            ),
+            _portfolio_exposure_for_asset(asset),
+        )
+        for asset in selected
+    }
+    risk_budget = apply_portfolio_risk_budget(
+        {code: row[0] for code, row in raw_rows.items()},
+        layer_by_code=item_types,
+        theme_by_code={
+            asset.metadata.code: (_portfolio_theme_keys(asset) or ["unknown"])[0]
+            for asset in selected
+        },
+        returns_by_code=dict(return_maps or {}),
+        market_risk=market_risk,
+        individual_caps=individual_caps,
+    )
+    if risk_budget.status != "ready":
         return (
             {},
             PORTFOLIO_MODE_CASH_WAIT,
             {
-                "cash_reason": "单只 30% 上限和候选数量约束不可行，按现金等待处理。",
+                "cash_reason": "组合风险证据不足，按现金等待处理。",
                 "primary_count": len(primary),
                 "satellite_count": len(satellite),
                 "defensive_count": len(defensive),
                 "target_exposure": 0.0,
                 "cash_weight": 1.0,
+                "risk_budget_version": risk_budget.contract_version,
+                "risk_budget_hash": risk_budget.contract_hash,
+                "risk_budget_status": risk_budget.status,
+                "unavailable_reasons": list(risk_budget.unavailable_reasons),
+                "risk_summary": risk_budget.metrics,
             },
         )
-    weights = {asset.metadata.code: weight for asset, weight in zip(selected, normalized, strict=True)}
-    has_primary = any(item_types[code] == PORTFOLIO_LAYER_PRIMARY for code in weights)
-    has_satellite = any(item_types[code] == PORTFOLIO_LAYER_SATELLITE for code in weights)
-    has_defensive = any(item_types[code] == PORTFOLIO_LAYER_DEFENSIVE for code in weights)
-    if has_defensive and not has_primary and not has_satellite:
-        mode = PORTFOLIO_MODE_DEFENSIVE
-    elif has_satellite or has_defensive:
-        mode = PORTFOLIO_MODE_NEUTRAL
-    else:
-        mode = PORTFOLIO_MODE_RISK_ON
+    weights = risk_budget.weights
+    mode = risk_budget.market_state
+    risk_returns = dict(return_maps or {})
+    large_returns = risk_returns.get("510300") or risk_returns.get("510310") or {}
+    small_returns = risk_returns.get("512100") or risk_returns.get("159845") or {}
+    growth_returns = risk_returns.get("159915") or risk_returns.get("159949") or {}
+
+    def spread_returns(
+        left: Mapping[date, float],
+        right: Mapping[date, float],
+    ) -> dict[date, float]:
+        return {
+            point_date: float(left[point_date]) - float(right[point_date])
+            for point_date in sorted(set(left) & set(right))
+        }
+
+    factor_returns = {
+        "market": dict(large_returns),
+        "small_vs_large": spread_returns(small_returns, large_returns),
+        "growth_vs_large": spread_returns(growth_returns, large_returns),
+    }
+    selected_by_code = {asset.metadata.code: asset for asset in selected}
+    risk_shadow = build_portfolio_risk_shadow(
+        tuple(
+            PortfolioRiskAssetInput(
+                code=code,
+                weight=float(weight),
+                clone_group_id=selected_by_code[code].metadata.tracking_index_code,
+                theme_group=(
+                    (_portfolio_theme_keys(selected_by_code[code]) or ["unknown"])[0]
+                ),
+                asset_bucket={
+                    "broad_index": "broad_base",
+                    "cross_border": "cross_border",
+                    "commodity": "commodity",
+                    "bond": "bond",
+                    "money": "money",
+                }.get(selected_by_code[code].metadata.category, "equity"),
+            )
+            for code, weight in sorted(weights.items())
+        ),
+        risk_returns,
+        factor_returns,
+        previous_weights=previous_weights,
+    )
     return (
         weights,
         mode,
@@ -507,12 +974,19 @@ def _generate_target_weights(assets: list[ComputedAsset]) -> tuple[dict[str, flo
             "excluded_count": excluded,
             "selected_codes": list(weights),
             "selected_item_types": item_types,
-            "layer_caps": {asset.metadata.code: cap for asset, cap in zip(selected, layer_caps, strict=True)},
+            "layer_caps": individual_caps,
             "satellite_single_weight_cap": PORTFOLIO_SATELLITE_SINGLE_WEIGHT_CAP,
             "satellite_exposure_cap": PORTFOLIO_SATELLITE_EXPOSURE_CAP,
             "target_exposure": round(sum(weights.values()), 4),
-            "cash_weight": round(max(0.0, 1.0 - sum(weights.values())), 4),
-            "cash_reason": "合格候选不足以用满资金，剩余现金等待。" if sum(weights.values()) < 0.999 else None,
+            "cash_weight": risk_budget.cash_weight,
+            "cash_reason": "风险预算保留部分现金。" if risk_budget.cash_weight > 0.0001 else None,
+            "risk_budget_version": risk_budget.contract_version,
+            "risk_budget_hash": risk_budget.contract_hash,
+            "risk_budget_status": risk_budget.status,
+            "risk_summary": risk_budget.metrics,
+            "portfolio_risk_shadow_v1": risk_shadow.as_dict(),
+            "binding_constraints": list(risk_budget.binding_constraints),
+            "constraints": risk_budget.constraints,
         },
     )
 
@@ -597,13 +1071,22 @@ def _sell_position(
     trade_date: date,
     reason: str,
     fee_rate: float,
+    fee_reference_price: float | None = None,
+    lot_size: int | None = None,
 ) -> tuple[ReplayTrade | None, float]:
     position = positions.get(code)
     if position is None or position.shares <= 0 or fraction <= 0:
         return None, 0.0
-    shares = min(position.shares, position.shares * fraction)
+    requested_shares = min(position.shares, position.shares * fraction)
+    if lot_size is not None and fraction < 1.0 - 1e-12:
+        shares = float(math.floor(requested_shares / lot_size) * lot_size)
+    else:
+        shares = requested_shares
+    if shares <= 0:
+        return None, 0.0
     amount = shares * price
-    fee = amount * fee_rate
+    fee_basis = shares * (fee_reference_price if _finite_positive(fee_reference_price) else price)
+    fee = fee_basis * fee_rate
     realized = shares * (price - position.avg_cost) - fee
     trade = ReplayTrade(
         trade_date=trade_date,
@@ -633,11 +1116,17 @@ def _buy_position(
     trade_date: date,
     reason: str,
     fee_rate: float,
+    lot_size: int = ETF_LOT_SIZE,
+    fee_reference_price: float | None = None,
 ) -> tuple[ReplayTrade | None, float]:
     if price <= 0 or amount <= 0:
         return None, 0.0
-    fee = amount * fee_rate
-    shares = amount / price
+    shares = _round_down_to_lot(gross_limit=amount, price=price, lot_size=lot_size)
+    if shares <= 0:
+        return None, 0.0
+    gross = shares * price
+    fee_basis = shares * (fee_reference_price if _finite_positive(fee_reference_price) else price)
+    fee = fee_basis * fee_rate
     current = positions.get(metadata.code)
     if current is None:
         positions[metadata.code] = ReplayPosition(
@@ -649,7 +1138,7 @@ def _buy_position(
         )
     else:
         old_cost = current.shares * current.avg_cost
-        new_cost = amount
+        new_cost = gross
         current.shares += shares
         current.avg_cost = (old_cost + new_cost) / current.shares if current.shares > 0 else price
     trade = ReplayTrade(
@@ -658,14 +1147,136 @@ def _buy_position(
         name=metadata.name,
         side="buy",
         reason=reason,
-        amount=_round_money(amount),
+        amount=_round_money(gross),
         shares=round(shares, 4),
         price=price,
         fee=_round_money(fee),
         realized_pnl=None,
         metadata={},
     )
-    return trade, amount + fee
+    return trade, gross + fee
+
+
+def _attempt_daily_order(
+    order: PendingDailyOrder,
+    *,
+    through_date: date,
+    bars: tuple[DailyExecutionBar, ...],
+    positions: dict[str, ReplayPosition],
+    metadata: ShortResearchAsset | None,
+    cash: float,
+) -> DailyOrderAttempt:
+    resolution = _daily_execution_resolution(
+        signal_date=order.signal_date,
+        through_date=through_date,
+        bars=bars,
+    )
+    if resolution.status is ExecutionStatus.DEFERRED:
+        reason = (
+            resolution.deferred_sessions[-1].reason
+            if resolution.deferred_sessions
+            else "missing_execution_bar"
+        )
+        return DailyOrderAttempt(status=ExecutionStatus.DEFERRED, reason=reason)
+    if resolution.status is ExecutionStatus.REJECTED:
+        return DailyOrderAttempt(
+            status=ExecutionStatus.REJECTED,
+            reason=resolution.rejection_reason or "execution_rejected",
+        )
+    if resolution.fill is None:
+        return DailyOrderAttempt(status=ExecutionStatus.REJECTED, reason="missing_fill_evidence")
+
+    reference_price = resolution.fill.normalized_execution_price
+    median_turnover_20d = resolution.fill.median_turnover_20d
+    if not _finite_positive(median_turnover_20d):
+        return DailyOrderAttempt(
+            status=ExecutionStatus.REJECTED,
+            reason="liquidity_capacity_turnover_unavailable",
+        )
+    adv = float(median_turnover_20d)
+    base_fill_price = _slipped_price(
+        reference_price,
+        side=order.side,
+        slippage_bps=RANKING_SLIPPAGE_BPS_PER_SIDE,
+    )
+    if order.side == "buy":
+        if metadata is None:
+            return DailyOrderAttempt(status=ExecutionStatus.REJECTED, reason="missing_asset_metadata")
+        requested_notional = min(
+            order.requested_amount,
+            cash / (1.0 + DEFAULT_BACKTEST_FEE_RATE),
+        )
+        gross_limit = min(
+            requested_notional,
+            adv * ETF_ENTRY_MAX_ADV_PARTICIPATION,
+        )
+        trade, cash_used = _buy_position(
+            positions,
+            metadata,
+            price=base_fill_price,
+            amount=gross_limit,
+            trade_date=resolution.fill.session_date,
+            reason=order.reason,
+            fee_rate=DEFAULT_BACKTEST_FEE_RATE,
+            lot_size=ETF_LOT_SIZE,
+            fee_reference_price=reference_price,
+        )
+        cash_delta = -cash_used
+        missing_trade_reason = "insufficient_cash_for_one_lot"
+    else:
+        current = positions.get(order.code)
+        if current is None or current.shares <= 0:
+            return DailyOrderAttempt(
+                status=ExecutionStatus.REJECTED,
+                reason="position_missing_or_target_satisfied",
+            )
+        requested_shares = min(
+            current.shares,
+            current.shares * order.requested_fraction,
+        )
+        requested_notional = requested_shares * reference_price
+        capacity_fraction = min(
+            order.requested_fraction,
+            (adv * ETF_EXIT_NORMAL_ADV_PARTICIPATION)
+            / (current.shares * reference_price),
+        )
+        trade, proceeds = _sell_position(
+            positions,
+            order.code,
+            price=base_fill_price,
+            fraction=capacity_fraction,
+            trade_date=resolution.fill.session_date,
+            reason=order.reason,
+            fee_rate=DEFAULT_BACKTEST_FEE_RATE,
+            fee_reference_price=reference_price,
+            lot_size=ETF_LOT_SIZE,
+        )
+        cash_delta = proceeds
+        missing_trade_reason = "position_missing_or_target_satisfied"
+    if trade is None:
+        return DailyOrderAttempt(status=ExecutionStatus.REJECTED, reason=missing_trade_reason)
+
+    evidence = _execution_cost_evidence(
+        side=order.side,
+        signal_date=order.signal_date,
+        fill_date=resolution.fill.session_date,
+        signal_price=order.signal_price,
+        reference_price=reference_price,
+        shares=trade.shares,
+        signal_to_fill_sessions=resolution.fill.signal_to_fill_trading_sessions,
+        deferred_reasons=tuple(item.reason for item in resolution.deferred_sessions),
+        price_basis="total_return_adjusted_open",
+        median_turnover_20d=median_turnover_20d,
+        requested_notional=requested_notional,
+    )
+    trade.metadata.update(order.metadata or {})
+    trade.metadata["execution_evidence"] = evidence
+    return DailyOrderAttempt(
+        status=ExecutionStatus.FILLED,
+        trade=trade,
+        cash_delta=cash_delta,
+        execution_evidence=evidence,
+    )
 
 
 def _equity(cash: float, positions: dict[str, ReplayPosition], prices: dict[str, float]) -> float:
@@ -780,7 +1391,19 @@ async def run_etf_portfolio_backtest(
             from_date=lookback_start,
             to_date=effective_end,
         )
-        trading_dates = _trading_dates(series_by_code, effective_start, effective_end)
+        execution_bars_by_code = await _load_daily_execution_bars(
+            session,
+            codes=list(metadata_by_code),
+            from_date=effective_start,
+            to_date=effective_end,
+        )
+        all_trading_dates = _trading_dates(series_by_code, lookback_start, effective_end)
+        all_trading_date_index = {item: index for index, item in enumerate(all_trading_dates)}
+        trading_dates = [
+            item
+            for item in all_trading_dates
+            if effective_start <= item <= effective_end and _previous_date(all_trading_dates, item) is not None
+        ]
         if len(trading_dates) < 30:
             raise ValueError("可用交易日少于 30 天，样本不足，暂不生成回测结论")
 
@@ -789,6 +1412,11 @@ async def run_etf_portfolio_backtest(
         high_watermark = capital
         total_fees = 0.0
         turnover = 0.0
+        total_base_slippage = 0.0
+        total_stress_slippage = 0.0
+        total_stress_incremental_cost = 0.0
+        stress_high_watermark = capital
+        stress_max_drawdown = 0.0
         realized_trades = 0
         winning_trades = 0
         trade_rows: list[EtfPortfolioBacktestTrade] = []
@@ -802,76 +1430,81 @@ async def run_etf_portfolio_backtest(
         last_target_exposure = 0.0
         partial_allocation_days = 0
         full_cash_days = 0
+        pending_orders: dict[str, PendingDailyOrder] = {}
+        order_sequence = 0
+        execution_deferred_counts: dict[str, int] = defaultdict(int)
+        execution_excluded_counts: dict[str, int] = defaultdict(int)
+        liquidity_capacity_status_counts: dict[str, int] = defaultdict(int)
+        entry_capacity_exceeded_count = 0
+        stress_entry_capacity_exceeded_count = 0
+        max_stress_exit_days: float | None = None
+        last_portfolio_context: dict[str, Any] = {}
+        previous_target_weights: dict[str, float] = {}
 
         for date_index, trade_date in enumerate(trading_dates):
-            assets = _build_daily_assets(metadata_by_code, series_by_code, trade_date)
+            signal_date = _previous_date(all_trading_dates, trade_date)
+            if signal_date is None:
+                continue
+            assets = _build_daily_assets(metadata_by_code, series_by_code, signal_date)
             latest_assets = assets
             asset_by_code = {asset.metadata.code: asset for asset in assets}
-            target_weights, portfolio_mode, portfolio_context = _generate_target_weights(assets)
+            target_weights, portfolio_mode, portfolio_context = _generate_target_weights(
+                assets,
+                return_maps=_risk_return_maps_for_date(series_by_code, signal_date),
+                previous_weights=previous_target_weights,
+            )
+            previous_target_weights = dict(target_weights)
+            last_portfolio_context = portfolio_context
             target_exposure = round(sum(float(weight) for weight in target_weights.values()), 4)
             last_target_exposure = target_exposure
             target_exposure_sum += target_exposure
             portfolio_mode_counts[portfolio_mode] += 1
             if target_exposure > 0 and first_signal_date is None:
-                first_signal_date = trade_date
+                first_signal_date = signal_date
             if target_exposure < 0.999:
                 partial_allocation_days += 1
             if target_exposure <= 0:
                 full_cash_days += 1
                 cash_wait_reason_counts[_cash_wait_reason_key(portfolio_context, assets)] += 1
-            prices = {
+            signal_prices = {
                 code: price
                 for code, series in series_by_code.items()
-                if (price := _price_on(series, trade_date)) is not None
+                if (price := _price_on(series, signal_date)) is not None
             }
 
+            risk_signal_codes: set[str] = set()
             for code in list(positions):
-                price = prices.get(code)
+                price = signal_prices.get(code)
                 asset = asset_by_code.get(code)
                 if price is None or asset is None:
                     continue
                 alert_type, fraction, context = _risk_action(positions[code], asset, price)
                 if alert_type is None:
                     continue
-                trade, cash_delta = _sell_position(
-                    positions,
-                    code,
-                    price=price,
-                    fraction=fraction,
-                    trade_date=trade_date,
+                risk_signal_codes.add(code)
+                target_weights.pop(code, None)
+                if pending_orders.get(code) is not None and pending_orders[code].side == "buy":
+                    pending_orders.pop(code, None)
+                if code in pending_orders:
+                    continue
+                order_sequence += 1
+                pending_orders[code] = PendingDailyOrder(
+                    order_id=order_sequence,
+                    signal_date=signal_date,
+                    code=code,
+                    name=positions[code].name,
+                    side="sell",
                     reason=alert_type,
-                    fee_rate=fee_rate,
+                    signal_price=price,
+                    requested_fraction=fraction,
+                    metadata=context,
                 )
-                if trade is not None:
-                    cash += cash_delta
-                    total_fees += trade.fee
-                    turnover += trade.amount
-                    realized_trades += 1
-                    winning_trades += 1 if (trade.realized_pnl or 0.0) > 0 else 0
-                    trade.metadata.update(context)
-                    trade_rows.append(
-                        EtfPortfolioBacktestTrade(
-                            run_id=run.id,
-                            trade_date=trade.trade_date,
-                            etf_code=trade.code,
-                            etf_name=trade.name,
-                            side=trade.side,
-                            reason=trade.reason,
-                            amount=trade.amount,
-                            shares=trade.shares,
-                            price=trade.price,
-                            fee=trade.fee,
-                            realized_pnl=trade.realized_pnl,
-                            metadata_json=trade.metadata,
-                        )
-                    )
-                    target_weights.pop(code, None)
 
-            current_equity = _equity(cash, positions, prices)
+            current_equity = _equity(cash, positions, signal_prices)
             for code, target_weight in sorted(target_weights.items(), key=lambda item: item[1], reverse=True):
                 asset = asset_by_code.get(code)
-                price = prices.get(code)
-                if asset is None or price is None:
+                price = signal_prices.get(code)
+                if asset is None or price is None or code in pending_orders or code in risk_signal_codes:
                     continue
                 target_value = current_equity * target_weight
                 current_position = positions.get(code)
@@ -879,73 +1512,117 @@ async def run_etf_portfolio_backtest(
                 delta = target_value - current_value
                 if delta < -max(100.0, current_equity * 0.01):
                     fraction = min(1.0, abs(delta) / current_value) if current_value > 0 else 0.0
-                    trade, cash_delta = _sell_position(
-                        positions,
-                        code,
-                        price=price,
-                        fraction=fraction,
-                        trade_date=trade_date,
+                    order_sequence += 1
+                    pending_orders[code] = PendingDailyOrder(
+                        order_id=order_sequence,
+                        signal_date=signal_date,
+                        code=code,
+                        name=asset.metadata.name,
+                        side="sell",
                         reason="target_rebalance",
-                        fee_rate=fee_rate,
+                        signal_price=price,
+                        requested_fraction=fraction,
                     )
-                    if trade is not None:
-                        cash += cash_delta
-                        total_fees += trade.fee
-                        turnover += trade.amount
-                        if trade.realized_pnl is not None:
-                            realized_trades += 1
-                            winning_trades += 1 if trade.realized_pnl > 0 else 0
-                        trade_rows.append(
-                            EtfPortfolioBacktestTrade(
-                                run_id=run.id,
-                                trade_date=trade.trade_date,
-                                etf_code=trade.code,
-                                etf_name=trade.name,
-                                side=trade.side,
-                                reason=trade.reason,
-                                amount=trade.amount,
-                                shares=trade.shares,
-                                price=trade.price,
-                                fee=trade.fee,
-                                realized_pnl=trade.realized_pnl,
-                                metadata_json=trade.metadata,
-                            )
-                        )
                 elif delta > max(100.0, current_equity * 0.01) and cash > 100:
-                    buy_amount = min(delta, cash / (1 + fee_rate))
-                    trade, cash_used = _buy_position(
-                        positions,
-                        asset.metadata,
-                        price=price,
-                        amount=buy_amount,
-                        trade_date=trade_date,
+                    order_sequence += 1
+                    pending_orders[code] = PendingDailyOrder(
+                        order_id=order_sequence,
+                        signal_date=signal_date,
+                        code=code,
+                        name=asset.metadata.name,
+                        side="buy",
                         reason="target_rebalance",
-                        fee_rate=fee_rate,
+                        signal_price=price,
+                        requested_amount=min(delta, cash / (1 + DEFAULT_BACKTEST_FEE_RATE)),
                     )
-                    if trade is not None:
-                        cash -= cash_used
-                        total_fees += trade.fee
-                        turnover += trade.amount
-                        trade_rows.append(
-                            EtfPortfolioBacktestTrade(
-                                run_id=run.id,
-                                trade_date=trade.trade_date,
-                                etf_code=trade.code,
-                                etf_name=trade.name,
-                                side=trade.side,
-                                reason=trade.reason,
-                                amount=trade.amount,
-                                shares=trade.shares,
-                                price=trade.price,
-                                fee=trade.fee,
-                                realized_pnl=trade.realized_pnl,
-                                metadata_json=trade.metadata,
-                            )
-                        )
+
+            for code, order in sorted(
+                list(pending_orders.items()),
+                key=lambda item: (0 if item[1].side == "sell" else 1, item[1].signal_date, item[1].order_id),
+            ):
+                attempt = _attempt_daily_order(
+                    order,
+                    through_date=trade_date,
+                    bars=execution_bars_by_code.get(code, ()),
+                    positions=positions,
+                    metadata=metadata_by_code.get(code),
+                    cash=cash,
+                )
+                if attempt.status is ExecutionStatus.DEFERRED:
+                    execution_deferred_counts[attempt.reason or "execution_deferred"] += 1
+                    continue
+                pending_orders.pop(code, None)
+                if attempt.status is ExecutionStatus.REJECTED or attempt.trade is None:
+                    execution_excluded_counts[attempt.reason or "execution_rejected"] += 1
+                    continue
+                trade = attempt.trade
+                cash += attempt.cash_delta
+                total_fees += trade.fee
+                turnover += trade.amount
+                if trade.realized_pnl is not None:
+                    realized_trades += 1
+                    winning_trades += 1 if trade.realized_pnl > 0 else 0
+                evidence = attempt.execution_evidence or {}
+                liquidity_capacity = dict(
+                    evidence.get("liquidity_capacity_stress") or {}
+                )
+                liquidity_capacity_status_counts[
+                    str(liquidity_capacity.get("status") or "unavailable")
+                ] += 1
+                entry_capacity_exceeded_count += int(
+                    liquidity_capacity.get("entry_capacity_exceeded") is True
+                )
+                stress_entry_capacity_exceeded_count += int(
+                    liquidity_capacity.get("stress_entry_capacity_exceeded") is True
+                )
+                stress_exit_days = liquidity_capacity.get("stress_exit_days")
+                if isinstance(stress_exit_days, int | float) and not isinstance(
+                    stress_exit_days,
+                    bool,
+                ) and math.isfinite(float(stress_exit_days)):
+                    max_stress_exit_days = max(
+                        max_stress_exit_days or 0.0,
+                        float(stress_exit_days),
+                    )
+                base_cost = dict(evidence.get("base") or {})
+                stress_cost = dict(evidence.get("stress") or {})
+                total_base_slippage += float(base_cost.get("slippage_cost") or 0.0)
+                total_stress_slippage += float(stress_cost.get("slippage_cost") or 0.0)
+                total_stress_incremental_cost += max(
+                    float(stress_cost.get("total_cost") or 0.0)
+                    - float(base_cost.get("total_cost") or 0.0),
+                    0.0,
+                )
+                trade_rows.append(
+                    EtfPortfolioBacktestTrade(
+                        run_id=run.id,
+                        trade_date=trade.trade_date,
+                        etf_code=trade.code,
+                        etf_name=trade.name,
+                        side=trade.side,
+                        reason=trade.reason,
+                        amount=trade.amount,
+                        shares=trade.shares,
+                        price=trade.price,
+                        fee=trade.fee,
+                        realized_pnl=trade.realized_pnl,
+                        metadata_json=trade.metadata,
+                    )
+                )
+
+            prices = {
+                code: price
+                for code, series in series_by_code.items()
+                if (price := _price_on(series, trade_date)) is not None
+            }
 
             final_equity = _equity(cash, positions, prices)
             high_watermark = max(high_watermark, final_equity)
             drawdown = final_equity / high_watermark - 1.0 if high_watermark > 0 else 0.0
+            stress_equity = max(final_equity - total_stress_incremental_cost, 0.0)
+            stress_high_watermark = max(stress_high_watermark, stress_equity)
+            stress_drawdown = stress_equity / stress_high_watermark - 1.0 if stress_high_watermark > 0 else 0.0
+            stress_max_drawdown = min(stress_max_drawdown, stress_drawdown)
             session.add(
                 EtfPortfolioBacktestEquityCurve(
                     run_id=run.id,
@@ -983,18 +1660,19 @@ async def run_etf_portfolio_backtest(
                 series = series_by_code.get(code) or []
                 if asset is None:
                     continue
-                current_price = _price_on(series, trade_date)
+                current_price = _price_on(series, signal_date)
                 if not current_price:
                     continue
+                signal_index = all_trading_date_index[signal_date]
                 for horizon in LABEL_HORIZONS:
-                    future_index = date_index + horizon
-                    if future_index >= len(trading_dates):
+                    future_index = signal_index + horizon
+                    if future_index >= len(all_trading_dates):
                         continue
-                    future_date = trading_dates[future_index]
+                    future_date = all_trading_dates[future_index]
                     future_price = _price_on(series, future_date)
                     if not future_price:
                         continue
-                    window_dates = set(trading_dates[date_index + 1 : future_index + 1])
+                    window_dates = set(all_trading_dates[signal_index + 1 : future_index + 1])
                     window_prices = [item.value for item in series if item.point_date in window_dates]
                     forward_return = future_price / current_price - 1.0
                     worst_drawdown = min((price / current_price - 1.0 for price in window_prices), default=0.0)
@@ -1026,29 +1704,89 @@ async def run_etf_portfolio_backtest(
         final_equity = _equity(cash, positions, {code: _price_on(series, trading_dates[-1]) or 0.0 for code, series in series_by_code.items()})
         first_trade_date = min((row.trade_date for row in trade_rows), default=None)
         average_target_exposure = target_exposure_sum / len(trading_dates) if trading_dates else 0.0
+        base_max_drawdown = round(
+            min(
+                (
+                    row.drawdown
+                    for row in (
+                        await session.scalars(
+                            select(EtfPortfolioBacktestEquityCurve).where(
+                                EtfPortfolioBacktestEquityCurve.run_id == run.id
+                            )
+                        )
+                    ).all()
+                ),
+                default=0.0,
+            ),
+            4,
+        )
+        stress_final_equity = max(final_equity - total_stress_incremental_cost, 0.0)
+        base_total_cost = total_fees + total_base_slippage
+        stress_total_cost = total_fees + total_stress_slippage
+        action_cycle_unavailable = {
+            "status": "unavailable",
+            "reason": "portfolio_replay_has_no_observed_action_cycle_counterfactual",
+        }
+        execution_scenarios = {
+            "contract_version": EXECUTION_RISK_CONTRACT_VERSION,
+            "cost_contract_hash": RANKING_COST_CONTRACT_HASH,
+            "simulated_not_observed": True,
+            "spread_evidence": "modeled_sensitivity_not_observed",
+            "base": {
+                "provenance": "simulated_fill_base",
+                "net_return": round(final_equity / capital - 1.0, 4),
+                "max_drawdown": base_max_drawdown,
+                "turnover": round(turnover / capital, 4),
+                "fee": _round_money(total_fees),
+                "slippage_cost": _round_money(total_base_slippage),
+                "spread_cost": None,
+                "total_cost": _round_money(base_total_cost),
+                "action_cycle_benefit": action_cycle_unavailable,
+            },
+            "stress": {
+                "provenance": "simulated_fill_stress",
+                "same_action_path_sensitivity": True,
+                "net_return": round(stress_final_equity / capital - 1.0, 4),
+                "max_drawdown": round(stress_max_drawdown, 4),
+                "turnover": round(turnover / capital, 4),
+                "fee": _round_money(total_fees),
+                "slippage_cost": _round_money(total_stress_slippage),
+                "spread_cost": None,
+                "total_cost": _round_money(stress_total_cost),
+                "action_cycle_benefit": action_cycle_unavailable,
+            },
+            "liquidity_capacity_stress": {
+                "status_counts": dict(liquidity_capacity_status_counts),
+                "entry_capacity_exceeded_count": entry_capacity_exceeded_count,
+                "stress_entry_capacity_exceeded_count": (
+                    stress_entry_capacity_exceeded_count
+                ),
+                "max_stress_exit_days": max_stress_exit_days,
+                "blocked_exit_sessions": int(
+                    execution_deferred_counts.get(
+                        "limit_lock_without_demonstrable_liquidity",
+                        0,
+                    )
+                ),
+                "simulation_only": True,
+            },
+        }
         metrics = {
             "cumulative_return": round(final_equity / capital - 1.0, 4),
-            "max_drawdown": round(
-                min(
-                    (
-                        row.drawdown
-                        for row in (
-                            await session.scalars(
-                                select(EtfPortfolioBacktestEquityCurve).where(
-                                    EtfPortfolioBacktestEquityCurve.run_id == run.id
-                                )
-                            )
-                        ).all()
-                    ),
-                    default=0.0,
-                ),
-                4,
-            ),
+            "max_drawdown": base_max_drawdown,
             "trade_count": len(trade_rows),
             "sell_count": realized_trades,
             "win_rate": round(winning_trades / realized_trades, 4) if realized_trades else None,
             "turnover": round(turnover / capital, 4),
             "total_fees": _round_money(total_fees),
+            "execution_scenarios": execution_scenarios,
+            "pending_order_count": len(pending_orders),
+            "execution_deferred_counts": dict(execution_deferred_counts),
+            "execution_excluded_counts": dict(execution_excluded_counts),
+            "liquidity_capacity_status_counts": dict(liquidity_capacity_status_counts),
+            "entry_capacity_exceeded_count": entry_capacity_exceeded_count,
+            "stress_entry_capacity_exceeded_count": stress_entry_capacity_exceeded_count,
+            "max_stress_exit_days": max_stress_exit_days,
             "average_holding_days": round(mean([(trading_dates[-1] - item.entry_date).days for item in positions.values()]), 2)
             if positions
             else None,
@@ -1056,11 +1794,13 @@ async def run_etf_portfolio_backtest(
             "last_target_exposure": round(last_target_exposure, 4),
             "partial_allocation_days": partial_allocation_days,
             "full_cash_days": full_cash_days,
-            "portfolio_rule": "逐日重放 ETF 资金配置参考 + 日线风控",
+            "portfolio_rule": "前一交易日信号 + 下一合格交易日复权开盘成交 + 日线风控",
+            "portfolio_risk_budget": last_portfolio_context,
         }
         caveats = [
             "这是历史日线回测，不代表未来收益。",
-            "第一版不验证盘中分钟级买点，也不模拟券商盘口成交。",
+            "信号最早在下一合格交易日复权开盘模拟成交；停牌、零量、缺价或不可证明成交时不使用收盘价兜底。",
+            "日线历史没有可验证 bid/ask，价差和盘中路径只标记为未观察敏感性；压力情景沿用同一动作路径。",
             "回测不连接券商，不会自动买卖。",
         ]
         if len(trading_dates) < 120:
@@ -1079,7 +1819,7 @@ async def run_etf_portfolio_backtest(
             "effective_end_date": trading_dates[-1].isoformat(),
             "latest_replay_asset_count": len(latest_assets),
             "sample_insufficient": len(trading_dates) < 120,
-            "warmup_days": (first_signal_date - trading_dates[0]).days if first_signal_date else len(trading_dates),
+            "warmup_days": max(0, (first_signal_date - trading_dates[0]).days) if first_signal_date else len(trading_dates),
             "first_signal_date": first_signal_date.isoformat() if first_signal_date else None,
             "first_trade_date": first_trade_date.isoformat() if first_trade_date else None,
             "cash_wait_reason_counts": dict(cash_wait_reason_counts),
@@ -1088,6 +1828,16 @@ async def run_etf_portfolio_backtest(
             "full_cash_days": full_cash_days,
             "average_target_exposure": round(average_target_exposure, 4),
             "last_target_exposure": round(last_target_exposure, 4),
+            "pending_order_count": len(pending_orders),
+            "execution_deferred_counts": dict(execution_deferred_counts),
+            "execution_excluded_counts": dict(execution_excluded_counts),
+            "liquidity_capacity_status_counts": dict(liquidity_capacity_status_counts),
+            "entry_capacity_exceeded_count": entry_capacity_exceeded_count,
+            "stress_entry_capacity_exceeded_count": stress_entry_capacity_exceeded_count,
+            "max_stress_exit_days": max_stress_exit_days,
+            "execution_model": EXECUTION_MODEL_DAILY_ADJUSTED_OPEN,
+            "simulated_not_observed": True,
+            "portfolio_risk_budget": last_portfolio_context,
         }
         run.status = "success"
         run.finished_at = utcnow()
@@ -1172,9 +1922,16 @@ async def run_etf_intraday_alert_backtest(
         high_watermark = capital
         total_fees = 0.0
         turnover = 0.0
+        total_base_slippage = 0.0
+        total_stress_slippage = 0.0
+        total_stress_incremental_cost = 0.0
+        total_observed_spread_cost = 0.0
+        stress_high_watermark = capital
+        stress_max_drawdown = 0.0
         realized_trades = 0
         winning_trades = 0
         unfilled_alert_count = 0
+        execution_excluded_counts: dict[str, int] = defaultdict(int)
         trade_rows: list[EtfPortfolioBacktestTrade] = []
         benchmark = _benchmark(series_by_code, benchmark_dates or trading_dates, capital)
         portfolio_mode_counts: dict[str, int] = defaultdict(int)
@@ -1187,6 +1944,7 @@ async def run_etf_intraday_alert_backtest(
         last_target_exposure = 0.0
         last_intraday_prices: dict[str, float] = {}
         latest_assets: list[ComputedAsset] = []
+        last_portfolio_context: dict[str, Any] = {}
 
         for trade_date in trading_dates:
             signal_date = _previous_date(daily_dates, trade_date)
@@ -1195,7 +1953,11 @@ async def run_etf_intraday_alert_backtest(
             assets = _build_daily_assets(metadata_by_code, series_by_code, signal_date)
             latest_assets = assets
             asset_by_code = {asset.metadata.code: asset for asset in assets}
-            target_weights, portfolio_mode, portfolio_context = _generate_target_weights(assets)
+            target_weights, portfolio_mode, portfolio_context = _generate_target_weights(
+                assets,
+                return_maps=_risk_return_maps_for_date(series_by_code, signal_date),
+            )
+            last_portfolio_context = portfolio_context
             target_exposure = round(sum(float(weight) for weight in target_weights.values()), 4)
             last_target_exposure = target_exposure
             target_exposure_sum += target_exposure
@@ -1213,16 +1975,41 @@ async def run_etf_intraday_alert_backtest(
                 for code in metadata_by_code
                 if intraday_by_code.get(code, {}).get(trade_date)
             }
-            opening_prices = {code: quotes[0].latest_price for code, quotes in day_quotes_by_code.items() if quotes}
-            last_intraday_prices.update(opening_prices)
+            opening_buy_quotes = {
+                code: quote
+                for code, quotes in day_quotes_by_code.items()
+                if (quote := _first_eligible_intraday_quote(quotes, side="buy")) is not None
+            }
+            opening_sell_quotes = {
+                code: quote
+                for code, quotes in day_quotes_by_code.items()
+                if (quote := _first_eligible_intraday_quote(quotes, side="sell")) is not None
+            }
+            opening_mark_prices = {
+                code: quote.latest_price
+                for code, quote in {**opening_buy_quotes, **opening_sell_quotes}.items()
+                if _finite_positive(quote.latest_price)
+            }
+            last_intraday_prices.update(opening_mark_prices)
             current_equity = _equity(cash, positions, last_intraday_prices)
 
             for code in list(positions):
                 if code in target_weights:
                     continue
-                price = opening_prices.get(code)
-                if price is None:
+                quote = opening_sell_quotes.get(code)
+                reference_price, reason = _intraday_execution_price(quote, side="sell")
+                if quote is None or reference_price is None:
+                    execution_excluded_counts[reason or "missing_executable_sell_quote"] += 1
                     continue
+                signal_price = _price_on(series_by_code.get(code, []), signal_date)
+                if not _finite_positive(signal_price):
+                    execution_excluded_counts["missing_signal_close"] += 1
+                    continue
+                price = _slipped_price(
+                    reference_price,
+                    side="sell",
+                    slippage_bps=RANKING_SLIPPAGE_BPS_PER_SIDE,
+                )
                 trade, cash_delta = _sell_position(
                     positions,
                     code,
@@ -1230,7 +2017,9 @@ async def run_etf_intraday_alert_backtest(
                     fraction=1.0,
                     trade_date=trade_date,
                     reason="target_rebalance",
-                    fee_rate=fee_rate,
+                    fee_rate=DEFAULT_BACKTEST_FEE_RATE,
+                    fee_reference_price=reference_price,
+                    lot_size=ETF_LOT_SIZE,
                 )
                 if trade is None:
                     continue
@@ -1239,7 +2028,21 @@ async def run_etf_intraday_alert_backtest(
                 turnover += trade.amount
                 realized_trades += 1
                 winning_trades += 1 if (trade.realized_pnl or 0.0) > 0 else 0
-                quote = day_quotes_by_code[code][0]
+                spread_pct = _intraday_spread_fraction(quote)
+                evidence = _execution_cost_evidence(
+                    side="sell",
+                    signal_date=signal_date,
+                    fill_date=trade_date,
+                    signal_price=float(signal_price),
+                    reference_price=reference_price,
+                    shares=trade.shares,
+                    signal_to_fill_sessions=1,
+                    deferred_reasons=(),
+                    price_basis="observed_sell_bid",
+                    execution_time=quote.quote_time,
+                    spread_pct=spread_pct,
+                    spread_observed=spread_pct is not None,
+                )
                 trade.metadata.update(
                     {
                         "execution_model": "intraday_alert",
@@ -1248,7 +2051,14 @@ async def run_etf_intraday_alert_backtest(
                         "execution_delay_minutes": 0,
                         "signal_date": signal_date.isoformat(),
                         "source": quote.source,
+                        "execution_evidence": evidence,
                     }
+                )
+                total_base_slippage += float(evidence["base"]["slippage_cost"])
+                total_stress_slippage += float(evidence["stress"]["slippage_cost"])
+                total_observed_spread_cost += float(evidence.get("spread_cost") or 0.0)
+                total_stress_incremental_cost += float(evidence["stress"]["total_cost"]) - float(
+                    evidence["base"]["total_cost"]
                 )
                 first_trade_date = first_trade_date or trade_date
                 trade_rows.append(
@@ -1271,15 +2081,27 @@ async def run_etf_intraday_alert_backtest(
             current_equity = _equity(cash, positions, last_intraday_prices)
             for code, target_weight in sorted(target_weights.items(), key=lambda item: item[1], reverse=True):
                 asset = asset_by_code.get(code)
-                price = opening_prices.get(code)
-                quotes = day_quotes_by_code.get(code) or []
-                if asset is None or price is None or not quotes:
+                mark_price = opening_mark_prices.get(code)
+                signal_price = _price_on(series_by_code.get(code, []), signal_date)
+                if asset is None or not _finite_positive(mark_price) or not _finite_positive(signal_price):
+                    execution_excluded_counts["missing_signal_or_mark_price"] += 1
                     continue
                 target_value = current_equity * target_weight
                 current_position = positions.get(code)
-                current_value = (current_position.shares * price) if current_position else 0.0
+                current_value = (current_position.shares * float(mark_price)) if current_position else 0.0
                 delta = target_value - current_value
                 if delta < -max(100.0, current_equity * 0.01):
+                    side = "sell"
+                    quote = opening_sell_quotes.get(code)
+                    reference_price, reason = _intraday_execution_price(quote, side=side)
+                    if quote is None or reference_price is None:
+                        execution_excluded_counts[reason or "missing_executable_sell_quote"] += 1
+                        continue
+                    price = _slipped_price(
+                        reference_price,
+                        side=side,
+                        slippage_bps=RANKING_SLIPPAGE_BPS_PER_SIDE,
+                    )
                     fraction = min(1.0, abs(delta) / current_value) if current_value > 0 else 0.0
                     trade, cash_delta = _sell_position(
                         positions,
@@ -1288,7 +2110,9 @@ async def run_etf_intraday_alert_backtest(
                         fraction=fraction,
                         trade_date=trade_date,
                         reason="target_rebalance",
-                        fee_rate=fee_rate,
+                        fee_rate=DEFAULT_BACKTEST_FEE_RATE,
+                        fee_reference_price=reference_price,
+                        lot_size=ETF_LOT_SIZE,
                     )
                     if trade is None:
                         continue
@@ -1298,18 +2122,19 @@ async def run_etf_intraday_alert_backtest(
                     if trade.realized_pnl is not None:
                         realized_trades += 1
                         winning_trades += 1 if trade.realized_pnl > 0 else 0
-                    trade.metadata.update(
-                        {
-                            "execution_model": "intraday_alert",
-                            "execution_time": quotes[0].quote_time.isoformat() if quotes[0].quote_time else None,
-                            "execution_price": price,
-                            "execution_delay_minutes": 0,
-                            "signal_date": signal_date.isoformat(),
-                            "source": quotes[0].source,
-                        }
-                    )
                 elif delta > max(100.0, current_equity * 0.01) and cash > 100:
-                    buy_amount = min(delta, cash / (1 + fee_rate))
+                    side = "buy"
+                    quote = opening_buy_quotes.get(code)
+                    reference_price, reason = _intraday_execution_price(quote, side=side)
+                    if quote is None or reference_price is None:
+                        execution_excluded_counts[reason or "missing_executable_buy_quote"] += 1
+                        continue
+                    price = _slipped_price(
+                        reference_price,
+                        side=side,
+                        slippage_bps=RANKING_SLIPPAGE_BPS_PER_SIDE,
+                    )
+                    buy_amount = min(delta, cash / (1 + DEFAULT_BACKTEST_FEE_RATE))
                     trade, cash_used = _buy_position(
                         positions,
                         asset.metadata,
@@ -1317,25 +2142,49 @@ async def run_etf_intraday_alert_backtest(
                         amount=buy_amount,
                         trade_date=trade_date,
                         reason="target_rebalance",
-                        fee_rate=fee_rate,
+                        fee_rate=DEFAULT_BACKTEST_FEE_RATE,
+                        lot_size=ETF_LOT_SIZE,
+                        fee_reference_price=reference_price,
                     )
                     if trade is None:
                         continue
                     cash -= cash_used
                     total_fees += trade.fee
                     turnover += trade.amount
-                    trade.metadata.update(
-                        {
-                            "execution_model": "intraday_alert",
-                            "execution_time": quotes[0].quote_time.isoformat() if quotes[0].quote_time else None,
-                            "execution_price": price,
-                            "execution_delay_minutes": 0,
-                            "signal_date": signal_date.isoformat(),
-                            "source": quotes[0].source,
-                        }
-                    )
                 else:
                     continue
+                spread_pct = _intraday_spread_fraction(quote)
+                evidence = _execution_cost_evidence(
+                    side=side,
+                    signal_date=signal_date,
+                    fill_date=trade_date,
+                    signal_price=float(signal_price),
+                    reference_price=reference_price,
+                    shares=trade.shares,
+                    signal_to_fill_sessions=1,
+                    deferred_reasons=(),
+                    price_basis="observed_buy_ask" if side == "buy" else "observed_sell_bid",
+                    execution_time=quote.quote_time,
+                    spread_pct=spread_pct,
+                    spread_observed=spread_pct is not None,
+                )
+                trade.metadata.update(
+                    {
+                        "execution_model": "intraday_alert",
+                        "execution_time": quote.quote_time.isoformat() if quote.quote_time else None,
+                        "execution_price": price,
+                        "execution_delay_minutes": 0,
+                        "signal_date": signal_date.isoformat(),
+                        "source": quote.source,
+                        "execution_evidence": evidence,
+                    }
+                )
+                total_base_slippage += float(evidence["base"]["slippage_cost"])
+                total_stress_slippage += float(evidence["stress"]["slippage_cost"])
+                total_observed_spread_cost += float(evidence.get("spread_cost") or 0.0)
+                total_stress_incremental_cost += float(evidence["stress"]["total_cost"]) - float(
+                    evidence["base"]["total_cost"]
+                )
                 first_trade_date = first_trade_date or trade_date
                 trade_rows.append(
                     EtfPortfolioBacktestTrade(
@@ -1361,6 +2210,7 @@ async def run_etf_intraday_alert_backtest(
                     for code, quotes in day_quotes_by_code.items()
                     for quote in quotes
                     if quote.quote_time is not None
+                    and _intraday_execution_price(quote, side="sell")[0] is not None
                 ),
                 key=lambda item: item[0],
             )
@@ -1381,18 +2231,32 @@ async def run_etf_intraday_alert_backtest(
                     day_quotes_by_code.get(code, []),
                     signal_time,
                     delay_minutes=execution_delay_minutes,
+                    side="sell",
                 )
                 if execution_quote is None:
                     unfilled_alert_count += 1
+                    execution_excluded_counts["missing_eligible_delayed_sell_quote"] += 1
                     continue
+                reference_price, reason = _intraday_execution_price(execution_quote, side="sell")
+                if reference_price is None:
+                    unfilled_alert_count += 1
+                    execution_excluded_counts[reason or "missing_executable_sell_quote"] += 1
+                    continue
+                execution_price = _slipped_price(
+                    reference_price,
+                    side="sell",
+                    slippage_bps=RANKING_SLIPPAGE_BPS_PER_SIDE,
+                )
                 trade, cash_delta = _sell_position(
                     positions,
                     code,
-                    price=execution_quote.latest_price,
+                    price=execution_price,
                     fraction=fraction,
                     trade_date=trade_date,
                     reason=alert_type,
-                    fee_rate=fee_rate,
+                    fee_rate=DEFAULT_BACKTEST_FEE_RATE,
+                    fee_reference_price=reference_price,
+                    lot_size=ETF_LOT_SIZE,
                 )
                 if trade is None:
                     continue
@@ -1407,6 +2271,21 @@ async def run_etf_intraday_alert_backtest(
                     if execution_quote.quote_time is not None
                     else None
                 )
+                spread_pct = _intraday_spread_fraction(execution_quote)
+                evidence = _execution_cost_evidence(
+                    side="sell",
+                    signal_date=trade_date,
+                    fill_date=trade_date,
+                    signal_price=quote.latest_price,
+                    reference_price=reference_price,
+                    shares=trade.shares,
+                    signal_to_fill_sessions=0,
+                    deferred_reasons=(),
+                    price_basis="observed_sell_bid",
+                    execution_time=execution_quote.quote_time,
+                    spread_pct=spread_pct,
+                    spread_observed=spread_pct is not None,
+                )
                 trade.metadata.update(
                     {
                         **context,
@@ -1414,11 +2293,18 @@ async def run_etf_intraday_alert_backtest(
                         "signal_time": signal_time.isoformat(),
                         "signal_price": quote.latest_price,
                         "execution_time": execution_quote.quote_time.isoformat() if execution_quote.quote_time else None,
-                        "execution_price": execution_quote.latest_price,
+                        "execution_price": execution_price,
                         "execution_delay_minutes": round(delay, 2) if delay is not None else None,
                         "configured_execution_delay_minutes": execution_delay_minutes,
                         "quote_source": quote.source,
+                        "execution_evidence": evidence,
                     }
+                )
+                total_base_slippage += float(evidence["base"]["slippage_cost"])
+                total_stress_slippage += float(evidence["stress"]["slippage_cost"])
+                total_observed_spread_cost += float(evidence.get("spread_cost") or 0.0)
+                total_stress_incremental_cost += float(evidence["stress"]["total_cost"]) - float(
+                    evidence["base"]["total_cost"]
                 )
                 first_trade_date = first_trade_date or trade_date
                 trade_rows.append(
@@ -1442,6 +2328,10 @@ async def run_etf_intraday_alert_backtest(
             final_equity = _equity(cash, positions, last_intraday_prices)
             high_watermark = max(high_watermark, final_equity)
             drawdown = final_equity / high_watermark - 1.0 if high_watermark > 0 else 0.0
+            stress_equity = max(final_equity - total_stress_incremental_cost, 0.0)
+            stress_high_watermark = max(stress_high_watermark, stress_equity)
+            stress_drawdown = stress_equity / stress_high_watermark - 1.0 if stress_high_watermark > 0 else 0.0
+            stress_max_drawdown = min(stress_max_drawdown, stress_drawdown)
             session.add(
                 EtfPortfolioBacktestEquityCurve(
                     run_id=run.id,
@@ -1503,25 +2393,64 @@ async def run_etf_intraday_alert_backtest(
             for quote in quotes
             if quote.quote_time is not None
         ]
+        base_max_drawdown = round(min((row.drawdown for row in curve_rows), default=0.0), 4)
+        stress_final_equity = max(final_equity - total_stress_incremental_cost, 0.0)
+        action_cycle_unavailable = {
+            "status": "unavailable",
+            "reason": "portfolio_replay_has_no_observed_action_cycle_counterfactual",
+        }
+        execution_scenarios = {
+            "contract_version": EXECUTION_RISK_CONTRACT_VERSION,
+            "cost_contract_hash": RANKING_COST_CONTRACT_HASH,
+            "simulated_not_observed": True,
+            "spread_evidence": "observed_bid_ask",
+            "base": {
+                "provenance": "simulated_fill_base",
+                "net_return": round(final_equity / capital - 1.0, 4),
+                "max_drawdown": base_max_drawdown,
+                "turnover": round(turnover / capital, 4),
+                "fee": _round_money(total_fees),
+                "slippage_cost": _round_money(total_base_slippage),
+                "spread_cost": _round_money(total_observed_spread_cost),
+                "total_cost": _round_money(total_fees + total_base_slippage),
+                "action_cycle_benefit": action_cycle_unavailable,
+            },
+            "stress": {
+                "provenance": "simulated_fill_stress",
+                "same_action_path_sensitivity": True,
+                "net_return": round(stress_final_equity / capital - 1.0, 4),
+                "max_drawdown": round(stress_max_drawdown, 4),
+                "turnover": round(turnover / capital, 4),
+                "fee": _round_money(total_fees),
+                "slippage_cost": _round_money(total_stress_slippage),
+                "spread_cost": _round_money(total_observed_spread_cost),
+                "total_cost": _round_money(total_fees + total_stress_slippage),
+                "action_cycle_benefit": action_cycle_unavailable,
+            },
+        }
         metrics = {
             "execution_model": "intraday_alert",
             "cumulative_return": round(final_equity / capital - 1.0, 4),
-            "max_drawdown": round(min((row.drawdown for row in curve_rows), default=0.0), 4),
+            "max_drawdown": base_max_drawdown,
             "trade_count": len(trade_rows),
             "sell_count": realized_trades,
             "win_rate": round(winning_trades / realized_trades, 4) if realized_trades else None,
             "turnover": round(turnover / capital, 4),
             "total_fees": _round_money(total_fees),
+            "execution_scenarios": execution_scenarios,
+            "execution_excluded_counts": dict(execution_excluded_counts),
             "unfilled_alert_count": unfilled_alert_count,
             "average_target_exposure": round(average_target_exposure, 4),
             "last_target_exposure": round(last_target_exposure, 4),
             "partial_allocation_days": partial_allocation_days,
             "full_cash_days": full_cash_days,
             "portfolio_rule": "上一交易日 ETF 资金配置参考 + 次日盘中成交 + 盘中提醒执行",
+            "portfolio_risk_budget": last_portfolio_context,
         }
         data_limitation_notes = [
             "盘中提醒回测只覆盖系统已保存的 ETF 盘中行情历史。",
-            "没有触发后 3 分钟以上后续行情时，提醒标记为未成交，不使用收盘价兜底。",
+            "只有显式 decision_eligible 且具备有效 ask/bid 的历史盘口可以成交；缺少后续合格行情时标记未成交。",
+            "买入使用 ask、卖出使用 bid，并分别报告费用、观察价差、基础滑点和压力滑点，不使用 latest_price 或收盘价兜底。",
         ]
         data_coverage = {
             "requested_start_date": effective_start.isoformat(),
@@ -1553,6 +2482,9 @@ async def run_etf_intraday_alert_backtest(
             "last_target_exposure": round(last_target_exposure, 4),
             "execution_delay_minutes": execution_delay_minutes,
             "unfilled_alert_count": unfilled_alert_count,
+            "execution_excluded_counts": dict(execution_excluded_counts),
+            "portfolio_risk_budget": last_portfolio_context,
+            "simulated_not_observed": True,
             "data_limitation_notes": data_limitation_notes,
         }
         caveats = [
@@ -1719,6 +2651,7 @@ def _backtest_evidence_dimensions(
     metrics = dict(run.metrics_json or {})
     coverage = dict(run.data_coverage_json or {})
     is_intraday = execution_model == EXECUTION_MODEL_INTRADAY_ALERT
+    is_next_open = execution_model == EXECUTION_MODEL_DAILY_ADJUSTED_OPEN
     current_action_contract = backtest_uses_current_action_contract(run)
     policy_semantics = (
         CURRENT_ACTION_TARGET_SEMANTICS
@@ -1787,11 +2720,19 @@ def _backtest_evidence_dimensions(
         },
         "execution_evidence": {
             "model": execution_model,
-            "label": "盘中历史快照模拟" if is_intraday else "日线收盘模拟",
+            "label": (
+                "盘中历史快照模拟"
+                if is_intraday
+                else "下一合格交易日复权开盘模拟"
+                if is_next_open
+                else "旧日线收盘模拟"
+            ),
             "base_fill_field": config.get("base_fill_field")
             or (
                 "stored_intraday_quote_after_fixed_delay"
                 if is_intraday
+                else "next_eligible_total_return_adjusted_open"
+                if is_next_open
                 else "legacy_daily_close"
             ),
             "execution_delay_minutes": config.get("execution_delay_minutes")
@@ -1896,7 +2837,11 @@ def _positive_momentum_assets(assets: list[ComputedAsset], *, limit: int = 4) ->
     ]
 
 
-def _optimizer_candidates_from_assets(assets: list[ComputedAsset]) -> list[OptimizerCandidate]:
+def _optimizer_candidates_from_assets(
+    assets: list[ComputedAsset],
+    *,
+    return_maps: Mapping[str, Mapping[date, float]] | None = None,
+) -> list[OptimizerCandidate]:
     candidates: list[OptimizerCandidate] = []
     for asset in assets:
         if asset.conclusion in {CONCLUSION_REJECT, CONCLUSION_INSUFFICIENT}:
@@ -1906,6 +2851,10 @@ def _optimizer_candidates_from_assets(assets: list[ComputedAsset]) -> list[Optim
         if float(asset.metrics.get("return_20d") or 0.0) <= 0:
             continue
         theme_profile = dict(asset.metrics.get("theme_profile") or asset.rationale.get("theme_profile") or {})
+        asset_returns = dict((return_maps or {}).get(asset.metadata.code, {}))
+        group, _reason = _portfolio_candidate_group(asset)
+        if group not in {PORTFOLIO_LAYER_PRIMARY, PORTFOLIO_LAYER_SATELLITE}:
+            group = PORTFOLIO_LAYER_PRIMARY
         candidates.append(
             OptimizerCandidate(
                 code=asset.metadata.code,
@@ -1915,14 +2864,27 @@ def _optimizer_candidates_from_assets(assets: list[ComputedAsset]) -> list[Optim
                 data_date=asset.latest_date,
                 expected_return=float(asset.metrics.get("return_20d") or 0.0),
                 volatility=float(asset.metrics.get("volatility_20d") or 0.025),
+                returns=tuple(asset_returns[key] for key in sorted(asset_returns)),
+                portfolio_layer=group,
+                risk_flags=tuple(asset.risk_flags),
+                max_drawdown_60d=asset.metrics.get("max_drawdown_60d"),
+                display_eligible=bool(asset.metrics.get("default_display_eligible", False)),
             )
         )
     return sorted(candidates, key=lambda item: item.score, reverse=True)[:10]
 
 
-def _comparison_target_weights(strategy_key: str, assets: list[ComputedAsset]) -> tuple[dict[str, float], str]:
+def _comparison_target_weights(
+    strategy_key: str,
+    assets: list[ComputedAsset],
+    *,
+    return_maps: Mapping[str, Mapping[date, float]] | None = None,
+) -> tuple[dict[str, float], str]:
     if strategy_key == "current_workbench":
-        weights, mode, _context = _generate_target_weights(assets)
+        weights, mode, _context = _generate_target_weights(
+            assets,
+            return_maps=return_maps,
+        )
         return weights, mode
     if strategy_key == "topn_fixed_hold":
         selected = assets[:4]
@@ -1939,10 +2901,44 @@ def _comparison_target_weights(strategy_key: str, assets: list[ComputedAsset]) -
         return {asset.metadata.code: weight for asset in selected}, PORTFOLIO_MODE_RISK_ON
     if strategy_key in {"optimized_min_volatility", "optimized_risk_parity"}:
         method = "minimum_volatility" if strategy_key == "optimized_min_volatility" else "risk_parity"
-        optimized_weights = optimized_method_weights(method, _optimizer_candidates_from_assets(assets))
-        return (
+        candidates = _optimizer_candidates_from_assets(assets, return_maps=return_maps)
+        optimized_weights = optimized_method_weights(method, candidates)
+        market_risk = classify_portfolio_market_risk(
+            _portfolio_market_risk_observations(assets)
+        )
+        by_code = {asset.metadata.code: asset for asset in assets}
+        budget = apply_portfolio_risk_budget(
             optimized_weights or {},
-            PORTFOLIO_MODE_RISK_ON if optimized_weights else PORTFOLIO_MODE_CASH_WAIT,
+            layer_by_code={
+                candidate.code: candidate.portfolio_layer
+                for candidate in candidates
+                if candidate.code in (optimized_weights or {})
+            },
+            theme_by_code={
+                candidate.code: candidate.theme_group
+                for candidate in candidates
+                if candidate.code in (optimized_weights or {})
+            },
+            returns_by_code=dict(return_maps or {}),
+            market_risk=market_risk,
+            individual_caps={
+                code: min(
+                    _portfolio_layer_cap(
+                        next(
+                            candidate.portfolio_layer
+                            for candidate in candidates
+                            if candidate.code == code
+                        )
+                    ),
+                    _portfolio_exposure_for_asset(by_code[code]),
+                )
+                for code in (optimized_weights or {})
+                if code in by_code
+            },
+        )
+        return (
+            budget.weights if budget.status == "ready" else {},
+            budget.market_state if budget.status == "ready" else PORTFOLIO_MODE_CASH_WAIT,
         )
     selected = _positive_momentum_assets(assets, limit=4)
     if strategy_key == "momentum_regime_cash_filter":
@@ -2208,7 +3204,11 @@ def _simulate_comparison_strategy(
         assets = _build_daily_assets(metadata_by_code, series_by_code, trade_date)
         assets_by_code = _comparison_asset_by_code(assets)
         target_strategy_key = "current_workbench" if strategy_key in {"current_live_exit_rules", "guard_only", "exit_v2_reentry"} else strategy_key
-        base_weights, portfolio_mode = _comparison_target_weights(target_strategy_key, assets)
+        base_weights, portfolio_mode = _comparison_target_weights(
+            target_strategy_key,
+            assets,
+            return_maps=_risk_return_maps_for_date(series_by_code, trade_date),
+        )
         target_weights = _comparison_apply_exit_variant(
             strategy_key,
             base_weights=base_weights,

@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import func, select
 
 from app.models.entities import (
+    TrackedEtfSleeveLedgerEvent,
     TrackedPosition,
     TrackedPositionActionDecision,
     TrackedPositionActionExecution,
@@ -29,6 +30,10 @@ from app.services.tracked_positions.action_transition_service import (
 from app.services.tracked_positions.lifecycle_rollout import (
     LifecycleRolloutMode,
     LifecycleRolloutPolicy,
+)
+from app.services.tracked_positions.sleeve_repository import (
+    AppendSleeveLedgerEventCommand,
+    append_owner_ledger_event,
 )
 
 ACTIVE_ROLLOUT = LifecycleRolloutPolicy.for_mode(LifecycleRolloutMode.ACTIVE)
@@ -222,6 +227,62 @@ async def test_action_transition_api_records_partial_then_complete_execution(app
     assert action.status == "executed"
     assert action.is_current is False
     assert len(executions) == 2
+
+
+@pytest.mark.asyncio
+async def test_owner_confirmed_exit_appends_one_atomic_sleeve_sell_event(app, client) -> None:
+    position_id, action_id, version = await _seed_action(app)
+    async with app.state.db.session() as session:
+        user = await session.get(User, 1)
+        position = await session.get(TrackedPosition, position_id)
+        assert user is not None and position is not None
+        user.etf_trading_capital = 10_000
+        user.etf_trading_capital_confirmed_at = utcnow()
+        await append_owner_ledger_event(
+            session,
+            AppendSleeveLedgerEventCommand(
+                owner_id=user.id,
+                idempotency_key="action-ledger-opening",
+                event_type="opening_reconciliation",
+                effective_date=date.today(),
+                occurred_at=utcnow(),
+                provenance="owner_confirmed",
+                expected_predecessor_event_hash=None,
+                cash_balance_after=9_000,
+                holdings_after=(
+                    {
+                        "tracked_position_id": position.id,
+                        "asset_code": position.asset_code,
+                        "quantity": 1_000.0,
+                        "remaining_cost_basis": 1_000.0,
+                        "adjustment_factor": 1.0,
+                    },
+                ),
+            ),
+        )
+        await session.commit()
+
+    response = await client.post(
+        f"/api/tracked-positions/{position_id}/actions/{action_id}/transitions",
+        headers={"Idempotency-Key": "atomic-sleeve-fill"},
+        json=_execute_payload(expected_version=version, quantity=200, resulting_shares=800),
+    )
+    assert response.status_code == 200, response.text
+
+    async with app.state.db.session() as session:
+        events = tuple(
+            (
+                await session.scalars(
+                    select(TrackedEtfSleeveLedgerEvent)
+                    .where(TrackedEtfSleeveLedgerEvent.user_id == 1)
+                    .order_by(TrackedEtfSleeveLedgerEvent.sequence_no.asc())
+                )
+            ).all()
+        )
+    assert [event.event_type for event in events] == ["opening_reconciliation", "sell"]
+    assert events[-1].quantity_delta == -200
+    assert events[-1].quantity_after == 800
+    assert events[-1].cash_delta == pytest.approx(203.0)
 
 
 @pytest.mark.asyncio

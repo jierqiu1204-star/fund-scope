@@ -83,6 +83,9 @@ class LifecycleEvaluationCommand:
     quote_freshness: str = "unknown"
     notification_repeat: bool = False
     user_silenced: bool = False
+    legacy_comparison_status: str = "not_observed"
+    legacy_alert_type: str | None = None
+    legacy_target_remaining_fraction: float | None = None
 
 
 @dataclass(frozen=True)
@@ -191,6 +194,13 @@ async def orchestrate_position_lifecycle_evaluation(
         raise ValueError("sealed_snapshot_hash must be a sha256 hex digest")
     if not command.evaluations:
         raise ValueError("at least one evaluated rule is required")
+    if command.legacy_comparison_status not in {"not_observed", "compared"}:
+        raise ValueError("unsupported legacy comparison status")
+    if command.legacy_target_remaining_fraction is not None and (
+        not math.isfinite(command.legacy_target_remaining_fraction)
+        or not 0.0 <= command.legacy_target_remaining_fraction <= 1.0
+    ):
+        raise ValueError("legacy target must be a finite fraction")
 
     position = await session.scalar(
         select(TrackedPosition)
@@ -232,25 +242,15 @@ async def orchestrate_position_lifecycle_evaluation(
             TrackedPositionLifecycleShadowEvidence.event_id == event_id
         )
         if is_shadow
-        else select(TrackedPositionAlertAudit).where(
-            TrackedPositionAlertAudit.event_id == event_id
-        )
+        else select(TrackedPositionAlertAudit).where(TrackedPositionAlertAudit.event_id == event_id)
     )
     if existing_event is not None:
         return LifecycleEvaluationResult(
             outcome="duplicate",
             position_state_version=position.exit_state_version,
-            action_id=(
-                None
-                if is_shadow
-                else existing_event.action_decision_id
-            ),
+            action_id=(None if is_shadow else existing_event.action_decision_id),
             audit_event_id=event_id,
-            notification_item_id=(
-                None
-                if is_shadow
-                else existing_event.notification_item_id
-            ),
+            notification_item_id=(None if is_shadow else existing_event.notification_item_id),
         )
 
     previous_policy = state.get("policy_version")
@@ -262,16 +262,14 @@ async def orchestrate_position_lifecycle_evaluation(
                 await session.scalars(
                     select(TrackedPositionLifecycleShadowEvidence)
                     .where(
-                        TrackedPositionLifecycleShadowEvidence.user_id
-                        == command.owner_id,
+                        TrackedPositionLifecycleShadowEvidence.user_id == command.owner_id,
                         TrackedPositionLifecycleShadowEvidence.tracked_position_id
                         == command.position_id,
                         TrackedPositionLifecycleShadowEvidence.policy_version
                         == command.policy_version,
                         TrackedPositionLifecycleShadowEvidence.position_episode_id
                         == position_episode_id,
-                        TrackedPositionLifecycleShadowEvidence.exposure_version
-                        == exposure_version,
+                        TrackedPositionLifecycleShadowEvidence.exposure_version == exposure_version,
                     )
                     .order_by(
                         TrackedPositionLifecycleShadowEvidence.stream_sequence.desc(),
@@ -284,14 +282,12 @@ async def orchestrate_position_lifecycle_evaluation(
         latest_shadow = shadow_head[0] if shadow_head else None
         if latest_shadow is not None:
             valid_first = (
-                latest_shadow.stream_sequence == 1
-                and latest_shadow.predecessor_event_id is None
+                latest_shadow.stream_sequence == 1 and latest_shadow.predecessor_event_id is None
             )
             valid_successor = (
                 latest_shadow.stream_sequence > 1
                 and len(shadow_head) == 2
-                and shadow_head[1].stream_sequence
-                == latest_shadow.stream_sequence - 1
+                and shadow_head[1].stream_sequence == latest_shadow.stream_sequence - 1
                 and latest_shadow.predecessor_event_id == shadow_head[1].event_id
             )
             if not (valid_first or valid_successor):
@@ -377,9 +373,7 @@ async def orchestrate_position_lifecycle_evaluation(
         )
         if not shadow_cycle_resolved:
             prior_target = prior_action_evidence.get("target_remaining_fraction")
-            if isinstance(prior_target, (int, float)) and not isinstance(
-                prior_target, bool
-            ):
+            if isinstance(prior_target, (int, float)) and not isinstance(prior_target, bool):
                 if math.isfinite(float(prior_target)) and 0 <= float(prior_target) <= 1:
                     shadow_current_target = float(prior_target)
     else:
@@ -390,7 +384,11 @@ async def orchestrate_position_lifecycle_evaluation(
         )
     next_version = position.exit_state_version
     terminalized_action = None
-    if not is_shadow and current_action is not None and current_action.policy_version != command.policy_version:
+    if (
+        not is_shadow
+        and current_action is not None
+        and current_action.policy_version != command.policy_version
+    ):
         if ActionStatus(current_action.status) in OPEN_ACTION_STATUSES:
             current_action.status = "superseded"
             current_action.status_reason = "policy_retired"
@@ -410,18 +408,13 @@ async def orchestrate_position_lifecycle_evaluation(
     if not is_shadow and current_action is not None:
         contributing_rules = tuple(current_action.contributing_rules_json or ())
         contributing_rule_set = set(contributing_rules)
-        evaluations_by_rule = {
-            evaluation.rule_id: evaluation for evaluation, _ in transitions
-        }
+        evaluations_by_rule = {evaluation.rule_id: evaluation for evaluation, _ in transitions}
         all_contributing_rules_resolved = bool(contributing_rules) and all(
             _load_rule_state(rule_states.get(rule_id)).state is AlertState.RESOLVED
             for rule_id in contributing_rules
         )
-        resolution_data_eligible = contributing_rule_set.issubset(
-            evaluations_by_rule
-        ) and all(
-            evaluations_by_rule[rule_id].data_state
-            == EvaluationDataState.ELIGIBLE.value
+        resolution_data_eligible = contributing_rule_set.issubset(evaluations_by_rule) and all(
+            evaluations_by_rule[rule_id].data_state == EvaluationDataState.ELIGIBLE.value
             for rule_id in contributing_rule_set
         )
         if (
@@ -488,6 +481,17 @@ async def orchestrate_position_lifecycle_evaluation(
                 else (_action_cycle_id(command) if evidence_target is not None else None)
             )
             disposition = aggregation.disposition
+        legacy_difference: bool | None = None
+        legacy_difference_explained: bool | None = None
+        legacy_difference_reason: str | None = None
+        if command.legacy_comparison_status == "compared":
+            legacy_difference = command.legacy_target_remaining_fraction != evidence_target
+            legacy_difference_explained = True
+            legacy_difference_reason = (
+                "targets_match"
+                if not legacy_difference
+                else "v2_confirmation_recovery_or_stricter_aggregation"
+            )
         shadow_evidence = TrackedPositionLifecycleShadowEvidence(
             user_id=command.owner_id,
             tracked_position_id=command.position_id,
@@ -517,9 +521,7 @@ async def orchestrate_position_lifecycle_evaluation(
             action_evidence_json={
                 "disposition": disposition,
                 "action_cycle_id": action_cycle_id,
-                "closed_action_cycle_id": (
-                    str(prior_cycle_id) if shadow_cycle_resolved else None
-                ),
+                "closed_action_cycle_id": (str(prior_cycle_id) if shadow_cycle_resolved else None),
                 "terminal_reason": (
                     "all_contributing_rules_resolved" if shadow_cycle_resolved else None
                 ),
@@ -539,9 +541,12 @@ async def orchestrate_position_lifecycle_evaluation(
                 "execution_provenance": "simulated_not_observed",
                 "production_action_id": None,
                 "notification_item_id": None,
-                "legacy_comparison_status": "not_observed",
-                "legacy_difference": None,
-                "legacy_difference_explained": None,
+                "legacy_comparison_status": command.legacy_comparison_status,
+                "legacy_alert_type": command.legacy_alert_type,
+                "legacy_target_remaining_fraction": (command.legacy_target_remaining_fraction),
+                "legacy_difference": legacy_difference,
+                "legacy_difference_explained": legacy_difference_explained,
+                "legacy_difference_reason": legacy_difference_reason,
             },
             data_state=(
                 "eligible"
@@ -700,15 +705,11 @@ async def orchestrate_position_lifecycle_evaluation(
             and pair[1].current.alert_episode_id
         ]
         candidates_for_notification = notable or (
-            active_hard_stops[:1]
-            or active_alerts[:1]
-            or [(primary_evaluation, primary_transition)]
+            active_hard_stops[:1] or active_alerts[:1] or [(primary_evaluation, primary_transition)]
         )
         has_hard_stop = bool(active_hard_stops)
         for evaluation, transition in candidates_for_notification:
-            episode_id = (
-                transition.current.alert_episode_id or transition.previous.alert_episode_id
-            )
+            episode_id = transition.current.alert_episode_id or transition.previous.alert_episode_id
             if not episode_id:
                 continue
             transition_name = (
@@ -814,9 +815,7 @@ async def orchestrate_position_lifecycle_evaluation(
                 PersistNotificationItemCommand(
                     owner_id=command.owner_id,
                     position_id=command.position_id,
-                    action_id=(
-                        action.id if action is not None and not soft_watch else None
-                    ),
+                    action_id=(action.id if action is not None and not soft_watch else None),
                     alert_episode_id=episode_id,
                     transition=decision.transition,
                     recipient=command.recipient,

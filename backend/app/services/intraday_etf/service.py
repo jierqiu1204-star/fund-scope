@@ -268,8 +268,7 @@ def quote_decision_eligible_flag(quote: QuoteRow | None) -> bool:
     if quote is None:
         return False
     raw = _quote_raw(quote)
-    value = raw.get("decision_eligible")
-    return True if value is None else bool(value)
+    return raw.get("decision_eligible") is True
 
 
 def quote_provider_count(quote: QuoteRow | None) -> int:

@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_approved_user
 from app.core.db import get_db_session
-from app.models.entities import User
+from app.models.entities import User, utcnow
 from app.schemas.settings import (
     NotificationSettingsRead,
     NotificationSettingsUpdate,
@@ -34,6 +34,9 @@ async def update_notification_settings(
     user.reference_index_code = payload.reference_index_code
     user.base_monthly_amount = payload.base_monthly_amount
     user.etf_trading_capital = payload.etf_trading_capital
+    # Existing default values are deliberately not treated as owner-confirmed.
+    # Saving this settings form is the explicit confirmation boundary.
+    user.etf_trading_capital_confirmed_at = utcnow()
     user.allow_full_exit = payload.allow_full_exit
     user.smtp_host = payload.smtp_host
     user.smtp_port = payload.smtp_port

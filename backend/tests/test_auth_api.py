@@ -87,12 +87,39 @@ async def test_user_can_update_etf_position_sizing_settings(client, app) -> None
     assert response.status_code == 200
     payload = response.json()
     assert payload["etf_trading_capital"] == 12000
+    assert payload["etf_trading_capital_confirmed_at"] is not None
     assert payload["allow_full_exit"] is False
     async with app.state.db.session() as session:
         user = await session.get(User, 1)
     assert user is not None
     assert user.etf_trading_capital == 12000
+    assert user.etf_trading_capital_confirmed_at is not None
     assert user.allow_full_exit is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_capital", [True, "NaN", "12000"])
+async def test_etf_position_sizing_settings_require_explicit_finite_numeric_capital(
+    client,
+    invalid_capital,
+) -> None:
+    response = await client.put(
+        "/api/settings/notifications",
+        json={
+            "recipient_email": "19535838578@163.com",
+            "reminder_day": 1,
+            "reference_index_code": "CSI300",
+            "base_monthly_amount": 833,
+            "etf_trading_capital": invalid_capital,
+            "allow_full_exit": False,
+            "smtp_host": "smtp.163.com",
+            "smtp_port": 465,
+            "smtp_username": "19535838578@163.com",
+            "smtp_from": "FundScope <19535838578@163.com>",
+        },
+    )
+
+    assert response.status_code == 422
 
 
 @pytest.mark.asyncio

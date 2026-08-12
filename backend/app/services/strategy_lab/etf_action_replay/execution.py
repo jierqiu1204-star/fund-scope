@@ -26,6 +26,7 @@ class DailyExecutionBar:
     raw_high: float | None = None
     raw_low: float | None = None
     raw_close: float | None = None
+    median_turnover_20d: float | None = None
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,7 @@ class SimulatedAdjustedOpenFill:
     adjusted_open: float
     normalized_execution_price: float
     signal_to_fill_trading_sessions: int
+    median_turnover_20d: float | None = None
 
 
 @dataclass(frozen=True)
@@ -133,6 +135,11 @@ def select_adjusted_open_fill(
                 adjusted_open=adjusted_open,
                 normalized_execution_price=adjusted_open,
                 signal_to_fill_trading_sessions=session_number,
+                median_turnover_20d=(
+                    float(bar.median_turnover_20d)
+                    if _finite_positive(bar.median_turnover_20d)
+                    else None
+                ),
             ),
             deferred_sessions=tuple(deferred),
         )

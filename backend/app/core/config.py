@@ -77,6 +77,10 @@ class Settings(BaseSettings):
         default="./data/etf-pit-artifacts",
         alias="ETF_PIT_ARTIFACT_DIR",
     )
+    tracked_position_lifecycle_shadow_enabled: bool = Field(
+        default=True,
+        alias="TRACKED_POSITION_LIFECYCLE_SHADOW_ENABLED",
+    )
     etf_leader_tactics_continuation_enabled: bool = Field(
         default=False,
         alias="ETF_LEADER_TACTICS_CONTINUATION_ENABLED",

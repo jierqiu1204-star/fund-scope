@@ -48,6 +48,7 @@ def test_position_sizing_hard_stop_exits_when_allowed() -> None:
         current_market_value=3000.0,
         current_price=2.0,
         etf_trading_capital=10000.0,
+        capital_confirmed=True,
         allow_full_exit=True,
     )
 
@@ -65,6 +66,7 @@ def test_position_sizing_trailing_take_profit_uses_first_stage_target() -> None:
         current_market_value=3000.0,
         current_price=2.0,
         etf_trading_capital=10000.0,
+        capital_confirmed=True,
         allow_full_exit=True,
     )
 
@@ -85,6 +87,7 @@ def test_repeated_trailing_reduction_uses_two_absolute_baseline_targets() -> Non
             current_market_value=current_market_value,
             current_price=2.0,
             etf_trading_capital=10000.0,
+            capital_confirmed=True,
             allow_full_exit=True,
             exposure_baseline_quantity=1500.0,
         )
@@ -102,6 +105,7 @@ def test_position_sizing_take_profit_watch_is_observation_only() -> None:
         current_market_value=3000.0,
         current_price=2.0,
         etf_trading_capital=10000.0,
+        capital_confirmed=True,
         allow_full_exit=True,
     )
 
@@ -119,6 +123,7 @@ def test_position_sizing_add_uses_single_etf_cap() -> None:
         current_market_value=2000.0,
         current_price=2.0,
         etf_trading_capital=10000.0,
+        capital_confirmed=True,
         allow_full_exit=True,
         target_portfolio_weight=0.4,
         entry_timing_label="健康回踩",
@@ -137,10 +142,11 @@ def test_position_sizing_missing_price_does_not_output_amount() -> None:
         current_market_value=3000.0,
         current_price=None,
         etf_trading_capital=10000.0,
+        capital_confirmed=True,
         allow_full_exit=True,
     )
 
-    assert sizing.action == "hold"
+    assert sizing.action == "exit"
     assert sizing.recommended_trade_amount is None
     assert sizing.recommended_trade_shares is None
 
@@ -574,12 +580,19 @@ async def test_etf_trailing_take_profit_starts_after_moderate_profit_giveback(cl
                 quote_time=now,
                 trade_date=now.date(),
                 latest_price=2.521,
+                bid_price=2.520,
+                ask_price=2.522,
                 change_percent=-1.0,
                 turnover=5_000_000,
                 iopv=None,
                 source="akshare",
                 freshness_status="fresh",
-                raw_json={},
+                raw_json={
+                    "decision_eligible": True,
+                    "consensus_status": "single_provider",
+                    "provider_count": 1,
+                    "fresh_provider_count": 1,
+                },
             )
         )
         await session.commit()
@@ -1023,11 +1036,18 @@ async def test_etf_email_proposal_does_not_write_executed_action_or_start_reentr
                     quote_time=now,
                     trade_date=now.date(),
                     latest_price=1.05,
+                    bid_price=1.049,
+                    ask_price=1.051,
                     change_percent=-2.8,
                     turnover=5_000_000,
                     source="test_fresh_quote",
                     freshness_status="fresh",
-                    raw_json={},
+                    raw_json={
+                        "decision_eligible": True,
+                        "consensus_status": "single_provider",
+                        "provider_count": 1,
+                        "fresh_provider_count": 1,
+                    },
                 ),
             ]
         )

@@ -32,6 +32,7 @@ def test_unconfirmed_trend_weakening_is_guard_only_for_sizing() -> None:
         current_market_value=5000,
         current_price=1.0,
         etf_trading_capital=10000,
+        capital_confirmed=True,
         allow_full_exit=True,
     )
 
@@ -47,6 +48,7 @@ def test_confirmed_trend_weakening_can_reduce_position() -> None:
         current_market_value=5000,
         current_price=1.0,
         etf_trading_capital=10000,
+        capital_confirmed=True,
         allow_full_exit=True,
     )
 
@@ -61,6 +63,7 @@ def test_hard_stop_exit_watch_trailing_and_take_profit_have_explicit_actions() -
         current_market_value=3000,
         current_price=1.5,
         etf_trading_capital=10000,
+        capital_confirmed=True,
         allow_full_exit=True,
     )
     exit_watch = calculate_position_sizing(
@@ -69,6 +72,7 @@ def test_hard_stop_exit_watch_trailing_and_take_profit_have_explicit_actions() -
         current_market_value=3000,
         current_price=1.5,
         etf_trading_capital=10000,
+        capital_confirmed=True,
         allow_full_exit=True,
     )
     trailing = calculate_position_sizing(
@@ -77,6 +81,7 @@ def test_hard_stop_exit_watch_trailing_and_take_profit_have_explicit_actions() -
         current_market_value=3000,
         current_price=1.5,
         etf_trading_capital=10000,
+        capital_confirmed=True,
         allow_full_exit=True,
     )
     watch = calculate_position_sizing(
@@ -85,6 +90,7 @@ def test_hard_stop_exit_watch_trailing_and_take_profit_have_explicit_actions() -
         current_market_value=3000,
         current_price=1.5,
         etf_trading_capital=10000,
+        capital_confirmed=True,
         allow_full_exit=True,
     )
 

@@ -82,6 +82,10 @@ class TrackedPositionLifecycleShadowImmutableError(ValueError):
     pass
 
 
+class TrackedEtfSleeveImmutableError(ValueError):
+    pass
+
+
 class EtfActionValidationImmutableError(ValueError):
     pass
 
@@ -116,6 +120,10 @@ class User(Base):
     reference_index_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
     base_monthly_amount: Mapped[float] = mapped_column(Float, default=0.0)
     etf_trading_capital: Mapped[float] = mapped_column(Float, default=10000.0)
+    etf_trading_capital_confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        nullable=True,
+    )
     allow_full_exit: Mapped[bool] = mapped_column(Boolean, default=True)
     smtp_host: Mapped[str | None] = mapped_column(String(255), nullable=True)
     smtp_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -2558,6 +2566,309 @@ class TrackedPositionActionTransitionReceipt(Base):
     request_hash: Mapped[str] = mapped_column(String(64))
     response_json: Mapped[dict[str, Any]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class TrackedEtfSleeveLedgerEvent(Base):
+    __tablename__ = "tracked_etf_sleeve_ledger_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "sequence_no",
+            name="uq_tracked_etf_sleeve_ledger_sequence",
+        ),
+        UniqueConstraint(
+            "user_id",
+            "idempotency_key",
+            name="uq_tracked_etf_sleeve_ledger_idempotency",
+        ),
+        UniqueConstraint(
+            "event_hash",
+            name="uq_tracked_etf_sleeve_ledger_event_hash",
+        ),
+        CheckConstraint(
+            "sequence_no >= 1",
+            name="ck_tracked_etf_sleeve_ledger_sequence",
+        ),
+        CheckConstraint(
+            "event_type IN ("
+            "'opening_reconciliation','reconciliation','cash_deposit','cash_withdrawal',"
+            "'buy','sell','distribution','fee','quantity_adjustment')",
+            name="ck_tracked_etf_sleeve_ledger_event_type",
+        ),
+        CheckConstraint(
+            "provenance IN ("
+            "'owner_confirmed','owner_documented','broker_verified','provider_verified')",
+            name="ck_tracked_etf_sleeve_ledger_provenance",
+        ),
+        CheckConstraint(
+            "(event_type NOT IN ('opening_reconciliation','reconciliation',"
+            "'cash_deposit','cash_withdrawal','buy','sell','fee') "
+            "OR provenance IN ('owner_confirmed','owner_documented','broker_verified'))",
+            name="ck_tracked_etf_sleeve_ledger_account_provenance",
+        ),
+        CheckConstraint(
+            "(provenance = 'owner_confirmed' OR evidence_ref IS NOT NULL)",
+            name="ck_tracked_etf_sleeve_ledger_external_evidence",
+        ),
+        CheckConstraint(
+            "cash_balance_after IS NULL OR cash_balance_after >= 0",
+            name="ck_tracked_etf_sleeve_ledger_cash_balance",
+        ),
+        CheckConstraint(
+            "quantity_after IS NULL OR quantity_after >= 0",
+            name="ck_tracked_etf_sleeve_ledger_quantity_after",
+        ),
+        CheckConstraint(
+            "execution_price IS NULL OR execution_price > 0",
+            name="ck_tracked_etf_sleeve_ledger_execution_price",
+        ),
+        CheckConstraint(
+            "fees >= 0",
+            name="ck_tracked_etf_sleeve_ledger_fees",
+        ),
+        CheckConstraint(
+            "adjustment_factor > 0",
+            name="ck_tracked_etf_sleeve_ledger_adjustment_factor",
+        ),
+        CheckConstraint(
+            "(event_type NOT IN ('opening_reconciliation','reconciliation') "
+            "OR cash_balance_after IS NOT NULL)",
+            name="ck_tracked_etf_sleeve_ledger_reconciliation_payload",
+        ),
+        CheckConstraint(
+            "(event_type != 'buy' OR (tracked_position_id IS NOT NULL "
+            "AND asset_code IS NOT NULL AND quantity_delta > 0 AND quantity_after >= 0 "
+            "AND cash_delta < 0 AND execution_price > 0))",
+            name="ck_tracked_etf_sleeve_ledger_buy_payload",
+        ),
+        CheckConstraint(
+            "(event_type != 'sell' OR (tracked_position_id IS NOT NULL "
+            "AND asset_code IS NOT NULL AND quantity_delta < 0 AND quantity_after >= 0 "
+            "AND cash_delta > 0 AND execution_price > 0))",
+            name="ck_tracked_etf_sleeve_ledger_sell_payload",
+        ),
+        CheckConstraint(
+            "(event_type != 'cash_deposit' OR cash_delta > 0) "
+            "AND (event_type != 'cash_withdrawal' OR cash_delta < 0) "
+            "AND (event_type != 'distribution' OR (asset_code IS NOT NULL AND cash_delta > 0)) "
+            "AND (event_type != 'fee' OR cash_delta < 0)",
+            name="ck_tracked_etf_sleeve_ledger_cash_event_payload",
+        ),
+        CheckConstraint(
+            "(event_type != 'quantity_adjustment' OR (tracked_position_id IS NOT NULL "
+            "AND asset_code IS NOT NULL AND quantity_delta IS NOT NULL "
+            "AND quantity_delta != 0 AND quantity_after >= 0))",
+            name="ck_tracked_etf_sleeve_ledger_quantity_event_payload",
+        ),
+        SaIndex(
+            "ix_tracked_etf_sleeve_ledger_owner_effective",
+            "user_id",
+            "effective_date",
+            "sequence_no",
+        ),
+        SaIndex(
+            "ix_tracked_etf_sleeve_ledger_position",
+            "tracked_position_id",
+            "sequence_no",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    tracked_position_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tracked_positions.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    sequence_no: Mapped[int] = mapped_column(Integer)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    event_type: Mapped[str] = mapped_column(String(32))
+    asset_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    effective_date: Mapped[date] = mapped_column(Date)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime)
+    cash_delta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cash_balance_after: Mapped[float | None] = mapped_column(Float, nullable=True)
+    quantity_delta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    quantity_after: Mapped[float | None] = mapped_column(Float, nullable=True)
+    execution_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fees: Mapped[float] = mapped_column(Float, default=0.0)
+    adjustment_factor: Mapped[float] = mapped_column(Float, default=1.0)
+    holdings_after_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    provenance: Mapped[str] = mapped_column(String(32))
+    evidence_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    reason_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    contract_version: Mapped[str] = mapped_column(String(64))
+    predecessor_event_hash: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "tracked_etf_sleeve_ledger_events.event_hash",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+    event_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class TrackedEtfSleeveDailySnapshot(Base):
+    __tablename__ = "tracked_etf_sleeve_daily_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "sequence_no",
+            name="uq_tracked_etf_sleeve_snapshot_sequence",
+        ),
+        UniqueConstraint(
+            "user_id",
+            "idempotency_key",
+            name="uq_tracked_etf_sleeve_snapshot_idempotency",
+        ),
+        UniqueConstraint(
+            "snapshot_hash",
+            name="uq_tracked_etf_sleeve_snapshot_hash",
+        ),
+        CheckConstraint(
+            "sequence_no >= 1",
+            name="ck_tracked_etf_sleeve_snapshot_sequence",
+        ),
+        CheckConstraint(
+            "coverage_state IN ('eligible','unavailable')",
+            name="ck_tracked_etf_sleeve_snapshot_coverage_state",
+        ),
+        CheckConstraint(
+            "risk_state IN ('normal','reduce_only','data_halt')",
+            name="ck_tracked_etf_sleeve_snapshot_risk_state",
+        ),
+        CheckConstraint(
+            "cash_balance IS NULL OR cash_balance >= 0",
+            name="ck_tracked_etf_sleeve_snapshot_cash",
+        ),
+        CheckConstraint(
+            "market_value IS NULL OR market_value >= 0",
+            name="ck_tracked_etf_sleeve_snapshot_market_value",
+        ),
+        CheckConstraint(
+            "equity IS NULL OR equity >= 0",
+            name="ck_tracked_etf_sleeve_snapshot_equity",
+        ),
+        CheckConstraint(
+            "flow_adjusted_nav IS NULL OR flow_adjusted_nav > 0",
+            name="ck_tracked_etf_sleeve_snapshot_nav",
+        ),
+        CheckConstraint(
+            "high_water_nav IS NULL OR high_water_nav > 0",
+            name="ck_tracked_etf_sleeve_snapshot_high_water",
+        ),
+        CheckConstraint(
+            "drawdown_pct IS NULL OR (drawdown_pct >= -1 AND drawdown_pct <= 0)",
+            name="ck_tracked_etf_sleeve_snapshot_drawdown",
+        ),
+        CheckConstraint(
+            "holding_count >= 0 AND valued_holding_count >= 0 "
+            "AND valued_holding_count <= holding_count",
+            name="ck_tracked_etf_sleeve_snapshot_counts",
+        ),
+        CheckConstraint(
+            "ledger_coverage_ratio >= 0 AND ledger_coverage_ratio <= 1 "
+            "AND valuation_coverage_ratio >= 0 AND valuation_coverage_ratio <= 1",
+            name="ck_tracked_etf_sleeve_snapshot_coverage_ratios",
+        ),
+        CheckConstraint(
+            "recovery_streak >= 0 AND signal_stop_cycle_count >= 0 "
+            "AND cooldown_sessions_remaining >= 0 "
+            "AND confirmed_stop_cycle_count >= 0 "
+            "AND confirmed_stop_cycle_count <= signal_stop_cycle_count",
+            name="ck_tracked_etf_sleeve_snapshot_risk_counters",
+        ),
+        CheckConstraint(
+            "(coverage_state != 'eligible' OR (cash_balance IS NOT NULL "
+            "AND market_value IS NOT NULL AND equity IS NOT NULL "
+            "AND flow_adjusted_nav IS NOT NULL AND high_water_nav IS NOT NULL "
+            "AND (risk_state = 'data_halt' OR drawdown_pct IS NOT NULL) "
+            "AND ledger_head_event_hash IS NOT NULL "
+            "AND ledger_coverage_ratio = 1 AND valuation_coverage_ratio = 1 "
+            "AND valued_holding_count = holding_count))",
+            name="ck_tracked_etf_sleeve_snapshot_eligible_payload",
+        ),
+        CheckConstraint(
+            "(coverage_state != 'unavailable' OR (risk_state = 'data_halt' "
+            "AND equity IS NULL AND flow_adjusted_nav IS NULL "
+            "AND high_water_nav IS NULL AND drawdown_pct IS NULL))",
+            name="ck_tracked_etf_sleeve_snapshot_unavailable_payload",
+        ),
+        SaIndex(
+            "ix_tracked_etf_sleeve_snapshot_owner_date",
+            "user_id",
+            "snapshot_date",
+            "sequence_no",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    sequence_no: Mapped[int] = mapped_column(Integer)
+    snapshot_date: Mapped[date] = mapped_column(Date)
+    cutoff_at: Mapped[datetime] = mapped_column(DateTime)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    cash_balance: Mapped[float | None] = mapped_column(Float, nullable=True)
+    market_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    equity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    net_external_flow: Mapped[float] = mapped_column(Float, default=0.0)
+    flow_adjusted_nav: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high_water_nav: Mapped[float | None] = mapped_column(Float, nullable=True)
+    drawdown_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    holding_count: Mapped[int] = mapped_column(Integer, default=0)
+    valued_holding_count: Mapped[int] = mapped_column(Integer, default=0)
+    ledger_coverage_ratio: Mapped[float] = mapped_column(Float, default=0.0)
+    valuation_coverage_ratio: Mapped[float] = mapped_column(Float, default=0.0)
+    coverage_state: Mapped[str] = mapped_column(String(32))
+    risk_state: Mapped[str] = mapped_column(String(32))
+    recovery_streak: Mapped[int] = mapped_column(Integer, default=0)
+    cooldown_sessions_remaining: Mapped[int] = mapped_column(Integer, default=0)
+    signal_stop_cycle_count: Mapped[int] = mapped_column(Integer, default=0)
+    confirmed_stop_cycle_count: Mapped[int] = mapped_column(Integer, default=0)
+    reasons_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    ledger_head_event_hash: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "tracked_etf_sleeve_ledger_events.event_hash",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+    input_contract_hash: Mapped[str] = mapped_column(String(64))
+    nav_contract_hash: Mapped[str] = mapped_column(String(64))
+    risk_policy_hash: Mapped[str] = mapped_column(String(64))
+    contract_version: Mapped[str] = mapped_column(String(64))
+    predecessor_snapshot_hash: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "tracked_etf_sleeve_daily_snapshots.snapshot_hash",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+    snapshot_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+@event.listens_for(Session, "before_flush")
+def _prevent_tracked_etf_sleeve_mutation(
+    session: Session,
+    _flush_context: object,
+    _instances: object,
+) -> None:
+    immutable_types = (TrackedEtfSleeveLedgerEvent, TrackedEtfSleeveDailySnapshot)
+    if any(
+        isinstance(instance, immutable_types)
+        and session.is_modified(instance, include_collections=True)
+        for instance in session.dirty
+    ):
+        raise TrackedEtfSleeveImmutableError(
+            "tracked ETF sleeve ledger events and daily snapshots are immutable"
+        )
+    if any(isinstance(instance, immutable_types) for instance in session.deleted):
+        raise TrackedEtfSleeveImmutableError(
+            "tracked ETF sleeve ledger events and daily snapshots cannot be deleted"
+        )
 
 
 class TrackedPositionLifecycleShadowEvidence(Base):
