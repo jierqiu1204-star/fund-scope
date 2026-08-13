@@ -17,7 +17,7 @@ class LeaderTacticsV2CandidateOut(BaseModel):
     sector: str | None = None
     tracked_index: str | None = None
     formula_id: str
-    state: Literal["preparing", "confirmed", "invalidated"]
+    state: Literal["preparing", "turning_watch", "confirmed", "invalidated"]
     availability: Literal["available", "unavailable"]
     qualifies: bool
     score: float | None = None
@@ -28,6 +28,14 @@ class LeaderTacticsV2CandidateOut(BaseModel):
     exclusion_reasons: list[str] = Field(default_factory=list)
     provenance: dict[str, Any] = Field(default_factory=dict)
     feature_hash: str
+    sentiment_risk_state: Literal[
+        "healthy", "warning", "risk_off", "unavailable", "not_applicable"
+    ] = "not_applicable"
+    sentiment_risk_action_mode: Literal[
+        "shadow_entry_allowed", "observe_only", "not_applicable"
+    ] = "not_applicable"
+    sentiment_risk_new_entry_allowed: bool | None = None
+    sentiment_risk_provenance: dict[str, Any] = Field(default_factory=dict)
 
 
 class LeaderTacticsV2SummaryOut(BaseModel):
@@ -39,6 +47,7 @@ class LeaderTacticsV2SummaryOut(BaseModel):
     exclusion_counts: dict[str, int] = Field(default_factory=dict)
     manifest_hash: str | None = None
     unavailable_reason: str | None = None
+    sentiment_risk: dict[str, Any] = Field(default_factory=dict)
 
 
 class LeaderTacticsV2CandidatesOut(BaseModel):

@@ -7,6 +7,13 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 
+from app.services.strategy_lab.ashare_sentiment_risk import (
+    ASHARE_SENTIMENT_RISK_CONTRACT_HASH,
+    RISK_HEALTHY,
+    RISK_OFF,
+    RISK_UNAVAILABLE,
+    RISK_WARNING,
+)
 from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
     V2_CANDIDATE_IDS,
     V2_SOURCE_REGISTRY,
@@ -71,6 +78,137 @@ class V2PromotionEvidence:
     embargo_sessions: int = EMBARGO_SESSIONS
     holm_adjusted: bool = True
     primary_endpoint: str = "five_session_paired_net_excess"
+
+
+@dataclass(frozen=True)
+class SentimentRiskPolicyShadowSample:
+    signal_date: date
+    raw_net_excess_return: float
+    risk_state: str
+    contract_hash: str = ASHARE_SENTIMENT_RISK_CONTRACT_HASH
+    primary_endpoint: str = "five_session_paired_net_excess"
+
+
+@dataclass(frozen=True)
+class SentimentRiskPolicyShadowDiagnostics:
+    contract_hash: str
+    primary_endpoint: str
+    policy_mode: str
+    status: str
+    sample_count: int
+    evaluable_count: int
+    coverage: float
+    state_counts: tuple[tuple[str, int], ...]
+    raw_mean_net_excess: float | None
+    gated_mean_net_excess: float | None
+    incremental_benefit_mean: float | None
+    avoided_loss: float
+    missed_gain: float
+    avoided_entry_ratio: float | None
+    raw_max_drawdown: float | None
+    gated_max_drawdown: float | None
+    regime_concentration: float | None
+
+
+def _max_drawdown(returns: Sequence[float]) -> float | None:
+    if not returns:
+        return None
+    wealth = 1.0
+    peak = 1.0
+    drawdown = 0.0
+    for value in returns:
+        if not math.isfinite(value) or value <= -1.0:
+            raise ValueError("policy-shadow net excess return is invalid")
+        wealth *= 1.0 + value
+        peak = max(peak, wealth)
+        drawdown = min(drawdown, wealth / peak - 1.0)
+    return drawdown
+
+
+def sentiment_risk_policy_shadow_diagnostics(
+    samples: Sequence[SentimentRiskPolicyShadowSample],
+) -> SentimentRiskPolicyShadowDiagnostics:
+    """Compare the frozen raw endpoint with the no-entry risk overlay.
+
+    Input returns must already be the existing five-session, theme-relative,
+    cost-adjusted endpoint. Warning and risk-off observations hold cash for the
+    shadow comparison; unavailable observations remain outside the denominator.
+    """
+
+    ordered = sorted(samples, key=lambda item: item.signal_date)
+    if len({item.signal_date for item in ordered}) != len(ordered):
+        raise ValueError("policy-shadow signal dates must be unique")
+    state_counts: dict[str, int] = {}
+    raw_returns: list[float] = []
+    gated_returns: list[float] = []
+    avoided_loss = 0.0
+    missed_gain = 0.0
+    blocked_count = 0
+    for item in ordered:
+        if item.contract_hash != ASHARE_SENTIMENT_RISK_CONTRACT_HASH:
+            raise ValueError("sentiment risk contract is not frozen")
+        if item.primary_endpoint != "five_session_paired_net_excess":
+            raise ValueError("sentiment risk primary endpoint was substituted")
+        if item.risk_state not in {
+            RISK_HEALTHY,
+            RISK_WARNING,
+            RISK_OFF,
+            RISK_UNAVAILABLE,
+        }:
+            raise ValueError("sentiment risk state is invalid")
+        if not math.isfinite(item.raw_net_excess_return) or item.raw_net_excess_return <= -1:
+            raise ValueError("policy-shadow net excess return is invalid")
+        state_counts[item.risk_state] = state_counts.get(item.risk_state, 0) + 1
+        if item.risk_state == RISK_UNAVAILABLE:
+            continue
+        raw_returns.append(item.raw_net_excess_return)
+        gated = item.raw_net_excess_return
+        if item.risk_state in {RISK_WARNING, RISK_OFF}:
+            blocked_count += 1
+            gated = 0.0
+            if item.raw_net_excess_return < 0:
+                avoided_loss += -item.raw_net_excess_return
+            elif item.raw_net_excess_return > 0:
+                missed_gain += item.raw_net_excess_return
+        gated_returns.append(gated)
+
+    total = len(ordered)
+    evaluable = len(raw_returns)
+    coverage = evaluable / total if total else 0.0
+    raw_mean = sum(raw_returns) / evaluable if evaluable else None
+    gated_mean = sum(gated_returns) / evaluable if evaluable else None
+    incremental = (
+        gated_mean - raw_mean
+        if gated_mean is not None and raw_mean is not None
+        else None
+    )
+    regime_concentration = (
+        max(state_counts.values()) / total if total and state_counts else None
+    )
+    status = (
+        "available"
+        if evaluable >= MIN_PRIMARY_DATES and coverage >= 0.95
+        else "insufficient_data"
+    )
+    return SentimentRiskPolicyShadowDiagnostics(
+        contract_hash=ASHARE_SENTIMENT_RISK_CONTRACT_HASH,
+        primary_endpoint="five_session_paired_net_excess",
+        policy_mode="policy_shadow",
+        status=status,
+        sample_count=total,
+        evaluable_count=evaluable,
+        coverage=coverage,
+        state_counts=tuple(sorted(state_counts.items())),
+        raw_mean_net_excess=raw_mean,
+        gated_mean_net_excess=gated_mean,
+        incremental_benefit_mean=incremental,
+        avoided_loss=avoided_loss,
+        missed_gain=missed_gain,
+        avoided_entry_ratio=blocked_count / evaluable if evaluable else None,
+        raw_max_drawdown=_max_drawdown(raw_returns),
+        gated_max_drawdown=_max_drawdown(gated_returns),
+        regime_concentration=regime_concentration,
+    )
 
 
 def source_label(
@@ -269,9 +407,12 @@ __all__ = [
     "V2PairedOutcome",
     "V2PromotionEvidence",
     "V2SourceLabel",
+    "SentimentRiskPolicyShadowDiagnostics",
+    "SentimentRiskPolicyShadowSample",
     "evaluate_locked_case",
     "locked_case_status",
     "paired_five_session_net_excess",
+    "sentiment_risk_policy_shadow_diagnostics",
     "source_label",
     "validate_v2_promotion_evidence",
 ]

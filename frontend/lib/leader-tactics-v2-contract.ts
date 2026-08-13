@@ -11,6 +11,17 @@ export type Lifecycle =
   | "confirmed"
   | "invalidated";
 
+export type SentimentRiskState =
+  | "healthy"
+  | "warning"
+  | "risk_off"
+  | "unavailable"
+  | "not_applicable";
+export type SentimentActionMode =
+  | "shadow_entry_allowed"
+  | "observe_only"
+  | "not_applicable";
+
 export type LeaderTacticsV2Filters = {
   universe: Universe;
   formula: Formula;
@@ -37,6 +48,11 @@ export type Candidate = {
   gate_facts: Record<string, unknown>;
   exclusion_reasons: string[];
   provenance: Record<string, unknown>;
+  feature_hash: string;
+  sentiment_risk_state: SentimentRiskState;
+  sentiment_risk_action_mode: SentimentActionMode;
+  sentiment_risk_new_entry_allowed: boolean | null;
+  sentiment_risk_provenance: Record<string, unknown>;
 };
 
 export type CandidatesResponse = {
@@ -65,6 +81,13 @@ export type CandidatesResponse = {
     unavailable_reason: string | null;
     exclusion_counts: Record<string, number>;
     manifest_hash: string | null;
+    sentiment_risk: {
+      observation_count: number;
+      state_counts: Record<string, number>;
+      action_mode_counts: Record<string, number>;
+      new_entry_allowed_count: number;
+      unavailable_reasons: Record<string, number>;
+    };
     materialization_progress?: {
       run_hash: string;
       status: string;
@@ -111,6 +134,28 @@ const unavailableLabels: Record<string, string> = {
   leader_tactics_v2_invalid_filter: "筛选条件或分页游标无效。",
   economic_validation_not_materialized: "经济验证证据尚未物化。"
 };
+
+const sentimentRiskLabels: Record<SentimentRiskState, string> = {
+  healthy: "情绪健康",
+  warning: "情绪预警",
+  risk_off: "情绪风险关闭",
+  unavailable: "情绪证据不可用",
+  not_applicable: "不适用"
+};
+
+const sentimentActionLabels: Record<SentimentActionMode, string> = {
+  shadow_entry_allowed: "研究准入（非实盘）",
+  observe_only: "仅观察",
+  not_applicable: "不适用"
+};
+
+export function sentimentRiskLabel(state: SentimentRiskState) {
+  return sentimentRiskLabels[state];
+}
+
+export function sentimentActionLabel(mode: SentimentActionMode) {
+  return sentimentActionLabels[mode];
+}
 
 export function leaderTacticsV2QueryKey(filters: LeaderTacticsV2Filters) {
   return [
@@ -217,6 +262,55 @@ export function assertLeaderTacticsV2PageContract(
       candidate.provenance.execution_provenance !== "none"
     ) {
       throw new Error("leader-tactics-v2 candidate has invalid provenance");
+    }
+    if (
+      ![
+        "healthy",
+        "warning",
+        "risk_off",
+        "unavailable",
+        "not_applicable"
+      ].includes(candidate.sentiment_risk_state) ||
+      !["shadow_entry_allowed", "observe_only", "not_applicable"].includes(
+        candidate.sentiment_risk_action_mode
+      )
+    ) {
+      throw new Error("leader-tactics-v2 candidate has invalid sentiment risk");
+    }
+    if (candidate.universe === "etf") {
+      if (
+        candidate.sentiment_risk_state !== "not_applicable" ||
+        candidate.sentiment_risk_action_mode !== "not_applicable" ||
+        candidate.sentiment_risk_new_entry_allowed !== null
+      ) {
+        throw new Error(
+          "ETF candidate crossed A-share sentiment risk boundary"
+        );
+      }
+    } else if (candidate.formula_id === "leader_breakout_proxy_v2") {
+      const blocked = ["warning", "risk_off", "unavailable"].includes(
+        candidate.sentiment_risk_state
+      );
+      if (
+        (!candidate.qualifies &&
+          (candidate.sentiment_risk_action_mode !== "observe_only" ||
+            candidate.sentiment_risk_new_entry_allowed !== false)) ||
+        (blocked &&
+          (candidate.sentiment_risk_action_mode !== "observe_only" ||
+            candidate.sentiment_risk_new_entry_allowed !== false)) ||
+        (candidate.qualifies &&
+          !blocked &&
+          candidate.sentiment_risk_state === "healthy" &&
+          (candidate.sentiment_risk_action_mode !== "shadow_entry_allowed" ||
+            candidate.sentiment_risk_new_entry_allowed !== true))
+      ) {
+        throw new Error("A-share breakout sentiment action mapping is invalid");
+      }
+    } else if (
+      candidate.sentiment_risk_action_mode !== "not_applicable" ||
+      candidate.sentiment_risk_new_entry_allowed !== null
+    ) {
+      throw new Error("non-breakout candidate has a sentiment action override");
     }
   }
   return page;

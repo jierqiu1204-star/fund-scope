@@ -8,6 +8,10 @@ import pytest
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.services.etf_research_evidence import stable_contract_hash
+from app.services.strategy_lab.ashare_sentiment_risk import (
+    ASHARE_SENTIMENT_RISK_CONTRACT_HASH,
+)
 from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
     V2_FORMULA_REGISTRY_HASH,
     V2_SOURCE_REGISTRY,
@@ -16,6 +20,7 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
     build_v2_manifest,
 )
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_storage import (
+    _candidate_projection,
     get_v2_materialized_manifest,
     persist_v2_screen_result,
     read_v2_candidates,
@@ -90,6 +95,50 @@ def _transition_ddl() -> str:
         created_at DATETIME NOT NULL
     )
     """
+
+
+def test_candidate_projection_resolves_one_shared_sentiment_snapshot() -> None:
+    shared = {
+        "contract_hash": ASHARE_SENTIMENT_RISK_CONTRACT_HASH,
+        "schema_version": "ashare_sentiment_risk_proxy_v1",
+        "source_kind": "adjusted_bar_middle_echelon_proxy_v1",
+        "price_basis": "total_return_adjusted",
+        "state": "warning",
+        "action_mode": "observe_only",
+        "new_entry_allowed": False,
+        "unavailable_reason": None,
+        "metrics": {"middle_positive_breadth": 0.3},
+        "thresholds": {"middle_positive_breadth_lt": 0.4},
+    }
+    shared["snapshot_hash"] = stable_contract_hash(shared)
+    reference = {
+        "contract_hash": ASHARE_SENTIMENT_RISK_CONTRACT_HASH,
+        "snapshot_hash": shared["snapshot_hash"],
+        "state": "warning",
+        "unavailable_reason": None,
+    }
+    row = {
+        "universe": "ashare",
+        "formula_id": "leader_breakout_proxy_v2",
+        "qualifies": True,
+        "gate_facts_json": json.dumps({"sentiment_risk_ref": reference}),
+        "exclusion_reasons_json": "[]",
+        "provenance_json": json.dumps(
+            {
+                "research_only": True,
+                "notification_provenance": "none",
+                "execution_provenance": "none",
+            }
+        ),
+    }
+
+    projected = _candidate_projection(row, shared_sentiment_risk=shared)
+
+    assert projected["sentiment_risk_state"] == "warning"
+    assert projected["sentiment_risk_action_mode"] == "observe_only"
+    assert projected["sentiment_risk_new_entry_allowed"] is False
+    assert projected["gate_facts"]["sentiment_risk"] == shared
+    assert "sentiment_risk_ref" not in projected["gate_facts"]
 
 
 async def _seed_read_db(engine) -> dict[str, str]:

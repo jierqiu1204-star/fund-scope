@@ -5,9 +5,11 @@ from datetime import date
 import pytest
 
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_validation import (
+    SentimentRiskPolicyShadowSample,
     V2PromotionEvidence,
     locked_case_status,
     paired_five_session_net_excess,
+    sentiment_risk_policy_shadow_diagnostics,
     source_label,
     validate_v2_promotion_evidence,
 )
@@ -69,6 +71,47 @@ def test_promotion_hard_gates_remain_insufficient_until_all_pass() -> None:
     assert "insufficient_factual_pit_sessions" in failures
     assert "primary_bootstrap_lower_bound_not_above_zero" in failures
     assert "holdout_not_successfully_used_once" in failures
+
+
+def test_sentiment_risk_policy_shadow_keeps_primary_and_reports_tradeoffs() -> None:
+    diagnostics = sentiment_risk_policy_shadow_diagnostics(
+        (
+            SentimentRiskPolicyShadowSample(date(2026, 8, 1), 0.01, "healthy"),
+            SentimentRiskPolicyShadowSample(date(2026, 8, 8), -0.03, "warning"),
+            SentimentRiskPolicyShadowSample(date(2026, 8, 15), 0.02, "risk_off"),
+            SentimentRiskPolicyShadowSample(date(2026, 8, 22), -0.05, "unavailable"),
+        )
+    )
+
+    assert diagnostics.primary_endpoint == "five_session_paired_net_excess"
+    assert diagnostics.policy_mode == "policy_shadow"
+    assert diagnostics.status == "insufficient_data"
+    assert diagnostics.sample_count == 4
+    assert diagnostics.evaluable_count == 3
+    assert diagnostics.coverage == pytest.approx(0.75)
+    assert diagnostics.avoided_loss == pytest.approx(0.03)
+    assert diagnostics.missed_gain == pytest.approx(0.02)
+    assert diagnostics.incremental_benefit_mean == pytest.approx((0.03 - 0.02) / 3)
+    assert diagnostics.raw_max_drawdown is not None
+    assert diagnostics.gated_max_drawdown is not None
+
+
+def test_sentiment_risk_policy_shadow_rejects_contract_or_endpoint_tuning() -> None:
+    with pytest.raises(ValueError, match="contract is not frozen"):
+        sentiment_risk_policy_shadow_diagnostics(
+            (SentimentRiskPolicyShadowSample(date(2026, 8, 1), 0.01, "healthy", "x" * 64),)
+        )
+    with pytest.raises(ValueError, match="endpoint was substituted"):
+        sentiment_risk_policy_shadow_diagnostics(
+            (
+                SentimentRiskPolicyShadowSample(
+                    date(2026, 8, 1),
+                    0.01,
+                    "healthy",
+                    primary_endpoint="one_session_hit_rate",
+                ),
+            )
+        )
 
 
 def test_locked_case_is_checked_after_screening_and_can_be_unavailable() -> None:

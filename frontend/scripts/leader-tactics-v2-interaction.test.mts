@@ -11,7 +11,9 @@ import {
   getLeaderTacticsV2NextCursor,
   leaderTacticsV2QueryKey,
   leaderTacticsV2UnavailableText,
-  mergeLeaderTacticsV2Pages
+  mergeLeaderTacticsV2Pages,
+  sentimentActionLabel,
+  sentimentRiskLabel
 } from "../lib/leader-tactics-v2-contract.ts";
 
 const filters: LeaderTacticsV2Filters = {
@@ -40,6 +42,11 @@ function candidate(universe: "etf" | "ashare" = "etf") {
     source_cutoff: "2026-08-03T15:00:00",
     gate_facts: { peer_count: 6 },
     exclusion_reasons: [],
+    feature_hash: "feature-1",
+    sentiment_risk_state: "not_applicable" as const,
+    sentiment_risk_action_mode: "not_applicable" as const,
+    sentiment_risk_new_entry_allowed: null,
+    sentiment_risk_provenance: {},
     provenance: {
       research_only: true,
       notification_provenance: "none",
@@ -74,7 +81,14 @@ function page(overrides: Partial<CandidatesResponse> = {}): CandidatesResponse {
       coverage: "available",
       unavailable_reason: null,
       exclusion_counts: {},
-      manifest_hash: "manifest-1"
+      manifest_hash: "manifest-1",
+      sentiment_risk: {
+        observation_count: 1,
+        state_counts: { not_applicable: 1 },
+        action_mode_counts: { not_applicable: 1 },
+        new_entry_allowed_count: 0,
+        unavailable_reasons: {}
+      }
     },
     ranking_source_kind: "research_replay",
     notification_provenance: "none",
@@ -189,6 +203,48 @@ test("provenance, research-only and no-fallback contracts are enforced", () => {
   );
 });
 
+test("sentiment risk labels and A-share action mapping stay isolated from ETF", () => {
+  assert.equal(sentimentRiskLabel("warning"), "情绪预警");
+  assert.equal(sentimentActionLabel("observe_only"), "仅观察");
+  assert.equal(
+    sentimentActionLabel("shadow_entry_allowed"),
+    "研究准入（非实盘）"
+  );
+  const warning = {
+    ...candidate("ashare"),
+    sentiment_risk_state: "warning" as const,
+    sentiment_risk_action_mode: "observe_only" as const,
+    sentiment_risk_new_entry_allowed: false,
+    sentiment_risk_provenance: {
+      unavailable_reason: null
+    }
+  };
+  const warningPage = page({ universe: "ashare", candidates: [warning] });
+  assert.equal(
+    assertLeaderTacticsV2PageContract(warningPage, {
+      ...filters,
+      universe: "ashare"
+    }),
+    warningPage
+  );
+  assert.throws(
+    () =>
+      assertLeaderTacticsV2PageContract(
+        page({
+          universe: "ashare",
+          candidates: [
+            {
+              ...warning,
+              sentiment_risk_action_mode: "shadow_entry_allowed" as const
+            }
+          ]
+        }),
+        { ...filters, universe: "ashare" }
+      ),
+    /action mapping is invalid/
+  );
+});
+
 test("a stale response from another filter is rejected instead of falling back", async () => {
   const controller = new AbortController();
   await assert.rejects(
@@ -282,7 +338,10 @@ test("turning watches remain non-actionable and universe isolated", () => {
     gate_facts: {
       turning_watch_missing_conditions: "core_leader",
       turning_watch_core_distance: 0.12
-    }
+    },
+    sentiment_risk_state: "healthy" as const,
+    sentiment_risk_action_mode: "observe_only" as const,
+    sentiment_risk_new_entry_allowed: false
   };
   const watchPage = page({
     universe: "ashare",

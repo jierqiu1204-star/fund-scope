@@ -19,6 +19,15 @@ async def test_enabled_v2_api_paginates_one_manifest_and_keeps_summary_stable(ap
     assert first_response.status_code == 200
     first = first_response.json()
     assert [row["asset_code"] for row in first["candidates"]] == ["000001", "000003"]
+    assert all(
+        row["sentiment_risk_state"] == "not_applicable"
+        and row["sentiment_risk_action_mode"] == "not_applicable"
+        and row["sentiment_risk_new_entry_allowed"] is None
+        for row in first["candidates"]
+    )
+    assert first["summary"]["sentiment_risk"]["state_counts"] == {
+        "not_applicable": 6
+    }
 
     second_response = await client.get(
         "/api/short-research/leader-tactics-v2/candidates",
@@ -47,6 +56,7 @@ async def test_enabled_v2_api_paginates_one_manifest_and_keeps_summary_stable(ap
         },
         "by_state": {"preparing": 5, "turning_watch": 1},
     }
+    assert summary["sentiment_risk"]["state_counts"] == {"not_applicable": 6}
 
 
 @pytest.mark.asyncio

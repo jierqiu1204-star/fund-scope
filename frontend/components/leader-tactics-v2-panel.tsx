@@ -11,7 +11,9 @@ import {
   fetchLeaderTacticsV2Page,
   leaderTacticsV2QueryKey,
   leaderTacticsV2UnavailableText,
-  mergeLeaderTacticsV2Pages
+  mergeLeaderTacticsV2Pages,
+  sentimentActionLabel,
+  sentimentRiskLabel
 } from "@/lib/leader-tactics-v2-contract";
 
 type Universe = "etf" | "ashare";
@@ -281,6 +283,16 @@ export function LeaderTacticsV2Panel() {
                         {candidate.theme ?? "未提供主题"} ·{" "}
                         {candidate.formula_id} · {candidate.state}
                       </p>
+                      {candidate.universe === "ashare" ? (
+                        <p className="mt-1 text-xs text-amber-800">
+                          情绪风险：
+                          {sentimentRiskLabel(candidate.sentiment_risk_state)} ·
+                          动作：
+                          {sentimentActionLabel(
+                            candidate.sentiment_risk_action_mode
+                          )}
+                        </p>
+                      ) : null}
                     </div>
                     <div className="text-left md:text-right">
                       <p className="font-mono text-sm">
@@ -301,6 +313,23 @@ export function LeaderTacticsV2Panel() {
                       可用性：{candidate.availability} · 门槛：
                       {candidate.qualifies ? "通过" : "未通过"}
                     </p>
+                    {candidate.universe === "ashare" ? (
+                      <p className="mt-2 rounded bg-amber-50 px-2 py-1 text-amber-900">
+                        情绪覆盖：
+                        {sentimentRiskLabel(
+                          candidate.sentiment_risk_state
+                        )} ·{" "}
+                        {sentimentActionLabel(
+                          candidate.sentiment_risk_action_mode
+                        )}
+                        {candidate.sentiment_risk_state === "unavailable"
+                          ? `（${String(
+                              candidate.sentiment_risk_provenance
+                                .unavailable_reason ?? "原因未提供"
+                            )}）`
+                          : ""}
+                      </p>
+                    ) : null}
                     {candidate.state === "turning_watch" ? (
                       <p className="mt-2 rounded bg-amber-50 px-2 py-1 text-amber-900">
                         仅为非行动“转强观察”，距正式候选仍缺：

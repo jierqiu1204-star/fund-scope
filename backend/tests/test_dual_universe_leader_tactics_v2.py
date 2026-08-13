@@ -129,6 +129,40 @@ def test_common_gate_facts_keep_three_equal_core_components() -> None:
     assert "core_score" in facts
 
 
+def test_ashare_sentiment_overlay_preserves_raw_screen_and_is_absent_from_etf() -> None:
+    etf_items = tuple(_asset(f"5100{index:02d}") for index in range(6))
+    ashare_items = tuple(
+        replace(item, universe="ashare", asset_code=f"0000{index:02d}")
+        for index, item in enumerate(etf_items)
+    )
+
+    etf_result = screen_dual_universe(etf_items)
+    ashare_result = screen_dual_universe(ashare_items)
+    etf_rows = sorted(etf_result.observations, key=lambda row: (row.formula_id, row.asset_code))
+    ashare_rows = sorted(
+        ashare_result.observations,
+        key=lambda row: (row.formula_id, row.asset_code),
+    )
+
+    assert len(etf_rows) == len(ashare_rows)
+    snapshot_count = 0
+    for etf_row, ashare_row in zip(etf_rows, ashare_rows, strict=True):
+        assert etf_row.formula_id == ashare_row.formula_id
+        assert etf_row.qualifies == ashare_row.qualifies
+        assert etf_row.score == ashare_row.score
+        assert etf_row.state == ashare_row.state
+        assert etf_row.exclusion_reasons == ashare_row.exclusion_reasons
+        assert "sentiment_risk" not in dict(etf_row.gate_facts)
+        facts = dict(ashare_row.gate_facts)
+        reference = facts["sentiment_risk_ref"]
+        assert reference["state"] == "unavailable"
+        assert reference["unavailable_reason"] == "sentiment_risk_insufficient_hot_themes"
+        if "sentiment_risk_snapshot" in facts:
+            snapshot_count += 1
+            assert facts["sentiment_risk_snapshot"]["new_entry_allowed"] is False
+    assert snapshot_count == 1
+
+
 def test_lifecycle_uses_later_eligible_daily_close_and_next_close_for_exit() -> None:
     signal_day = date(2026, 8, 1)
     bars = []

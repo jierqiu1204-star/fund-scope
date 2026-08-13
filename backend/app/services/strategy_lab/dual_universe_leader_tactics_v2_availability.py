@@ -92,6 +92,12 @@ V2_UNAVAILABLE_REASONS = frozenset(
         "v2_candidate_not_materialized",
         "locked_case_unavailable",
         "locked_case_wrong_cutoff",
+        "sentiment_risk_contract_missing",
+        "sentiment_risk_pit_input_invalid",
+        "sentiment_risk_non_finite_input",
+        "sentiment_risk_insufficient_hot_themes",
+        "sentiment_risk_insufficient_leaders",
+        "sentiment_risk_insufficient_middle_tier",
     }
 )
 

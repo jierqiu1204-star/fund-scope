@@ -18,6 +18,12 @@ from datetime import date, datetime
 from typing import Any, Literal
 
 from app.services.etf_research_evidence import stable_contract_hash
+from app.services.strategy_lab.ashare_sentiment_risk import (
+    ASHARE_SENTIMENT_RISK_CONTRACT_HASH,
+    SentimentRiskPoint,
+    SentimentRiskSnapshot,
+    calculate_sentiment_risk,
+)
 
 V2_SCHEMA_VERSION = "dual_universe_leader_tactics_v2"
 V2_EXPERIMENT_FAMILY = "leader_tactics_shadow_v2"
@@ -485,7 +491,7 @@ class V2CandidateObservation:
     availability: Literal["available", "unavailable"]
     qualifies: bool
     score: float | None
-    gate_facts: tuple[tuple[str, str | int | float | bool | None], ...]
+    gate_facts: tuple[tuple[str, Any], ...]
     exclusion_reasons: tuple[str, ...]
     source_cutoff: datetime
     theme: str | None
@@ -552,6 +558,8 @@ class V2StagedAssetFeature:
     return_5: float | None
     mean_amount_20: float | None
     input_digest: str
+    return_20: float | None = None
+    below_adjusted_ma5: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -599,10 +607,13 @@ class V2ResearchManifest:
     exclusions: tuple[tuple[str, int], ...] = ()
     provider_health: tuple[tuple[str, str], ...] = ()
     runtime_budget_seconds: float = 55.0
+    sentiment_risk_contract_hash: str | None = None
 
     def canonical_payload(self) -> dict[str, Any]:
         payload = asdict(self)
         payload.pop("manifest_hash")
+        if payload["sentiment_risk_contract_hash"] is None:
+            payload.pop("sentiment_risk_contract_hash")
         return payload
 
     def validate(self) -> None:
@@ -629,6 +640,12 @@ class V2ResearchManifest:
             raise V2ContractError("V2 manifest must be research-only")
         if self.runtime_budget_seconds <= 0 or self.runtime_budget_seconds > 55:
             raise V2ContractError("manifest runtime budget exceeds the V2 bound")
+        if (
+            self.sentiment_risk_contract_hash is not None
+            and self.sentiment_risk_contract_hash
+            != ASHARE_SENTIMENT_RISK_CONTRACT_HASH
+        ):
+            raise V2ContractError("sentiment risk contract hash is incompatible")
         cost_keys = {key for key, _ in self.cost_model}
         if cost_keys != {"fee_bps_per_side", "slippage_bps_per_side"}:
             raise V2ContractError("manifest cost model is incomplete")
@@ -664,6 +681,11 @@ def build_v2_manifest(
         pagination_cursor=pagination_cursor,
         exclusions=exclusions,
         provider_health=provider_health,
+        sentiment_risk_contract_hash=(
+            ASHARE_SENTIMENT_RISK_CONTRACT_HASH
+            if universe == UNIVERSE_ASHARE
+            else None
+        ),
     )
     result = replace(draft, manifest_hash=stable_contract_hash(draft.canonical_payload()))
     result.validate()
@@ -1150,6 +1172,8 @@ def _incremental_input_hash(items: Sequence[V2AssetInput]) -> str:
 def build_v2_staged_asset_feature(item: V2AssetInput) -> V2StagedAssetFeature:
     """Project one fully validated input into a bounded Stage-A row."""
 
+    adjusted_ma5 = _ma(item, 5)
+    adjusted_close = item.bars[-1].adjusted_close if item.bars else None
     return V2StagedAssetFeature(
         asset_code=item.asset_code,
         asset_name=item.asset_name,
@@ -1160,6 +1184,12 @@ def build_v2_staged_asset_feature(item: V2AssetInput) -> V2StagedAssetFeature:
         return_5=_return(item, 5),
         mean_amount_20=_mean_finite([bar.amount for bar in item.bars[-20:]]),
         input_digest=_incremental_input_hash((item,)),
+        return_20=_return(item, 20),
+        below_adjusted_ma5=(
+            adjusted_close < adjusted_ma5
+            if adjusted_close is not None and adjusted_ma5 is not None
+            else None
+        ),
     )
 
 
@@ -1207,6 +1237,99 @@ def staged_theme_percentile_overrides(
     }
 
 
+def staged_sentiment_risk_snapshot(
+    features: Sequence[V2StagedAssetFeature],
+    *,
+    theme_percentile_overrides: Mapping[str, tuple[float, float, float]],
+    signal_date: date,
+    source_cutoff: datetime,
+) -> SentimentRiskSnapshot:
+    """Build the market-wide risk snapshot from bounded Stage-A scalars."""
+
+    representatives: list[V2StagedAssetFeature] = []
+    clones: dict[tuple[str, str], list[V2StagedAssetFeature]] = defaultdict(list)
+    for feature in features:
+        if not feature.standard_available or feature.group_key is None:
+            continue
+        if feature.clone_group:
+            clones[(feature.group_key, feature.clone_group)].append(feature)
+        else:
+            representatives.append(feature)
+    for rows in clones.values():
+        representatives.append(
+            max(
+                rows,
+                key=lambda row: (
+                    row.mean_amount_20
+                    if row.mean_amount_20 is not None
+                    else -math.inf,
+                    row.asset_code,
+                ),
+            )
+        )
+
+    groups: dict[str, list[V2StagedAssetFeature]] = defaultdict(list)
+    for feature in representatives:
+        groups[feature.group_key].append(feature)  # type: ignore[index]
+    points: list[SentimentRiskPoint] = []
+    for group, rows in groups.items():
+        return_20_pct = _percentile(
+            {
+                row.asset_code: row.return_20
+                for row in rows
+                if row.return_20 is not None
+            }
+        )
+        return_5_pct = _percentile(
+            {
+                row.asset_code: row.return_5
+                for row in rows
+                if row.return_5 is not None
+            }
+        )
+        amount_pct = _percentile(
+            {
+                row.asset_code: row.mean_amount_20
+                for row in rows
+                if row.mean_amount_20 is not None
+            }
+        )
+        theme_components = theme_percentile_overrides.get(group)
+        hot_score = _mean_finite(theme_components or ())
+        for row in rows:
+            core_score = _mean_finite(
+                (
+                    return_20_pct.get(row.asset_code),
+                    return_5_pct.get(row.asset_code),
+                    amount_pct.get(row.asset_code),
+                )
+            )
+            if (
+                hot_score is None
+                or core_score is None
+                or row.return_1 is None
+                or row.below_adjusted_ma5 is None
+            ):
+                continue
+            points.append(
+                SentimentRiskPoint(
+                    asset_code=row.asset_code,
+                    theme_key=group,
+                    hot_score=hot_score,
+                    core_score=core_score,
+                    return_1=row.return_1,
+                    below_adjusted_ma5=row.below_adjusted_ma5,
+                    signal_date=signal_date,
+                    source_cutoff=source_cutoff,
+                )
+            )
+    return calculate_sentiment_risk(
+        points,
+        signal_date=signal_date,
+        source_cutoff=source_cutoff,
+    )
+
+
 def staged_v2_input_hash(features: Sequence[V2StagedAssetFeature]) -> str:
     return stable_contract_hash(
         {
@@ -1230,10 +1353,11 @@ def _observation(
     availability: Literal["available", "unavailable"],
     qualifies: bool,
     score: float | None,
-    gate_facts: Mapping[str, str | int | float | bool | None],
+    gate_facts: Mapping[str, Any],
     exclusion_reasons: Sequence[str],
     clone_excluded: bool,
     state: str = STATE_PREPARING,
+    sentiment_risk: SentimentRiskSnapshot | None = None,
 ) -> V2CandidateObservation:
     reasons = tuple(sorted(set(exclusion_reasons)))
     facts = dict(gate_facts)
@@ -1265,6 +1389,8 @@ def _observation(
     )
     if clone_excluded:
         facts["clone_representative"] = False
+    if sentiment_risk is not None:
+        facts["sentiment_risk_ref"] = sentiment_risk.reference_dict()
     draft = V2CandidateObservation(
         universe=item.universe,
         asset_code=item.asset_code,
@@ -1286,6 +1412,44 @@ def _observation(
         feature_hash="pending",
     )
     return replace(draft, feature_hash=stable_contract_hash(draft.canonical_payload()))
+
+
+def attach_sentiment_risk_snapshot(
+    observations: Sequence[V2CandidateObservation],
+    snapshot: SentimentRiskSnapshot,
+) -> tuple[V2CandidateObservation, ...]:
+    """Attach one full snapshot and compact references to a materialization."""
+
+    rewritten: list[V2CandidateObservation] = []
+    for observation in observations:
+        facts = dict(observation.gate_facts)
+        facts.pop("sentiment_risk", None)
+        facts.pop("sentiment_risk_snapshot", None)
+        facts["sentiment_risk_ref"] = snapshot.reference_dict()
+        draft = replace(
+            observation,
+            gate_facts=tuple(sorted(facts.items())),
+            feature_hash="pending",
+        )
+        rewritten.append(
+            replace(draft, feature_hash=stable_contract_hash(draft.canonical_payload()))
+        )
+    ordered = sorted(rewritten, key=lambda row: (row.formula_id, row.asset_code))
+    if not ordered:
+        return ()
+    anchor = ordered[0]
+    anchor_facts = dict(anchor.gate_facts)
+    anchor_facts["sentiment_risk_snapshot"] = snapshot.to_dict()
+    anchor_draft = replace(
+        anchor,
+        gate_facts=tuple(sorted(anchor_facts.items())),
+        feature_hash="pending",
+    )
+    ordered[0] = replace(
+        anchor_draft,
+        feature_hash=stable_contract_hash(anchor_draft.canonical_payload()),
+    )
+    return tuple(ordered)
 
 
 def _cross_close(item: V2AssetInput) -> bool:
@@ -1567,6 +1731,40 @@ def screen_dual_universe(
                 )
             )
 
+    sentiment_risk: SentimentRiskSnapshot | None = None
+    if universe == UNIVERSE_ASHARE:
+        risk_points: list[SentimentRiskPoint] = []
+        for item, details in intermediate[BREAKOUT_V2]:
+            if item.asset_code not in representatives or standard_reasons[item.asset_code]:
+                continue
+            facts = details["facts"]
+            group = _group_key(item)
+            hot_score = _finite(facts.get("hot_score"))
+            core_score = _finite(facts.get("core_score"))
+            return_1 = _return(item, 1)
+            ma5 = _finite(facts.get("adjusted_ma5"))
+            close = _finite(item.bars[-1].adjusted_close if item.bars else None)
+            if group is None or None in (hot_score, core_score, return_1, ma5, close):
+                continue
+            risk_points.append(
+                SentimentRiskPoint(
+                    asset_code=item.asset_code,
+                    theme_key=group,
+                    hot_score=hot_score,
+                    core_score=core_score,
+                    return_1=return_1,
+                    below_adjusted_ma5=close < ma5,
+                    signal_date=item.signal_date,
+                    source_cutoff=item.source_cutoff,
+                    pit_visible=True,
+                )
+            )
+        sentiment_risk = calculate_sentiment_risk(
+            risk_points,
+            signal_date=next(iter(dates)),
+            source_cutoff=next(iter(cutoffs)),
+        )
+
     component_specs = {
         BREAKOUT_V2: {"breakout_magnitude": False},
         BASE_LAUNCH_V2: {"compression": True, "overextension": True},
@@ -1750,12 +1948,18 @@ def screen_dual_universe(
                     exclusion_reasons=reasons,
                     clone_excluded=clone,
                     state=observation_state,
+                    sentiment_risk=sentiment_risk,
                 )
             )
 
     ordered_observations = tuple(
         sorted(observations, key=lambda row: (row.formula_id, row.asset_code))
     )
+    if sentiment_risk is not None:
+        ordered_observations = attach_sentiment_risk_snapshot(
+            ordered_observations,
+            sentiment_risk,
+        )
     exclusion_counts: dict[str, int] = defaultdict(int)
     for row in ordered_observations:
         for reason in row.exclusion_reasons:
@@ -2018,8 +2222,10 @@ __all__ = [
     "V2_EXPERIMENT_FAMILY",
     "build_v2_manifest",
     "build_v2_staged_asset_feature",
+    "attach_sentiment_risk_snapshot",
     "derive_lifecycle",
     "screen_dual_universe",
+    "staged_sentiment_risk_snapshot",
     "staged_theme_percentile_overrides",
     "staged_v2_input_hash",
     "screen_result_payload",

@@ -48,15 +48,17 @@ async def test_summary_reads_materialized_layers_and_sqlite_text_dates(tmp_path)
         await connection.execute(
             text(
                 """
-                CREATE TABLE leader_tactics_v2_candidate_observations (
-                    id INTEGER PRIMARY KEY,
-                    manifest_hash TEXT NOT NULL,
-                    formula_id TEXT NOT NULL,
-                    state TEXT NOT NULL,
-                    availability TEXT NOT NULL,
-                    qualifies BOOLEAN NOT NULL,
-                    exclusion_reasons_json TEXT NOT NULL
-                )
+                    CREATE TABLE leader_tactics_v2_candidate_observations (
+                        id INTEGER PRIMARY KEY,
+                        manifest_hash TEXT NOT NULL,
+                        universe TEXT NOT NULL,
+                        formula_id TEXT NOT NULL,
+                        state TEXT NOT NULL,
+                        availability TEXT NOT NULL,
+                        qualifies BOOLEAN NOT NULL,
+                        gate_facts_json TEXT NOT NULL,
+                        exclusion_reasons_json TEXT NOT NULL
+                    )
                 """
             )
         )
@@ -104,13 +106,15 @@ async def test_summary_reads_materialized_layers_and_sqlite_text_dates(tmp_path)
         await connection.execute(
             text(
                 """
-                INSERT INTO leader_tactics_v2_candidate_observations
-                    (id, manifest_hash, formula_id, state, availability,
-                     qualifies, exclusion_reasons_json)
-                VALUES (1, :manifest, 'leader_breakout_proxy_v2', 'preparing',
-                        'available', 1, '[]'),
-                       (2, :manifest, 'base_launch_proxy_v2', 'preparing',
-                        'unavailable', 0, '[\"insufficient_adjusted_history\"]')
+                    INSERT INTO leader_tactics_v2_candidate_observations
+                        (id, manifest_hash, universe, formula_id, state,
+                         availability, qualifies, gate_facts_json,
+                         exclusion_reasons_json)
+                    VALUES (1, :manifest, 'etf', 'leader_breakout_proxy_v2',
+                            'preparing', 'available', 1, '{}', '[]'),
+                           (2, :manifest, 'etf', 'base_launch_proxy_v2',
+                            'preparing', 'unavailable', 0, '{}',
+                            '[\"insufficient_adjusted_history\"]')
                 """
             ),
             {"manifest": manifest.manifest_hash},

@@ -15,6 +15,11 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.strategy_lab.ashare_sentiment_risk import (
+    project_sentiment_risk,
+    resolve_sentiment_risk_snapshot,
+    summarize_sentiment_risk,
+)
 from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
     V2_SOURCE_REGISTRY,
     V2ContractError,
@@ -124,10 +129,13 @@ def _manifest_from_payload(value: object) -> V2ResearchManifest:
         raise V2ContractError("manifest payload is invalid") from exc
     if not isinstance(payload, dict):
         raise V2ContractError("manifest payload is invalid")
-    if set(payload) != _MANIFEST_FIELDS:
+    missing_fields = _MANIFEST_FIELDS - set(payload)
+    unexpected_fields = set(payload) - _MANIFEST_FIELDS
+    if unexpected_fields or missing_fields - {"sentiment_risk_contract_hash"}:
         raise V2ContractError("manifest payload fields are incomplete or unexpected")
 
     normalized = dict(payload)
+    normalized.setdefault("sentiment_risk_contract_hash", None)
     normalized["decision_cutoff"] = _manifest_datetime(
         normalized["decision_cutoff"], "decision_cutoff"
     )
@@ -464,6 +472,42 @@ def _decode_json(value: object, fallback: Any) -> Any:
     return parsed
 
 
+def _candidate_projection(
+    row: Mapping[str, Any],
+    *,
+    shared_sentiment_risk: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    persisted_gate_facts = _decode_json(row.get("gate_facts_json"), {})
+    if not isinstance(persisted_gate_facts, dict):
+        persisted_gate_facts = {}
+    gate_facts = dict(persisted_gate_facts)
+    resolved_risk = resolve_sentiment_risk_snapshot(
+        gate_facts=persisted_gate_facts,
+        shared_snapshot=shared_sentiment_risk,
+    )
+    gate_facts.pop("sentiment_risk_ref", None)
+    gate_facts.pop("sentiment_risk_snapshot", None)
+    if resolved_risk is not None:
+        gate_facts["sentiment_risk"] = dict(resolved_risk)
+    candidate = {
+        **dict(row),
+        "qualifies": bool(row.get("qualifies")),
+        "gate_facts": gate_facts,
+        "exclusion_reasons": _decode_json(row.get("exclusion_reasons_json"), []),
+        "provenance": _decode_json(row.get("provenance_json"), {}),
+    }
+    candidate.update(
+        project_sentiment_risk(
+            universe=str(row.get("universe") or ""),
+            formula_id=str(row.get("formula_id") or ""),
+            qualifies=bool(row.get("qualifies")),
+            gate_facts=persisted_gate_facts,
+            shared_snapshot=shared_sentiment_risk,
+        )
+    )
+    return candidate
+
+
 def _candidate_cte(filter_where: str) -> str:
     return f"""
         WITH visible_transitions AS (
@@ -607,6 +651,7 @@ async def read_v2_candidates(
                 "exclusion_counts": {},
                 "manifest_hash": None,
                 "materialization_progress": materialization_progress,
+                "sentiment_risk": summarize_sentiment_risk(()),
             },
             "ranking_source_kind": "research_replay",
             "notification_provenance": "none",
@@ -636,6 +681,12 @@ async def read_v2_candidates(
         .first()
     )
     timing_facts = _decode_json(timing_row["gate_facts_json"], {}) if timing_row is not None else {}
+    shared_sentiment_risk = (
+        timing_facts.get("sentiment_risk_snapshot")
+        if isinstance(timing_facts, dict)
+        and isinstance(timing_facts.get("sentiment_risk_snapshot"), Mapping)
+        else None
+    )
     decision_mode = str(timing_facts.get("decision_mode") or "session_pit")
     ranking_source_kind = (
         "post_close_watchlist" if decision_mode == "post_close_watchlist" else "research_replay"
@@ -722,13 +773,7 @@ async def read_v2_candidates(
     has_more = len(rows) > limit
     rows = rows[:limit]
     candidates = [
-        {
-            **dict(row),
-            "qualifies": bool(row["qualifies"]),
-            "gate_facts": _decode_json(row["gate_facts_json"], {}),
-            "exclusion_reasons": _decode_json(row["exclusion_reasons_json"], []),
-            "provenance": _decode_json(row["provenance_json"], {}),
-        }
+        _candidate_projection(row, shared_sentiment_risk=shared_sentiment_risk)
         for row in rows
     ]
     next_cursor = None
@@ -784,7 +829,8 @@ async def read_v2_candidates(
                 text(
                     f"""
                 {cte}
-                SELECT exclusion_reasons_json
+                SELECT universe, formula_id, qualifies, gate_facts_json,
+                       exclusion_reasons_json
                 FROM filtered
                 """
                 ),
@@ -795,7 +841,16 @@ async def read_v2_candidates(
         .all()
     )
     exclusion_counts: dict[str, int] = {}
+    risk_rows: list[dict[str, Any]] = []
     for row in exclusion_rows:
+        risk_rows.append(
+            {
+                "universe": row["universe"],
+                "formula_id": row["formula_id"],
+                "qualifies": bool(row["qualifies"]),
+                "gate_facts": _decode_json(row["gate_facts_json"], {}),
+            }
+        )
         reasons = _decode_json(row["exclusion_reasons_json"], [])
         if isinstance(reasons, list):
             for reason in reasons:
@@ -832,6 +887,10 @@ async def read_v2_candidates(
             "exclusion_counts": dict(sorted(exclusion_counts.items())),
             "manifest_hash": manifest_hash,
             "materialization_progress": materialization_progress,
+            "sentiment_risk": summarize_sentiment_risk(
+                risk_rows,
+                shared_snapshot=shared_sentiment_risk,
+            ),
         },
         "ranking_source_kind": ranking_source_kind,
         "notification_provenance": "none",

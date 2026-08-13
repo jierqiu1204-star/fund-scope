@@ -9,6 +9,9 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.strategy_lab.ashare_sentiment_risk import (
+    summarize_sentiment_risk,
+)
 from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
     V2_CANDIDATE_IDS,
     V2_EXPERIMENT_FAMILY,
@@ -75,6 +78,7 @@ def unavailable_v2_summary(
             ).to_dict(),
         },
         "candidate_counts": {},
+        "sentiment_risk": summarize_sentiment_risk(()),
         "exclusion_counts": {},
         "provider_health": {},
         "economic_evidence": {
@@ -117,8 +121,8 @@ async def read_v2_summary(
             await session.execute(
                 text(
                     """
-                SELECT formula_id, state, availability, qualifies,
-                       exclusion_reasons_json
+                SELECT universe, formula_id, state, availability, qualifies,
+                       gate_facts_json, exclusion_reasons_json
                 FROM leader_tactics_v2_candidate_observations
                 WHERE manifest_hash = :manifest_hash
                 ORDER BY formula_id, state
@@ -136,11 +140,27 @@ async def read_v2_summary(
     by_formula: dict[str, int] = {}
     by_state: dict[str, int] = {}
     exclusions: dict[str, int] = {}
+    risk_rows: list[dict[str, Any]] = []
+    shared_sentiment_risk: dict[str, Any] | None = None
     for row in observations:
         formula_id = str(row["formula_id"])
         state = str(row["state"])
         by_formula[formula_id] = by_formula.get(formula_id, 0) + 1
         by_state[state] = by_state.get(state, 0) + 1
+        gate_facts = _decode(row["gate_facts_json"], {})
+        if not isinstance(gate_facts, dict):
+            gate_facts = {}
+        snapshot = gate_facts.get("sentiment_risk_snapshot")
+        if shared_sentiment_risk is None and isinstance(snapshot, dict):
+            shared_sentiment_risk = snapshot
+        risk_rows.append(
+            {
+                "universe": row["universe"],
+                "formula_id": row["formula_id"],
+                "qualifies": bool(row["qualifies"]),
+                "gate_facts": gate_facts,
+            }
+        )
         reasons = _decode(row["exclusion_reasons_json"], [])
         if isinstance(reasons, list):
             for reason in reasons:
@@ -216,6 +236,10 @@ async def read_v2_summary(
             "by_formula": by_formula,
             "by_state": by_state,
         },
+        "sentiment_risk": summarize_sentiment_risk(
+            risk_rows,
+            shared_snapshot=shared_sentiment_risk,
+        ),
         "exclusion_counts": dict(sorted(exclusions.items())),
         "provider_health": _decode(manifest["provider_health_json"], {}),
         "economic_evidence": economic,

@@ -21,9 +21,11 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
     V2CandidateObservation,
     V2ScreenResult,
     V2StagedAssetFeature,
+    attach_sentiment_risk_snapshot,
     build_v2_manifest,
     build_v2_staged_asset_feature,
     screen_dual_universe,
+    staged_sentiment_risk_snapshot,
     staged_theme_percentile_overrides,
     staged_v2_input_hash,
 )
@@ -404,6 +406,12 @@ async def advance_ashare_materialization(
     )
     await session.commit()
     overrides = staged_theme_percentile_overrides(features)
+    sentiment_risk = staged_sentiment_risk_snapshot(
+        features,
+        theme_percentile_overrides=overrides,
+        signal_date=signal_date,
+        source_cutoff=source_cutoff,
+    )
     assets_by_group: dict[str, list[tuple[str, str]]] = defaultdict(list)
     for feature in features:
         key = feature.group_key or f"__ungrouped__:{feature.asset_code}"
@@ -531,8 +539,9 @@ async def advance_ashare_materialization(
                 "research_only": True,
             }
         decoded_observations.extend(_observation_from_payload(item) for item in payload)
-    observations = tuple(
-        sorted(decoded_observations, key=lambda row: (row.formula_id, row.asset_code))
+    observations = attach_sentiment_risk_snapshot(
+        decoded_observations,
+        sentiment_risk,
     )
     observation_identities = {
         (row.asset_code, row.formula_id, row.signal_date) for row in observations
