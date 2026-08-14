@@ -659,32 +659,6 @@ class EtfPortfolioBacktestListOut(BaseModel):
     items: list[EtfPortfolioBacktestRunSummaryOut] = Field(default_factory=list)
 
 
-class EtfStrategyComparisonRequest(BaseModel):
-    start_date: date | None = None
-    end_date: date | None = None
-    days: int = Field(default=180, ge=60, le=1000)
-    initial_cash: float | None = Field(default=None, gt=0)
-    fee_rate: float = Field(default=0.001, ge=0, le=0.02)
-    max_assets: int = Field(default=180, ge=20, le=500)
-
-
-class EtfStrategyComparisonOut(BaseModel):
-    id: int
-    status: str
-    started_at: datetime
-    finished_at: datetime | None = None
-    start_date: date
-    end_date: date
-    initial_cash: float
-    fee_rate: float
-    data_coverage: dict[str, Any] = Field(default_factory=dict)
-    caveats: list[str] = Field(default_factory=list)
-    strategies: list[dict[str, Any]] = Field(default_factory=list)
-    best_strategy: str | None = None
-    exit_v2_baseline_comparison: dict[str, Any] | None = None
-    exit_v2_evidence_contract: dict[str, Any] | None = None
-    error_message: str | None = None
-
 
 class EtfExitHyperoptRequest(BaseModel):
     days: int = Field(default=730, ge=120, le=1500)

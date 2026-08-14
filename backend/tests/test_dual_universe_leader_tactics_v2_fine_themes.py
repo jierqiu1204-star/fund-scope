@@ -10,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.services.strategy_lab import dual_universe_leader_tactics_v2_concept_snapshot
+from app.services.strategy_lab import dual_universe_leader_tactics_v2_fine_themes as fine_themes
 from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
     ASHARE_FINE_THEME_FACT_HASH_CONTRACT,
 )
@@ -23,6 +24,15 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_fine_themes impor
 )
 
 
+def test_registered_theme_sources_have_stable_keys_and_labels() -> None:
+    assert fine_themes.REGISTERED_FINE_THEME_KEYS == ("rare_earth",)
+    assert fine_themes.REGISTERED_FINE_THEME_LABELS == ("稀土", "稀土永磁")
+    assert (
+        tuple(source.provider_label for source in fine_themes.registered_fine_theme_sources())
+        == fine_themes.REGISTERED_FINE_THEME_LABELS
+    )
+
+
 def test_rare_earth_aliases_are_normalized_without_inferring_membership() -> None:
     assert normalize_fine_theme_label("稀土") == ("rare_earth", "稀土/稀土永磁")
     assert normalize_fine_theme_label(" 稀土永磁 ") == (
@@ -31,7 +41,7 @@ def test_rare_earth_aliases_are_normalized_without_inferring_membership() -> Non
     )
 
 
-def test_concept_snapshot_keeps_a_valid_alias_when_another_alias_fails(monkeypatch, capsys) -> None:
+def test_concept_snapshot_fetches_one_registered_theme(monkeypatch, capsys) -> None:
     @dataclass
     class _Column:
         values: list[str]
@@ -43,11 +53,12 @@ def test_concept_snapshot_keeps_a_valid_alias_when_another_alias_fails(monkeypat
         columns = ("代码",)
 
         def __getitem__(self, _key: str) -> _Column:
-            return _Column(["600111"])
+            return _Column(["600111", "600111"])
+
+    calls: list[str] = []
 
     def fetch(*, symbol: str):
-        if symbol == "稀土":
-            raise RuntimeError("alias unavailable")
+        calls.append(symbol)
         return _Frame()
 
     monkeypatch.setitem(
@@ -55,16 +66,79 @@ def test_concept_snapshot_keeps_a_valid_alias_when_another_alias_fails(monkeypat
         "akshare",
         SimpleNamespace(stock_board_concept_cons_em=fetch),
     )
-    monkeypatch.setattr(sys, "argv", ["concept-snapshot", "稀土", "稀土永磁"])
+    monkeypatch.setattr(sys, "argv", ["concept-snapshot", "稀土"])
 
     assert dual_universe_leader_tactics_v2_concept_snapshot.main() == 0
     captured = capsys.readouterr()
-    assert '"asset_code": "600111"' in captured.out
-    assert "稀土:RuntimeError" in captured.err
+    assert calls == ["稀土"]
+    assert captured.out.count('"asset_code":"600111"') == 1
 
 
-def test_factual_fine_theme_round_trips_with_pit_provenance() -> None:
-    fact = AshareFineThemeMembershipFact(
+def test_concept_snapshot_rejects_multi_theme_invocation(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "argv", ["concept-snapshot", "稀土", "稀土永磁"])
+    assert dual_universe_leader_tactics_v2_concept_snapshot.main() == 2
+    assert "exactly_one" in capsys.readouterr().err
+
+
+class _CompletedProcess:
+    def __init__(self, *, returncode: int, stdout: bytes = b"", stderr: bytes = b""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        self.killed = False
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        return self.stdout, self.stderr
+
+    def kill(self) -> None:
+        self.killed = True
+
+    async def wait(self) -> int:
+        return self.returncode
+
+
+class _HangingProcess(_CompletedProcess):
+    def __init__(self) -> None:
+        super().__init__(returncode=None)
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        raise TimeoutError
+
+    async def wait(self) -> int:
+        return -9
+
+
+@pytest.mark.asyncio
+async def test_single_theme_failure_keeps_a_bounded_summary(monkeypatch) -> None:
+    async def spawn(*_args, **_kwargs):
+        return _CompletedProcess(returncode=1, stderr=b"HTTP 504 provider timeout")
+
+    monkeypatch.setattr(fine_themes.asyncio, "create_subprocess_exec", spawn)
+    with pytest.raises(RuntimeError, match="稀土.*HTTP 504"):
+        await fine_themes.load_registered_fine_theme_facts_for_source(
+            "稀土",
+            received_at=datetime(2026, 8, 14, 9, 0),
+        )
+
+
+@pytest.mark.asyncio
+async def test_single_theme_timeout_is_failed_closed(monkeypatch) -> None:
+    process = _HangingProcess()
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    monkeypatch.setattr(fine_themes.asyncio, "create_subprocess_exec", spawn)
+    with pytest.raises(RuntimeError, match="fine_theme_provider_timeout:稀土"):
+        await fine_themes.load_registered_fine_theme_facts_for_source(
+            "稀土",
+            received_at=datetime(2026, 8, 14, 9, 0),
+        )
+    assert process.killed is True
+
+
+def _fact() -> AshareFineThemeMembershipFact:
+    return AshareFineThemeMembershipFact(
         asset_code="600111",
         group_id="fine_theme:rare_earth",
         theme="稀土/稀土永磁",
@@ -75,6 +149,27 @@ def test_factual_fine_theme_round_trips_with_pit_provenance() -> None:
         taxonomy_version="eastmoney.concept.current_v1",
         source="eastmoney.concept.constituents",
     ).finalized()
+
+
+@pytest.mark.asyncio
+async def test_compatibility_loader_serially_aggregates_and_deduplicates(monkeypatch) -> None:
+    calls: list[str] = []
+
+    async def load_one(provider_label: str, *, received_at: datetime):
+        calls.append(provider_label)
+        return (_fact(),)
+
+    monkeypatch.setattr(fine_themes, "load_registered_fine_theme_facts_for_source", load_one)
+    facts = await fine_themes.load_registered_fine_theme_facts(
+        received_at=datetime(2026, 8, 14, 9, 0),
+    )
+    assert calls == ["稀土", "稀土永磁"]
+    assert len(facts) == 1
+    assert facts[0].asset_code == "600111"
+
+
+def test_factual_fine_theme_round_trips_with_pit_provenance() -> None:
+    fact = _fact()
     membership = fine_theme_membership_to_v2(
         {
             **fact.identity_payload(),

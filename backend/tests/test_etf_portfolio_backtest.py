@@ -18,7 +18,6 @@ from app.models.entities import (
 from app.services.short_research import backtest as backtest_service
 from app.services.short_research.backtest import (
     ReplayPosition,
-    _comparison_target_weights,
     _daily_execution_resolution,
     _execution_cost_evidence,
     _first_execution_quote_after,
@@ -26,7 +25,6 @@ from app.services.short_research.backtest import (
     _risk_action,
     backtest_summary_payload,
     run_etf_portfolio_backtest,
-    run_etf_strategy_comparison_backtest,
 )
 from app.services.short_research.service import (
     ComputedAsset,
@@ -289,29 +287,6 @@ async def test_etf_portfolio_backtest_api_create_list_and_detail(client, app) ->
     assert detail_body["label_summaries"]
 
 
-@pytest.mark.asyncio
-async def test_etf_strategy_comparison_includes_exit_v2_evidence(app) -> None:
-    codes = [f"57{index:04d}" for index in range(24)]
-    await _seed_backtest_etfs(app, codes=codes, days=150)
-
-    async with app.state.db.session() as session:
-        run = await run_etf_strategy_comparison_backtest(session, days=120, max_assets=80)
-
-    assert run.status == "success", run.error_message
-    metrics = run.metrics_json or {}
-    baselines = metrics["exit_v2_baseline_comparison"]["baselines"]
-
-    assert {"topn_fixed_hold", "current_live_exit_rules", "guard_only", "exit_v2_reentry"} <= set(baselines)
-    assert run.config_json["exit_v2_evidence_contract"]["research_only"] is True
-    assert run.config_json["exit_action_version"]
-    assert run.config_json["reentry_rule_version"]
-    for strategy in metrics["strategies"]:
-        strategy_metrics = strategy["metrics"]
-        assert "missed_upside_rate" in strategy_metrics
-        assert "protection_success_rate" in strategy_metrics
-        assert "reentry_count" in strategy_metrics
-        assert "alert_count" in strategy_metrics
-
 
 @pytest.mark.asyncio
 async def test_etf_intraday_alert_backtest_api_uses_intraday_execution_model(client, app) -> None:
@@ -372,33 +347,6 @@ def test_backtest_portfolio_cash_wait_when_no_candidate_passes_filters() -> None
     assert mode == "cash_wait"
     assert context["cash_weight"] == 1.0
 
-
-def test_strategy_comparison_optimized_and_equal_weight_are_independent() -> None:
-    assets = [
-        _computed_asset("510300", asset_class="broad_index"),
-        _computed_asset("510500", asset_class="broad_index"),
-        _computed_asset("513520"),
-        _computed_asset("588220"),
-    ]
-    for asset, theme in zip(assets, ("宽基", "金融", "跨境", "科技"), strict=False):
-        asset.metrics["theme_profile"] = {"theme_group": theme}
-    for index, asset in enumerate(assets, start=1):
-        asset.metrics["volatility_20d"] = 0.01 * index
-    return_maps = _risk_return_maps([asset.metadata.code for asset in assets])
-
-    optimized_weights, optimized_mode = _comparison_target_weights(
-        "optimized_min_volatility",
-        assets,
-        return_maps=return_maps,
-    )
-    equal_weights, equal_mode = _comparison_target_weights("equal_weight_benchmark", assets)
-
-    assert optimized_mode == "risk_on"
-    assert equal_mode == "risk_on"
-    assert optimized_weights
-    assert equal_weights
-    assert optimized_weights != equal_weights
-    assert max(optimized_weights.values()) <= 0.3
 
 
 def test_backtest_summary_marks_old_method_when_contract_is_missing() -> None:
@@ -749,3 +697,19 @@ def test_replay_compute_uses_supplied_date_slice_not_future_price() -> None:
     assert replay_asset.latest_date == visible[-1].point_date
     assert replay_asset.latest_value == visible[-1].value
     assert replay_asset.latest_value != 99.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("post", "/api/short-research/etf-strategy-comparisons"),
+        ("get", "/api/short-research/etf-strategy-comparisons/latest"),
+        ("get", "/api/short-research/etf-strategy-comparisons/1"),
+    ],
+)
+async def test_etf_strategy_comparison_routes_are_removed(
+    client, method: str, path: str
+) -> None:
+    response = await getattr(client, method)(path)
+    assert response.status_code == 404

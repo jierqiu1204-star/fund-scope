@@ -1117,32 +1117,6 @@ export type EtfPortfolioBacktestList = {
   items: EtfPortfolioBacktestRunSummary[];
 };
 
-export type EtfStrategyComparisonStrategy = {
-  strategy_key: string;
-  strategy_label: string;
-  metrics: Record<string, unknown>;
-  equity_curve: Array<Record<string, unknown>>;
-  caveats: string[];
-};
-
-export type EtfStrategyComparison = {
-  id: number;
-  status: string;
-  started_at: string;
-  finished_at: string | null;
-  start_date: string;
-  end_date: string;
-  initial_cash: number;
-  fee_rate: number;
-  data_coverage: Record<string, unknown>;
-  caveats: string[];
-  strategies: EtfStrategyComparisonStrategy[];
-  best_strategy: string | null;
-  exit_v2_baseline_comparison?: Record<string, unknown> | null;
-  exit_v2_evidence_contract?: Record<string, unknown> | null;
-  error_message: string | null;
-};
-
 export type EtfExitHyperoptItem = {
   id: number;
   bucket_type: string;

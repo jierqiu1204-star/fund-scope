@@ -38,8 +38,6 @@ from app.schemas.short_research import (
     EtfSignalValidationItemOut,
     EtfSignalValidationRunOut,
     EtfSignalValidationSourceEventOut,
-    EtfStrategyComparisonOut,
-    EtfStrategyComparisonRequest,
     EtfStrategyHealthcheckOut,
     ShortResearchAdvisorReportOut,
     ShortResearchAdvisorRunRequest,
@@ -70,12 +68,9 @@ from app.services.short_research.backtest import (
     backtest_detail_payload,
     backtest_summary_payload,
     get_backtest_run,
-    latest_strategy_comparison_run,
     list_backtest_runs,
     run_etf_intraday_alert_backtest,
     run_etf_portfolio_backtest,
-    run_etf_strategy_comparison_backtest,
-    strategy_comparison_payload,
 )
 from app.services.short_research.etf_exit_credibility import (
     etf_exit_credibility_payload,
@@ -1338,48 +1333,6 @@ async def get_etf_portfolio_backtest(
         raise HTTPException(status_code=404, detail="未找到 ETF 组合回测记录")
     return await backtest_detail_payload(session, run)
 
-
-@router.post("/etf-strategy-comparisons", response_model=EtfStrategyComparisonOut)
-async def start_etf_strategy_comparison(
-    payload: EtfStrategyComparisonRequest | None = Body(default=None),
-    session: AsyncSession = Depends(get_db_session),
-    user: User = Depends(require_approved_user),
-) -> dict[str, Any]:
-    payload = payload or EtfStrategyComparisonRequest()
-    run = await run_etf_strategy_comparison_backtest(
-        session,
-        user=user,
-        start_date=payload.start_date,
-        end_date=payload.end_date,
-        days=payload.days,
-        initial_cash=payload.initial_cash,
-        fee_rate=payload.fee_rate,
-        max_assets=payload.max_assets,
-    )
-    return strategy_comparison_payload(run)
-
-
-@router.get("/etf-strategy-comparisons/latest", response_model=EtfStrategyComparisonOut | None)
-async def get_latest_etf_strategy_comparison(
-    session: AsyncSession = Depends(get_db_session),
-    _user: User = Depends(require_approved_user),
-) -> dict[str, Any] | None:
-    run = await latest_strategy_comparison_run(session)
-    if run is None:
-        return None
-    return strategy_comparison_payload(run)
-
-
-@router.get("/etf-strategy-comparisons/{run_id}", response_model=EtfStrategyComparisonOut)
-async def get_etf_strategy_comparison(
-    run_id: int,
-    session: AsyncSession = Depends(get_db_session),
-    _user: User = Depends(require_approved_user),
-) -> dict[str, Any]:
-    run = await get_backtest_run(session, run_id)
-    if run is None or run.rule_version != "etf_strategy_comparison_v1":
-        raise HTTPException(status_code=404, detail="未找到 ETF 策略对照记录")
-    return strategy_comparison_payload(run)
 
 
 @router.post("/etf-exit-hyperopt/run", response_model=EtfExitHyperoptRunOut)

@@ -11,11 +11,8 @@ from app.services.etf_research_evidence import (
     EVIDENCE_STATUS_SAME_CONTRACT,
     EVIDENCE_STATUS_VERSION_MISMATCH,
     EVIDENCE_STATUS_WAITING,
-    EXECUTION_MODEL_INTRADAY_ALERT,
     build_allocation_contract,
     build_evidence_summary,
-    build_exit_v2_baseline_comparison,
-    build_exit_v2_evidence_contract,
     build_research_signal_contract,
     classify_evidence_status,
     stable_contract_hash,
@@ -197,33 +194,3 @@ def test_empty_validation_with_current_contract_is_waiting_not_insufficient() ->
 
     assert summary["evidence_status"] == EVIDENCE_STATUS_WAITING
     assert summary["contract_hash"] == contract["contract_hash"]
-
-
-def test_exit_v2_evidence_contract_is_research_only_and_stable() -> None:
-    contract = build_exit_v2_evidence_contract(
-        validation_run_id=7,
-        signal_contract_hash="abc123",
-        signal_rule_version="short_research_signal_v1",
-        execution_model=EXECUTION_MODEL_INTRADAY_ALERT,
-        data_cutoff=date(2026, 7, 6),
-    )
-
-    assert contract["research_only"] is True
-    assert contract["approved_for_live"] is False
-    assert contract["signal_contract_hash"] == "abc123"
-    assert contract["execution_model"] == EXECUTION_MODEL_INTRADAY_ALERT
-    assert contract["contract_hash"]
-
-
-def test_exit_v2_baseline_comparison_rejects_v2_when_hold_is_better_without_drawdown_help() -> None:
-    comparison = build_exit_v2_baseline_comparison(
-        topn_hold={"total_return_pct": 12.0, "max_drawdown_pct": -8.0},
-        current_exit={"total_return_pct": 7.0, "max_drawdown_pct": -6.5},
-        guard_only={"total_return_pct": 9.0, "max_drawdown_pct": -8.2},
-        exit_v2={"total_return_pct": 8.0, "max_drawdown_pct": -7.5},
-    )
-
-    assert comparison["research_only"] is True
-    assert comparison["approved_for_live"] is False
-    assert comparison["v2_underperforms_hold"] is True
-    assert comparison["baselines"]["topn_fixed_hold"]["total_return_pct"] == 12.0

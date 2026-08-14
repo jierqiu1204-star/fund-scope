@@ -43,7 +43,8 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_etf_inputs import
     read_etf_v2_asset_inputs,
 )
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_fine_themes import (
-    load_registered_fine_theme_facts,
+    REGISTERED_FINE_THEME_LABELS,
+    load_fine_theme_facts_for_registered_theme,
     persist_fine_theme_membership_batch,
 )
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_ingestion import (
@@ -95,15 +96,19 @@ from app.services.workflows.dual_universe_leader_tactics_v2 import (
 )
 
 V2_CAPTURE_JOB_NAME = "dual_universe_leader_tactics_v2_capture"
+V2_FINE_THEME_CAPTURE_JOB_NAME = "dual_universe_leader_tactics_v2_capture_fine_themes"
 V2_MATERIALIZE_JOB_NAME = "dual_universe_leader_tactics_v2_materialize"
 V2_ETF_MATERIALIZE_JOB_NAME = "dual_universe_leader_tactics_v2_materialize_etf"
 V2_JOB_TIMEOUT_SECONDS = 55.0
 V2_WORK_SECONDS = 52.0
+V2_FINE_THEME_WORK_SECONDS = 40.0
 V2_MIN_MATERIALIZATION_HEADROOM_BYTES = 768 * 1024 * 1024
 V2_MAX_ASHARE_ASSETS = 6_000
 V2_UNIVERSE_PERSIST_PAGE_SIZE = 500
 V2_ASHARE_INPUT_PAGE_SIZE = 500
 V2_PROVIDER_FAILURE_COOLDOWN_MINUTES = 30
+FINE_THEME_PROVIDER = "akshare.stock_board_concept_cons_em.current"
+FINE_THEME_TAXONOMY_VERSION = "eastmoney.concept.current_v1"
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
@@ -193,6 +198,41 @@ def _checkpoint_contract(*, manifest_hash: str) -> V2CheckpointContract:
         cost_model=(("fee_bps_per_side", 5.0), ("slippage_bps_per_side", 5.0)),
         state_policy="preparing_confirmed_invalidated_v2",
     )
+
+
+def _fine_theme_manifest_hash(
+    *, signal_date: date, provider_labels: tuple[str, ...], code_version: str
+) -> str:
+    return stable_contract_hash(
+        {
+            "schema_version": "leader_tactics_v2_fine_theme_capture_v1",
+            "signal_date": signal_date,
+            "provider_labels": provider_labels,
+            "provider": FINE_THEME_PROVIDER,
+            "taxonomy_version": FINE_THEME_TAXONOMY_VERSION,
+            "source_registry_hash": V2_SOURCE_REGISTRY.registry_hash,
+            "formula_registry_hash": V2_FORMULA_REGISTRY_HASH,
+            "code_version": code_version,
+        }
+    )
+
+
+def _fine_theme_checkpoint_contract(*, manifest_hash: str) -> V2CheckpointContract:
+    return V2CheckpointContract(
+        manifest_hash=manifest_hash,
+        source_registry_hash=V2_SOURCE_REGISTRY.registry_hash,
+        formula_registry_hash=V2_FORMULA_REGISTRY_HASH,
+        adjustment_version="not_applicable",
+        taxonomy_version=FINE_THEME_TAXONOMY_VERSION,
+        cost_model=(("fee_bps_per_side", 5.0), ("slippage_bps_per_side", 5.0)),
+        state_policy="fine_theme_capture_only_v1",
+    )
+
+
+def _should_defer_failed_retry(*, batch: Any, completed_before: int) -> bool:
+    """Stop same-run retry storms while preserving the durable failed item."""
+
+    return bool(batch.failed and len(batch.checkpoint.completed_codes) == completed_before)
 
 
 async def _prior_ashare_members(
@@ -713,7 +753,10 @@ async def _capture_ashare(
 
     started = time.monotonic()
     provider_received_at = local_now
-    fine_theme_capture: dict[str, Any] = {"status": "not_run"}
+    fine_theme_capture: dict[str, Any] = {
+        "status": "delegated",
+        "job_name": V2_FINE_THEME_CAPTURE_JOB_NAME,
+    }
     async with TickflowAshareV2Provider() as provider:
         baseline_members = await provider.fetch_universe(received_at=provider_received_at)
         baseline_members = provider.restrict_industries_to_signal_date(signal_date)
@@ -756,40 +799,6 @@ async def _capture_ashare(
             }
         database_received_at = _utc_naive(_local_now())
         remaining = timeout_seconds - (time.monotonic() - started) - 2.0
-        if (
-            signal_date == local_now.date()
-            and remaining > 18.0
-            and await staging_tables_available(session)
-        ):
-            existing_fine = await session.scalar(
-                text(
-                    "SELECT COUNT(*) FROM ashare_fine_theme_membership_facts "
-                    "WHERE effective_from = :signal_date"
-                ),
-                {"signal_date": signal_date},
-            )
-            if int(existing_fine or 0) == 0:
-                try:
-                    fine_facts = await load_registered_fine_theme_facts(
-                        received_at=database_received_at
-                    )
-                    inserted = await persist_fine_theme_membership_batch(session, fine_facts)
-                    await session.commit()
-                    fine_theme_capture = {
-                        "status": "captured",
-                        "fact_count": inserted,
-                        "source": "akshare.stock_board_concept_cons_em.current",
-                    }
-                except Exception as exc:
-                    fine_theme_capture = {
-                        "status": "degraded",
-                        "error_summary": f"{type(exc).__name__}: {exc}"[:300],
-                    }
-            else:
-                fine_theme_capture = {
-                    "status": "already_captured",
-                    "fact_count": int(existing_fine or 0),
-                }
         manifest_hash = _capture_manifest_hash(
             signal_date=signal_date,
             members=members,
@@ -827,6 +836,7 @@ async def _capture_ashare(
         codes = tuple(member.code for member in members)
         batch = None
         batch_failures = 0
+        failed_retry_deferred = False
         prefetched_page: tuple[str, ...] = ()
         prefetched_bundles: dict[str, V2CapturedAshareFacts] = {}
         prefetched_failures: dict[str, str] = {}
@@ -875,6 +885,7 @@ async def _capture_ashare(
         # removes idle scheduler gaps without increasing concurrency or page
         # memory.
         while checkpoint.status != "complete" and remaining > 3.0:
+            completed_before = len(checkpoint.completed_codes)
             batch = await run_v2_fact_capture_batch(
                 session,
                 manifest_hash=manifest_hash,
@@ -890,6 +901,11 @@ async def _capture_ashare(
             checkpoint = batch.checkpoint
             batch_failures += len(batch.failed)
             if batch.stopped_reason in {"database_lease_busy", "single_worker_lease_busy"}:
+                break
+            if _should_defer_failed_retry(batch=batch, completed_before=completed_before):
+                # Leave a deterministic bad symbol in the durable retry set;
+                # do not hammer it hundreds of times in this invocation.
+                failed_retry_deferred = True
                 break
             remaining = timeout_seconds - (time.monotonic() - started) - 2.0
         if batch is None:
@@ -915,7 +931,9 @@ async def _capture_ashare(
         "coverage": completed_count / len(members),
         "checkpoint_status": batch.checkpoint.status,
         "batch_size_next": batch.checkpoint.batch_size,
-        "stopped_reason": batch.stopped_reason,
+        "stopped_reason": (
+            "failed_retry_deferred" if failed_retry_deferred else batch.stopped_reason
+        ),
         "provider_health": {
             "provider": TICKFLOW_PROVIDER,
             "status": "healthy" if failed_count == 0 else "degraded",
@@ -987,33 +1005,43 @@ async def _latest_capture_provider_health(
 ) -> tuple[tuple[str, str], ...]:
     """Read bounded transport evidence instead of inferring health from row counts."""
 
-    details_rows = (
-        await session.scalars(
-            select(JobRun.details_json)
-            .where(
-                JobRun.job_name == V2_CAPTURE_JOB_NAME,
-                JobRun.finished_at.is_not(None),
-                JobRun.finished_at <= _utc_naive(as_of),
+    health_by_provider: dict[str, str] = {}
+    for job_name in (V2_CAPTURE_JOB_NAME, V2_FINE_THEME_CAPTURE_JOB_NAME):
+        details_rows = (
+            await session.scalars(
+                select(JobRun.details_json)
+                .where(
+                    JobRun.job_name == job_name,
+                    JobRun.finished_at.is_not(None),
+                    JobRun.finished_at <= _utc_naive(as_of),
+                )
+                .order_by(JobRun.id.desc())
+                .limit(20)
             )
-            .order_by(JobRun.id.desc())
-            .limit(20)
-        )
-    ).all()
-    for details in details_rows:
-        if not isinstance(details, dict) or details.get("signal_date") != signal_date.isoformat():
-            continue
-        health = details.get("provider_health")
-        if not isinstance(health, dict):
-            continue
-        provider = health.get("provider")
-        status = health.get("status")
-        if (
-            isinstance(provider, str)
-            and provider.strip()
-            and status in {"healthy", "degraded", "unavailable"}
-        ):
-            return ((provider.strip(), str(status)),)
-    return ()
+        ).all()
+        found = False
+        for details in details_rows:
+            if (
+                not isinstance(details, dict)
+                or details.get("signal_date") != signal_date.isoformat()
+            ):
+                continue
+            health = details.get("provider_health")
+            if not isinstance(health, dict):
+                continue
+            provider = health.get("provider")
+            status = health.get("status")
+            if (
+                isinstance(provider, str)
+                and provider.strip()
+                and status in {"healthy", "degraded", "unavailable"}
+            ):
+                health_by_provider[provider.strip()] = str(status)
+                found = True
+                break
+        if job_name == V2_FINE_THEME_CAPTURE_JOB_NAME and not found:
+            health_by_provider[FINE_THEME_PROVIDER] = "unavailable"
+    return tuple(sorted(health_by_provider.items()))
 
 
 async def _materialize_etf(
@@ -1367,6 +1395,119 @@ async def _materialize_ashare(
     }
 
 
+async def _capture_fine_themes(
+    session: AsyncSession,
+    *,
+    settings: Settings,
+    local_now: datetime,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    signal_date = _capture_signal_date(local_now)
+    if signal_date is None:
+        return {
+            "status": "skipped",
+            "reason": "leader_tactics_v2_no_completed_trading_session",
+            "research_only": True,
+        }
+    code_version = settings.etf_leader_tactics_v2_code_version.strip()
+    if not code_version:
+        return {
+            "status": "failed",
+            "job_status": "failed",
+            "job_message": "leader_tactics_v2_code_version_missing",
+            "research_only": True,
+        }
+    provider_labels = REGISTERED_FINE_THEME_LABELS
+    if not provider_labels:
+        return {
+            "status": "skipped",
+            "reason": "leader_tactics_v2_no_registered_fine_themes",
+            "research_only": True,
+        }
+    manifest_hash = _fine_theme_manifest_hash(
+        signal_date=signal_date,
+        provider_labels=provider_labels,
+        code_version=code_version,
+    )
+    checkpoint = await load_v2_checkpoint(session, manifest_hash=manifest_hash)
+    if checkpoint is not None and checkpoint.status == "complete":
+        return {
+            "status": "skipped",
+            "reason": "leader_tactics_v2_fine_themes_already_captured",
+            "signal_date": signal_date.isoformat(),
+            "manifest_hash": manifest_hash,
+            "research_only": True,
+        }
+    if checkpoint is None:
+        checkpoint = V2CollectorCheckpoint(
+            cursor=None,
+            batch_size=5,
+            completed_codes=(),
+            status="paused",
+            manifest_hash=manifest_hash,
+        )
+    received_at = _utc_naive(local_now)
+    facts_by_label: dict[str, tuple[Any, ...]] = {}
+
+    async def fetch_one(provider_label: str) -> str:
+        facts = await load_fine_theme_facts_for_registered_theme(
+            provider_label,
+            received_at=received_at,
+        )
+        if not facts:
+            raise RuntimeError("fine_theme_provider_returned_no_facts")
+        facts_by_label[provider_label] = facts
+        return stable_contract_hash(
+            {
+                "provider_label": provider_label,
+                "fact_hashes": tuple(fact.fact_hash for fact in facts),
+            }
+        )
+
+    async def persist_completed(provider_label: str) -> None:
+        facts = facts_by_label.pop(provider_label, None)
+        if facts is None:
+            raise V2ContractError("fine theme capture has no buffered facts")
+        await persist_fine_theme_membership_batch(session, tuple(facts))
+
+    contract = _fine_theme_checkpoint_contract(manifest_hash=manifest_hash)
+    batch = await run_v2_capture_batch(
+        session,
+        manifest_hash=manifest_hash,
+        codes=provider_labels,
+        checkpoint=checkpoint,
+        fetch_one=fetch_one,
+        lease_owner="scheduler-v2-fine-theme-capture",
+        budget_seconds=min(timeout_seconds, V2_FINE_THEME_WORK_SECONDS),
+        provider_cooldown_seconds=0.0,
+        persist_completed=persist_completed,
+        expected_contract=contract,
+        checkpoint_contract=contract,
+    )
+    completed_count = len(batch.checkpoint.completed_codes)
+    failed_count = len(batch.checkpoint.failed_codes)
+    complete = batch.checkpoint.status == "complete"
+    return {
+        "status": "complete" if complete else "partial",
+        "job_status": "success" if complete else "partial",
+        "signal_date": signal_date.isoformat(),
+        "manifest_hash": manifest_hash,
+        "registered_source_count": len(provider_labels),
+        "completed_source_count": completed_count,
+        "failed_source_count": failed_count,
+        "checkpoint_status": batch.checkpoint.status,
+        "stopped_reason": batch.stopped_reason,
+        "provider_health": {
+            "provider": FINE_THEME_PROVIDER,
+            "status": "healthy" if complete else "degraded",
+            "error_summary": batch.checkpoint.error_summary,
+        },
+        "research_only": True,
+        "notification_provenance": "none",
+        "execution_provenance": "none",
+    }
+
+
 async def dual_universe_leader_tactics_v2_etf_materialize_job(
     session: AsyncSession,
     settings: Settings,
@@ -1453,6 +1594,54 @@ async def dual_universe_leader_tactics_v2_materialize_job(
         }
 
 
+async def dual_universe_leader_tactics_v2_fine_theme_capture_job(
+    session: AsyncSession,
+    settings: Settings,
+    *,
+    now: datetime | None = None,
+    timeout_seconds: float = V2_JOB_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """Capture registered fine themes independently from full-market prices."""
+
+    if not settings.etf_leader_tactics_v2_capture_enabled:
+        return {
+            "status": "skipped",
+            "reason": "leader_tactics_v2_capture_disabled",
+            "research_only": True,
+        }
+    if timeout_seconds <= 0 or timeout_seconds > V2_JOB_TIMEOUT_SECONDS:
+        raise ValueError("V2 fine-theme capture timeout must be in (0, 55] seconds")
+    work_seconds = min(V2_FINE_THEME_WORK_SECONDS, timeout_seconds)
+    try:
+        return await asyncio.wait_for(
+            _capture_fine_themes(
+                session,
+                settings=settings,
+                local_now=_local_now(now),
+                timeout_seconds=work_seconds,
+            ),
+            timeout=work_seconds,
+        )
+    except TimeoutError:
+        await session.rollback()
+        signal_date = _capture_signal_date(_local_now(now))
+        return {
+            "status": "waiting",
+            "job_status": "partial",
+            "signal_date": signal_date.isoformat() if signal_date else None,
+            "unavailable_reason": "leader_tactics_v2_fine_theme_capture_timeout",
+            "provider_health": {
+                "provider": FINE_THEME_PROVIDER,
+                "status": "unavailable",
+                "error_summary": "TimeoutError: fine-theme capture exceeded bounded budget",
+            },
+            "timeout_seconds": work_seconds,
+            "research_only": True,
+            "notification_provenance": "none",
+            "execution_provenance": "none",
+        }
+
+
 async def dual_universe_leader_tactics_v2_capture_job(
     session: AsyncSession,
     settings: Settings,
@@ -1508,9 +1697,11 @@ async def dual_universe_leader_tactics_v2_capture_job(
 __all__ = [
     "V2_CAPTURE_JOB_NAME",
     "V2_ETF_MATERIALIZE_JOB_NAME",
+    "V2_FINE_THEME_CAPTURE_JOB_NAME",
     "V2_MATERIALIZE_JOB_NAME",
     "available_memory_bytes",
     "dual_universe_leader_tactics_v2_capture_job",
     "dual_universe_leader_tactics_v2_etf_materialize_job",
+    "dual_universe_leader_tactics_v2_fine_theme_capture_job",
     "dual_universe_leader_tactics_v2_materialize_job",
 ]

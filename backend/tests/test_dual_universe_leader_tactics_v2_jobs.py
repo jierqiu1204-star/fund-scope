@@ -80,7 +80,109 @@ async def test_materialization_preserves_degraded_capture_provider_health(app) -
             as_of=datetime(2026, 8, 8, 9, 12),
         )
 
-    assert health == (("tickflow", "degraded"),)
+    assert health == (
+        (jobs.FINE_THEME_PROVIDER, "unavailable"),
+        ("tickflow", "degraded"),
+    )
+
+
+def test_failed_symbol_retry_is_deferred_after_zero_progress() -> None:
+    batch = SimpleNamespace(
+        failed=(("920427", "adjusted_open_non_finite"),),
+        checkpoint=SimpleNamespace(completed_codes=("000001",)),
+    )
+
+    assert jobs._should_defer_failed_retry(batch=batch, completed_before=1) is True
+    assert jobs._should_defer_failed_retry(batch=batch, completed_before=0) is False
+
+
+@pytest.mark.asyncio
+async def test_fine_theme_capture_is_default_off_without_database_work() -> None:
+    settings = _settings(enabled=False)
+    settings.etf_leader_tactics_v2_capture_enabled = False
+
+    result = await jobs.dual_universe_leader_tactics_v2_fine_theme_capture_job(
+        object(),  # type: ignore[arg-type]
+        settings,
+    )
+
+    assert result == {
+        "status": "skipped",
+        "reason": "leader_tactics_v2_capture_disabled",
+        "research_only": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_fine_theme_capture_uses_durable_checkpoint_path(monkeypatch) -> None:
+    settings = _settings(enabled=False)
+    settings.etf_leader_tactics_v2_capture_enabled = True
+    settings.etf_leader_tactics_v2_code_version = "test-v2"
+    captured: dict[str, object] = {}
+
+    async def load_checkpoint(*_args, **_kwargs):
+        return None
+
+    async def load_facts(provider_label: str, *, received_at: datetime):
+        captured.setdefault("provider_labels", []).append(provider_label)
+        captured["received_at"] = received_at
+        return (SimpleNamespace(fact_hash="f" * 64),)
+
+    async def persist(_session, facts):
+        captured.setdefault("persisted", []).extend(fact.fact_hash for fact in facts)
+        return len(facts)
+
+    async def run_batch(
+        _session,
+        *,
+        manifest_hash,
+        codes,
+        checkpoint,
+        fetch_one,
+        persist_completed,
+        expected_contract,
+        checkpoint_contract,
+        **_kwargs,
+    ):
+        captured["manifest_hash"] = manifest_hash
+        captured["codes"] = codes
+        captured["initial_status"] = checkpoint.status
+        content_hashes = []
+        for code in codes:
+            content_hashes.append(await fetch_one(code))
+            await persist_completed(code)
+        captured["content_hashes"] = tuple(content_hashes)
+        assert expected_contract == checkpoint_contract
+        return SimpleNamespace(
+            checkpoint=SimpleNamespace(
+                status="complete",
+                completed_codes=codes,
+                failed_codes=(),
+                error_summary=None,
+            ),
+            stopped_reason="page_complete",
+        )
+
+    monkeypatch.setattr(jobs, "load_v2_checkpoint", load_checkpoint)
+    monkeypatch.setattr(jobs, "load_fine_theme_facts_for_registered_theme", load_facts)
+    monkeypatch.setattr(jobs, "persist_fine_theme_membership_batch", persist)
+    monkeypatch.setattr(jobs, "run_v2_capture_batch", run_batch)
+
+    result = await jobs.dual_universe_leader_tactics_v2_fine_theme_capture_job(
+        object(),  # type: ignore[arg-type]
+        settings,
+        now=datetime(2026, 8, 7, 20, 30),
+        timeout_seconds=10.0,
+    )
+
+    assert result["status"] == "complete"
+    assert result["completed_source_count"] == 2
+    assert result["provider_health"]["status"] == "healthy"
+    assert captured["provider_labels"] == ["稀土", "稀土永磁"]
+    assert captured["codes"] == ("稀土", "稀土永磁")
+    assert captured["initial_status"] == "paused"
+    assert captured["persisted"] == ["f" * 64, "f" * 64]
+    assert all(isinstance(item, str) for item in captured["content_hashes"])
 
 
 @pytest.mark.asyncio

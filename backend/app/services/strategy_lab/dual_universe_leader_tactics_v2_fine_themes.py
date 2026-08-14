@@ -7,6 +7,7 @@ import json
 import sys
 from dataclasses import dataclass, replace
 from datetime import date, datetime
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +19,16 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_boundary import (
     assert_v2_research_table,
 )
+from app.services.strategy_lab.dual_universe_leader_tactics_v2_concept_snapshot import (
+    MAX_OUTPUT_BYTES,
+    REGISTERED_FINE_THEME_KEYS,
+    REGISTERED_FINE_THEME_LABELS,
+    REGISTERED_FINE_THEME_SOURCES,
+    RegisteredFineThemeSource,
+    registered_fine_theme_keys,
+    registered_fine_theme_sources,
+    resolve_registered_fine_theme_source,
+)
 
 _FINE_THEME_ALIASES = {
     "稀土/稀土永磁": ("rare_earth", "稀土/稀土永磁"),
@@ -25,6 +36,10 @@ _FINE_THEME_ALIASES = {
     "稀土永磁": ("rare_earth", "稀土/稀土永磁"),
     "稀土磁材": ("rare_earth", "稀土/稀土永磁"),
 }
+
+FINE_THEME_SUBPROCESS_TIMEOUT_SECONDS = 15.0
+FINE_THEME_MAX_STDERR_BYTES = 32_000
+MAX_ERROR_SUMMARY_LENGTH = 300
 
 
 def normalize_fine_theme_label(label: str) -> tuple[str, str]:
@@ -92,48 +107,136 @@ class AshareFineThemeMembershipFact:
         return replace(self, fact_hash=digest)
 
 
-async def load_registered_fine_theme_facts(
-    *, received_at: datetime
-) -> tuple[AshareFineThemeMembershipFact, ...]:
-    """Fetch explicit current constituents; facts are eligible only from receipt onward."""
+def _error_summary(stderr: bytes, *, fallback: str) -> str:
+    decoded = stderr[:FINE_THEME_MAX_STDERR_BYTES].decode("utf-8", errors="replace")
+    summary = " ".join(decoded.split())[-MAX_ERROR_SUMMARY_LENGTH:]
+    return summary or fallback
 
-    themes = ("稀土", "稀土永磁")
+
+async def _stop_subprocess(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is None:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+    try:
+        await asyncio.wait_for(process.wait(), timeout=1.0)
+    except (TimeoutError, ProcessLookupError):
+        pass
+
+
+def _fact_from_snapshot_row(
+    row: dict[str, Any], *, received_at: datetime
+) -> AshareFineThemeMembershipFact:
+    normalized_key, normalized_label = normalize_fine_theme_label(str(row["theme"]))
+    return AshareFineThemeMembershipFact(
+        asset_code=str(row["asset_code"]),
+        group_id=f"fine_theme:{normalized_key}",
+        theme=normalized_label,
+        normalized_theme_key=normalized_key,
+        effective_from=received_at.date(),
+        effective_to=None,
+        received_at=received_at,
+        taxonomy_version="eastmoney.concept.current_v1",
+        source="akshare.stock_board_concept_cons_em.current",
+    ).finalized()
+
+
+async def load_registered_fine_theme_facts_for_source(
+    provider_label: str, *, received_at: datetime
+) -> tuple[AshareFineThemeMembershipFact, ...]:
+    """Fetch exactly one registered provider source in one bounded subprocess."""
+
+    source = resolve_registered_fine_theme_source(provider_label)
     process = await asyncio.create_subprocess_exec(
         sys.executable,
         "-m",
         "app.services.strategy_lab.dual_universe_leader_tactics_v2_concept_snapshot",
-        *themes,
+        source.provider_label,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=15.0)
-    except (TimeoutError, asyncio.CancelledError):
-        process.kill()
-        await process.wait()
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(), timeout=FINE_THEME_SUBPROCESS_TIMEOUT_SECONDS
+        )
+    except TimeoutError as exc:
+        await _stop_subprocess(process)
+        raise RuntimeError(f"fine_theme_provider_timeout:{source.provider_label}") from exc
+    except asyncio.CancelledError:
+        await _stop_subprocess(process)
         raise
     if process.returncode != 0:
-        summary = stderr.decode("utf-8", errors="replace")[-300:]
-        raise RuntimeError(f"fine_theme_provider_failed:{summary}")
-    if len(stdout) > 2_000_000:
+        summary = _error_summary(
+            stderr,
+            fallback=f"returncode={int(process.returncode or 0)}",
+        )
+        raise RuntimeError(f"fine_theme_provider_failed:{source.provider_label}:{summary}")
+    if len(stdout) > MAX_OUTPUT_BYTES or len(stderr) > FINE_THEME_MAX_STDERR_BYTES:
         raise RuntimeError("fine_theme_provider_response_too_large")
+
     facts: dict[tuple[str, str], AshareFineThemeMembershipFact] = {}
-    effective_from = received_at.date()
     for line in stdout.splitlines():
-        row = json.loads(line)
-        normalized_key, normalized_label = normalize_fine_theme_label(row["theme"])
-        fact = AshareFineThemeMembershipFact(
-            asset_code=str(row["asset_code"]),
-            group_id=f"fine_theme:{normalized_key}",
-            theme=normalized_label,
-            normalized_theme_key=normalized_key,
-            effective_from=effective_from,
-            effective_to=None,
-            received_at=received_at,
-            taxonomy_version="eastmoney.concept.current_v1",
-            source="akshare.stock_board_concept_cons_em.current",
-        ).finalized()
+        try:
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                raise ValueError("snapshot_row_not_object")
+            fact = _fact_from_snapshot_row(row, received_at=received_at)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(f"fine_theme_provider_invalid_output:{type(exc).__name__}") from exc
         facts[(fact.asset_code, fact.normalized_theme_key)] = fact
+    return tuple(facts[key] for key in sorted(facts))
+
+
+async def load_fine_theme_facts_for_registered_theme(
+    provider_label: str, *, received_at: datetime
+) -> tuple[AshareFineThemeMembershipFact, ...]:
+    """Descriptive alias for resumable per-source callers."""
+
+    return await load_registered_fine_theme_facts_for_source(
+        provider_label, received_at=received_at
+    )
+
+
+async def load_registered_fine_theme_facts(
+    *, received_at: datetime, normalized_theme_key: str | None = None
+) -> tuple[AshareFineThemeMembershipFact, ...]:
+    """Compatibility loader that serially aggregates registered sources.
+
+    Each provider label runs in its own bounded subprocess. A failed alias does
+    not discard successful aliases; if all selected sources fail, loading fails.
+    """
+
+    if normalized_theme_key is None:
+        sources = REGISTERED_FINE_THEME_SOURCES
+    else:
+        if normalized_theme_key not in REGISTERED_FINE_THEME_KEYS:
+            raise ValueError("fine_theme_key_not_registered")
+        sources = tuple(
+            source
+            for source in REGISTERED_FINE_THEME_SOURCES
+            if source.normalized_theme_key == normalized_theme_key
+        )
+
+    facts: dict[tuple[str, str], AshareFineThemeMembershipFact] = {}
+    failures: list[str] = []
+    for source in sources:
+        try:
+            source_facts = await load_registered_fine_theme_facts_for_source(
+                source.provider_label, received_at=received_at
+            )
+        except (RuntimeError, ValueError) as exc:
+            failures.append(f"{source.provider_label}:{str(exc)[:120]}")
+            continue
+        for fact in source_facts:
+            facts[(fact.asset_code, fact.normalized_theme_key)] = fact
+
+    if not facts and failures:
+        summary = _error_summary(
+            " ".join(failures).encode(),
+            fallback="all_sources_failed",
+        )
+        raise RuntimeError(f"fine_theme_provider_failed:{summary}")
     return tuple(facts[key] for key in sorted(facts))
 
 
@@ -181,7 +284,18 @@ async def persist_fine_theme_membership_batch(
 
 __all__ = [
     "AshareFineThemeMembershipFact",
+    "FINE_THEME_MAX_STDERR_BYTES",
+    "FINE_THEME_SUBPROCESS_TIMEOUT_SECONDS",
+    "REGISTERED_FINE_THEME_KEYS",
+    "REGISTERED_FINE_THEME_LABELS",
+    "REGISTERED_FINE_THEME_SOURCES",
+    "RegisteredFineThemeSource",
+    "load_fine_theme_facts_for_registered_theme",
     "load_registered_fine_theme_facts",
+    "load_registered_fine_theme_facts_for_source",
     "normalize_fine_theme_label",
     "persist_fine_theme_membership_batch",
+    "registered_fine_theme_keys",
+    "registered_fine_theme_sources",
+    "resolve_registered_fine_theme_source",
 ]

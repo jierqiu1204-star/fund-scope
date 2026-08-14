@@ -14,6 +14,10 @@ async def _fake_capture(_session: AsyncSession, _settings: Settings) -> dict[str
     return {"status": "capture_stub"}
 
 
+async def _fake_fine_theme_capture(_session: AsyncSession, _settings: Settings) -> dict[str, Any]:
+    return {"status": "fine_theme_capture_stub"}
+
+
 async def _fake_materialize(_session: AsyncSession, _settings: Settings) -> dict[str, Any]:
     return {"status": "materialize_stub"}
 
@@ -44,6 +48,7 @@ def test_v2_scheduler_is_default_off_and_does_not_import_workflow_jobs(app, monk
     scheduler_module.register_default_jobs(scheduler, app.state.db, app.state.settings)
 
     job_ids = {job.id for job in scheduler.get_jobs()}
+    assert scheduler_module.V2_FINE_THEME_CAPTURE_JOB_NAME not in job_ids
     assert scheduler_module.V2_CAPTURE_JOB_NAME not in job_ids
     assert scheduler_module.V2_MATERIALIZE_JOB_NAME not in job_ids
     assert scheduler_module.V2_ETF_MATERIALIZE_JOB_NAME not in job_ids
@@ -52,7 +57,15 @@ def test_v2_scheduler_is_default_off_and_does_not_import_workflow_jobs(app, monk
 @pytest.mark.parametrize(
     ("capture_enabled", "materialize_enabled", "etf_materialize_enabled", "expected"),
     [
-        (True, False, False, {scheduler_module.V2_CAPTURE_JOB_NAME}),
+        (
+            True,
+            False,
+            False,
+            {
+                scheduler_module.V2_CAPTURE_JOB_NAME,
+                scheduler_module.V2_FINE_THEME_CAPTURE_JOB_NAME,
+            },
+        ),
         (
             False,
             True,
@@ -65,6 +78,7 @@ def test_v2_scheduler_is_default_off_and_does_not_import_workflow_jobs(app, monk
             True,
             {
                 scheduler_module.V2_CAPTURE_JOB_NAME,
+                scheduler_module.V2_FINE_THEME_CAPTURE_JOB_NAME,
                 scheduler_module.V2_MATERIALIZE_JOB_NAME,
                 scheduler_module.V2_ETF_MATERIALIZE_JOB_NAME,
             },
@@ -89,10 +103,12 @@ def test_v2_scheduler_registers_only_enabled_stages(
     app.state.settings.etf_leader_tactics_v2_materialize_enabled = materialize_enabled
     app.state.settings.etf_leader_tactics_v2_etf_materialize_enabled = etf_materialize_enabled
     contract = scheduler_module._V2SchedulerJobContract(
+        fine_theme_capture_name=scheduler_module.V2_FINE_THEME_CAPTURE_JOB_NAME,
         capture_name=scheduler_module.V2_CAPTURE_JOB_NAME,
         materialize_name=scheduler_module.V2_MATERIALIZE_JOB_NAME,
         etf_materialize_name=scheduler_module.V2_ETF_MATERIALIZE_JOB_NAME,
         capture_job=_fake_capture,
+        fine_theme_capture_job=_fake_fine_theme_capture,
         materialize_job=_fake_materialize,
         etf_materialize_job=_fake_etf_materialize,
     )
@@ -108,6 +124,7 @@ def test_v2_scheduler_registers_only_enabled_stages(
         in {
             scheduler_module.V2_CAPTURE_JOB_NAME,
             scheduler_module.V2_MATERIALIZE_JOB_NAME,
+            scheduler_module.V2_FINE_THEME_CAPTURE_JOB_NAME,
             scheduler_module.V2_ETF_MATERIALIZE_JOB_NAME,
         }
     }
@@ -123,6 +140,13 @@ def test_v2_scheduler_registers_only_enabled_stages(
         assert _trigger_field(capture, "hour") == "21-23"
         assert _trigger_field(capture, "minute") == "*/2"
         assert _trigger_field(capture, "second") == "0"
+
+    fine_theme = v2_jobs.get(scheduler_module.V2_FINE_THEME_CAPTURE_JOB_NAME)
+    if fine_theme is not None:
+        assert _trigger_field(fine_theme, "day_of_week") == "mon-fri"
+        assert _trigger_field(fine_theme, "hour") == "20"
+        assert _trigger_field(fine_theme, "minute") == "30,40,50"
+        assert _trigger_field(fine_theme, "second") == "0"
 
     etf_materialize = v2_jobs.get(scheduler_module.V2_ETF_MATERIALIZE_JOB_NAME)
     if etf_materialize is not None:
