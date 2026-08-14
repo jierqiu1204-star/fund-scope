@@ -121,6 +121,22 @@ class Settings(BaseSettings):
         default="./data/dual-universe-leader-tactics-v2-artifacts",
         alias="ETF_LEADER_TACTICS_V2_ARTIFACT_DIR",
     )
+    late_day_turnaround_api_enabled: bool = Field(
+        default=False,
+        alias="LATE_DAY_TURNAROUND_API_ENABLED",
+    )
+    late_day_turnaround_etf_materialize_enabled: bool = Field(
+        default=False,
+        alias="LATE_DAY_TURNAROUND_ETF_MATERIALIZE_ENABLED",
+    )
+    late_day_turnaround_ashare_capture_enabled: bool = Field(
+        default=False,
+        alias="LATE_DAY_TURNAROUND_ASHARE_CAPTURE_ENABLED",
+    )
+    late_day_turnaround_ashare_materialize_enabled: bool = Field(
+        default=False,
+        alias="LATE_DAY_TURNAROUND_ASHARE_MATERIALIZE_ENABLED",
+    )
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:3000"],
         alias="CORS_ORIGINS",

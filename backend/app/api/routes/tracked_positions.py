@@ -41,6 +41,9 @@ from app.services.tracked_positions.action_transition_service import (
     ActionTransitionValidationError,
     transition_position_action,
 )
+from app.services.tracked_positions.alert_policy import (
+    apply_alert_policy_selection,
+)
 from app.services.tracked_positions.audit_projection import (
     lifecycle_state_for_position,
     project_alert_audits,
@@ -197,6 +200,12 @@ async def _position_out(
         entry_price=row.entry_price,
         entry_price_date=row.entry_price_date,
         estimated_shares=row.estimated_shares,
+        alert_policy_id=row.alert_policy_id,
+        alert_policy_version=row.alert_policy_version,
+        alert_policy_provenance=row.alert_policy_provenance,
+        source_strategy=row.source_strategy,
+        source_manifest_hash=row.source_manifest_hash,
+        source_decision_at=row.source_decision_at,
         status=row.status,
         note=row.note,
         created_at=row.created_at,
@@ -396,6 +405,9 @@ async def create_tracked_position(
             confirmed_nav=payload.confirmed_nav,
             confirmed_shares=payload.confirmed_shares,
             note=payload.note,
+            alert_policy_id=payload.alert_policy_id,
+            source_manifest_hash=payload.source_manifest_hash,
+            source_decision_at=payload.source_decision_at,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -629,6 +641,18 @@ async def update_tracked_position(
     row = await session.get(TrackedPosition, position_id)
     if row is None or row.user_id != user.id:
         raise HTTPException(status_code=404, detail="未找到这笔追踪")
+    if payload.asset_type is not None and payload.asset_type != row.asset_type:
+        raise HTTPException(status_code=422, detail="追踪中的资产类型不可修改")
+    policy_fields_changed = bool(
+        {"alert_policy_id", "source_manifest_hash", "source_decision_at"}
+        & payload.model_fields_set
+    )
+    if (
+        policy_fields_changed
+        and payload.expected_exit_state_version is not None
+        and payload.expected_exit_state_version != row.exit_state_version
+    ):
+        raise HTTPException(status_code=409, detail="tracked position state version is stale")
     recalculate_needed = False
     changed_execution_rule = False
     if payload.buy_date is not None:
@@ -696,6 +720,33 @@ async def update_tracked_position(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
     if recalculate_needed:
         await recalculate_entry(session, row)
+    if policy_fields_changed:
+        selected_policy = payload.alert_policy_id or row.alert_policy_id
+        if payload.alert_policy_id == "standard_dynamic_v2":
+            source_manifest_hash = None
+            source_decision_at = None
+        elif "source_manifest_hash" in payload.model_fields_set:
+            source_manifest_hash = payload.source_manifest_hash
+            source_decision_at = payload.source_decision_at
+        elif selected_policy == row.alert_policy_id:
+            source_manifest_hash = row.source_manifest_hash
+            source_decision_at = row.source_decision_at
+        else:
+            source_manifest_hash = None
+            source_decision_at = None
+        try:
+            await apply_alert_policy_selection(
+                session,
+                position=row,
+                owner_id=user.id,
+                policy_id=selected_policy,
+                source_manifest_hash=source_manifest_hash,
+                source_decision_at=source_decision_at,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="未找到这笔追踪") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     row.updated_at = utcnow()
     await session.commit()
     await session.refresh(row)

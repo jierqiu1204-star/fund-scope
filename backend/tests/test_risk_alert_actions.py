@@ -17,10 +17,13 @@ from app.services.risk_alerts import (
     ALERT_CONFIRMED_TREND_WEAKENING,
     ALERT_EXIT_WATCH,
     ALERT_HARD_STOP,
+    ALERT_LATE_DAY_T1_EXIT,
     ALERT_MA5_CLOSE_BREAK_EXIT,
     ALERT_TAKE_PROFIT_WATCH,
     ALERT_TRAILING_TAKE_PROFIT,
     ALERT_TREND_WEAKENING,
+    EMAIL_ALERT_TYPES,
+    SELL_ALERT_TYPES,
     AlertDecision,
     evaluate_exit_execution_evidence,
     map_exit_signal_to_position_action,
@@ -48,7 +51,21 @@ def test_ma5_close_break_maps_to_absolute_zero_target() -> None:
 
     assert decision.action == "exit"
     assert decision.action_class == ACTION_CLASS_ACTIONABLE_EXIT
+
     assert decision.target_remaining_fraction == 0.0
+
+def test_late_day_t1_exit_maps_to_absolute_zero_target() -> None:
+    decision = map_exit_signal_to_position_action(
+        alert_type=ALERT_LATE_DAY_T1_EXIT,
+        allow_full_exit=False,
+    )
+
+    assert decision.action == "exit"
+    assert decision.action_class == ACTION_CLASS_ACTIONABLE_EXIT
+    assert decision.target_remaining_fraction == 0.0
+    assert ALERT_LATE_DAY_T1_EXIT in EMAIL_ALERT_TYPES
+    assert ALERT_LATE_DAY_T1_EXIT in SELL_ALERT_TYPES
+
 
 
 def test_legacy_quote_without_explicit_eligibility_fails_closed() -> None:

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from statistics import pstdev
 from typing import Any, cast
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
@@ -17,11 +19,13 @@ from app.core.market_data import (
 from app.defaults.short_research import (
     ASSET_TYPE_ETF,
     ASSET_TYPE_FUND,
+    ASSET_TYPE_STOCK,
     SHORT_RESEARCH_ASSET_BY_KEY,
 )
 from app.models.entities import (
     EtfExitHyperoptItem,
     EtfExitHyperoptRun,
+    EtfIntradayQuote,
     EtfObservationPortfolioItem,
     EtfObservationPortfolioSnapshot,
     EtfPriceHistory,
@@ -53,8 +57,14 @@ from app.services.etf_exit_calibration import (
     calibration_contract_hash,
     search_space_for_execution_model,
 )
+from app.services.intraday_etf.exchange_calendar import (
+    ExchangeCalendarUnavailableError,
+    next_trading_day,
+)
 from app.services.market_data import (
     ASIA_SHANGHAI,
+    EtfAdjustedDailyFact,
+    etf_adjusted_daily_facts_on_or_before,
     latest_etf_quotes_by_code,
     recent_decision_eligible_etf_adjusted_facts,
     recent_decision_eligible_etf_turnovers_by_code,
@@ -93,6 +103,10 @@ from app.services.market_data import (
     latest_intraday_etf_quote as latest_intraday_quote,
 )
 from app.services.notifier import Notifier
+from app.services.recommendations.stock_adjusted_prices import (
+    canonical_ashare_code,
+    compatible_adjusted_bars,
+)
 from app.services.risk_alerts import (
     ACTION_CLASS_ACTIONABLE_EXIT,
     ACTION_CLASS_DATA_WAITING,
@@ -102,6 +116,8 @@ from app.services.risk_alerts import (
     ALERT_CONFIRMED_TREND_WEAKENING,
     ALERT_EXIT_WATCH,
     ALERT_HARD_STOP,
+    ALERT_LATE_DAY_T1_EXIT,
+    ALERT_LEADER_TACTICS_EXIT,
     ALERT_MA5_CLOSE_BREAK_EXIT,
     ALERT_RISK_WARNING,
     ALERT_TAKE_PROFIT_WATCH,
@@ -112,6 +128,14 @@ from app.services.risk_alerts import (
     ETF_DYNAMIC_THRESHOLD_VERSION,
     ETF_PROFIT_PROTECTION_STATE_KEY,
     HARD_STOP_LOSS_PCT,
+    LEADER_TACTICS_BREAKEVEN_EXIT,
+    LEADER_TACTICS_DATA_WAITING,
+    LEADER_TACTICS_EXIT_POLICY_ID,
+    LEADER_TACTICS_EXIT_POLICY_VERSION,
+    LEADER_TACTICS_EXIT_STATE_KEY,
+    LEADER_TACTICS_HARD_STOP,
+    LEADER_TACTICS_MA5_EXIT,
+    LEADER_TACTICS_PRICE_BASIS,
     TAKE_PROFIT_WATCH_COOLDOWN_DAYS,
     TAKE_PROFIT_WATCH_PCT,
     TRAILING_GIVEBACK_POINTS,
@@ -119,12 +143,15 @@ from app.services.risk_alerts import (
     TRAILING_START_PROFIT_PCT,
     AlertDecision,
     EtfLiquidityCapacityAssessment,
+    LeaderTacticsDailyBar,
+    LeaderTacticsExitInput,
     LongProfitProtectionDecision,
     PositionSizingRecommendation,
     assess_etf_liquidity_capacity,
     calculate_position_sizing,
     derive_etf_profit_thresholds,
     evaluate_exit_execution_evidence,
+    evaluate_leader_tactics_exit,
     evaluate_long_profit_protection,
     evaluate_reentry_state,
 )
@@ -144,6 +171,11 @@ from app.services.short_research.service import (
     list_signal_items,
 )
 from app.services.short_research.theme_taxonomy import classify_etf_theme
+from app.services.tracked_positions.alert_policy import (
+    DEFAULT_POLICY_ID,
+    LATE_DAY_POLICY_ID,
+    resolve_alert_policy_selection,
+)
 from app.services.tracked_positions.exposure_repository import (
     ExposureMutationCommand,
     ExposureMutationIntent,
@@ -151,6 +183,14 @@ from app.services.tracked_positions.exposure_repository import (
     InitializeTrackedPositionCommand,
     apply_exposure_mutation,
     initialize_tracked_position,
+)
+from app.services.tracked_positions.late_day_t1_policy import (
+    POLICY_STATE_KEY as LATE_DAY_POLICY_STATE_KEY,
+)
+from app.services.tracked_positions.late_day_t1_policy import (
+    LateDayT1Input,
+    MorningQuote,
+    evaluate_late_day_t1,
 )
 from app.services.tracked_positions.ma5_close_break import (
     MA5_CLOSE_BREAK_STATE_KEY,
@@ -310,6 +350,7 @@ class PositionAnalysis:
     dynamic_thresholds: DynamicExitThresholdsOut | None = None
     profit_protection: LongProfitProtectionDecision | None = None
     ma5_close_break: AdjustedMa5CloseBreakEvidence | None = None
+    policy_state_update: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -355,7 +396,46 @@ async def resolve_asset_name(session: AsyncSession, asset_type: str, asset_code:
         etf = await session.get(TradableEtf, asset_code)
         if etf is not None:
             return etf.name
-    raise ValueError("只能追踪短线研究池里的基金或 ETF")
+    if asset_type == ASSET_TYPE_STOCK:
+        normalized_code = canonical_ashare_code(asset_code)
+        try:
+            row = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT asset_name
+                        FROM (
+                            SELECT asset_name, listing_state, exclusion_reason,
+                                   ROW_NUMBER() OVER (
+                                       PARTITION BY asset_code
+                                       ORDER BY snapshot_date DESC, effective_at DESC,
+                                                received_at DESC, fact_hash DESC
+                                   ) AS snapshot_rank
+                            FROM ashare_research_universe_snapshots
+                            WHERE asset_code = :asset_code
+                              AND snapshot_date <= :as_of_date
+                              AND effective_at <= :cutoff
+                              AND received_at <= :cutoff
+                              AND source_cutoff <= :cutoff
+                        ) latest
+                        WHERE snapshot_rank = 1
+                          AND LOWER(listing_state) = 'listed'
+                          AND TRIM(COALESCE(exclusion_reason, '')) = ''
+                        LIMIT 1
+                        """
+                    ),
+                    {
+                        "asset_code": normalized_code,
+                        "as_of_date": datetime.now(ASIA_SHANGHAI).date(),
+                        "cutoff": utcnow(),
+                    },
+                )
+            ).mappings().first()
+        except SQLAlchemyError:
+            row = None
+        if row is not None and str(row.get("asset_name") or "").strip():
+            return str(row["asset_name"]).strip()
+    raise ValueError("只能追踪短线研究池里的基金、ETF 或已登记股票")
 
 
 async def latest_price(
@@ -394,7 +474,27 @@ async def latest_price(
         )
         row = await session.scalar(etf_query.order_by(order_by))
         return PriceSnapshot(row.close, row.trade_date) if row is not None else None
-    raise ValueError("资产类型只支持 fund 或 etf")
+    if asset_type == ASSET_TYPE_STOCK:
+        if on_or_after is not None:
+            rows = await compatible_adjusted_bars(
+                session,
+                stock_code=asset_code,
+                as_of_date=datetime.now(ASIA_SHANGHAI).date(),
+                lookback_days=370,
+                max_rows=300,
+            )
+            row = next((item for item in rows if item.trade_date >= on_or_after), None)
+        else:
+            rows = await compatible_adjusted_bars(
+                session,
+                stock_code=asset_code,
+                as_of_date=on_or_before or datetime.now(ASIA_SHANGHAI).date(),
+                lookback_days=370,
+                max_rows=300,
+            )
+            row = rows[-1] if rows else None
+        return PriceSnapshot(row.adjusted_close, row.trade_date) if row is not None else None
+    raise ValueError("资产类型只支持 fund、etf 或 stock")
 
 
 async def latest_tracking_price(
@@ -487,6 +587,13 @@ def tracking_start_date(position: TrackedPosition) -> date:
     ):
         return position.entry_price_date
     return position.buy_date
+
+
+def _leader_entry_anchor_date(position: TrackedPosition) -> date:
+    """Return the first date whose completed close can be post-entry evidence."""
+
+    anchor = tracking_start_date(position)
+    return anchor + timedelta(days=1) if position.order_time_bucket == ORDER_AFTER_15 else anchor
 
 
 async def resolve_entry_price(
@@ -993,6 +1100,25 @@ def _exit_signal(
     )
 
 
+def _mark_leader_exit_notification_sent(
+    position: TrackedPosition,
+    alert: TrackedPositionAlert,
+) -> None:
+    """Persist notification success separately from the pure strategy trigger."""
+
+    state = dict(position.exit_state_json or {})
+    leader_state = dict(state.get(LEADER_TACTICS_EXIT_STATE_KEY) or {})
+    leader_state.update(
+        {
+            "exit_notification_sent": True,
+            "exit_notification_sent_at": utcnow().isoformat(),
+            "exit_notification_alert_id": alert.id,
+        }
+    )
+    state[LEADER_TACTICS_EXIT_STATE_KEY] = leader_state
+    position.exit_state_json = state
+
+
 def _ma5_close_break_metrics(
     evidence: AdjustedMa5CloseBreakEvidence | None,
 ) -> dict[str, Any]:
@@ -1052,6 +1178,8 @@ def _alert_type_label(alert_type: str) -> str:
         ALERT_CONFIRMED_TREND_WEAKENING: "确认趋势转弱提醒",
         ALERT_HARD_STOP: "止损提醒",
         ALERT_MA5_CLOSE_BREAK_EXIT: "收盘跌破五日线退出提醒",
+        ALERT_LATE_DAY_T1_EXIT: "尾盘策略 T+1 退出提醒",
+        ALERT_LEADER_TACTICS_EXIT: "龙头策略全额退出提醒",
     }.get(alert_type, "网页风险提示")
 
 
@@ -1063,6 +1191,8 @@ def _action_class_for_alert_type(alert_type: str | None) -> str:
     if alert_type in {
         ALERT_HARD_STOP,
         ALERT_MA5_CLOSE_BREAK_EXIT,
+        ALERT_LATE_DAY_T1_EXIT,
+        ALERT_LEADER_TACTICS_EXIT,
         ALERT_TRAILING_TAKE_PROFIT,
         ALERT_CONFIRMED_TREND_WEAKENING,
         ALERT_EXIT_WATCH,
@@ -1127,6 +1257,8 @@ def _data_reliability_for_position(
 ) -> str:
     if position.asset_type == ASSET_TYPE_FUND:
         return "daily_nav"
+    if position.alert_policy_id == LEADER_TACTICS_EXIT_POLICY_ID:
+        return "total_return_adjusted_daily"
     if intraday_snapshot is None:
         return RELIABILITY_DAILY_CLOSE
     return intraday_snapshot.reliability_level
@@ -1167,6 +1299,25 @@ def _annotate_exit_signal_email_eligibility(
     if not _should_send_email(signal.alert_type):
         signal.email_eligible = False
         signal.email_eligibility_reason = "数据质量或结构提示只在网页展示，不发送邮件。"
+        return signal
+    if position.alert_policy_id == LEADER_TACTICS_EXIT_POLICY_ID:
+        leader_context = dict(signal.threshold_context.get("leader_tactics") or {})
+        signal.email_eligible = bool(
+            signal.alert_type == ALERT_LEADER_TACTICS_EXIT
+            and signal.action_class == ACTION_CLASS_ACTIONABLE_EXIT
+            and leader_context.get("data_eligible") is True
+            and leader_context.get("price_basis") == LEADER_TACTICS_PRICE_BASIS
+            and leader_context.get("bar_date")
+            and leader_context.get("bar_cutoff")
+            and leader_context.get("provider")
+            and leader_context.get("adjustment_version")
+            and leader_context.get("revision")
+        )
+        signal.email_eligibility_reason = (
+            "龙头策略仅使用同口径可决策复权收盘、MA5 和冻结风险线，按收盘确认。"
+            if signal.email_eligible
+            else "龙头策略缺少完整的可决策复权日线证据，不发送邮件。"
+        )
         return signal
     ma5_context = dict(signal.threshold_context.get("ma5_close_break") or {})
     if (
@@ -1213,6 +1364,22 @@ def _decision_email_data_eligible(
 ) -> bool:
     if not _should_send_email(decision.alert_type):
         return True
+    if position.alert_policy_id == LEADER_TACTICS_EXIT_POLICY_ID:
+        leader_context = dict(
+            (position.exit_state_json or {})
+            .get("exit_signal_threshold_context", {})
+            .get("leader_tactics", {})
+        )
+        return bool(
+            decision.alert_type == ALERT_LEADER_TACTICS_EXIT
+            and leader_context.get("data_eligible") is True
+            and leader_context.get("price_basis") == LEADER_TACTICS_PRICE_BASIS
+            and leader_context.get("bar_date")
+            and leader_context.get("bar_cutoff")
+            and leader_context.get("provider")
+            and leader_context.get("adjustment_version")
+            and leader_context.get("revision")
+        )
     if position.asset_type != ASSET_TYPE_ETF:
         return True
     if decision.alert_type == ALERT_MA5_CLOSE_BREAK_EXIT:
@@ -1753,7 +1920,21 @@ def _estimate_snapshot(
         estimated_pnl_pct = (
             estimated_pnl / cost_basis * 100 if estimated_pnl is not None and cost_basis else None
         )
-    if position.asset_type == ASSET_TYPE_ETF:
+    if position.alert_policy_id == LEADER_TACTICS_EXIT_POLICY_ID:
+        # Adjusted closes are for the leader rule only, not broker fills or account marks.
+        estimated_value = None
+        estimated_pnl = None
+        estimated_pnl_pct = None
+        price_source = "leader_tactics_total_return_adjusted_daily"
+        decision_eligible = price is not None
+        data_reliability = "verified" if decision_eligible else "unavailable"
+        display_only_reason = (
+            "复权收盘仅用于龙头风控线比较，不代表券商实际成交价或账户实际市值；"
+            "金额和份额请按券商持仓处理。"
+            if decision_eligible
+            else "暂无可决策 total_return_adjusted 日线，不能触发龙头邮件。"
+        )
+    elif position.asset_type == ASSET_TYPE_ETF:
         price_source = (
             intraday_snapshot.price_source if intraday_snapshot is not None else "unavailable"
         )
@@ -1773,6 +1954,15 @@ def _estimate_snapshot(
                 if intraday_snapshot is not None
                 else "暂无可用价格，不能触发邮件或计算持仓处理。"
             )
+        )
+    elif position.asset_type == ASSET_TYPE_STOCK:
+        price_source = "ashare_adjusted_price_facts:total_return_adjusted" if price is not None else "unavailable"
+        data_reliability = "verified" if price is not None else "unavailable"
+        decision_eligible = price is not None
+        display_only_reason = (
+            None
+            if decision_eligible
+            else "暂无可决策 total_return_adjusted 股票日线，不能触发邮件或计算持仓处理。"
         )
     else:
         price_source = "daily_nav" if price is not None else "unavailable"
@@ -1802,9 +1992,18 @@ async def current_snapshot(
     report: ShortResearchAdvisorReport | None = None,
     signal_context_loaded: bool = False,
 ) -> TrackedPositionSnapshot:
-    current_price, intraday = await latest_tracking_price(
-        session, position.asset_type, position.asset_code
-    )
+    if position.alert_policy_id == LEADER_TACTICS_EXIT_POLICY_ID:
+        leader_chart = await position_chart(session, position)
+        current_price = (
+            PriceSnapshot(leader_chart[-1].price, leader_chart[-1].date)
+            if leader_chart
+            else None
+        )
+        intraday = None
+    else:
+        current_price, intraday = await latest_tracking_price(
+            session, position.asset_type, position.asset_code
+        )
     snapshot = _estimate_snapshot(position, current_price, intraday)
     if not signal_context_loaded:
         _run, item, report = await latest_signal_context(session, position)
@@ -1825,6 +2024,97 @@ async def current_snapshot(
     return snapshot
 
 
+def _leader_etf_fact_to_bar(fact: EtfAdjustedDailyFact) -> LeaderTacticsDailyBar | None:
+    if (
+        fact.adjusted_close is None
+        or fact.raw_close <= 0
+        or fact.source_timestamp is None
+        or fact.data_provider is None
+        or fact.adjustment_version is None
+        or not isinstance(fact.revision_hash, str)
+        or not fact.revision_hash.strip()
+        or fact.research_price_basis != LEADER_TACTICS_PRICE_BASIS
+        or fact.decision_eligible is not True
+    ):
+        return None
+    scale = fact.adjusted_close / fact.raw_close
+    raw_values = (fact.raw_open, fact.raw_high, fact.raw_low, fact.raw_close)
+    if not math.isfinite(scale) or scale <= 0 or any(
+        not math.isfinite(float(value)) or float(value) <= 0 for value in raw_values
+    ):
+        return None
+    adjusted_open, adjusted_high, adjusted_low, adjusted_close = (
+        float(value) * scale for value in raw_values
+    )
+    if adjusted_low > min(adjusted_open, adjusted_close) or adjusted_high < max(
+        adjusted_open, adjusted_close
+    ):
+        return None
+    return LeaderTacticsDailyBar(
+        trade_date=fact.trade_date,
+        adjusted_open=adjusted_open,
+        adjusted_high=adjusted_high,
+        adjusted_low=adjusted_low,
+        adjusted_close=adjusted_close,
+        provider=str(fact.data_provider).lower(),
+        adjustment_version=str(fact.adjustment_version),
+        revision_id=fact.revision_hash.strip(),
+        received_at=fact.source_timestamp,
+        decision_eligible=True,
+        price_basis=LEADER_TACTICS_PRICE_BASIS,
+    )
+
+
+async def _leader_daily_bars(
+    session: AsyncSession,
+    position: TrackedPosition,
+    *,
+    as_of: date,
+) -> tuple[LeaderTacticsDailyBar, ...]:
+    if position.asset_type == ASSET_TYPE_STOCK:
+        rows = await compatible_adjusted_bars(
+            session,
+            stock_code=position.asset_code,
+            as_of_date=as_of,
+            lookback_days=370,
+            max_rows=300,
+        )
+        return tuple(
+            LeaderTacticsDailyBar(
+                trade_date=row.trade_date,
+                adjusted_open=row.adjusted_open,
+                adjusted_high=row.adjusted_high,
+                adjusted_low=row.adjusted_low,
+                adjusted_close=row.adjusted_close,
+                provider=row.provider,
+                adjustment_version=row.adjustment_version,
+                revision_id=row.revision_id,
+                received_at=row.received_at,
+                decision_eligible=row.decision_eligible,
+                price_basis=row.price_basis,
+            )
+            for row in rows
+        )
+    facts = await etf_adjusted_daily_facts_on_or_before(
+        session,
+        etf_codes=(position.asset_code,),
+        replay_date=as_of,
+        rows_per_code=300,
+        max_source_rows=300,
+        decision_cutoff=datetime(
+            as_of.year,
+            as_of.month,
+            as_of.day,
+            23,
+            59,
+            59,
+            999999,
+            tzinfo=ASIA_SHANGHAI,
+        ),
+    )
+    return tuple(bar for fact in facts if (bar := _leader_etf_fact_to_bar(fact)) is not None)
+
+
 async def position_chart(
     session: AsyncSession, position: TrackedPosition
 ) -> list[TrackedPositionChartPoint]:
@@ -1842,6 +2132,30 @@ async def position_chart(
             )
         ).all()
         points = [(row.nav_date, row.nav) for row in fund_rows]
+    elif position.asset_type == ASSET_TYPE_STOCK:
+        stock_rows = await compatible_adjusted_bars(
+            session,
+            stock_code=position.asset_code,
+            as_of_date=datetime.now(ASIA_SHANGHAI).date(),
+            lookback_days=370,
+            max_rows=300,
+        )
+        points = [
+            (row.trade_date, row.adjusted_close)
+            for row in stock_rows
+            if row.trade_date >= start_date
+        ]
+    elif position.alert_policy_id == LEADER_TACTICS_EXIT_POLICY_ID:
+        leader_rows = await _leader_daily_bars(
+            session,
+            position,
+            as_of=datetime.now(ASIA_SHANGHAI).date(),
+        )
+        points = [
+            (row.trade_date, row.adjusted_close)
+            for row in leader_rows
+            if row.trade_date >= start_date
+        ]
     else:
         etf_rows = (
             await session.scalars(
@@ -1862,8 +2176,13 @@ async def position_chart(
                 points.append((quote.trade_date, quote.latest_price))
     chart: list[TrackedPositionChartPoint] = []
     cost_basis, _source = cost_basis_for_position(position)
+    leader_policy = position.alert_policy_id == LEADER_TACTICS_EXIT_POLICY_ID
     for point_date, price in points[-240:]:
-        estimated_value = position.estimated_shares * price if position.estimated_shares else None
+        estimated_value = (
+            position.estimated_shares * price
+            if position.estimated_shares and not leader_policy
+            else None
+        )
         pnl_pct = (
             (estimated_value - cost_basis) / cost_basis * 100
             if estimated_value is not None and cost_basis
@@ -1878,6 +2197,108 @@ async def position_chart(
             )
         )
     return chart
+
+
+async def _leader_tactics_position_analysis(
+    session: AsyncSession,
+    position: TrackedPosition,
+    *,
+    chart: list[TrackedPositionChartPoint],
+    now: datetime | None,
+) -> PositionAnalysis:
+    evaluation_at = now or datetime.now(ASIA_SHANGHAI)
+    if evaluation_at.tzinfo is None:
+        evaluation_at = evaluation_at.replace(tzinfo=ASIA_SHANGHAI)
+    else:
+        evaluation_at = evaluation_at.astimezone(ASIA_SHANGHAI)
+    bars = await _leader_daily_bars(
+        session,
+        position,
+        as_of=evaluation_at.date(),
+    )
+    policy_state = dict((position.exit_state_json or {}).get(LEADER_TACTICS_EXIT_STATE_KEY) or {})
+    source_context = dict(policy_state.get("source_context") or {})
+    decision = evaluate_leader_tactics_exit(
+        LeaderTacticsExitInput(
+            entry_anchor_date=_leader_entry_anchor_date(position),
+            evaluation_cutoff=evaluation_at,
+            bars=bars,
+            persisted_state=policy_state,
+            source_signal_low=source_context.get("signal_adjusted_low"),
+            source_strategy=position.source_strategy,
+        )
+    )
+    leader_context = dict(decision.threshold_context)
+    leader_context["data_eligible"] = decision.data_eligible
+    context = {"leader_tactics": leader_context}
+    reason_text = {
+        LEADER_TACTICS_HARD_STOP: "当前复权收盘价触及龙头策略冻结的初始风险线。",
+        LEADER_TACTICS_BREAKEVEN_EXIT: "龙头策略已达到 1R，当前复权收盘价跌破保本线。",
+        LEADER_TACTICS_MA5_EXIT: "当前复权收盘价收盘跌破同口径复权 MA5。",
+        "leader_tactics_exit_already_triggered": "本持仓 episode 的龙头策略退出信号已经触发，不重复发送。",
+        "leader_tactics_exit_not_triggered": "当前复权收盘仍在龙头策略有效退出线之上。",
+        LEADER_TACTICS_DATA_WAITING: "缺少合格 total_return_adjusted 日线或 ATR20/MA5 预热，暂不触发邮件。",
+    }.get(decision.reason_code, "龙头策略暂未生成可执行退出信号。")
+    signal = _exit_signal(
+        alert_type=decision.alert_type,
+        label=decision.label,
+        level=decision.level,
+        action_class=(
+            ACTION_CLASS_ACTIONABLE_EXIT
+            if decision.actionable
+            else ACTION_CLASS_NONE
+            if decision.data_eligible
+            else ACTION_CLASS_DATA_WAITING
+        ),
+        threshold_context=context,
+        approved_for_live=decision.actionable,
+        no_alert_reason=None if decision.actionable else reason_text,
+        reasons=[reason_text],
+        data_reliability=(
+            "total_return_adjusted_daily" if decision.data_eligible else RELIABILITY_UNAVAILABLE
+        ),
+    )
+    signal = _annotate_exit_signal_email_eligibility(position, signal, None)
+    entry_close = decision.threshold_context.get("entry_adjusted_close")
+    current_close = decision.threshold_context.get("current_adjusted_close")
+    max_close = decision.threshold_context.get("high_water_adjusted_close")
+    current_pnl = (
+        (float(current_close) / float(entry_close) - 1.0) * 100.0
+        if isinstance(current_close, int | float)
+        and isinstance(entry_close, int | float)
+        and entry_close
+        else None
+    )
+    max_profit = (
+        (float(max_close) / float(entry_close) - 1.0) * 100.0
+        if isinstance(max_close, int | float)
+        and isinstance(entry_close, int | float)
+        and entry_close
+        else None
+    )
+    state_update = dict(decision.state_update)
+    if source_context:
+        state_update["source_context"] = source_context
+    return PositionAnalysis(
+        chart=chart,
+        exit_signal=signal,
+        max_profit_pct=_round_or_none(max_profit),
+        profit_giveback_pct=(
+            _round_or_none(max(0.0, max_profit - current_pnl))
+            if max_profit is not None and current_pnl is not None
+            else None
+        ),
+        holding_days=(
+            evaluation_at.date() - tracking_start_date(position)
+        ).days,
+        technical_metrics={
+            "alert_policy_id": LEADER_TACTICS_EXIT_POLICY_ID,
+            "alert_policy_version": LEADER_TACTICS_EXIT_POLICY_VERSION,
+            "data_status": "eligible" if decision.data_eligible else "data_waiting",
+            **context,
+        },
+        policy_state_update=state_update,
+    )
 
 
 async def latest_signal_context(
@@ -1904,6 +2325,196 @@ async def latest_signal_context(
     return run, item, reports.get((position.asset_type, position.asset_code))
 
 
+async def _late_day_morning_quotes(
+    session: AsyncSession,
+    *,
+    asset_code: str,
+    trade_date: date,
+    evaluation_at: datetime,
+) -> tuple[MorningQuote, ...]:
+    local_cutoff = (
+        evaluation_at.replace(tzinfo=ASIA_SHANGHAI)
+        if evaluation_at.tzinfo is None
+        else evaluation_at.astimezone(ASIA_SHANGHAI)
+    )
+    rows = (
+        await session.scalars(
+            select(EtfIntradayQuote)
+            .where(
+                EtfIntradayQuote.etf_code == asset_code,
+                EtfIntradayQuote.trade_date == trade_date,
+                EtfIntradayQuote.quote_time
+                >= datetime.combine(trade_date, datetime.min.time()).replace(
+                    hour=9, minute=30
+                ),
+                EtfIntradayQuote.quote_time <= local_cutoff.replace(tzinfo=None),
+                EtfIntradayQuote.created_at
+                <= local_cutoff.astimezone(UTC).replace(tzinfo=None),
+            )
+            .order_by(EtfIntradayQuote.quote_time.asc(), EtfIntradayQuote.id.asc())
+            .limit(513)
+        )
+    ).all()
+    if len(rows) > 512:
+        return tuple(
+            MorningQuote(observed_at=row.quote_time, price=float(row.latest_price))
+            for row in rows
+        )
+    return tuple(
+        MorningQuote(observed_at=row.quote_time, price=float(row.latest_price))
+        for row in rows
+        if is_fresh_decision_quote(row, now=row.quote_time)
+    )
+
+
+def _late_day_reason_text(reason_code: str) -> str:
+    return {
+        "late_day_t1_hard_stop": "T+1 新鲜报价跌破波动自适应硬止损线。",
+        "late_day_t1_morning_high_giveback": "T+1 早盘可观测高点后的回吐超过波动自适应允许值。",
+        "late_day_t1_ma5_failure": "最新已收盘 10 分钟 K 线向下穿越同口径 MA5。",
+        "late_day_t1_timed_exit": "T+1 已到 10:30，按尾盘短持有规则执行最迟退出。",
+    }.get(reason_code, "尾盘策略当前没有可执行退出信号。")
+
+
+async def _late_day_position_analysis(
+    session: AsyncSession,
+    position: TrackedPosition,
+    *,
+    chart: list[TrackedPositionChartPoint],
+    intraday_snapshot: TrackedEtfIntradaySnapshotOut | None,
+    dynamic_thresholds: DynamicExitThresholdsOut | None,
+    now: datetime | None,
+) -> PositionAnalysis:
+    evaluation_at = now or datetime.now(ASIA_SHANGHAI)
+    evaluation_at = (
+        evaluation_at.replace(tzinfo=ASIA_SHANGHAI)
+        if evaluation_at.tzinfo is None
+        else evaluation_at.astimezone(ASIA_SHANGHAI)
+    )
+    entry_date = position.entry_price_date or position.buy_date
+    try:
+        t1_date = next_trading_day(entry_date)
+    except ExchangeCalendarUnavailableError:
+        return PositionAnalysis(
+            chart=chart,
+            exit_signal=_exit_signal(
+                label="尾盘策略等待交易日历",
+                action_class=ACTION_CLASS_DATA_WAITING,
+                no_alert_reason="无法确定下一合格交易日。",
+                reasons=["交易所日历不可用，未生成邮件或持仓动作。"],
+                data_reliability=RELIABILITY_UNAVAILABLE,
+            ),
+            max_profit_pct=None,
+            profit_giveback_pct=None,
+            holding_days=(evaluation_at.date() - entry_date).days,
+            technical_metrics={
+                "alert_policy_id": LATE_DAY_POLICY_ID,
+                "late_day_reason_code": "exchange_calendar_unavailable",
+            },
+            intraday_snapshot=intraday_snapshot,
+            dynamic_thresholds=dynamic_thresholds,
+        )
+    policy_state = dict(
+        (position.exit_state_json or {}).get(LATE_DAY_POLICY_STATE_KEY) or {}
+    )
+    hard_stop_pct = (
+        dynamic_thresholds.hard_stop_pct
+        if dynamic_thresholds and dynamic_thresholds.hard_stop_pct is not None
+        else HARD_STOP_LOSS_PCT
+    )
+    volatility_unit_pct = (
+        dynamic_thresholds.current_volatility_unit_pct
+        if dynamic_thresholds and dynamic_thresholds.current_volatility_unit_pct is not None
+        else dynamic_thresholds.volatility_unit_pct
+        if dynamic_thresholds and dynamic_thresholds.volatility_unit_pct is not None
+        else 1.5
+    )
+    decision = evaluate_late_day_t1(
+        LateDayT1Input(
+            entry_date=entry_date,
+            t1_date=t1_date,
+            entry_price=position.entry_price,
+            evaluation_at=evaluation_at,
+            current_quote_time=intraday_snapshot.quote_time if intraday_snapshot else None,
+            current_price=intraday_snapshot.current_price if intraday_snapshot else None,
+            current_quote_eligible=bool(
+                intraday_snapshot
+                and intraday_snapshot.decision_eligible
+                and intraday_snapshot.email_eligible
+                and not intraday_snapshot.is_stale
+            ),
+            morning_quotes=await _late_day_morning_quotes(
+                session,
+                asset_code=position.asset_code,
+                trade_date=t1_date,
+                evaluation_at=evaluation_at,
+            ),
+            hard_stop_pct=hard_stop_pct,
+            volatility_unit_pct=volatility_unit_pct,
+            persisted_high_water_price=policy_state.get("morning_high_price"),
+        )
+    )
+    context = {"late_day_t1": dict(decision.threshold_context)}
+    reason_text = _late_day_reason_text(decision.reason_code)
+    signal = _exit_signal(
+        alert_type=ALERT_LATE_DAY_T1_EXIT if decision.actionable else None,
+        label=decision.label,
+        level=decision.level,
+        action_class=(
+            ACTION_CLASS_ACTIONABLE_EXIT
+            if decision.actionable
+            else ACTION_CLASS_NONE
+            if decision.data_eligible
+            else ACTION_CLASS_DATA_WAITING
+        ),
+        threshold_context=context,
+        approved_for_live=decision.actionable,
+        no_alert_reason=None if decision.actionable else reason_text,
+        reasons=[reason_text],
+        data_reliability=(
+            intraday_snapshot.reliability_level
+            if intraday_snapshot
+            else RELIABILITY_UNAVAILABLE
+        ),
+    )
+    signal = _annotate_exit_signal_email_eligibility(position, signal, intraday_snapshot)
+    current_price = intraday_snapshot.current_price if intraday_snapshot else None
+    current_pnl_pct = (
+        (current_price / position.entry_price - 1.0) * 100.0
+        if current_price and position.entry_price
+        else None
+    )
+    high_price = decision.state_update.get("morning_high_price")
+    max_profit_pct = (
+        (float(high_price) / position.entry_price - 1.0) * 100.0
+        if isinstance(high_price, int | float) and position.entry_price
+        else current_pnl_pct
+    )
+    return PositionAnalysis(
+        chart=chart,
+        exit_signal=signal,
+        max_profit_pct=_round_or_none(max_profit_pct),
+        profit_giveback_pct=(
+            _round_or_none(max(0.0, max_profit_pct - current_pnl_pct))
+            if max_profit_pct is not None and current_pnl_pct is not None
+            else None
+        ),
+        holding_days=(evaluation_at.date() - entry_date).days,
+        technical_metrics={
+            "alert_policy_id": LATE_DAY_POLICY_ID,
+            "alert_policy_version": position.alert_policy_version,
+            "late_day_reason_code": decision.reason_code,
+            "current_pnl_pct": _round_or_none(current_pnl_pct),
+            "hard_stop_pct": _round_or_none(hard_stop_pct),
+            "data_eligible": decision.data_eligible,
+            **context,
+        },
+        intraday_snapshot=intraday_snapshot,
+        dynamic_thresholds=dynamic_thresholds,
+        policy_state_update=dict(decision.state_update),
+    )
+
+
 async def position_analysis(
     session: AsyncSession,
     position: TrackedPosition,
@@ -1913,6 +2524,13 @@ async def position_analysis(
     include_daily_close_rules: bool = True,
 ) -> PositionAnalysis:
     chart = await position_chart(session, position)
+    if position.alert_policy_id == LEADER_TACTICS_EXIT_POLICY_ID:
+        return await _leader_tactics_position_analysis(
+            session,
+            position,
+            chart=chart,
+            now=now,
+        )
     intraday_snapshot = None
     dynamic_thresholds = None
     ma5_close_break = None
@@ -1920,13 +2538,22 @@ async def position_analysis(
         _price, intraday_snapshot = await latest_tracking_price(
             session, position.asset_type, position.asset_code
         )
-        if include_daily_close_rules:
+        if include_daily_close_rules and position.alert_policy_id == DEFAULT_POLICY_ID:
             ma5_close_break = await load_adjusted_ma5_close_break_evidence(
                 session, position, now=now
             )
     dynamic_thresholds = await dynamic_thresholds_for_position(
         session, position, chart, intraday_snapshot
     )
+    if position.alert_policy_id == LATE_DAY_POLICY_ID:
+        return await _late_day_position_analysis(
+            session,
+            position,
+            chart=chart,
+            intraday_snapshot=intraday_snapshot,
+            dynamic_thresholds=dynamic_thresholds,
+            now=now,
+        )
     return _performance_analysis(
         position,
         chart,
@@ -2003,6 +2630,19 @@ def merge_exit_state(position: TrackedPosition, analysis: PositionAnalysis) -> N
             state["latest_quote_time"] = analysis.intraday_snapshot.quote_time.isoformat()
     if analysis.ma5_close_break is not None and analysis.ma5_close_break.state_update is not None:
         state[MA5_CLOSE_BREAK_STATE_KEY] = dict(analysis.ma5_close_break.state_update)
+    if analysis.policy_state_update is not None:
+        policy_state_key = (
+            LEADER_TACTICS_EXIT_STATE_KEY
+            if position.alert_policy_id == LEADER_TACTICS_EXIT_POLICY_ID
+            else LATE_DAY_POLICY_STATE_KEY
+        )
+        previous_policy_state = dict(state.get(policy_state_key) or {})
+        previous_policy_state.update(dict(analysis.policy_state_update))
+        state[policy_state_key] = previous_policy_state
+    state["alert_policy_state"] = {
+        "policy_id": position.alert_policy_id,
+        "policy_version": position.alert_policy_version,
+    }
     state["updated_at"] = utcnow().isoformat()
     position.exit_state_json = state
 
@@ -2020,8 +2660,21 @@ async def create_position(
     confirmed_nav: float | None = None,
     confirmed_shares: float | None = None,
     note: str | None = None,
+    alert_policy_id: str = DEFAULT_POLICY_ID,
+    source_manifest_hash: str | None = None,
+    source_decision_at: datetime | None = None,
 ) -> TrackedPosition:
+    if asset_type == ASSET_TYPE_STOCK:
+        asset_code = canonical_ashare_code(asset_code)
     asset_name = await resolve_asset_name(session, asset_type, asset_code)
+    policy = await resolve_alert_policy_selection(
+        session,
+        asset_type=asset_type,
+        asset_code=asset_code,
+        policy_id=alert_policy_id,
+        source_manifest_hash=source_manifest_hash,
+        source_decision_at=source_decision_at,
+    )
     entry, effective_confirmed_nav_date = await resolve_entry_price(
         session,
         asset_type=asset_type,
@@ -2053,6 +2706,21 @@ async def create_position(
                 entry=entry,
             ),
             note=note,
+            alert_policy_id=policy.policy_id,
+            alert_policy_version=policy.policy_version,
+            alert_policy_provenance=policy.provenance,
+            source_strategy=policy.source_strategy,
+            source_manifest_hash=policy.source_manifest_hash,
+            source_decision_at=policy.source_decision_at,
+            initial_exit_state=(
+                {
+                    LEADER_TACTICS_EXIT_STATE_KEY: {
+                        "source_context": dict(policy.source_context),
+                    }
+                }
+                if policy.source_context is not None
+                else None
+            ),
             occurred_at=now,
             request_id=f"create:{asset_type}:{asset_code}:{now.isoformat()}",
         ),
@@ -2403,7 +3071,11 @@ async def position_sizing_recommendation(
         effective_alert_type = exit_signal.alert_type
     else:
         effective_alert_type = None
-    if position.asset_type == ASSET_TYPE_ETF and effective_alert_type is None:
+    if (
+        position.asset_type == ASSET_TYPE_ETF
+        and effective_alert_type is None
+        and position.alert_policy_id == DEFAULT_POLICY_ID
+    ):
         target = await _latest_etf_observation_target(session, position.asset_code)
         if target is not None:
             target_weight = target.target_weight
@@ -2491,7 +3163,16 @@ def _alert_threshold_context(
     dynamic_thresholds = dict(state.get("dynamic_thresholds") or {})
     profit_protection = dict(state.get(ETF_PROFIT_PROTECTION_STATE_KEY) or {})
     signal_thresholds = dict(state.get("exit_signal_threshold_context") or {})
+    leader_tactics = dict(state.get(LEADER_TACTICS_EXIT_STATE_KEY) or {})
     context = {
+        "alert_policy_id": position.alert_policy_id,
+        "alert_policy_version": position.alert_policy_version,
+        "alert_policy_provenance": position.alert_policy_provenance,
+        "source_strategy": position.source_strategy,
+        "source_manifest_hash": position.source_manifest_hash,
+        "source_decision_at": (
+            position.source_decision_at.isoformat() if position.source_decision_at else None
+        ),
         "threshold_mode": dynamic_thresholds.get("threshold_source", "fixed_rule"),
         "rule_version": dynamic_thresholds.get("rule_version", "fixed_exit_v1"),
         "hard_stop_pct": dynamic_thresholds.get("hard_stop_pct"),
@@ -2522,6 +3203,8 @@ def _alert_threshold_context(
         "no_alert_reason": state.get("no_alert_reason"),
         "execution_risk": _exit_execution_context(position, intraday_snapshot),
         "ma5_close_break": signal_thresholds.get("ma5_close_break"),
+        "late_day_t1": signal_thresholds.get("late_day_t1"),
+        "leader_tactics": signal_thresholds.get("leader_tactics") or leader_tactics,
     }
     if position_sizing is not None:
         context["position_sizing"] = position_sizing.as_context()
@@ -2608,6 +3291,8 @@ def _quote_freshness_for_audit(
 ) -> str:
     if position.asset_type == ASSET_TYPE_FUND:
         return "daily_nav"
+    if position.alert_policy_id == LEADER_TACTICS_EXIT_POLICY_ID:
+        return "total_return_adjusted_daily"
     if intraday_snapshot is None:
         return "missing_intraday" if evaluation_mode == "intraday" else "daily_close"
     if _is_fresh_intraday_snapshot(intraday_snapshot):
@@ -2638,11 +3323,19 @@ def _audit_decision_context(
     elif not email_data_eligible:
         if decision.alert_type == ALERT_MA5_CLOSE_BREAK_EXIT:
             email_eligibility_reason = "可决策复权收盘或同日复权 MA5 证据不可用。"
+        elif decision.alert_type == ALERT_LEADER_TACTICS_EXIT:
+            email_eligibility_reason = "龙头策略可决策复权日线证据不可用。"
         else:
             email_eligibility_reason = (
                 "盘中提醒必须使用新鲜盘中行情；旧行情、日线价和估算价不会触发邮件。"
             )
     return {
+        "alert_policy_id": position.alert_policy_id,
+        "alert_policy_version": position.alert_policy_version,
+        "alert_policy_provenance": position.alert_policy_provenance,
+        "source_strategy": position.source_strategy,
+        "source_manifest_hash": position.source_manifest_hash,
+        "source_decision_at": position.source_decision_at.isoformat() if position.source_decision_at else None,
         "evaluation_mode": evaluation_mode,
         "outcome": outcome,
         "action_class": _action_class_for_alert_type(decision.alert_type),
@@ -2845,6 +3538,106 @@ async def prepare_alert_evaluation(
     *,
     evaluation_mode: str = "daily",
 ) -> PreparedAlertEvaluation:
+    if (
+        position.alert_policy_id == LEADER_TACTICS_EXIT_POLICY_ID
+        and evaluation_mode == "intraday"
+    ):
+        return PreparedAlertEvaluation(
+            decision=None,
+            signal_date=None,
+            analysis=None,
+            data_reason_code="leader_tactics_daily_close_only",
+        )
+    if position.alert_policy_id == LEADER_TACTICS_EXIT_POLICY_ID:
+        analysis = await position_analysis(
+            session,
+            position,
+            item=None,
+            include_daily_close_rules=False,
+        )
+        merge_exit_state(position, analysis)
+        signal = analysis.exit_signal
+        leader_context = dict(analysis.technical_metrics.get("leader_tactics") or {})
+        try:
+            alert_date = date.fromisoformat(str(leader_context.get("bar_date")))
+        except (TypeError, ValueError):
+            alert_date = analysis.chart[-1].date if analysis.chart else date.today()
+        if signal.alert_type is None:
+            return PreparedAlertEvaluation(
+                decision=None,
+                signal_date=alert_date,
+                analysis=analysis,
+                data_reason_code=str(
+                    leader_context.get("data_reason")
+                    or "leader_tactics_exit_not_triggered"
+                ),
+            )
+        return PreparedAlertEvaluation(
+            decision=AlertDecision(
+                alert_type=signal.alert_type,
+                trigger_label=signal.label,
+                reasons=list(signal.reasons),
+                risk_flags=[],
+                advisor_summary=None,
+                signal_item=None,
+                advisor_report=None,
+                alert_level=signal.level,
+                alert_source="leader_tactics_daily_close",
+                quote_time=None,
+            ),
+            signal_date=alert_date,
+            analysis=analysis,
+            data_reason_code="leader_tactics_prepared",
+        )
+    if position.alert_policy_id == LATE_DAY_POLICY_ID:
+        analysis = await position_analysis(
+            session,
+            position,
+            item=None,
+            include_daily_close_rules=False,
+        )
+        merge_exit_state(position, analysis)
+        signal = analysis.exit_signal
+        alert_date = (
+            analysis.intraday_snapshot.trade_date
+            if analysis.intraday_snapshot and analysis.intraday_snapshot.trade_date
+            else datetime.now(ASIA_SHANGHAI).date()
+        )
+        if signal.alert_type is None:
+            return PreparedAlertEvaluation(
+                decision=None,
+                signal_date=alert_date,
+                analysis=analysis,
+                data_reason_code=str(
+                    analysis.technical_metrics.get("late_day_reason_code")
+                    or "late_day_threshold_not_triggered"
+                ),
+            )
+        return PreparedAlertEvaluation(
+            decision=AlertDecision(
+                alert_type=signal.alert_type,
+                trigger_label=signal.label,
+                reasons=list(signal.reasons),
+                risk_flags=[],
+                advisor_summary=None,
+                signal_item=None,
+                advisor_report=None,
+                alert_level=signal.level,
+                alert_source=(
+                    analysis.intraday_snapshot.price_source
+                    if analysis.intraday_snapshot
+                    else "unavailable"
+                ),
+                quote_time=(
+                    analysis.intraday_snapshot.quote_time
+                    if analysis.intraday_snapshot
+                    else None
+                ),
+            ),
+            signal_date=alert_date,
+            analysis=analysis,
+            data_reason_code="late_day_t1_prepared",
+        )
     run, item, report = await latest_signal_context(session, position)
     analysis = await position_analysis(
         session,
@@ -3074,6 +3867,7 @@ async def create_alert_if_needed(
     is_intraday_alert = (
         position.asset_type == ASSET_TYPE_ETF and decision.alert_source == "intraday_quote"
     )
+    retry_alert: TrackedPositionAlert | None = None
 
     if not _decision_email_data_eligible(
         position,
@@ -3140,20 +3934,40 @@ async def create_alert_if_needed(
             )
         )
         if existing is not None:
-            await _record_alert_audit(
-                session,
-                position,
-                decision,
-                signal_date,
-                outcome="suppressed",
-                evaluation_mode=evaluation_mode,
-                alert=existing,
-                intraday_snapshot=intraday_snapshot,
-                duplicate_reason="同一持仓同一天同类提醒已存在，本次不重复记录邮件。",
-                dedupe_minutes=1440,
-                position_sizing=position_sizing,
-            )
-            return existing, "deduplicated"
+            if position.alert_policy_id == LEADER_TACTICS_EXIT_POLICY_ID:
+                if existing.email_status == "sent":
+                    _mark_leader_exit_notification_sent(position, existing)
+                    await session.commit()
+                    await _record_alert_audit(
+                        session,
+                        position,
+                        decision,
+                        signal_date,
+                        outcome="suppressed",
+                        evaluation_mode=evaluation_mode,
+                        alert=existing,
+                        intraday_snapshot=intraday_snapshot,
+                        duplicate_reason="同一龙头策略 bar/episode 已成功发送，不重复发送。",
+                        dedupe_minutes=1440,
+                        position_sizing=position_sizing,
+                    )
+                    return existing, "deduplicated"
+                retry_alert = existing
+            else:
+                await _record_alert_audit(
+                    session,
+                    position,
+                    decision,
+                    signal_date,
+                    outcome="suppressed",
+                    evaluation_mode=evaluation_mode,
+                    alert=existing,
+                    intraday_snapshot=intraday_snapshot,
+                    duplicate_reason="同一持仓同一天同类提醒已存在，本次不重复记录邮件。",
+                    dedupe_minutes=1440,
+                    position_sizing=position_sizing,
+                )
+                return existing, "deduplicated"
 
     if decision.alert_type == ALERT_TAKE_PROFIT_WATCH:
         recent_take_profit = await session.scalar(
@@ -3183,7 +3997,7 @@ async def create_alert_if_needed(
             )
             return recent_take_profit, "deduplicated"
 
-    alert = TrackedPositionAlert(
+    alert = retry_alert or TrackedPositionAlert(
         tracked_position_id=position.id,
         alert_date=signal_date,
         alert_type=decision.alert_type,
@@ -3208,6 +4022,29 @@ async def create_alert_if_needed(
         suppression_status="sent_or_pending",
         email_status="pending",
     )
+    if retry_alert is not None:
+        alert.trigger_label = decision.trigger_label
+        alert.current_price = snapshot.current_price
+        alert.current_price_date = snapshot.current_price_date
+        alert.estimated_value = snapshot.estimated_value
+        alert.estimated_pnl = snapshot.estimated_pnl
+        alert.estimated_pnl_pct = snapshot.estimated_pnl_pct
+        alert.reasons_json = decision.reasons
+        alert.risk_flags_json = decision.risk_flags
+        alert.advisor_summary = decision.advisor_summary
+        alert.alert_level = decision.alert_level
+        alert.quote_time = decision.quote_time
+        alert.alert_source = (
+            decision.alert_source
+            if decision.alert_source == MA5_CLOSE_BREAK_ALERT_SOURCE
+            else intraday_snapshot.price_source
+            if intraday_snapshot
+            else decision.alert_source
+        )
+        alert.email_status = "pending"
+        alert.email_error_message = None
+        alert.sent_at = None
+        alert.suppression_status = "sent_or_pending"
     alert.threshold_context_json = _alert_threshold_context(
         position,
         alert,
@@ -3215,7 +4052,8 @@ async def create_alert_if_needed(
         position_sizing,
         intraday_snapshot,
     )
-    session.add(alert)
+    if retry_alert is None:
+        session.add(alert)
     await session.commit()
     await session.refresh(alert)
 
@@ -3278,6 +4116,8 @@ async def create_alert_if_needed(
         )
         alert.email_status = "sent"
         alert.sent_at = utcnow()
+        if position.alert_policy_id == LEADER_TACTICS_EXIT_POLICY_ID:
+            _mark_leader_exit_notification_sent(position, alert)
         await session.commit()
         await session.refresh(alert)
         await _record_alert_audit(
@@ -3329,12 +4169,30 @@ def _email_payload(
         ORDER_AFTER_15: "15:00 后",
         ORDER_UNKNOWN: "未填写",
     }.get(position.order_time_bucket, "未填写")
+    if position.alert_policy_id == LEADER_TACTICS_EXIT_POLICY_ID:
+        data_limitations = (
+            "龙头策略只用决策合格的 total_return_adjusted 日线收盘、ATR20、冻结风险线和复权 MA5；"
+            "邮件中的复权价格只用于规则比较，不代表券商实际成交价、账户实际市值或自动下单结果；"
+            "ETF/个股金额和份额请按券商实际持仓处理。"
+        )
+    else:
+        data_limitations = (
+            decision.advisor_report.data_limitations
+            if decision.advisor_report is not None
+            else "结果基于公开净值或 ETF 日线数据，不连接支付宝或券商。"
+        )
     return {
         "title": f"FundScope {title_prefix}：{position.asset_name}",
         "alert_title": title_prefix,
         "asset_name": position.asset_name,
         "asset_code": position.asset_code,
-        "asset_type": "ETF" if position.asset_type == ASSET_TYPE_ETF else "基金",
+        "asset_type": (
+            "ETF"
+            if position.asset_type == ASSET_TYPE_ETF
+            else "A股个股"
+            if position.asset_type == ASSET_TYPE_STOCK
+            else "基金"
+        ),
         "buy_date": position.buy_date.isoformat(),
         "order_time_label": order_time_label,
         "confirmed_nav_date": position.confirmed_nav_date.isoformat()
@@ -3368,11 +4226,7 @@ def _email_payload(
             if decision.advisor_report is not None
             else []
         ),
-        "data_limitations": (
-            decision.advisor_report.data_limitations
-            if decision.advisor_report is not None
-            else "结果基于公开净值或 ETF 日线数据，不连接支付宝或券商。"
-        ),
+        "data_limitations": data_limitations,
         "position_sizing": position_sizing.as_context() if position_sizing is not None else None,
         "threshold_context": _alert_threshold_context(
             position,

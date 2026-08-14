@@ -24,7 +24,6 @@ from app.models.entities import (
     Stock,
     StockFundamental,
     StockMetric,
-    StockPriceHistory,
     utcnow,
 )
 from app.services.recommendations.constants import (
@@ -41,9 +40,12 @@ from app.services.recommendations.scoring import (
     score_fund_candidate,
     score_stock_candidate,
 )
+from app.services.recommendations.stock_adjusted_prices import (
+    StockAdjustedPricePoint,
+    compatible_adjusted_prices,
+)
 from app.services.recommendations.stock_data import (
     default_stock_fundamentals,
-    default_stock_price_history,
     default_stock_universe,
 )
 
@@ -131,15 +133,6 @@ async def ensure_default_stock_seed_data(session: AsyncSession, as_of_date: date
             )
     await session.flush()
 
-    for price_row in default_stock_price_history(as_of_date):
-        existing = await session.scalar(
-            select(StockPriceHistory).where(
-                StockPriceHistory.stock_code == price_row["stock_code"],
-                StockPriceHistory.trade_date == price_row["trade_date"],
-            )
-        )
-        if existing is None:
-            session.add(StockPriceHistory(**price_row))
 
     for fundamental_row in default_stock_fundamentals(as_of_date):
         existing = await session.scalar(
@@ -219,7 +212,10 @@ async def recompute_fund_metrics(session: AsyncSession, as_of_date: date | None 
     return rows_upserted
 
 
-def _stock_metric_scores(fundamental: StockFundamental, price_rows: Sequence[StockPriceHistory]) -> dict[str, Any]:
+def _stock_metric_scores(
+    fundamental: StockFundamental,
+    price_rows: Sequence[StockAdjustedPricePoint],
+) -> dict[str, Any]:
     closes = [row.close for row in price_rows]
     returns = _returns(closes)
     volatility = round(pstdev(returns) * math.sqrt(252) * 100, 2) if len(returns) >= 2 else None
@@ -264,17 +260,11 @@ async def recompute_stock_metrics(session: AsyncSession, as_of_date: date | None
             )
             .order_by(StockFundamental.report_date.desc())
         )
-        price_rows = (
-            await session.scalars(
-                select(StockPriceHistory)
-                .where(
-                    StockPriceHistory.stock_code == stock.code,
-                    StockPriceHistory.trade_date <= metric_date,
-                    StockPriceHistory.trade_date >= metric_date - timedelta(days=370),
-                )
-                .order_by(StockPriceHistory.trade_date.asc())
-            )
-        ).all()
+        price_rows = await compatible_adjusted_prices(
+            session,
+            stock_code=stock.code,
+            as_of_date=metric_date,
+        )
         missing_metrics: list[str] = []
         if fundamental is None:
             missing_metrics.extend(["pe", "pb", "roe"])
@@ -303,7 +293,7 @@ async def recompute_stock_metrics(session: AsyncSession, as_of_date: date | None
                     "volatility_1y": scores["volatility_1y"],
                     "turnover": scores["turnover"],
                     "price_points": len(price_rows),
-                    "source": "local_seed_or_imported_stock_data",
+                    "source": "ashare_adjusted_price_facts",
                 },
             }
         existing = await session.scalar(

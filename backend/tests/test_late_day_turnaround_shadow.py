@@ -230,7 +230,7 @@ def _signal() -> SignalResult:
 def _quotes() -> tuple[ExecutionQuote, ...]:
     return (
         ExecutionQuote(
-            observed_at=datetime(2026, 8, 10, 14, 40, tzinfo=SHANGHAI),
+            observed_at=datetime(2026, 8, 10, 14, 31, tzinfo=SHANGHAI),
             price=10.40,
             asset_code="600000",
             source="quote-provider-buy",
@@ -273,10 +273,25 @@ def test_backtest_uses_first_quote_and_fixed_t_plus_one_10am_exit() -> None:
     assert result.available is True
     assert result.buy_quote is not None
     assert result.sell_quote is not None
-    assert result.buy_quote.observed_at.time() == time(14, 40)
+    assert result.buy_quote.observed_at.time() == time(14, 31)
     assert result.sell_quote.observed_at.time() == time(10, 5)
     assert result.net_return_pct == pytest.approx((10.80 / 10.40 - 1) * 100)
 
+
+def test_backtest_does_not_delay_entry_past_two_minutes() -> None:
+    late_quotes = tuple(
+        replace(quote, observed_at=datetime(2026, 8, 10, 14, 33, tzinfo=SHANGHAI))
+        if index == 0
+        else quote
+        for index, quote in enumerate(_quotes())
+    )
+
+    result = backtest_trade(
+        _signal(), late_quotes, trading_dates=(date(2026, 8, 11),)
+    )
+
+    assert result.available is False
+    assert result.reason == "missing_buy_quote"
 
 def test_fees_slippage_and_tax_reduce_net_return() -> None:
     no_cost = backtest_trade(

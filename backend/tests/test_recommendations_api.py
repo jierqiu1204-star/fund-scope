@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 
 import pytest
 from sqlalchemy import select
@@ -13,7 +13,6 @@ from app.models.entities import (
     Stock,
     StockFundamental,
     StockMetric,
-    StockPriceHistory,
 )
 from app.services.jobs import daily_asset_recommendations_job, daily_recommendation_metrics_job
 from app.services.recommendations import engine
@@ -158,26 +157,6 @@ async def test_metric_and_recommendation_jobs_persist_items(client, app) -> None
                     config_json={},
                 ),
                 Stock(code="600519.SH", exchange="SH", name="Kweichow Moutai", industry="consumer", is_candidate=True),
-                StockPriceHistory(
-                    stock_code="600519.SH",
-                    trade_date=date.today() - timedelta(days=180),
-                    open=100,
-                    high=100,
-                    low=100,
-                    close=100,
-                    volume=1000,
-                    turnover=100_000,
-                ),
-                StockPriceHistory(
-                    stock_code="600519.SH",
-                    trade_date=date.today(),
-                    open=120,
-                    high=122,
-                    low=118,
-                    close=120,
-                    volume=2000,
-                    turnover=240_000,
-                ),
                 StockFundamental(
                     stock_code="600519.SH",
                     report_date=date.today(),

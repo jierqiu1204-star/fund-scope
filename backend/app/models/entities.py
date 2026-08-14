@@ -254,20 +254,6 @@ class Stock(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
-class StockPriceHistory(Base):
-    __tablename__ = "stock_price_history"
-    __table_args__ = (UniqueConstraint("stock_code", "trade_date", name="uq_stock_price_history"),)
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    stock_code: Mapped[str] = mapped_column(ForeignKey("stocks.code", ondelete="CASCADE"))
-    trade_date: Mapped[date] = mapped_column(Date)
-    open: Mapped[float] = mapped_column(Float)
-    high: Mapped[float] = mapped_column(Float)
-    low: Mapped[float] = mapped_column(Float)
-    close: Mapped[float] = mapped_column(Float)
-    volume: Mapped[float] = mapped_column(Float)
-    turnover: Mapped[float] = mapped_column(Float)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class StockFundamental(Base):
@@ -2401,6 +2387,18 @@ class ShortResearchAdvisorAttempt(Base):
 
 class TrackedPosition(Base):
     __tablename__ = "tracked_positions"
+    __table_args__ = (
+        CheckConstraint(
+            "asset_type IN ('fund', 'etf', 'stock')",
+            name="ck_tracked_position_asset_type",
+        ),
+        CheckConstraint(
+            "(alert_policy_id = 'standard_dynamic_v2' AND asset_type IN ('fund', 'etf')) "
+            "OR (alert_policy_id = 'late_day_turnaround_t1_v1' AND asset_type = 'etf') "
+            "OR (alert_policy_id = 'leader_tactics_exit_v1' AND asset_type IN ('etf', 'stock'))",
+            name="ck_tracked_position_alert_policy_asset_type",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
@@ -2418,6 +2416,16 @@ class TrackedPosition(Base):
     estimated_shares: Mapped[float | None] = mapped_column(Float, nullable=True)
     exit_state_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     exit_state_version: Mapped[int] = mapped_column(Integer, default=0)
+    alert_policy_id: Mapped[str] = mapped_column(
+        String(64), default="standard_dynamic_v2"
+    )
+    alert_policy_version: Mapped[str] = mapped_column(
+        String(64), default="standard_dynamic_v2"
+    )
+    alert_policy_provenance: Mapped[str] = mapped_column(String(32), default="default")
+    source_strategy: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_manifest_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_decision_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="active")
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
@@ -3388,6 +3396,176 @@ class RecommendationReviewItem(Base):
     verdict: Mapped[str] = mapped_column(String(64))
     agent_notes_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     risk_flags_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class AshareIntraday10mFact(Base):
+    __tablename__ = "ashare_intraday_10m_facts"
+    __table_args__ = (
+        UniqueConstraint(
+            "content_hash",
+            name="uq_ashare_intraday_10m_content_hash",
+        ),
+        SaIndex(
+            "ix_ashare_intraday_10m_pit_lookup",
+            "trade_date",
+            "asset_code",
+            "bar_end",
+            "received_at",
+        ),
+        CheckConstraint("bar_end > bar_start", name="ck_ashare_intraday_10m_bar_order"),
+        CheckConstraint(
+            "raw_open > 0 AND raw_high > 0 AND raw_low > 0 AND raw_close > 0",
+            name="ck_ashare_intraday_10m_positive_prices",
+        ),
+        CheckConstraint(
+            "raw_high >= raw_open AND raw_high >= raw_close "
+            "AND raw_low <= raw_open AND raw_low <= raw_close "
+            "AND raw_low <= raw_high",
+            name="ck_ashare_intraday_10m_ohlc",
+        ),
+        CheckConstraint(
+            "volume >= 0 AND amount >= 0 AND normalization_factor > 0",
+            name="ck_ashare_intraday_10m_nonnegative_values",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    asset_code: Mapped[str] = mapped_column(String(32))
+    trade_date: Mapped[date] = mapped_column(Date)
+    bar_start: Mapped[datetime] = mapped_column(DateTime)
+    bar_end: Mapped[datetime] = mapped_column(DateTime)
+    raw_open: Mapped[float] = mapped_column(Float)
+    raw_high: Mapped[float] = mapped_column(Float)
+    raw_low: Mapped[float] = mapped_column(Float)
+    raw_close: Mapped[float] = mapped_column(Float)
+    volume: Mapped[float] = mapped_column(Float)
+    amount: Mapped[float] = mapped_column(Float)
+    provider: Mapped[str] = mapped_column(String(64))
+    source_timestamp: Mapped[datetime] = mapped_column(DateTime)
+    received_at: Mapped[datetime] = mapped_column(DateTime)
+    normalization_factor: Mapped[float] = mapped_column(Float)
+    normalization_identity: Mapped[str] = mapped_column(String(128))
+    decision_eligible: Mapped[bool] = mapped_column(Boolean)
+    content_hash: Mapped[str] = mapped_column(String(128))
+
+
+class LateDayTurnaroundCaptureCheckpoint(Base):
+    __tablename__ = "late_day_turnaround_capture_checkpoints"
+    __table_args__ = (
+        UniqueConstraint(
+            "universe",
+            "trade_date",
+            "checkpoint_at",
+            "provider",
+            name="uq_late_day_capture_checkpoint",
+        ),
+        CheckConstraint(
+            "expected_count >= 0 AND completed_count >= 0 AND failed_count >= 0",
+            name="ck_late_day_capture_nonnegative_counts",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    universe: Mapped[str] = mapped_column(String(16))
+    trade_date: Mapped[date] = mapped_column(Date)
+    checkpoint_at: Mapped[datetime] = mapped_column(DateTime)
+    provider: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(32))
+    cursor_asset_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    expected_count: Mapped[int] = mapped_column(Integer)
+    completed_count: Mapped[int] = mapped_column(Integer)
+    failed_count: Mapped[int] = mapped_column(Integer)
+    manifest_hash: Mapped[str] = mapped_column(String(128))
+    error_summary: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    details_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime)
+
+
+class LateDayTurnaroundRun(Base):
+    __tablename__ = "late_day_turnaround_runs"
+    __table_args__ = (
+        UniqueConstraint("manifest_hash", name="uq_late_day_run_manifest_hash"),
+        UniqueConstraint(
+            "universe",
+            "decision_at",
+            "contract_hash",
+            name="uq_late_day_run_contract_cutoff",
+        ),
+        SaIndex("ix_late_day_run_lookup", "universe", "decision_at", "status"),
+        CheckConstraint(
+            "universe IN ('etf','ashare')",
+            name="ck_late_day_run_universe",
+        ),
+        CheckConstraint(
+            "expected_count >= 0 AND evaluated_count >= 0 "
+            "AND available_count >= 0 AND qualifying_count >= 0",
+            name="ck_late_day_run_nonnegative_counts",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    manifest_hash: Mapped[str] = mapped_column(String(128))
+    universe: Mapped[str] = mapped_column(String(16))
+    signal_date: Mapped[date] = mapped_column(Date)
+    decision_at: Mapped[datetime] = mapped_column(DateTime)
+    status: Mapped[str] = mapped_column(String(32))
+    policy_mode: Mapped[str] = mapped_column(String(32))
+    strategy_version: Mapped[str] = mapped_column(String(64))
+    contract_hash: Mapped[str] = mapped_column(String(128))
+    universe_hash: Mapped[str] = mapped_column(String(128))
+    input_hash: Mapped[str] = mapped_column(String(128))
+    expected_count: Mapped[int] = mapped_column(Integer)
+    evaluated_count: Mapped[int] = mapped_column(Integer)
+    available_count: Mapped[int] = mapped_column(Integer)
+    qualifying_count: Mapped[int] = mapped_column(Integer)
+    provider_health_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    exclusion_counts_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    unavailable_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class LateDayTurnaroundObservation(Base):
+    __tablename__ = "late_day_turnaround_observations"
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id",
+            "asset_code",
+            name="uq_late_day_observation_asset",
+        ),
+        SaIndex(
+            "ix_late_day_observation_candidates",
+            "run_id",
+            "observation_kind",
+            "available",
+            "score",
+            "asset_code",
+        ),
+        CheckConstraint(
+            "observation_kind IN "
+            "('formal_candidate','formal_exclusion','daily_proxy_watchlist')",
+            name="ck_late_day_observation_kind",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("late_day_turnaround_runs.id", ondelete="CASCADE")
+    )
+    asset_code: Mapped[str] = mapped_column(String(32))
+    asset_name: Mapped[str] = mapped_column(String(255))
+    observation_kind: Mapped[str] = mapped_column(String(32))
+    available: Mapped[bool] = mapped_column(Boolean)
+    reason: Mapped[str] = mapped_column(String(128))
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ma5: Mapped[float | None] = mapped_column(Float, nullable=True)
+    gain_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ma_deviation_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    amount_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    signal_date: Mapped[date] = mapped_column(Date)
+    decision_at: Mapped[datetime] = mapped_column(DateTime)
+    input_hash: Mapped[str] = mapped_column(String(128))
+    provenance_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 

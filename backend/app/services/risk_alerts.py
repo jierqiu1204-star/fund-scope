@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime, timedelta
 from statistics import median
+from types import MappingProxyType
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from app.defaults.short_research import ASSET_TYPE_ETF
 from app.services.etf_research_evidence import (
@@ -23,6 +25,20 @@ ALERT_TREND_WEAKENING = "trend_weakening"
 ALERT_CONFIRMED_TREND_WEAKENING = "confirmed_trend_weakening"
 ALERT_HARD_STOP = "hard_stop"
 ALERT_MA5_CLOSE_BREAK_EXIT = "ma5_close_break_exit"
+ALERT_LATE_DAY_T1_EXIT = "late_day_t1_exit"
+ALERT_LEADER_TACTICS_EXIT = "leader_tactics_exit"
+
+LEADER_TACTICS_EXIT_POLICY_ID = "leader_tactics_exit_v1"
+LEADER_TACTICS_EXIT_POLICY_VERSION = "leader_tactics_exit_v1"
+LEADER_TACTICS_EXIT_STATE_KEY = "leader_tactics_exit_v1"
+LEADER_TACTICS_HARD_STOP = "leader_tactics_hard_stop"
+LEADER_TACTICS_BREAKEVEN_EXIT = "leader_tactics_breakeven_exit"
+LEADER_TACTICS_MA5_EXIT = "leader_tactics_ma5_exit"
+LEADER_TACTICS_DATA_WAITING = "leader_tactics_data_waiting"
+LEADER_TACTICS_PRICE_BASIS = "total_return_adjusted"
+LEADER_TACTICS_ROUND_TRIP_COST_BPS = 20.0
+LEADER_TACTICS_APPROVED_PROVIDERS = frozenset({"akshare", "eastmoney", "tickflow"})
+_LEADER_TACTICS_SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 EXIT_ACTION_VERSION = OPERATIONAL_EXIT_ACTION_VERSION
 REENTRY_RULE_VERSION = OPERATIONAL_REENTRY_RULE_VERSION
@@ -45,6 +61,8 @@ EMAIL_ALERT_TYPES = {
     ALERT_CONFIRMED_TREND_WEAKENING,
     ALERT_HARD_STOP,
     ALERT_MA5_CLOSE_BREAK_EXIT,
+    ALERT_LATE_DAY_T1_EXIT,
+    ALERT_LEADER_TACTICS_EXIT,
 }
 
 TAKE_PROFIT_WATCH_PCT = 3.0
@@ -115,6 +133,8 @@ SELL_ALERT_TYPES = {
     ALERT_CONFIRMED_TREND_WEAKENING,
     ALERT_HARD_STOP,
     ALERT_MA5_CLOSE_BREAK_EXIT,
+    ALERT_LATE_DAY_T1_EXIT,
+    ALERT_LEADER_TACTICS_EXIT,
 }
 
 
@@ -854,6 +874,491 @@ class AlertDecision:
 
 
 @dataclass(frozen=True)
+class LeaderTacticsDailyBar:
+    """One already-authorized total-return-adjusted daily bar."""
+
+    trade_date: date
+    adjusted_open: float
+    adjusted_high: float
+    adjusted_low: float
+    adjusted_close: float
+    provider: str
+    adjustment_version: str
+    revision_id: str
+    received_at: datetime | None
+    decision_eligible: bool = True
+    price_basis: str = LEADER_TACTICS_PRICE_BASIS
+
+
+@dataclass(frozen=True)
+class LeaderTacticsExitInput:
+    """Pure input for one causal close-based leader-tactics evaluation."""
+
+    entry_anchor_date: date
+    evaluation_cutoff: datetime
+    bars: Sequence[LeaderTacticsDailyBar]
+    persisted_state: Mapping[str, Any] = field(default_factory=dict)
+    source_signal_low: float | None = None
+    source_strategy: str | None = None
+
+
+@dataclass(frozen=True)
+class LeaderTacticsExitDecision:
+    actionable: bool
+    data_eligible: bool
+    reason_code: str
+    label: str
+    alert_type: str | None
+    level: str
+    threshold_context: Mapping[str, Any]
+    state_update: Mapping[str, Any]
+
+
+def _leader_decision(
+    *,
+    actionable: bool,
+    data_eligible: bool,
+    reason_code: str,
+    label: str,
+    context: dict[str, Any],
+    state: dict[str, Any],
+    level: str = "none",
+) -> LeaderTacticsExitDecision:
+    return LeaderTacticsExitDecision(
+        actionable=actionable,
+        data_eligible=data_eligible,
+        reason_code=reason_code,
+        label=label,
+        alert_type=ALERT_LEADER_TACTICS_EXIT if actionable else None,
+        level=level,
+        threshold_context=MappingProxyType(context),
+        state_update=MappingProxyType(state),
+    )
+
+
+def _leader_positive_finite(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    parsed = float(value)
+    return parsed if math.isfinite(parsed) and parsed > 0 else None
+
+
+def _leader_utc_naive(value: object) -> datetime | None:
+    """Normalize aware/naive timestamps to the database's UTC-naive convention."""
+
+    if not isinstance(value, datetime):
+        return None
+    try:
+        if value.tzinfo is None or value.utcoffset() is None:
+            return value
+        return value.astimezone(UTC).replace(tzinfo=None)
+    except (OverflowError, TypeError, ValueError):
+        return None
+
+
+def _leader_cutoff_trade_date(value: datetime) -> date:
+    """Return the Shanghai trading date represented by a cutoff timestamp."""
+
+    if value.tzinfo is None or value.utcoffset() is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(_LEADER_TACTICS_SHANGHAI).date()
+
+
+def _leader_atr20(bars: Sequence[LeaderTacticsDailyBar], end_index: int) -> float | None:
+    if end_index < 20 or end_index >= len(bars):
+        return None
+    ranges: list[float] = []
+    for previous, current in zip(
+        bars[end_index - 20 : end_index],
+        bars[end_index - 19 : end_index + 1],
+        strict=True,
+    ):
+        high = _leader_positive_finite(current.adjusted_high)
+        low = _leader_positive_finite(current.adjusted_low)
+        previous_close = _leader_positive_finite(previous.adjusted_close)
+        if high is None or low is None or previous_close is None or low > high:
+            return None
+        true_range = max(
+            high - low,
+            abs(high - previous_close),
+            abs(low - previous_close),
+        )
+        if not math.isfinite(true_range) or true_range <= 0:
+            return None
+        ranges.append(true_range)
+    result = math.fsum(ranges) / len(ranges) if ranges else None
+    return result if result is not None and math.isfinite(result) and result > 0 else None
+
+
+def evaluate_leader_tactics_exit(
+    value: LeaderTacticsExitInput,
+) -> LeaderTacticsExitDecision:
+    """Evaluate the leader-tactics full-exit policy from eligible daily bars only.
+
+    The rule intentionally has no profit target or trailing drawdown. It freezes
+    the first eligible post-entry close, the entry ATR20 and the initial risk
+    line, then protects the position with MA5, hard-stop and (once armed)
+    breakeven lines. Only a successfully notified episode is suppressed.
+    """
+
+    persisted = dict(value.persisted_state or {})
+    entry_anchor_date = getattr(value, "entry_anchor_date", None)
+    evaluation_cutoff = getattr(value, "evaluation_cutoff", None)
+    if not (
+        isinstance(entry_anchor_date, date)
+        and not isinstance(entry_anchor_date, datetime)
+        and isinstance(evaluation_cutoff, datetime)
+        and _leader_utc_naive(evaluation_cutoff) is not None
+    ):
+        return _leader_decision(
+            actionable=False,
+            data_eligible=False,
+            reason_code=LEADER_TACTICS_DATA_WAITING,
+            label="龙头策略等待合格复权日线",
+            context={
+                "policy_id": LEADER_TACTICS_EXIT_POLICY_ID,
+                "policy_version": LEADER_TACTICS_EXIT_POLICY_VERSION,
+                "price_basis": LEADER_TACTICS_PRICE_BASIS,
+                "data_reason": "invalid_evaluation_input",
+            },
+            state={"policy_id": LEADER_TACTICS_EXIT_POLICY_ID},
+        )
+
+    assert isinstance(entry_anchor_date, date)
+    assert isinstance(evaluation_cutoff, datetime)
+    cutoff_utc = _leader_utc_naive(evaluation_cutoff)
+    assert cutoff_utc is not None
+    cutoff_trade_date = _leader_cutoff_trade_date(evaluation_cutoff)
+    base_context: dict[str, Any] = {
+        "policy_id": LEADER_TACTICS_EXIT_POLICY_ID,
+        "policy_version": LEADER_TACTICS_EXIT_POLICY_VERSION,
+        "price_basis": LEADER_TACTICS_PRICE_BASIS,
+        "evaluation_cutoff": evaluation_cutoff.isoformat(),
+        "entry_anchor_date": entry_anchor_date.isoformat(),
+        "source_strategy": value.source_strategy,
+        "fee_bps_per_side": 5.0,
+        "slippage_bps_per_side": 5.0,
+        "round_trip_cost_bps": LEADER_TACTICS_ROUND_TRIP_COST_BPS,
+    }
+    base_state: dict[str, Any] = {
+        "policy_id": LEADER_TACTICS_EXIT_POLICY_ID,
+        "policy_version": LEADER_TACTICS_EXIT_POLICY_VERSION,
+        "last_evaluated_at": evaluation_cutoff.isoformat(),
+    }
+
+    try:
+        bars = tuple(value.bars or ())
+    except TypeError:
+        bars = ()
+    if not bars:
+        return _leader_decision(
+            actionable=False,
+            data_eligible=False,
+            reason_code=LEADER_TACTICS_DATA_WAITING,
+            label="龙头策略等待连续合格复权日线",
+            context={**base_context, "data_reason": "daily_bar_order_or_duplicate"},
+            state=base_state,
+        )
+    trade_dates: list[date] = []
+    adjustment_versions: list[str] = []
+    for bar in bars:
+        if not isinstance(bar, LeaderTacticsDailyBar):
+            return _leader_decision(
+                actionable=False,
+                data_eligible=False,
+                reason_code=LEADER_TACTICS_DATA_WAITING,
+                label="龙头策略等待合格复权日线",
+                context={**base_context, "data_reason": "bar_type_invalid"},
+                state=base_state,
+            )
+        if not isinstance(bar.trade_date, date) or isinstance(bar.trade_date, datetime):
+            return _leader_decision(
+                actionable=False,
+                data_eligible=False,
+                reason_code=LEADER_TACTICS_DATA_WAITING,
+                label="龙头策略等待合格复权日线",
+                context={**base_context, "data_reason": "trade_date_invalid"},
+                state=base_state,
+            )
+        received_at_utc = _leader_utc_naive(bar.received_at)
+        provider = bar.provider.strip().lower() if isinstance(bar.provider, str) else ""
+        adjustment_version = (
+            bar.adjustment_version.strip() if isinstance(bar.adjustment_version, str) else ""
+        )
+        revision_id = bar.revision_id.strip() if isinstance(bar.revision_id, str) else ""
+        values = (
+            bar.adjusted_open,
+            bar.adjusted_high,
+            bar.adjusted_low,
+            bar.adjusted_close,
+        )
+        if (
+            bar.decision_eligible is not True
+            or bar.price_basis != LEADER_TACTICS_PRICE_BASIS
+            or provider not in LEADER_TACTICS_APPROVED_PROVIDERS
+            or not adjustment_version
+            or not revision_id
+            or received_at_utc is None
+            or received_at_utc > cutoff_utc
+            or bar.trade_date > cutoff_trade_date
+            or any(_leader_positive_finite(item) is None for item in values)
+            or bar.adjusted_high < max(bar.adjusted_open, bar.adjusted_close)
+            or bar.adjusted_low > min(bar.adjusted_open, bar.adjusted_close)
+        ):
+            return _leader_decision(
+                actionable=False,
+                data_eligible=False,
+                reason_code=LEADER_TACTICS_DATA_WAITING,
+                label="龙头策略等待合格复权日线",
+                context={**base_context, "data_reason": "ineligible_or_invalid_adjusted_bar"},
+                state=base_state,
+            )
+        trade_dates.append(bar.trade_date)
+        adjustment_versions.append(adjustment_version)
+    if tuple(sorted(trade_dates)) != tuple(trade_dates) or len(set(trade_dates)) != len(trade_dates):
+        return _leader_decision(
+            actionable=False,
+            data_eligible=False,
+            reason_code=LEADER_TACTICS_DATA_WAITING,
+            label="龙头策略等待连续合格复权日线",
+            context={**base_context, "data_reason": "daily_bar_order_or_duplicate"},
+            state=base_state,
+        )
+    if len(set(adjustment_versions)) != 1:
+        return _leader_decision(
+            actionable=False,
+            data_eligible=False,
+            reason_code=LEADER_TACTICS_DATA_WAITING,
+            label="龙头策略等待统一复权口径",
+            context={**base_context, "data_reason": "adjustment_version_mismatch"},
+            state=base_state,
+        )
+    base_context["adjustment_version"] = adjustment_versions[0]
+
+    entry_index = next(
+        (index for index, bar in enumerate(bars) if bar.trade_date >= entry_anchor_date),
+        None,
+    )
+    entry_close = _leader_positive_finite(persisted.get("entry_adjusted_close"))
+    entry_atr20 = _leader_positive_finite(persisted.get("entry_atr20"))
+    initial_stop = _leader_positive_finite(persisted.get("initial_stop"))
+    risk_unit = _leader_positive_finite(persisted.get("risk_unit"))
+    frozen_adjustment_version = (
+        persisted.get("adjustment_version", "").strip()
+        if isinstance(persisted.get("adjustment_version"), str)
+        else ""
+    )
+    if any(item is not None for item in (entry_close, entry_atr20, initial_stop, risk_unit)) and not all(
+        item is not None for item in (entry_close, entry_atr20, initial_stop, risk_unit)
+    ):
+        return _leader_decision(
+            actionable=False,
+            data_eligible=False,
+            reason_code=LEADER_TACTICS_DATA_WAITING,
+            label="龙头策略冻结状态不完整",
+            context={**base_context, "data_reason": "frozen_state_incomplete"},
+            state=base_state,
+        )
+    frozen_state = all(
+        item is not None for item in (entry_close, entry_atr20, initial_stop, risk_unit)
+    )
+    if frozen_state and (
+        not frozen_adjustment_version
+        or frozen_adjustment_version != adjustment_versions[0]
+        or initial_stop >= entry_close
+        or not math.isclose(
+            risk_unit,
+            entry_close - initial_stop,
+            rel_tol=1e-9,
+            abs_tol=1e-12,
+        )
+    ):
+        return _leader_decision(
+            actionable=False,
+            data_eligible=False,
+            reason_code=LEADER_TACTICS_DATA_WAITING,
+            label="龙头策略冻结风险口径不一致",
+            context={**base_context, "data_reason": "frozen_state_basis_mismatch"},
+            state=base_state,
+        )
+    if not frozen_state:
+        if entry_index is None or entry_index < 20 or len(bars) - entry_index < 1:
+            return _leader_decision(
+                actionable=False,
+                data_eligible=False,
+                reason_code=LEADER_TACTICS_DATA_WAITING,
+                label="龙头策略等待 ATR20 预热数据",
+                context={
+                    **base_context,
+                    "data_reason": "entry_atr20_warmup_missing",
+                    "bar_count": len(bars),
+                },
+                state=base_state,
+            )
+    elif entry_index is None:
+        if not bars or bars[-1].trade_date < entry_anchor_date:
+            return _leader_decision(
+                actionable=False,
+                data_eligible=False,
+                reason_code=LEADER_TACTICS_DATA_WAITING,
+                label="龙头策略等待入场后的合格复权日线",
+                context={**base_context, "data_reason": "entry_not_visible_in_window"},
+                state=base_state,
+            )
+        # The bounded window can start after a long-held position's entry.
+        entry_index = 0
+    if entry_close is None:
+        entry_close = _leader_positive_finite(bars[entry_index].adjusted_close)
+        entry_atr20 = _leader_atr20(bars, entry_index)
+        if entry_close is None or entry_atr20 is None:
+            return _leader_decision(
+                actionable=False,
+                data_eligible=False,
+                reason_code=LEADER_TACTICS_DATA_WAITING,
+                label="龙头策略等待 ATR20 预热数据",
+                context={**base_context, "data_reason": "entry_atr20_unavailable"},
+                state=base_state,
+            )
+        candidate_low = _leader_positive_finite(value.source_signal_low)
+        usable_signal_low = candidate_low if candidate_low is not None and candidate_low < entry_close else None
+        initial_stop = max(
+            usable_signal_low if usable_signal_low is not None else 0.0,
+            entry_close - 2.0 * entry_atr20,
+        )
+        if initial_stop <= 0 or initial_stop >= entry_close:
+            initial_stop = entry_close - 2.0 * entry_atr20
+        risk_unit = entry_close - initial_stop
+        if not math.isfinite(risk_unit) or risk_unit <= 0:
+            return _leader_decision(
+                actionable=False,
+                data_eligible=False,
+                reason_code=LEADER_TACTICS_DATA_WAITING,
+                label="龙头策略初始风险线无效",
+                context={**base_context, "data_reason": "initial_risk_unit_invalid"},
+                state=base_state,
+            )
+        persisted["source_signal_low_ignored"] = (
+            candidate_low is not None and candidate_low >= entry_close
+        )
+    assert entry_close is not None
+    assert entry_atr20 is not None
+    assert initial_stop is not None
+    assert risk_unit is not None
+    current = _leader_positive_finite(bars[-1].adjusted_close)
+    closes = [_leader_positive_finite(bar.adjusted_close) for bar in bars[-5:]]
+    if current is None or len(closes) != 5 or any(item is None for item in closes):
+        return _leader_decision(
+            actionable=False,
+            data_eligible=False,
+            reason_code=LEADER_TACTICS_DATA_WAITING,
+            label="龙头策略等待 MA5 复权收盘",
+            context={**base_context, "data_reason": "ma5_unavailable"},
+            state=base_state,
+        )
+    ma5 = math.fsum(item for item in closes if item is not None) / 5.0
+    previous_high = _leader_positive_finite(persisted.get("high_water_adjusted_close"))
+    visible_highs = [
+        _leader_positive_finite(bar.adjusted_close)
+        for bar in bars[entry_index:]
+    ]
+    if any(item is None for item in visible_highs):
+        return _leader_decision(
+            actionable=False,
+            data_eligible=False,
+            reason_code=LEADER_TACTICS_DATA_WAITING,
+            label="龙头策略等待合格复权日线",
+            context={**base_context, "data_reason": "high_water_unavailable"},
+            state=base_state,
+        )
+    high_water = max(
+        [item for item in visible_highs if item is not None]
+        + ([previous_high] if previous_high is not None else [])
+    )
+    armed = bool(persisted.get("armed") is True or high_water >= entry_close + risk_unit)
+    notification_sent = persisted.get("exit_notification_sent") is True
+    breakeven = entry_close * (1.0 + LEADER_TACTICS_ROUND_TRIP_COST_BPS / 10_000.0) if armed else None
+    effective_line = max(
+        initial_stop,
+        *(line for line in (breakeven, ma5) if line is not None),
+    )
+    context = {
+        **base_context,
+        "bar_date": bars[-1].trade_date.isoformat(),
+        "bar_cutoff": bars[-1].received_at.isoformat() if bars[-1].received_at else None,
+        "provider": bars[-1].provider,
+        "revision": bars[-1].revision_id,
+        "entry_adjusted_close": round(entry_close, 8),
+        "entry_atr20": round(entry_atr20, 8),
+        "initial_stop": round(initial_stop, 8),
+        "risk_unit": round(risk_unit, 8),
+        "high_water_adjusted_close": round(high_water, 8),
+        "armed": armed,
+        "breakeven_line": round(breakeven, 8) if breakeven is not None else None,
+        "adjusted_ma5": round(ma5, 8),
+        "effective_exit_line": round(effective_line, 8),
+        "current_adjusted_close": round(current, 8),
+        "source_signal_low_ignored": bool(persisted.get("source_signal_low_ignored", False)),
+        "exit_notification_sent": notification_sent,
+        "trigger_priority": [LEADER_TACTICS_HARD_STOP, LEADER_TACTICS_BREAKEVEN_EXIT, LEADER_TACTICS_MA5_EXIT],
+    }
+    state = {
+        **base_state,
+        "entry_adjusted_close": entry_close,
+        "entry_atr20": entry_atr20,
+        "initial_stop": initial_stop,
+        "risk_unit": risk_unit,
+        "adjustment_version": adjustment_versions[0],
+        "high_water_adjusted_close": high_water,
+        "armed": armed,
+        "breakeven_line": breakeven,
+        "last_bar_date": bars[-1].trade_date.isoformat(),
+        "source_signal_low_ignored": bool(persisted.get("source_signal_low_ignored", False)),
+        "exit_triggered": bool(persisted.get("exit_triggered", False)),
+        "exit_notification_sent": notification_sent,
+    }
+    if current <= effective_line:
+        if notification_sent:
+            return _leader_decision(
+                actionable=False,
+                data_eligible=True,
+                reason_code="leader_tactics_exit_already_triggered",
+                label="龙头策略退出信号已触发",
+                context=context,
+                state=state,
+            )
+        hard_stop_hit = current <= initial_stop
+        breakeven_hit = breakeven is not None and current <= breakeven
+        ma5_hit = current <= ma5
+        if hard_stop_hit:
+            reason_code = LEADER_TACTICS_HARD_STOP
+        elif breakeven_hit:
+            reason_code = LEADER_TACTICS_BREAKEVEN_EXIT
+        elif ma5_hit:
+            reason_code = LEADER_TACTICS_MA5_EXIT
+        else:
+            reason_code = LEADER_TACTICS_MA5_EXIT
+        state["exit_triggered"] = True
+        state["exit_triggered_date"] = bars[-1].trade_date.isoformat()
+        return _leader_decision(
+            actionable=True,
+            data_eligible=True,
+            reason_code=reason_code,
+            label="龙头策略全额退出提醒",
+            context=context,
+            state=state,
+            level="urgent" if reason_code == LEADER_TACTICS_HARD_STOP else "warning",
+        )
+    return _leader_decision(
+        actionable=False,
+        data_eligible=True,
+        reason_code="leader_tactics_exit_not_triggered",
+        label="暂无龙头策略退出提醒",
+        context=context,
+        state=state,
+    )
+
+
+@dataclass(frozen=True)
 class ExitExecutionEvidence:
     status: str
     signal_price: float | None
@@ -1027,6 +1532,7 @@ def legacy_exit_target_remaining_fraction(alert_type: str | None) -> float | Non
     return {
         ALERT_HARD_STOP: 0.0,
         ALERT_MA5_CLOSE_BREAK_EXIT: 0.0,
+        ALERT_LATE_DAY_T1_EXIT: 0.0,
         ALERT_TRAILING_TAKE_PROFIT: TRAILING_FIRST_TARGET_REMAINING_FRACTION,
         ALERT_CONFIRMED_TREND_WEAKENING: 0.5,
         ALERT_EXIT_WATCH: 0.5,
@@ -1350,17 +1856,23 @@ def map_exit_signal_to_position_action(
         or not 0.0 <= current_remaining_fraction <= 1.0
     ):
         raise ValueError("current_remaining_fraction must be a finite fraction")
-    if alert_type in {ALERT_HARD_STOP, ALERT_MA5_CLOSE_BREAK_EXIT}:
+    if alert_type in {
+        ALERT_HARD_STOP,
+        ALERT_MA5_CLOSE_BREAK_EXIT,
+        ALERT_LATE_DAY_T1_EXIT,
+        ALERT_LEADER_TACTICS_EXIT,
+    }:
         return PositionActionDecision(
             action=POSITION_ACTION_EXIT,
             action_class=ACTION_CLASS_ACTIONABLE_EXIT,
             label=position_action_label(POSITION_ACTION_EXIT),
             target_remaining_fraction=0.0,
-            reason=(
-                "触发硬止损，绝对目标为当前 exposure baseline 的 0%。"
-                if alert_type == ALERT_HARD_STOP
-                else "复权收盘价跌破同日复权五日线，T 日确认并以 T+1 为最早可执行日，绝对目标为当前 exposure baseline 的 0%。"
-            ),
+            reason={
+                ALERT_HARD_STOP: "触发硬止损，绝对目标为当前 exposure baseline 的 0%。",
+                ALERT_MA5_CLOSE_BREAK_EXIT: "复权收盘价跌破同日复权五日线，T 日确认并以 T+1 为最早可执行日，绝对目标为当前 exposure baseline 的 0%。",
+                ALERT_LATE_DAY_T1_EXIT: "尾盘转强 T+1 策略触发版本化全量退出，绝对目标为当前 exposure baseline 的 0%。",
+                ALERT_LEADER_TACTICS_EXIT: "龙头策略触发全额退出，绝对目标为当前 exposure baseline 的 0%；个股金额和份额请按券商实际持仓处理。",
+            }[alert_type],
         )
     if alert_type == ALERT_EXIT_WATCH:
         if not evidence_eligible:
@@ -1599,6 +2111,14 @@ def calculate_position_sizing(
     exposure_baseline_quantity: float | None = None,
 ) -> PositionSizingRecommendation:
     if asset_type != ASSET_TYPE_ETF:
+        if alert_type == ALERT_LEADER_TACTICS_EXIT:
+            return PositionSizingRecommendation(
+                action=POSITION_ACTION_EXIT,
+                label=position_action_label(POSITION_ACTION_EXIT),
+                target_account_weight=0.0,
+                reason="龙头策略触发个股全额退出；不估算金额或份额，请按券商实际持仓处理。",
+                action_class=ACTION_CLASS_ACTIONABLE_EXIT,
+            )
         return PositionSizingRecommendation(
             action=POSITION_ACTION_HOLD,
             label=position_action_label(POSITION_ACTION_HOLD),

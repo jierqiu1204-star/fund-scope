@@ -56,6 +56,10 @@ from app.services.workflows.etf_publish_readiness import (
     preflight_post_close_etf_publication_readiness,
 )
 from app.services.workflows.intraday_etf import intraday_etf_watch_with_alerts_job
+from app.services.workflows.late_day_turnaround import (
+    late_day_turnaround_ashare_capture_job,
+    late_day_turnaround_materialize_job,
+)
 from app.services.workflows.tracked_position_lifecycle_shadow import (
     daily_tracked_position_alerts_with_shadow_job,
 )
@@ -209,6 +213,24 @@ def register_default_jobs(
             session_factory=db.session,
         )
 
+    async def late_day_turnaround_etf_tracked(
+        session: AsyncSession,
+    ) -> dict[str, Any]:
+        return await late_day_turnaround_materialize_job(session, universe="etf")
+
+    async def late_day_turnaround_ashare_capture_tracked(
+        session: AsyncSession,
+    ) -> dict[str, Any]:
+        return await late_day_turnaround_ashare_capture_job(session)
+
+    async def late_day_turnaround_ashare_tracked(
+        session: AsyncSession,
+    ) -> dict[str, Any]:
+        return await late_day_turnaround_materialize_job(
+            session,
+            universe="ashare",
+        )
+
     async def post_close_etf_adjusted_sync_preflight(
         session: AsyncSession,
     ) -> dict[str, Any]:
@@ -359,6 +381,62 @@ def register_default_jobs(
                 coalesce=True,
                 replace_existing=True,
             )
+
+    if settings.late_day_turnaround_ashare_capture_enabled:
+        scheduler.add_job(
+            _run_tracked_job,
+            "cron",
+            args=[
+                db,
+                "late_day_turnaround_capture_ashare",
+                late_day_turnaround_ashare_capture_tracked,
+            ],
+            day_of_week="mon-fri",
+            hour=14,
+            minute="28,38,48",
+            second=0,
+            id="late_day_turnaround_capture_ashare",
+            max_instances=1,
+            coalesce=True,
+            replace_existing=True,
+        )
+
+    if settings.late_day_turnaround_etf_materialize_enabled:
+        scheduler.add_job(
+            _run_tracked_job,
+            "cron",
+            args=[
+                db,
+                "late_day_turnaround_materialize_etf",
+                late_day_turnaround_etf_tracked,
+            ],
+            day_of_week="mon-fri",
+            hour=14,
+            minute="30,40,50",
+            second=0,
+            id="late_day_turnaround_materialize_etf",
+            max_instances=1,
+            coalesce=True,
+            replace_existing=True,
+        )
+    if settings.late_day_turnaround_ashare_materialize_enabled:
+        scheduler.add_job(
+            _run_tracked_job,
+            "cron",
+            args=[
+                db,
+                "late_day_turnaround_materialize_ashare",
+                late_day_turnaround_ashare_tracked,
+            ],
+            day_of_week="mon-fri",
+            hour=14,
+            minute="30,40,50",
+            second=0,
+            id="late_day_turnaround_materialize_ashare",
+            max_instances=1,
+            coalesce=True,
+            replace_existing=True,
+        )
 
     scheduler.add_job(
         _run_tracked_job,

@@ -43,17 +43,26 @@ import type {
   TrackedPositionAlertAuditList,
   TrackedPositionDetail,
   TrackedPositionExecutionPriceSource,
-  TrackedPositionList
+  TrackedPositionList,
+  TrackingAlertPolicyId
 } from "@/lib/types";
 
 type AssetType = "fund" | "etf";
 type RankingSurface = "research" | "actionable";
-type SortKey = "score" | "return_5d" | "return_20d" | "drawdown_low" | "risk_low" | "liquidity";
+type SortKey =
+  | "score"
+  | "return_5d"
+  | "return_20d"
+  | "drawdown_low"
+  | "risk_low"
+  | "liquidity";
 type OrderTimeBucket = "before_15" | "after_15" | "unknown";
 type MobileTab = "ranking" | "detail" | "tracking" | "explanation";
 type RankedAssetItem = ShortResearchAsset | IntradayEtfLiveRankingItem;
 type RankedAssetResponse = ShortResearchAssetList | IntradayEtfLiveRankingList;
-type FreshIntradayQuote = NonNullable<IntradayEtfLiveRankingItem["quote"]> & { change_percent: number };
+type FreshIntradayQuote = NonNullable<IntradayEtfLiveRankingItem["quote"]> & {
+  change_percent: number;
+};
 type EtfStateMessage = { key: string; text: string };
 type LabelFilterKey = "observation" | "entry" | "tracking";
 type LabelFilterState = Record<LabelFilterKey, string[]>;
@@ -85,7 +94,11 @@ type ActionTransitionMutationRequest = {
 };
 
 const ASSET_PAGE_SIZE = 12;
-const emptyLabelFilters: LabelFilterState = { observation: [], entry: [], tracking: [] };
+const emptyLabelFilters: LabelFilterState = {
+  observation: [],
+  entry: [],
+  tracking: []
+};
 
 const executionPriceSourceOptions: Array<{
   value: TrackedPositionExecutionPriceSource;
@@ -114,12 +127,37 @@ const labelFilterGroups: Array<{
   title: string;
   options: string[];
 }> = [
-  { key: "observation", title: "买入观察", options: ["短线观察", "高位观察", "谨慎观察", "不适合短线", "数据不足"] },
-  { key: "entry", title: "今日买点", options: ["健康回踩", "趋势延续", "冲高别追", "跌破等待", "放量转弱", "午休", "休市", "行情滞后", "数据不足"] },
-  { key: "tracking", title: "持仓状态", options: ["我已持仓", "触发提醒", "仅网页提示"] }
+  {
+    key: "observation",
+    title: "买入观察",
+    options: ["短线观察", "高位观察", "谨慎观察", "不适合短线", "数据不足"]
+  },
+  {
+    key: "entry",
+    title: "今日买点",
+    options: [
+      "健康回踩",
+      "趋势延续",
+      "冲高别追",
+      "跌破等待",
+      "放量转弱",
+      "午休",
+      "休市",
+      "行情滞后",
+      "数据不足"
+    ]
+  },
+  {
+    key: "tracking",
+    title: "持仓状态",
+    options: ["我已持仓", "触发提醒", "仅网页提示"]
+  }
 ];
 
-function appendLabelFilterParams(params: URLSearchParams, filters: LabelFilterState) {
+function appendLabelFilterParams(
+  params: URLSearchParams,
+  filters: LabelFilterState
+) {
   if (filters.observation.length) {
     params.set("observation_labels", filters.observation.join(","));
   }
@@ -160,9 +198,12 @@ const assetModes: Record<
     priceLabel: "日线收盘价",
     dataButton: "拉取近 120 天 ETF 日线",
     trackingTitle: "标注你已经在证券账户买入的场内 ETF",
-    trackingEmpty: "还没有追踪记录。左侧选择一只场内 ETF 后，点“我已买入，开始追踪”。",
-    detailEmpty: "左侧选择一只 ETF 后，这里会显示日线走势、盘中价、回撤、成交额、近期涨跌和解释。",
-    noResults: "当前筛选条件下没有 ETF 结果。可以换一个方向，或先更新日线数据并生成短线排序。"
+    trackingEmpty:
+      "还没有追踪记录。左侧选择一只场内 ETF 后，点“我已买入，开始追踪”。",
+    detailEmpty:
+      "左侧选择一只 ETF 后，这里会显示日线走势、盘中价、回撤、成交额、近期涨跌和解释。",
+    noResults:
+      "当前筛选条件下没有 ETF 结果。可以换一个方向，或先更新日线数据并生成短线排序。"
   },
   fund: {
     label: "支付宝场外基金（非实时净值）",
@@ -174,9 +215,12 @@ const assetModes: Record<
     priceLabel: "最新净值",
     dataButton: "拉取近 120 天基金净值",
     trackingTitle: "标注你已经在支付宝买入的场外基金",
-    trackingEmpty: "还没有追踪记录。左侧选择一只场外基金后，点“我已买入，开始追踪”。",
-    detailEmpty: "左侧选择一只场外基金后，这里会显示走势、回撤、近期涨跌和解释。",
-    noResults: "当前筛选条件下没有场外基金结果。可以换一个方向，或先点击“拉取近 120 天基金净值”。"
+    trackingEmpty:
+      "还没有追踪记录。左侧选择一只场外基金后，点“我已买入，开始追踪”。",
+    detailEmpty:
+      "左侧选择一只场外基金后，这里会显示走势、回撤、近期涨跌和解释。",
+    noResults:
+      "当前筛选条件下没有场外基金结果。可以换一个方向，或先点击“拉取近 120 天基金净值”。"
   }
 };
 
@@ -202,7 +246,8 @@ const fallbackThemes = [
 
 function errorText(error: unknown) {
   if (typeof error === "object" && error !== null && "response" in error) {
-    const response = (error as { response?: { data?: { detail?: string } } }).response;
+    const response = (error as { response?: { data?: { detail?: string } } })
+      .response;
     if (response?.data?.detail) {
       return response.data.detail;
     }
@@ -260,44 +305,81 @@ type ScoreBucketValidationGroup = LabelValidationGroup & {
   selected_codes?: string[];
 };
 
-function labelValidationGroups(statusData: ShortResearchStatus | undefined): LabelValidationGroup[] {
-  const validation = statusData?.label_validation as { groups?: unknown } | undefined;
-  return Array.isArray(validation?.groups) ? (validation.groups as LabelValidationGroup[]) : [];
+function labelValidationGroups(
+  statusData: ShortResearchStatus | undefined
+): LabelValidationGroup[] {
+  const validation = statusData?.label_validation as
+    | { groups?: unknown }
+    | undefined;
+  return Array.isArray(validation?.groups)
+    ? (validation.groups as LabelValidationGroup[])
+    : [];
 }
 
-function scoreBucketValidationGroups(statusData: ShortResearchStatus | undefined): ScoreBucketValidationGroup[] {
-  const validation = statusData?.score_bucket_validation as { groups?: unknown } | undefined;
-  return Array.isArray(validation?.groups) ? (validation.groups as ScoreBucketValidationGroup[]) : [];
+function scoreBucketValidationGroups(
+  statusData: ShortResearchStatus | undefined
+): ScoreBucketValidationGroup[] {
+  const validation = statusData?.score_bucket_validation as
+    | { groups?: unknown }
+    | undefined;
+  return Array.isArray(validation?.groups)
+    ? (validation.groups as ScoreBucketValidationGroup[])
+    : [];
 }
 
-function labelValidationLine(group: LabelValidationGroup | undefined, window: "5" | "10") {
+function labelValidationLine(
+  group: LabelValidationGroup | undefined,
+  window: "5" | "10"
+) {
   const item = group?.windows?.[window];
   if (!item || !item.sample_count) {
     return `${window}日：样本不足`;
   }
-  const median = item.median_return === null || item.median_return === undefined ? "暂无" : formatPercent(item.median_return * 100);
+  const median =
+    item.median_return === null || item.median_return === undefined
+      ? "暂无"
+      : formatPercent(item.median_return * 100);
   const drawdownValue = item.worst_forward_drawdown ?? item.max_drawdown;
-  const drawdown = drawdownValue === null || drawdownValue === undefined ? "暂无" : formatPercent(drawdownValue * 100);
-  const winRate = item.win_rate === null || item.win_rate === undefined ? "暂无" : formatPercent(item.win_rate * 100);
+  const drawdown =
+    drawdownValue === null || drawdownValue === undefined
+      ? "暂无"
+      : formatPercent(drawdownValue * 100);
+  const winRate =
+    item.win_rate === null || item.win_rate === undefined
+      ? "暂无"
+      : formatPercent(item.win_rate * 100);
   return `${window}日：样本 ${item.sample_count}，中位收益 ${median}，胜率 ${winRate}，最差回撤 ${drawdown}`;
 }
 
-function scoreBucketWindowText(group: ScoreBucketValidationGroup, window: "5" | "10") {
+function scoreBucketWindowText(
+  group: ScoreBucketValidationGroup,
+  window: "5" | "10"
+) {
   const item = group.windows?.[window];
   if (!item || !item.sample_count) {
     return "样本不足";
   }
-  const median = item.median_return === null || item.median_return === undefined ? "暂无" : formatPercent(item.median_return * 100);
-  const winRate = item.win_rate === null || item.win_rate === undefined ? "暂无" : formatPercent(item.win_rate * 100);
+  const median =
+    item.median_return === null || item.median_return === undefined
+      ? "暂无"
+      : formatPercent(item.median_return * 100);
+  const winRate =
+    item.win_rate === null || item.win_rate === undefined
+      ? "暂无"
+      : formatPercent(item.win_rate * 100);
   const paired =
-    item.paired_excess_return_mean === null || item.paired_excess_return_mean === undefined
+    item.paired_excess_return_mean === null ||
+    item.paired_excess_return_mean === undefined
       ? "暂无"
       : formatPercent(item.paired_excess_return_mean * 100);
-  return item.endpoint_type === "primary" ? `净中位 ${median} / 配对超额 ${paired}` : `${median} / ${winRate}`;
+  return item.endpoint_type === "primary"
+    ? `净中位 ${median} / 配对超额 ${paired}`
+    : `${median} / ${winRate}`;
 }
 
 function scoreBucketSampleText(group: ScoreBucketValidationGroup) {
-  const window = group.windows?.["5"] ?? group.windows?.["10"] ?? group.windows?.["1"];
+  const window =
+    group.windows?.["5"] ?? group.windows?.["10"] ?? group.windows?.["1"];
   const selectedCount = group.selected_count ?? group.selected_codes?.length;
   const sampleCount = window?.sample_count ?? 0;
   const assetCount = window?.asset_count ?? 0;
@@ -308,7 +390,10 @@ function scoreBucketSampleText(group: ScoreBucketValidationGroup) {
 }
 
 function scoreBucketUnavailableText(summary: Record<string, unknown>) {
-  const reason = typeof summary.unavailable_reason === "string" ? summary.unavailable_reason : "";
+  const reason =
+    typeof summary.unavailable_reason === "string"
+      ? summary.unavailable_reason
+      : "";
   switch (reason) {
     case "waiting_signal_generation":
       return "尚无通过发布门槛的 final_score_v3 历史快照；需先完成复权价、盘中报价及综合分覆盖，且不使用旧分数或原始价格补算。";
@@ -321,20 +406,34 @@ function scoreBucketUnavailableText(summary: Record<string, unknown>) {
   }
 }
 
-function scoreBucketPrimaryEndpointText(group: ScoreBucketValidationGroup | undefined) {
+function scoreBucketPrimaryEndpointText(
+  group: ScoreBucketValidationGroup | undefined
+) {
   const window = group?.windows?.["5"];
   if (!window) {
     return "等待 Top 10 5 日配对样本。";
   }
   const interval = window.paired_excess_return_ci_95;
-  const intervalText = interval ? `${formatPercent(interval[0] * 100)} 至 ${formatPercent(interval[1] * 100)}` : "暂无";
+  const intervalText = interval
+    ? `${formatPercent(interval[0] * 100)} 至 ${formatPercent(interval[1] * 100)}`
+    : "暂无";
   const effect = window.effect_direction ?? "insufficient";
   const label =
-    effect === "supportive" ? "支持" : effect === "negative" ? "负向" : effect === "inconclusive" ? "不确定" : "样本不足";
+    effect === "supportive"
+      ? "支持"
+      : effect === "negative"
+        ? "负向"
+        : effect === "inconclusive"
+          ? "不确定"
+          : "样本不足";
   const coverage = window.asset_coverage ?? window.coverage;
-  const coverageText = coverage === null || coverage === undefined ? "暂无" : formatPercent(coverage * 100);
+  const coverageText =
+    coverage === null || coverage === undefined
+      ? "暂无"
+      : formatPercent(coverage * 100);
   const cost = window.cost_per_round_trip;
-  const costText = cost === null || cost === undefined ? "暂无" : formatPercent(cost * 100);
+  const costText =
+    cost === null || cost === undefined ? "暂无" : formatPercent(cost * 100);
   return `主终点：Top 10 5 日相对 all_scored 的配对净超额，${label}；95% 区间 ${intervalText}；独立日期 ${window.paired_sample_count ?? 0}；数据覆盖 ${coverageText}；双边成本 ${costText}。`;
 }
 
@@ -348,26 +447,36 @@ function validationConfidenceLabel(confidence: string | undefined) {
   return "样本不足";
 }
 
-function sampleQualityLabel(evidence: ShortResearchAsset["validation_evidence"] | null | undefined) {
+function sampleQualityLabel(
+  evidence: ShortResearchAsset["validation_evidence"] | null | undefined
+) {
   const sampleQuality = evidence?.sample_quality;
   if (!sampleQuality) {
     return "无样本质量说明";
   }
   const excluded = sampleQuality.excluded_count_total ?? 0;
   const rawReasons = sampleQuality.exclusion_reasons;
-  const reasons = Array.isArray(rawReasons) ? rawReasons : Object.keys(rawReasons ?? {});
+  const reasons = Array.isArray(rawReasons)
+    ? rawReasons
+    : Object.keys(rawReasons ?? {});
   if (excluded > 0 && reasons.length) {
     return `排除 ${excluded} 条不可决策样本：${reasons.slice(0, 2).join("、")}`;
   }
   return `可用样本 ${sampleQuality.sample_count_total ?? evidence?.sample_count ?? 0}`;
 }
 
-function evidenceTrack(asset: ShortResearchAsset | null | undefined, key: "historical_replay" | "forward_live") {
+function evidenceTrack(
+  asset: ShortResearchAsset | null | undefined,
+  key: "historical_replay" | "forward_live"
+) {
   const evidence = asset?.validation_evidence;
   return evidence?.evidence_tracks?.[key] ?? evidence?.[key] ?? null;
 }
 
-function evidenceHorizon(evidence: ShortResearchAsset["validation_evidence"] | null | undefined, window = "5") {
+function evidenceHorizon(
+  evidence: ShortResearchAsset["validation_evidence"] | null | undefined,
+  window = "5"
+) {
   if (!evidence?.horizons) {
     return null;
   }
@@ -381,31 +490,45 @@ function validationTrackText(
 ) {
   const replay = options.replay ?? false;
   if (!evidence) {
-    return replay ? `${label}：还没运行历史回放。` : `${label}：真实前瞻样本正在积累。`;
+    return replay
+      ? `${label}：还没运行历史回放。`
+      : `${label}：真实前瞻样本正在积累。`;
   }
   const horizon = evidenceHorizon(evidence, "5");
   const sampleCount = horizon?.sample_count ?? evidence.sample_count ?? 0;
   if (!sampleCount) {
-    return replay ? `${label}：样本不足，先运行历史回放。` : `${label}：真实前瞻样本不足，继续积累。`;
+    return replay
+      ? `${label}：样本不足，先运行历史回放。`
+      : `${label}：真实前瞻样本不足，继续积累。`;
   }
   const medianReturn =
-    (horizon?.median_return ?? evidence.median_return) === null || (horizon?.median_return ?? evidence.median_return) === undefined
+    (horizon?.median_return ?? evidence.median_return) === null ||
+    (horizon?.median_return ?? evidence.median_return) === undefined
       ? "暂无"
-      : formatPercent((horizon?.median_return ?? evidence.median_return ?? 0) * 100);
+      : formatPercent(
+          (horizon?.median_return ?? evidence.median_return ?? 0) * 100
+        );
   const winRate =
-    (horizon?.win_rate ?? evidence.win_rate) === null || (horizon?.win_rate ?? evidence.win_rate) === undefined
+    (horizon?.win_rate ?? evidence.win_rate) === null ||
+    (horizon?.win_rate ?? evidence.win_rate) === undefined
       ? "暂无"
       : formatPercent((horizon?.win_rate ?? evidence.win_rate ?? 0) * 100);
   const drawdown =
-    horizon?.worst_forward_drawdown === null || horizon?.worst_forward_drawdown === undefined
+    horizon?.worst_forward_drawdown === null ||
+    horizon?.worst_forward_drawdown === undefined
       ? "暂无"
       : formatPercent(horizon.worst_forward_drawdown * 100);
   const coverage =
-    horizon?.coverage === null || horizon?.coverage === undefined ? "暂无" : formatPercent(horizon.coverage * 100);
+    horizon?.coverage === null || horizon?.coverage === undefined
+      ? "暂无"
+      : formatPercent(horizon.coverage * 100);
   return `${label}：${validationConfidenceLabel(horizon?.confidence ?? evidence.confidence)}，5日样本 ${sampleCount}，中位收益 ${medianReturn}，胜率 ${winRate}，最差回撤 ${drawdown}，覆盖率 ${coverage}`;
 }
 
-function validationTrackSummary(evidence: ShortResearchAsset["validation_evidence"] | null | undefined, replay = false) {
+function validationTrackSummary(
+  evidence: ShortResearchAsset["validation_evidence"] | null | undefined,
+  replay = false
+) {
   const horizon = evidenceHorizon(evidence, "5");
   const sampleCount = horizon?.sample_count ?? evidence?.sample_count ?? 0;
   if (!evidence || !sampleCount) {
@@ -416,27 +539,42 @@ function validationTrackSummary(evidence: ShortResearchAsset["validation_evidenc
       winRate: "暂无",
       drawdown: "暂无",
       coverage: replay ? "暂无" : "前瞻等待",
-      asOfDate: evidence?.freshness?.as_of_date ? formatDate(evidence.freshness.as_of_date) : "暂无"
+      asOfDate: evidence?.freshness?.as_of_date
+        ? formatDate(evidence.freshness.as_of_date)
+        : "暂无"
     };
   }
   return {
-    status: validationConfidenceLabel(horizon?.confidence ?? evidence.confidence),
+    status: validationConfidenceLabel(
+      horizon?.confidence ?? evidence.confidence
+    ),
     sampleCount: `${sampleCount}`,
     medianReturn:
-      (horizon?.median_return ?? evidence.median_return) === null || (horizon?.median_return ?? evidence.median_return) === undefined
+      (horizon?.median_return ?? evidence.median_return) === null ||
+      (horizon?.median_return ?? evidence.median_return) === undefined
         ? "暂无"
-        : formatPercent((horizon?.median_return ?? evidence.median_return ?? 0) * 100),
+        : formatPercent(
+            (horizon?.median_return ?? evidence.median_return ?? 0) * 100
+          ),
     winRate:
-      (horizon?.win_rate ?? evidence.win_rate) === null || (horizon?.win_rate ?? evidence.win_rate) === undefined
+      (horizon?.win_rate ?? evidence.win_rate) === null ||
+      (horizon?.win_rate ?? evidence.win_rate) === undefined
         ? "暂无"
         : formatPercent((horizon?.win_rate ?? evidence.win_rate ?? 0) * 100),
     drawdown:
-      horizon?.worst_forward_drawdown === null || horizon?.worst_forward_drawdown === undefined
+      horizon?.worst_forward_drawdown === null ||
+      horizon?.worst_forward_drawdown === undefined
         ? "暂无"
         : formatPercent(horizon.worst_forward_drawdown * 100),
     coverage:
-      horizon?.coverage === null || horizon?.coverage === undefined ? "暂无" : formatPercent(horizon.coverage * 100),
-    asOfDate: evidence.freshness?.as_of_date ? formatDate(evidence.freshness.as_of_date) : evidence.as_of_date ? formatDate(evidence.as_of_date) : "暂无"
+      horizon?.coverage === null || horizon?.coverage === undefined
+        ? "暂无"
+        : formatPercent(horizon.coverage * 100),
+    asOfDate: evidence.freshness?.as_of_date
+      ? formatDate(evidence.freshness.as_of_date)
+      : evidence.as_of_date
+        ? formatDate(evidence.as_of_date)
+        : "暂无"
   };
 }
 
@@ -450,18 +588,29 @@ function validationEvidenceText(asset: ShortResearchAsset | null | undefined) {
   if (!evidence || !evidence.sample_count) {
     return "标签验证：样本不足";
   }
-  const winRate = evidence.win_rate === null || evidence.win_rate === undefined ? "暂无" : formatPercent(evidence.win_rate * 100);
+  const winRate =
+    evidence.win_rate === null || evidence.win_rate === undefined
+      ? "暂无"
+      : formatPercent(evidence.win_rate * 100);
   const medianReturn =
     evidence.median_return === null || evidence.median_return === undefined
       ? "暂无"
       : formatPercent(evidence.median_return * 100);
-  const freshness = evidence.freshness?.as_of_date ? `，样本日期 ${formatDate(evidence.freshness.as_of_date)}` : "";
-  const warning = evidence.degradation_warning ? `；${evidence.degradation_warning}` : "";
+  const freshness = evidence.freshness?.as_of_date
+    ? `，样本日期 ${formatDate(evidence.freshness.as_of_date)}`
+    : "";
+  const warning = evidence.degradation_warning
+    ? `；${evidence.degradation_warning}`
+    : "";
   return `标签验证：${validationConfidenceLabel(evidence.confidence)}，样本 ${evidence.sample_count}，5日中位收益 ${medianReturn}，胜率 ${winRate}，${sampleQualityLabel(evidence)}${freshness}${warning}`;
 }
 
-function evidenceContractText(status: string | null | undefined, summary?: Record<string, unknown> | null) {
-  const sampleCount = typeof summary?.sample_count === "number" ? summary.sample_count : 0;
+function evidenceContractText(
+  status: string | null | undefined,
+  summary?: Record<string, unknown> | null
+) {
+  const sampleCount =
+    typeof summary?.sample_count === "number" ? summary.sample_count : 0;
   switch (status) {
     case "同源已验证":
       return `当前结果已有同源历史证据，样本 ${sampleCount}；它只代表历史复盘，不保证未来。`;
@@ -477,32 +626,58 @@ function evidenceContractText(status: string | null | undefined, summary?: Recor
   }
 }
 
-function recordNumber(metadata: Record<string, unknown> | null | undefined, key: string) {
+function recordNumber(
+  metadata: Record<string, unknown> | null | undefined,
+  key: string
+) {
   const value = metadata?.[key];
   return typeof value === "number" ? value : null;
 }
 
-function observationPortfolioText(asset: ShortResearchAsset | null | undefined) {
+function observationPortfolioText(
+  asset: ShortResearchAsset | null | undefined
+) {
   const context = asset?.observation_portfolio;
   if (!context || !context.status) {
     return "ETF 资金配置：暂无权重快照";
   }
-  if (context.status === "included" || context.status === "defensive" || context.status === "satellite") {
+  if (
+    context.status === "included" ||
+    context.status === "defensive" ||
+    context.status === "satellite"
+  ) {
     const label =
-      context.status === "defensive" ? "防守仓位" : context.status === "satellite" ? "小仓观察" : "进攻仓位";
-    return context.weight_explanation ?? `ETF 资金配置：${label}参考权重 ${formatPercent((context.target_weight ?? 0) * 100)}，仅作研究参考`;
+      context.status === "defensive"
+        ? "防守仓位"
+        : context.status === "satellite"
+          ? "小仓观察"
+          : "进攻仓位";
+    return (
+      context.weight_explanation ??
+      `ETF 资金配置：${label}参考权重 ${formatPercent((context.target_weight ?? 0) * 100)}，仅作研究参考`
+    );
   }
-  const reason = context.exclusion_explanation || context.exclusion_reason || context.risk_reasons?.[0] || "未进入主观察组合";
+  const reason =
+    context.exclusion_explanation ||
+    context.exclusion_reason ||
+    context.risk_reasons?.[0] ||
+    "未进入主观察组合";
   return `ETF 资金配置：${context.status === "watch_only" ? "只观察不配权" : "未配权"}，${reason}`;
 }
 
-function thresholdExplanationLine(position: TrackedPosition | null | undefined) {
+function thresholdExplanationLine(
+  position: TrackedPosition | null | undefined
+) {
   const explanation = position?.dynamic_thresholds?.explanation?.[0];
   if (explanation) {
     return explanation;
   }
-  const alertExplanation = position?.latest_alert?.threshold_context?.explanation;
-  if (Array.isArray(alertExplanation) && typeof alertExplanation[0] === "string") {
+  const alertExplanation =
+    position?.latest_alert?.threshold_context?.explanation;
+  if (
+    Array.isArray(alertExplanation) &&
+    typeof alertExplanation[0] === "string"
+  ) {
     return alertExplanation[0];
   }
   return "动态线等待足够价格数据后计算。";
@@ -523,6 +698,38 @@ function profitProtectionStateLabel(state: string | null | undefined) {
   }
 }
 
+function trackingAlertPolicyLabel(policy: TrackingAlertPolicyId) {
+  if (policy === "late_day_turnaround_t1_v1") {
+    return "尾盘转强 T+1 规则";
+  }
+  if (policy === "leader_tactics_exit_v1") {
+    return "龙头战法（仅卖出提醒）";
+  }
+  return "默认动态止盈止损规则";
+}
+
+function trackingAlertPolicyDescription(policy: TrackingAlertPolicyId) {
+  if (policy === "late_day_turnaround_t1_v1") {
+    return "信号日不卖；下一交易日上午按硬止损、高点回吐、已收盘 10 分钟 MA5 失守依次判断，最迟 10:30 全部退出。";
+  }
+  if (policy === "leader_tactics_exit_v1") {
+    return "候选和入场只在网页显示；买入后仅按合格复权日线判断灾难止损、保本线或收盘跌破五日线，不发送候选或买入邮件。";
+  }
+  return "沿用当前动态止损、利润保护、五日线与持仓生命周期规则。";
+}
+
+function trackingPolicyProvenanceLabel(
+  provenance: TrackedPosition["alert_policy_provenance"]
+) {
+  switch (provenance) {
+    case "candidate_backed":
+      return "候选证据绑定";
+    case "manual_selection":
+      return "手动选择";
+    default:
+      return "系统默认";
+  }
+}
 
 function signedScore(value: number | null | undefined) {
   if (value === null || value === undefined) {
@@ -573,7 +780,9 @@ function advisorTone(action: string) {
   return "bg-stone-200 text-stone-700";
 }
 
-function isLiveRankingItem(item: RankedAssetItem): item is IntradayEtfLiveRankingItem {
+function isLiveRankingItem(
+  item: RankedAssetItem
+): item is IntradayEtfLiveRankingItem {
   return "live_rank" in item && "etf_code" in item;
 }
 
@@ -590,7 +799,9 @@ function toEtfItemName(item: RankedAssetItem) {
 }
 
 function toEtfItemRank(item: RankedAssetItem) {
-  return isLiveRankingItem(item) ? item.live_scope_rank ?? item.live_rank : item.rank;
+  return isLiveRankingItem(item)
+    ? (item.live_scope_rank ?? item.live_rank)
+    : item.rank;
 }
 
 function etfGlobalRank(item: IntradayEtfLiveRankingItem) {
@@ -624,10 +835,20 @@ function formatLiveScore(value: number | null | undefined) {
 
 function liveScoreText(item: IntradayEtfLiveRankingItem) {
   if (item.score_source === "intraday") {
-    return "实时综合分 " + formatLiveScore(item.live_total_score) + " 分（盘中调整 " + signedScore(item.intraday_adjustment_score) + "）";
+    return (
+      "实时综合分 " +
+      formatLiveScore(item.live_total_score) +
+      " 分（盘中调整 " +
+      signedScore(item.intraday_adjustment_score) +
+      "）"
+    );
   }
   if (item.score_source === "daily") {
-    return "日线基础分 " + formatLiveScore(item.base_score ?? item.live_total_score) + " 分";
+    return (
+      "日线基础分 " +
+      formatLiveScore(item.base_score ?? item.live_total_score) +
+      " 分"
+    );
   }
   return "暂无分数";
 }
@@ -679,11 +900,17 @@ function actionableStateText(
   if (snapshotState === "provisional") {
     return "临时研究预览：只展示日线研究榜，不产生盘中可行动名次";
   }
-  if (asset.actionable_eligible && asset.actionable_rank !== null && asset.actionable_rank !== undefined) {
+  if (
+    asset.actionable_eligible &&
+    asset.actionable_rank !== null &&
+    asset.actionable_rank !== undefined
+  ) {
     return `盘中可行动榜 #${asset.actionable_rank}`;
   }
   const reasons = asset.actionable_exclusion_reasons ?? [];
-  return reasons.length ? `暂无可行动资格：${reasons.slice(0, 2).join("；")}` : "暂无可行动资格：缺少行动证据";
+  return reasons.length
+    ? `暂无可行动资格：${reasons.slice(0, 2).join("；")}`
+    : "暂无可行动资格：缺少行动证据";
 }
 
 function researchQualityStateText(asset: ShortResearchAsset) {
@@ -695,7 +922,9 @@ function researchQualityStateText(asset: ShortResearchAsset) {
     taxonomy_bucket_unresolved: "分类证据不足",
     canonical_quality_gate_failed: "行动质量门槛未通过"
   };
-  const reasons = (asset.research_quality_reasons ?? []).map((reason) => labels[reason] ?? reason);
+  const reasons = (asset.research_quality_reasons ?? []).map(
+    (reason) => labels[reason] ?? reason
+  );
   return `研究可见 · 仅观察${reasons.length ? `：${reasons.slice(0, 2).join("；")}` : ""}`;
 }
 
@@ -769,7 +998,10 @@ function etfSnapshotStateMessages(
       text: "覆盖门槛未通过：不使用旧快照、估算数据或回退候选补成正式榜单。"
     });
   }
-  if (snapshot.coverage_policy_mode === "degraded" && snapshot.snapshot_state !== "provisional") {
+  if (
+    snapshot.coverage_policy_mode === "degraded" &&
+    snapshot.snapshot_state !== "provisional"
+  ) {
     messages.push({
       key: "coverage-degraded",
       text: "覆盖为降级状态：仅作日线研究观察，不产生盘中可行动名次。"
@@ -793,7 +1025,8 @@ function etfAssetStateMessages(asset: ShortResearchAsset): EtfStateMessage[] {
     asset.primary_theme
   ];
   const hasUnknownTaxonomy = taxonomyValues.some((value) => {
-    const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+    const normalized =
+      typeof value === "string" ? value.trim().toLowerCase() : "";
     return normalized === "unknown" || normalized === "未分类";
   });
   if (hasUnknownTaxonomy) {
@@ -823,10 +1056,16 @@ function etfAssetStateMessages(asset: ShortResearchAsset): EtfStateMessage[] {
       if (status === "available") {
         return false;
       }
-      return status !== "not_applicable" || exclusionReasons.some((reason) => reason.startsWith(`${field}:`));
+      return (
+        status !== "not_applicable" ||
+        exclusionReasons.some((reason) => reason.startsWith(`${field}:`))
+      );
     })
     .slice(0, 3)
-    .map(([field, status]) => `${actionableFieldLabel(field)}：${actionableFieldStatusLabel(status)}`);
+    .map(
+      ([field, status]) =>
+        `${actionableFieldLabel(field)}：${actionableFieldStatusLabel(status)}`
+    );
   if (fieldIssues.length) {
     messages.push({
       key: "actionable-field-issues",
@@ -869,7 +1108,15 @@ function opportunityVersionText(asset: ShortResearchAsset | null | undefined) {
   }
 }
 
-const factorGroupOrder = ["price_momentum", "sector_trend", "theme_event", "fund_flow", "constituent_breadth", "liquidity", "etf_structure"];
+const factorGroupOrder = [
+  "price_momentum",
+  "sector_trend",
+  "theme_event",
+  "fund_flow",
+  "constituent_breadth",
+  "liquidity",
+  "etf_structure"
+];
 
 function factorProfileText(asset: ShortResearchAsset | null | undefined) {
   if (!asset?.factor_profile_version) {
@@ -879,7 +1126,10 @@ function factorProfileText(asset: ShortResearchAsset | null | undefined) {
   if (asset.factor_profile_version === "etf_factor_profile_v1_unavailable") {
     return "因子口径：暂无综合因子";
   }
-  const label = asset.factor_profile_version === "etf_factor_profile_v1_full" ? "完整多因子" : "降级多因子";
+  const label =
+    asset.factor_profile_version === "etf_factor_profile_v1_full"
+      ? "完整多因子"
+      : "降级多因子";
   return `因子口径：${label} · ${score} 分`;
 }
 
@@ -895,13 +1145,18 @@ function factorGroupHighlights(asset: ShortResearchAsset | null | undefined) {
     .map((item) => ({
       key: item.group,
       label: item.label,
-      value: item.score === null || item.score === undefined ? "暂无" : `${item.score.toFixed(1)} 分`,
+      value:
+        item.score === null || item.score === undefined
+          ? "暂无"
+          : `${item.score.toFixed(1)} 分`,
       muted: item.availability !== "available"
     }));
 }
 
 function activeRiskGateText(asset: ShortResearchAsset | null | undefined) {
-  const active = (asset?.risk_gates ?? []).filter((gate) => gate.active === true);
+  const active = (asset?.risk_gates ?? []).filter(
+    (gate) => gate.active === true
+  );
   if (!active.length) {
     return "风险门槛：未触发硬门槛";
   }
@@ -912,11 +1167,16 @@ function activeRiskGateText(asset: ShortResearchAsset | null | undefined) {
 }
 
 function sectorTrendText(asset: ShortResearchAsset | null | undefined) {
-  if (asset?.sector_trend_score === null || asset?.sector_trend_score === undefined) {
+  if (
+    asset?.sector_trend_score === null ||
+    asset?.sector_trend_score === undefined
+  ) {
     return asset?.sector_trend_reason || "暂无板块趋势数据";
   }
   const label = asset.sector_trend_label || "板块趋势";
-  const peers = asset.sector_peer_count ? ` · ${asset.sector_peer_count}只样本` : "";
+  const peers = asset.sector_peer_count
+    ? ` · ${asset.sector_peer_count}只样本`
+    : "";
   return `${label} ${formatOptionalScore(asset.sector_trend_score)} 分${peers}`;
 }
 
@@ -952,48 +1212,76 @@ function CatalystShadowPanel({ asset }: { asset: ShortResearchAsset }) {
   if (!shadow) {
     return (
       <div className="rounded-[10px] border border-dashed border-ink/20 bg-paper p-4">
-        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">催化影子研究</p>
-        <p className="mt-2 text-sm leading-6 text-ink/60">尚无已完成的缓存影子快照。</p>
+        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">
+          催化影子研究
+        </p>
+        <p className="mt-2 text-sm leading-6 text-ink/60">
+          尚无已完成的缓存影子快照。
+        </p>
       </div>
     );
   }
   const events = shadow.themes.flatMap((theme) =>
     theme.events.map((event) => {
-      const receipt = theme.receipts.find((item) => event.receipt_ids.includes(item.receipt_id));
+      const receipt = theme.receipts.find((item) =>
+        event.receipt_ids.includes(item.receipt_id)
+      );
       return { event, receipt, themeId: theme.snapshot.theme_id };
     })
   );
-  const directEvents = events.filter(({ event }) => event.mapping_kind === "direct");
-  const proxyEvents = events.filter(({ event }) => event.mapping_kind === "proxy");
+  const directEvents = events.filter(
+    ({ event }) => event.mapping_kind === "direct"
+  );
+  const proxyEvents = events.filter(
+    ({ event }) => event.mapping_kind === "proxy"
+  );
   return (
     <div
       data-catalyst-shadow
       className="rounded-[10px] border border-dashed border-accent/35 bg-paper p-4"
     >
       <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">催化影子研究</p>
+        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">
+          催化影子研究
+        </p>
         <p className="text-xs text-ink/50">覆盖状态：{shadow.coverage_state}</p>
       </div>
-      <p className="mt-2 text-sm leading-6 text-ink/65">{catalystSummaryText(asset)}</p>
+      <p className="mt-2 text-sm leading-6 text-ink/65">
+        {catalystSummaryText(asset)}
+      </p>
       {directEvents.length ? (
         <div className="mt-3 space-y-2">
           {directEvents.map(({ event, receipt, themeId }) => (
-            <article key={`${event.event_id}:${event.event_version}:${themeId}`} className="rounded-[8px] border border-ink/10 bg-white p-3">
+            <article
+              key={`${event.event_id}:${event.event_version}:${themeId}`}
+              className="rounded-[8px] border border-ink/10 bg-white p-3"
+            >
               <p className="text-sm font-semibold text-ink">
                 {event.title}
-                {event.is_correction ? <span className="ml-2 text-xs text-accent">更正版</span> : null}
+                {event.is_correction ? (
+                  <span className="ml-2 text-xs text-accent">更正版</span>
+                ) : null}
               </p>
               <p className="mt-1 text-xs text-ink/50">
-                直接映射 · {themeId} · {catalystDirectionText(event.direction)} · 发布 {formatDate(event.source_published_at)}
+                直接映射 · {themeId} · {catalystDirectionText(event.direction)}{" "}
+                · 发布 {formatDate(event.source_published_at)}
                 {" · "}首次收到 {formatDate(event.first_received_at)}
               </p>
-              <p className="mt-2 text-sm leading-6 text-ink/65">{event.summary}</p>
+              <p className="mt-2 text-sm leading-6 text-ink/65">
+                {event.summary}
+              </p>
               <p className="mt-1 text-xs text-ink/50">
-                有效期 {formatDate(event.effective_start)} 至 {formatDate(event.effective_end)}
+                有效期 {formatDate(event.effective_start)} 至{" "}
+                {formatDate(event.effective_end)}
                 {receipt?.canonical_url ? (
                   <>
                     {" · "}
-                    <a className="text-accent underline" href={receipt.canonical_url} target="_blank" rel="noreferrer">
+                    <a
+                      className="text-accent underline"
+                      href={receipt.canonical_url}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
                       官方来源
                     </a>
                   </>
@@ -1005,14 +1293,20 @@ function CatalystShadowPanel({ asset }: { asset: ShortResearchAsset }) {
       ) : null}
       {proxyEvents.length ? (
         <p className="mt-3 text-xs leading-5 text-ink/55">
-          代理映射（仅展示）：{proxyEvents.map(({ event, themeId }) => `${event.title} → ${themeId}`).join("；")}
+          代理映射（仅展示）：
+          {proxyEvents
+            .map(({ event, themeId }) => `${event.title} → ${themeId}`)
+            .join("；")}
         </p>
       ) : null}
       {shadow.limitations.length ? (
-        <p className="mt-3 text-xs leading-5 text-ink/50">限制：{shadow.limitations.join("；")}</p>
+        <p className="mt-3 text-xs leading-5 text-ink/50">
+          限制：{shadow.limitations.join("；")}
+        </p>
       ) : null}
       <p className="mt-3 border-t border-ink/10 pt-3 text-xs font-medium leading-5 text-ink/60">
-        影子研究，权重为 0；不改变研究榜、可行动榜、组合配置、持仓动作或邮件状态。
+        影子研究，权重为
+        0；不改变研究榜、可行动榜、组合配置、持仓动作或邮件状态。
       </p>
     </div>
   );
@@ -1079,9 +1373,13 @@ function scoreDimensionLabels(asset: ShortResearchAsset | null | undefined) {
     : legacyScoreDimensionLabels;
 }
 
-function scoreDimensionValue(asset: ShortResearchAsset | null | undefined, key: string) {
+function scoreDimensionValue(
+  asset: ShortResearchAsset | null | undefined,
+  key: string
+) {
   const final = finalScoreBreakdown(asset);
-  const score = final?.component_scores?.[key] ?? final?.components?.[key]?.score;
+  const score =
+    final?.component_scores?.[key] ?? final?.components?.[key]?.score;
   return typeof score === "number" && Number.isFinite(score)
     ? score.toFixed(1)
     : "暂无";
@@ -1089,20 +1387,20 @@ function scoreDimensionValue(asset: ShortResearchAsset | null | undefined, key: 
 
 function hasFreshIntradayChange(
   quote: IntradayEtfLiveRankingItem["quote"],
-  marketStatus?: string | null,
+  marketStatus?: string | null
 ): quote is FreshIntradayQuote {
   return Boolean(
     quote &&
-      !quote.is_stale &&
-      quote.decision_eligible &&
-      (!marketStatus || marketStatus === "open") &&
-      typeof quote.change_percent === "number"
+    !quote.is_stale &&
+    quote.decision_eligible &&
+    (!marketStatus || marketStatus === "open") &&
+    typeof quote.change_percent === "number"
   );
 }
 
 function intradayChangeDisplay(
   quote: IntradayEtfLiveRankingItem["quote"],
-  marketStatus?: string | null,
+  marketStatus?: string | null
 ) {
   if (!quote) {
     if (marketStatus === "lunch_break") {
@@ -1119,36 +1417,60 @@ function intradayChangeDisplay(
       : formatPercent(quote.change_percent);
   if (marketStatus && marketStatus !== "open") {
     const suffix = marketStatus === "lunch_break" ? "午休最近行情" : "最近行情";
-    return { value: changeValue ? `${changeValue}（${suffix}）` : suffix, time: formatDateTime(quote.quote_time) };
+    return {
+      value: changeValue ? `${changeValue}（${suffix}）` : suffix,
+      time: formatDateTime(quote.quote_time)
+    };
   }
   if (!quote.decision_eligible) {
-    return { value: changeValue ? `${changeValue}（仅网页参考）` : "仅网页参考", time: formatDateTime(quote.quote_time) };
+    return {
+      value: changeValue ? `${changeValue}（仅网页参考）` : "仅网页参考",
+      time: formatDateTime(quote.quote_time)
+    };
   }
   if (quote.is_stale) {
-    return { value: changeValue ? `${changeValue}（行情滞后）` : "行情滞后", time: formatDateTime(quote.quote_time) };
+    return {
+      value: changeValue ? `${changeValue}（行情滞后）` : "行情滞后",
+      time: formatDateTime(quote.quote_time)
+    };
   }
   if (!changeValue) {
-    return { value: "等待新鲜盘中行情", time: formatDateTime(quote.quote_time) };
+    return {
+      value: "等待新鲜盘中行情",
+      time: formatDateTime(quote.quote_time)
+    };
   }
   return { value: changeValue, time: formatDateTime(quote.quote_time) };
 }
-function isLiveRankingResponse(value: RankedAssetResponse | undefined): value is IntradayEtfLiveRankingList {
-  return Boolean(value && "signal_as_of_date" in value && "latest_run" in value);
+function isLiveRankingResponse(
+  value: RankedAssetResponse | undefined
+): value is IntradayEtfLiveRankingList {
+  return Boolean(
+    value && "signal_as_of_date" in value && "latest_run" in value
+  );
 }
 
 function liveRankingQuote(item: RankedAssetItem) {
   return isLiveRankingItem(item) ? item.quote : null;
 }
 
-function dailyReferenceParts(reason: string | null | undefined, asOfDate: string | null | undefined) {
-  const normalized = (reason?.trim() || "暂无日线参考原因").replaceAll("今天", "该日");
-  const readable = asOfDate ? normalized : normalized.replaceAll("该日", "最近日线");
+function dailyReferenceParts(
+  reason: string | null | undefined,
+  asOfDate: string | null | undefined
+) {
+  const normalized = (reason?.trim() || "暂无日线参考原因").replaceAll(
+    "今天",
+    "该日"
+  );
+  const readable = asOfDate
+    ? normalized
+    : normalized.replaceAll("该日", "最近日线");
   const clauses = readable
     .split(/[，。；]/)
     .map((item) => item.trim())
     .filter(Boolean);
   const parts: Array<{ label: string; value: string }> = [
-    { label: "参考日", value: asOfDate ? formatDate(asOfDate) : "最近日线" },
+    { label: "参考日", value: asOfDate ? formatDate(asOfDate) : "最近日线" }
   ];
   for (const clause of clauses) {
     if (clause.includes("近5/20/60") || clause.includes("近 5 / 20 / 60")) {
@@ -1169,17 +1491,27 @@ function dailyReferenceParts(reason: string | null | undefined, asOfDate: string
   return parts;
 }
 
-function dailyReferenceReason(reason: string | null | undefined, asOfDate: string | null | undefined) {
+function dailyReferenceReason(
+  reason: string | null | undefined,
+  asOfDate: string | null | undefined
+) {
   return dailyReferenceParts(reason, asOfDate)
     .map((part) => `${part.label}：${part.value}`)
     .join("；");
 }
-function itemEntryTimingDisplay(item: RankedAssetItem, marketStatus?: string | null) {
+function itemEntryTimingDisplay(
+  item: RankedAssetItem,
+  marketStatus?: string | null
+) {
   if (!isLiveRankingItem(item)) {
     return {
       title: "今日买点",
       label: item.entry_timing_label,
-      reason: rationaleText(item, "key_reason", "按近期趋势、风险和数据质量生成。"),
+      reason: rationaleText(
+        item,
+        "key_reason",
+        "按近期趋势、风险和数据质量生成。"
+      )
     };
   }
   const hasFreshLiveTiming =
@@ -1193,7 +1525,7 @@ function itemEntryTimingDisplay(item: RankedAssetItem, marketStatus?: string | n
     return {
       title: "盘中买点状态",
       label: item.live_entry_timing_label,
-      reason: item.live_entry_timing_reason,
+      reason: item.live_entry_timing_reason
     };
   }
   if (marketStatus !== "open") {
@@ -1203,20 +1535,20 @@ function itemEntryTimingDisplay(item: RankedAssetItem, marketStatus?: string | n
       label: isLunchBreak ? "午休" : "休市",
       reason: isLunchBreak
         ? "当前是午休时段，不产生新的盘中买点；页面展示上午最近行情，下午开盘后继续刷新。"
-        : "当前非交易时段，不输出盘中买点；休市后盘中行情正常不再刷新，只展示最近公开行情和日线买点参考。",
+        : "当前非交易时段，不输出盘中买点；休市后盘中行情正常不再刷新，只展示最近公开行情和日线买点参考。"
     };
   }
   if (item.quote?.is_stale) {
     return {
       title: "盘中买点状态",
       label: "行情滞后",
-      reason: "盘中行情已滞后，等待新鲜盘中行情；日线买点只能作为参考。",
+      reason: "盘中行情已滞后，等待新鲜盘中行情；日线买点只能作为参考。"
     };
   }
   return {
     title: "盘中买点状态",
     label: "数据不足",
-    reason: "等待新鲜盘中行情；日线买点只能作为参考。",
+    reason: "等待新鲜盘中行情；日线买点只能作为参考。"
   };
 }
 
@@ -1224,7 +1556,10 @@ function shortResearchThemeTags(item: RankedAssetItem): string[] {
   return isLiveRankingItem(item) ? [] : item.theme_tags;
 }
 
-function previewAssetFromRankedItem(item: RankedAssetItem, marketStatus?: string | null): ShortResearchAsset {
+function previewAssetFromRankedItem(
+  item: RankedAssetItem,
+  marketStatus?: string | null
+): ShortResearchAsset {
   if (!isLiveRankingItem(item)) {
     return item;
   }
@@ -1262,7 +1597,9 @@ function previewAssetFromRankedItem(item: RankedAssetItem, marketStatus?: string
     entry_timing_label: entryTiming.label,
     entry_timing_reason: entryTiming.reason,
     theme_tags: [],
-    investment_direction: item.sources.length ? item.sources.join(" / ") : "场内 ETF",
+    investment_direction: item.sources.length
+      ? item.sources.join(" / ")
+      : "场内 ETF",
     trading_rule_label: "场内 ETF",
     latest_date: quote?.trade_date ?? null,
     latest_value: quote?.latest_price ?? null,
@@ -1275,7 +1612,10 @@ function previewAssetFromRankedItem(item: RankedAssetItem, marketStatus?: string
       key_reason: keyReason,
       label_meaning: labelMeaning(conclusion)
     },
-    source_note: item.score_source === "intraday" ? "盘中榜单预览，完整详情加载中" : "日线榜单预览，完整详情加载中",
+    source_note:
+      item.score_source === "intraday"
+        ? "盘中榜单预览，完整详情加载中"
+        : "日线榜单预览，完整详情加载中",
     advisor_report: null,
     validation_evidence: {
       sample_count: 0,
@@ -1299,7 +1639,9 @@ function previewAssetFromRankedItem(item: RankedAssetItem, marketStatus?: string
 }
 
 function assetTypeLabel(assetType: string) {
-  return assetType === "etf" ? "场内 ETF" : "支付宝场外基金";
+  if (assetType === "etf") return "场内 ETF";
+  if (assetType === "stock") return "A 股个股";
+  return "支付宝场外基金";
 }
 
 function formatTurnover(value: number | null) {
@@ -1312,11 +1654,20 @@ function formatTurnover(value: number | null) {
   return `${(value / 10_000).toFixed(0)} 万元`;
 }
 
-function assetCount(status: ShortResearchStatus | undefined, assetType: AssetType) {
-  return assetType === "etf" ? status?.etf_total_count ?? status?.etf_count ?? 0 : status?.fund_count ?? 0;
+function assetCount(
+  status: ShortResearchStatus | undefined,
+  assetType: AssetType
+) {
+  return assetType === "etf"
+    ? (status?.etf_total_count ?? status?.etf_count ?? 0)
+    : (status?.fund_count ?? 0);
 }
 
-function rationaleText(asset: ShortResearchAsset, key: string, fallback: string) {
+function rationaleText(
+  asset: ShortResearchAsset,
+  key: string,
+  fallback: string
+) {
   const value = asset.rationale[key];
   return typeof value === "string" ? value : fallback;
 }
@@ -1359,7 +1710,10 @@ function returnWindowChart(asset: ShortResearchAsset | undefined) {
     { label: "近 10 日", value: numericMetric(asset.metrics, "return_10d") },
     { label: "近 20 日", value: numericMetric(asset.metrics, "return_20d") },
     { label: "近 60 日", value: numericMetric(asset.metrics, "return_60d") }
-  ].map((item) => ({ ...item, percent: item.value === null ? null : item.value * 100 }));
+  ].map((item) => ({
+    ...item,
+    percent: item.value === null ? null : item.value * 100
+  }));
 }
 
 function trackingChartPoints(detail: TrackedPositionDetail | undefined) {
@@ -1389,7 +1743,9 @@ function todayInputValue() {
 }
 
 function defaultOrderTimeBucket(): OrderTimeBucket {
-  return Number(shanghaiClockParts(Date.now()).hour) >= 15 ? "after_15" : "before_15";
+  return Number(shanghaiClockParts(Date.now()).hour) >= 15
+    ? "after_15"
+    : "before_15";
 }
 
 function orderTimeBucketLabel(value: string) {
@@ -1475,7 +1831,14 @@ function alertTypeLabel(alertType: string) {
   return alertType;
 }
 
-const EXIT_ALERT_TYPES = new Set(["exit_watch", "take_profit_watch", "trailing_take_profit", "confirmed_trend_weakening", "hard_stop", "ma5_close_break_exit"]);
+const EXIT_ALERT_TYPES = new Set([
+  "exit_watch",
+  "take_profit_watch",
+  "trailing_take_profit",
+  "confirmed_trend_weakening",
+  "hard_stop",
+  "ma5_close_break_exit"
+]);
 
 function isEmailExitAlert(alertType: string) {
   return EXIT_ALERT_TYPES.has(alertType);
@@ -1733,24 +2096,38 @@ function consensusLabel(value: string | null | undefined) {
 }
 
 function quoteReliabilityLine(
-  quote: IntradayEtfLiveRankingItem["quote"] | null | undefined,
+  quote: IntradayEtfLiveRankingItem["quote"] | null | undefined
 ) {
   if (!quote) {
     return "行情来源：暂无；校验状态：等待行情。";
   }
-  const providerText = quote.provider_count > 1 ? `${quote.fresh_provider_count}/${quote.provider_count} 源新鲜` : `${quote.provider_count} 源`;
-  const decisionText = quote.decision_eligible ? "可用于盘中判断" : "仅网页参考";
+  const providerText =
+    quote.provider_count > 1
+      ? `${quote.fresh_provider_count}/${quote.provider_count} 源新鲜`
+      : `${quote.provider_count} 源`;
+  const decisionText = quote.decision_eligible
+    ? "可用于盘中判断"
+    : "仅网页参考";
   const reason = quote.limitation_reason ? `；${quote.limitation_reason}` : "";
   return `行情来源：${quoteSourceName(quote.source)}；校验状态：${consensusLabel(quote.consensus_status)}（${providerText}，${decisionText}）${reason}`;
 }
 
-function snapshotReliabilityLine(snapshot: TrackedPosition["intraday_snapshot"] | null | undefined) {
+function snapshotReliabilityLine(
+  snapshot: TrackedPosition["intraday_snapshot"] | null | undefined
+) {
   if (!snapshot) {
     return "行情来源：暂无；校验状态：等待行情。";
   }
-  const providerText = snapshot.provider_count > 1 ? `${snapshot.fresh_provider_count}/${snapshot.provider_count} 源新鲜` : `${snapshot.provider_count} 源`;
-  const decisionText = snapshot.decision_eligible ? "可用于盘中提醒" : "仅网页参考";
-  const reason = snapshot.limitation_reason ? `；${snapshot.limitation_reason}` : "";
+  const providerText =
+    snapshot.provider_count > 1
+      ? `${snapshot.fresh_provider_count}/${snapshot.provider_count} 源新鲜`
+      : `${snapshot.provider_count} 源`;
+  const decisionText = snapshot.decision_eligible
+    ? "可用于盘中提醒"
+    : "仅网页参考";
+  const reason = snapshot.limitation_reason
+    ? `；${snapshot.limitation_reason}`
+    : "";
   return `行情来源：${quoteSourceName(snapshot.source)}；校验状态：${consensusLabel(snapshot.consensus_status)}（${providerText}，${decisionText}）${reason}`;
 }
 
@@ -1820,7 +2197,8 @@ function shanghaiClockParts(timestamp: number) {
     minute: "2-digit",
     hourCycle: "h23"
   }).formatToParts(new Date(timestamp));
-  const value = (type: string) => parts.find((part) => part.type === type)?.value ?? "";
+  const value = (type: string) =>
+    parts.find((part) => part.type === type)?.value ?? "";
   return {
     weekday: value("weekday"),
     year: value("year"),
@@ -1916,8 +2294,12 @@ function WorkbenchMetric({
 }) {
   return (
     <div className={`rounded-[8px] border border-border px-3 py-2.5 ${tone}`}>
-      <p className="text-[11px] font-medium uppercase tracking-[0.14em] opacity-60">{label}</p>
-      <p className="mt-1 font-mono text-base font-semibold leading-tight">{value}</p>
+      <p className="text-[11px] font-medium uppercase tracking-[0.14em] opacity-60">
+        {label}
+      </p>
+      <p className="mt-1 font-mono text-base font-semibold leading-tight">
+        {value}
+      </p>
     </div>
   );
 }
@@ -1930,12 +2312,24 @@ function DetailLoadingPlaceholder({ text }: { text: string }) {
   );
 }
 
-function SectionKicker({ eyebrow, title, description }: { eyebrow: string; title: string; description?: string }) {
+function SectionKicker({
+  eyebrow,
+  title,
+  description
+}: {
+  eyebrow: string;
+  title: string;
+  description?: string;
+}) {
   return (
     <div>
-      <p className="text-xs font-semibold uppercase tracking-[0.22em] text-accent">{eyebrow}</p>
+      <p className="text-xs font-semibold uppercase tracking-[0.22em] text-accent">
+        {eyebrow}
+      </p>
       <h2 className="mt-2 text-2xl font-semibold text-ink">{title}</h2>
-      {description ? <p className="mt-2 text-sm leading-6 text-ink/65">{description}</p> : null}
+      {description ? (
+        <p className="mt-2 text-sm leading-6 text-ink/65">{description}</p>
+      ) : null}
     </div>
   );
 }
@@ -1952,28 +2346,42 @@ function ShortTermClient() {
   const explanationSectionRef = useRef<HTMLDivElement | null>(null);
   const trackingSectionRef = useRef<HTMLDivElement | null>(null);
   const [assetType, setAssetType] = useState<AssetType>("etf");
-  const [rankingSurface, setRankingSurface] = useState<RankingSurface>("research");
+  const [rankingSurface, setRankingSurface] =
+    useState<RankingSurface>("research");
   const [theme, setTheme] = useState("all");
   const [sort, setSort] = useState<SortKey>("score");
   const [keyword, setKeyword] = useState("");
-  const [labelFilters, setLabelFilters] = useState<LabelFilterState>(emptyLabelFilters);
+  const [labelFilters, setLabelFilters] =
+    useState<LabelFilterState>(emptyLabelFilters);
   const [labelFilterExpanded, setLabelFilterExpanded] = useState(false);
   const [assetOffset, setAssetOffset] = useState(0);
-  const [selected, setSelected] = useState<{ asset_type: "fund" | "etf"; code: string } | null>(null);
+  const [selected, setSelected] = useState<{
+    asset_type: "fund" | "etf";
+    code: string;
+  } | null>(null);
   const [mobileTab, setMobileTab] = useState<MobileTab>("ranking");
-  const [lastResult, setLastResult] = useState<Record<string, unknown> | null>(null);
+  const [lastResult, setLastResult] = useState<Record<string, unknown> | null>(
+    null
+  );
   const [trackingOpen, setTrackingOpen] = useState(false);
   const [trackingAmount, setTrackingAmount] = useState("3000");
   const [trackingDate, setTrackingDate] = useState(todayInputValue());
-  const [trackingOrderTime, setTrackingOrderTime] = useState<OrderTimeBucket>(defaultOrderTimeBucket());
+  const [trackingOrderTime, setTrackingOrderTime] = useState<OrderTimeBucket>(
+    defaultOrderTimeBucket()
+  );
+  const [trackingAlertPolicy, setTrackingAlertPolicy] =
+    useState<TrackingAlertPolicyId>("standard_dynamic_v2");
   const [trackingConfirmedNavDate, setTrackingConfirmedNavDate] = useState("");
   const [trackingConfirmedNav, setTrackingConfirmedNav] = useState("");
   const [trackingConfirmedShares, setTrackingConfirmedShares] = useState("");
   const [trackingNote, setTrackingNote] = useState("");
-  const [editingTrackingId, setEditingTrackingId] = useState<number | null>(null);
+  const [editingTrackingId, setEditingTrackingId] = useState<number | null>(
+    null
+  );
   const [editBuyAmount, setEditBuyAmount] = useState("");
   const [editBuyDate, setEditBuyDate] = useState("");
-  const [editOrderTime, setEditOrderTime] = useState<OrderTimeBucket>("before_15");
+  const [editOrderTime, setEditOrderTime] =
+    useState<OrderTimeBucket>("before_15");
   const [editConfirmedNavDate, setEditConfirmedNavDate] = useState("");
   const [editConfirmedNav, setEditConfirmedNav] = useState("");
   const [editConfirmedShares, setEditConfirmedShares] = useState("");
@@ -1989,10 +2397,15 @@ function ShortTermClient() {
   const actionRequestPayloads = useRef(
     new Map<string, TrackedPositionActionTransitionRequest>()
   );
-  const [pendingDesktopScrollKey, setPendingDesktopScrollKey] = useState<string | null>(null);
+  const [pendingDesktopScrollKey, setPendingDesktopScrollKey] = useState<
+    string | null
+  >(null);
   const mode = assetModes[assetType];
   const sortOptions = assetType === "etf" ? etfSortOptions : baseSortOptions;
-  const labelFilterSignature = useMemo(() => JSON.stringify(labelFilters), [labelFilters]);
+  const labelFilterSignature = useMemo(
+    () => JSON.stringify(labelFilters),
+    [labelFilters]
+  );
 
   const status = useQuery({
     queryKey: ["short-research", "status", assetType],
@@ -2013,12 +2426,27 @@ function ShortTermClient() {
       if (theme !== "all") {
         params.set("theme", theme);
       }
-      return (await api.get<ShortResearchSignalRun | null>(`/api/short-research/signals/latest?${params.toString()}`, { signal })).data;
+      return (
+        await api.get<ShortResearchSignalRun | null>(
+          `/api/short-research/signals/latest?${params.toString()}`,
+          { signal }
+        )
+      ).data;
     }
   });
 
   const assets = useQuery({
-    queryKey: ["short-research", "assets", assetType, rankingSurface, theme, sort, keyword, assetOffset, labelFilterSignature],
+    queryKey: [
+      "short-research",
+      "assets",
+      assetType,
+      rankingSurface,
+      theme,
+      sort,
+      keyword,
+      assetOffset,
+      labelFilterSignature
+    ],
     queryFn: async ({ signal }) => {
       const params = new URLSearchParams();
       params.set("asset_type", assetType);
@@ -2036,7 +2464,12 @@ function ShortTermClient() {
         params.set("ranking_surface", rankingSurface);
         params.set("include_theme_heat", "false");
       }
-      return (await api.get<ShortResearchAssetList>(`/api/short-research/assets?${params.toString()}`, { signal })).data;
+      return (
+        await api.get<ShortResearchAssetList>(
+          `/api/short-research/assets?${params.toString()}`,
+          { signal }
+        )
+      ).data;
     },
     refetchInterval: false
   });
@@ -2058,10 +2491,18 @@ function ShortTermClient() {
     queryKey: ["etf-quotes", "live-ranking-status"],
     enabled: assetType === "etf",
     queryFn: async ({ signal }) =>
-      (await api.get<IntradayEtfLiveRankingList>("/api/etf-quotes/live-rankings?limit=1", { signal })).data,
+      (
+        await api.get<IntradayEtfLiveRankingList>(
+          "/api/etf-quotes/live-rankings?limit=1",
+          { signal }
+        )
+      ).data,
     refetchInterval: (query) => {
       const data = query.state.data as IntradayEtfLiveRankingList | undefined;
-      const seconds = data?.market_status === "open" ? data.page_poll_seconds : data?.next_poll_seconds;
+      const seconds =
+        data?.market_status === "open"
+          ? data.page_poll_seconds
+          : data?.next_poll_seconds;
       return seconds && seconds > 0 ? seconds * 1_000 : false;
     }
   });
@@ -2069,7 +2510,9 @@ function ShortTermClient() {
   const etfLiveData = isLiveRankingResponse(assets.data) ? assets.data : null;
   const effectiveEtfLiveStatus = etfLiveData ?? etfLiveStatusQuery.data ?? null;
   const isEtfLiveRanking = etfLiveData !== null && assetType === "etf";
-  const shortAssetData = isEtfLiveRanking ? null : (assets.data as ShortResearchAssetList | undefined);
+  const shortAssetData = isEtfLiveRanking
+    ? null
+    : (assets.data as ShortResearchAssetList | undefined);
   const etfThemeSource = useQuery({
     queryKey: ["short-research", "etf-theme-heat"],
     enabled: assetType === "etf",
@@ -2082,19 +2525,31 @@ function ShortTermClient() {
       ).data,
     staleTime: 5 * 60_000
   });
-  const shouldRefreshIntradayQueries = assetType === "etf" && effectiveEtfLiveStatus?.market_status === "open";
+  const shouldRefreshIntradayQueries =
+    assetType === "etf" && effectiveEtfLiveStatus?.market_status === "open";
   const selectedEtfLiveData = useQuery({
     queryKey: ["etf-quotes", "selected-live-ranking", selected?.code],
-    enabled: assetType === "etf" && selected?.asset_type === "etf" && Boolean(selected?.code),
+    enabled:
+      assetType === "etf" &&
+      selected?.asset_type === "etf" &&
+      Boolean(selected?.code),
     queryFn: async ({ signal }) => {
       const params = new URLSearchParams();
       params.set("limit", "5");
       params.set("q", selected?.code ?? "");
-      return (await api.get<IntradayEtfLiveRankingList>(`/api/etf-quotes/live-rankings?${params.toString()}`, { signal })).data;
+      return (
+        await api.get<IntradayEtfLiveRankingList>(
+          `/api/etf-quotes/live-rankings?${params.toString()}`,
+          { signal }
+        )
+      ).data;
     },
     refetchInterval: (query) => {
       const data = query.state.data as IntradayEtfLiveRankingList | undefined;
-      const seconds = data?.market_status === "open" ? data.page_poll_seconds : data?.next_poll_seconds;
+      const seconds =
+        data?.market_status === "open"
+          ? data.page_poll_seconds
+          : data?.next_poll_seconds;
       return seconds && seconds > 0 ? seconds * 1_000 : false;
     }
   });
@@ -2114,11 +2569,20 @@ function ShortTermClient() {
     queryKey: ["short-research", "etf-optimized-allocation", "latest"],
     enabled: assetType === "etf",
     queryFn: async () =>
-      (await api.get<EtfOptimizedAllocation | null>("/api/short-research/etf-optimized-allocation/latest")).data
+      (
+        await api.get<EtfOptimizedAllocation | null>(
+          "/api/short-research/etf-optimized-allocation/latest"
+        )
+      ).data
   });
 
   const selectedDetail = useQuery({
-    queryKey: ["short-research", "detail", selected?.asset_type, selected?.code],
+    queryKey: [
+      "short-research",
+      "detail",
+      selected?.asset_type,
+      selected?.code
+    ],
     enabled: selected !== null,
     queryFn: async ({ signal }) =>
       (
@@ -2132,14 +2596,24 @@ function ShortTermClient() {
   const trackedPositions = useQuery({
     queryKey: ["tracked-positions", user?.id ?? "anonymous"],
     enabled: Boolean(user),
-    queryFn: async ({ signal }) => (await api.get<TrackedPositionList>("/api/tracked-positions", { signal })).data,
-    refetchInterval: shouldRefreshIntradayQueries ? (etfLiveData?.page_poll_seconds ?? 30) * 1_000 : false
+    queryFn: async ({ signal }) =>
+      (await api.get<TrackedPositionList>("/api/tracked-positions", { signal }))
+        .data,
+    refetchInterval: shouldRefreshIntradayQueries
+      ? (etfLiveData?.page_poll_seconds ?? 30) * 1_000
+      : false
   });
 
-  const rawAssets = useMemo(() => (assets.data?.items ?? []) as RankedAssetItem[], [assets.data?.items]);
+  const rawAssets = useMemo(
+    () => (assets.data?.items ?? []) as RankedAssetItem[],
+    [assets.data?.items]
+  );
   const activeTracked = useMemo(
-    () => (trackedPositions.data?.items ?? []).filter((item) => item.status === "active"),
-    [trackedPositions.data?.items],
+    () =>
+      (trackedPositions.data?.items ?? []).filter(
+        (item) => item.status === "active"
+      ),
+    [trackedPositions.data?.items]
   );
   const trackedByAsset = useMemo(() => {
     const map = new Map<string, TrackedPosition>();
@@ -2148,31 +2622,49 @@ function ShortTermClient() {
     }
     return map;
   }, [activeTracked]);
-  const activeLabelFilterCount = labelFilters.observation.length + labelFilters.entry.length + labelFilters.tracking.length;
+  const activeLabelFilterCount =
+    labelFilters.observation.length +
+    labelFilters.entry.length +
+    labelFilters.tracking.length;
   const assetCountScope =
-    theme !== "all" || Boolean(keyword.trim()) || activeLabelFilterCount > 0 ? "当前筛选结果" : "当前完整范围";
-  const showLabelFilterDetails = labelFilterExpanded || activeLabelFilterCount > 0;
+    theme !== "all" || Boolean(keyword.trim()) || activeLabelFilterCount > 0
+      ? "当前筛选结果"
+      : "当前完整范围";
+  const showLabelFilterDetails =
+    labelFilterExpanded || activeLabelFilterCount > 0;
   const selectedLabelChips = useMemo(
     () =>
       labelFilterGroups.flatMap((group) =>
         labelFilters[group.key].map((value) => ({
           groupKey: group.key,
           groupTitle: group.title,
-          value,
-        })),
+          value
+        }))
       ),
-    [labelFilters],
+    [labelFilters]
   );
   const visibleAssets = rawAssets;
 
   useEffect(() => {
     return () => {
-      void queryClient.cancelQueries({ queryKey: ["tracked-positions", user?.id ?? "anonymous"] });
-      queryClient.removeQueries({ queryKey: ["tracked-positions", user?.id ?? "anonymous"] });
-      void queryClient.cancelQueries({ queryKey: ["tracked-position", user?.id ?? "anonymous"] });
-      queryClient.removeQueries({ queryKey: ["tracked-position", user?.id ?? "anonymous"] });
-      void queryClient.cancelQueries({ queryKey: ["tracked-position-audit", user?.id ?? "anonymous"] });
-      queryClient.removeQueries({ queryKey: ["tracked-position-audit", user?.id ?? "anonymous"] });
+      void queryClient.cancelQueries({
+        queryKey: ["tracked-positions", user?.id ?? "anonymous"]
+      });
+      queryClient.removeQueries({
+        queryKey: ["tracked-positions", user?.id ?? "anonymous"]
+      });
+      void queryClient.cancelQueries({
+        queryKey: ["tracked-position", user?.id ?? "anonymous"]
+      });
+      queryClient.removeQueries({
+        queryKey: ["tracked-position", user?.id ?? "anonymous"]
+      });
+      void queryClient.cancelQueries({
+        queryKey: ["tracked-position-audit", user?.id ?? "anonymous"]
+      });
+      queryClient.removeQueries({
+        queryKey: ["tracked-position-audit", user?.id ?? "anonymous"]
+      });
     };
   }, [queryClient, user?.id]);
 
@@ -2188,14 +2680,24 @@ function ShortTermClient() {
     }
     if (
       !selected ||
-      !visibleAssets.some((item) => getItemAssetType(item) === selected.asset_type && toEtfItemCode(item) === selected.code)
+      !visibleAssets.some(
+        (item) =>
+          getItemAssetType(item) === selected.asset_type &&
+          toEtfItemCode(item) === selected.code
+      )
     ) {
-      setSelected({ asset_type: getItemAssetType(first), code: toEtfItemCode(first) });
+      setSelected({
+        asset_type: getItemAssetType(first),
+        code: toEtfItemCode(first)
+      });
     }
   }, [selected, visibleAssets]);
 
   useEffect(() => {
-    if (assetType === "fund" && !baseSortOptions.some((option) => option.key === sort)) {
+    if (
+      assetType === "fund" &&
+      !baseSortOptions.some((option) => option.key === sort)
+    ) {
       setSort("score");
     }
   }, [assetType, sort]);
@@ -2206,7 +2708,12 @@ function ShortTermClient() {
       for (const item of etfThemeSource.data?.theme_heat ?? []) {
         seen.add(item.theme);
       }
-      return ["all", ...Array.from(seen).sort((left, right) => left.localeCompare(right, "zh-CN"))];
+      return [
+        "all",
+        ...Array.from(seen).sort((left, right) =>
+          left.localeCompare(right, "zh-CN")
+        )
+      ];
     }
     const seen = new Set<string>(fallbackThemes);
     for (const item of assets.data?.items ?? []) {
@@ -2214,16 +2721,24 @@ function ShortTermClient() {
         seen.add(tag);
       }
     }
-    return ["all", ...Array.from(seen).sort((left, right) => left.localeCompare(right, "zh-CN"))];
+    return [
+      "all",
+      ...Array.from(seen).sort((left, right) =>
+        left.localeCompare(right, "zh-CN")
+      )
+    ];
   }, [assetType, assets.data, etfThemeSource.data]);
 
   const syncData = useMutation({
     mutationFn: async () =>
       (
-        await api.post<Record<string, unknown>>("/api/short-research/data/sync", {
-          days: 120,
-          asset_type: assetType
-        })
+        await api.post<Record<string, unknown>>(
+          "/api/short-research/data/sync",
+          {
+            days: 120,
+            asset_type: assetType
+          }
+        )
       ).data,
     onSuccess: async (result) => {
       setLastResult(result);
@@ -2240,10 +2755,13 @@ function ShortTermClient() {
         return { kind: "canonical_refresh" as const };
       }
       const run = (
-        await api.post<ShortResearchSignalRun>("/api/short-research/signals/run", {
-          asset_type: assetType,
-          theme: theme === "all" ? null : theme
-        })
+        await api.post<ShortResearchSignalRun>(
+          "/api/short-research/signals/run",
+          {
+            asset_type: assetType,
+            theme: theme === "all" ? null : theme
+          }
+        )
       ).data;
       return { kind: "fund_signal" as const, run };
     },
@@ -2268,19 +2786,32 @@ function ShortTermClient() {
 
   const runEtfOptimizedAllocation = useMutation({
     mutationFn: async () =>
-      (await api.post<EtfOptimizedAllocation>("/api/short-research/etf-optimized-allocation/run")).data,
+      (
+        await api.post<EtfOptimizedAllocation>(
+          "/api/short-research/etf-optimized-allocation/run"
+        )
+      ).data,
     onSuccess: async () => {
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["short-research", "etf-optimized-allocation"] }),
-        queryClient.invalidateQueries({ queryKey: ["short-research", "observation-portfolio"] })
+        queryClient.invalidateQueries({
+          queryKey: ["short-research", "etf-optimized-allocation"]
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["short-research", "observation-portfolio"]
+        })
       ]);
     }
   });
 
-  const optimizedAllocationData = observationPortfolio.data?.optimized_allocation ?? etfOptimizedAllocation.data ?? null;
+  const optimizedAllocationData =
+    observationPortfolio.data?.optimized_allocation ??
+    etfOptimizedAllocation.data ??
+    null;
   const advisorSourceRunId =
     assetType === "etf"
-      ? (etfLiveData?.snapshot?.snapshot_id ?? shortAssetData?.snapshot?.snapshot_id ?? null)
+      ? (etfLiveData?.snapshot?.snapshot_id ??
+        shortAssetData?.snapshot?.snapshot_id ??
+        null)
       : (latestCompletedSignal.data?.id ?? null);
 
   const runAdvisor = useMutation({
@@ -2289,11 +2820,14 @@ function ShortTermClient() {
         throw new Error("等待已完成的研究快照后才能生成顾问说明。");
       }
       return (
-        await api.post<Record<string, unknown>>("/api/short-research/advisor/run", {
-          asset_type: assetType,
-          theme: theme === "all" ? null : theme,
-          source_signal_run_id: advisorSourceRunId
-        })
+        await api.post<Record<string, unknown>>(
+          "/api/short-research/advisor/run",
+          {
+            asset_type: assetType,
+            theme: theme === "all" ? null : theme,
+            source_signal_run_id: advisorSourceRunId
+          }
+        )
       ).data;
     },
     onSuccess: async (result) => {
@@ -2302,7 +2836,10 @@ function ShortTermClient() {
     }
   });
   const isResearchTaskPending =
-    syncData.isPending || runSignals.isPending || runAdvisor.isPending || runEtfOptimizedAllocation.isPending;
+    syncData.isPending ||
+    runSignals.isPending ||
+    runAdvisor.isPending ||
+    runEtfOptimizedAllocation.isPending;
 
   const resetEditTracking = () => {
     setEditingTrackingId(null);
@@ -2320,7 +2857,9 @@ function ShortTermClient() {
     setEditBuyAmount(String(position.buy_amount));
     setEditBuyDate(position.buy_date);
     setEditOrderTime(position.order_time_bucket);
-    setEditConfirmedNavDate(position.confirmed_nav_date ?? position.entry_price_date ?? "");
+    setEditConfirmedNavDate(
+      position.confirmed_nav_date ?? position.entry_price_date ?? ""
+    );
     setEditConfirmedNav(
       position.confirmed_nav !== null
         ? String(position.confirmed_nav)
@@ -2328,15 +2867,25 @@ function ShortTermClient() {
           ? String(position.entry_price)
           : ""
     );
-    setEditConfirmedShares(position.confirmed_shares !== null ? String(position.confirmed_shares) : "");
+    setEditConfirmedShares(
+      position.confirmed_shares !== null
+        ? String(position.confirmed_shares)
+        : ""
+    );
     setEditNote(position.note ?? "");
   };
 
   const buildEditTrackingPayload = () => {
     const payload: TrackedPositionPatchPayload = {};
     const buyAmount = positiveNumberOrUndefined(editBuyAmount, "买入金额");
-    const confirmedNav = positiveNumberOrUndefined(editConfirmedNav, "实际成交价/确认净值");
-    const confirmedShares = positiveNumberOrUndefined(editConfirmedShares, "实际成交份额/确认份额");
+    const confirmedNav = positiveNumberOrUndefined(
+      editConfirmedNav,
+      "实际成交价/确认净值"
+    );
+    const confirmedShares = positiveNumberOrUndefined(
+      editConfirmedShares,
+      "实际成交份额/确认份额"
+    );
     if (buyAmount !== undefined) {
       payload.buy_amount = buyAmount;
     }
@@ -2371,6 +2920,10 @@ function ShortTermClient() {
           buy_amount: Number(trackingAmount),
           buy_date: trackingDate,
           order_time_bucket: trackingOrderTime,
+          alert_policy_id:
+            selectedAsset.asset_type === "etf"
+              ? trackingAlertPolicy
+              : "standard_dynamic_v2",
           confirmed_nav_date: trackingConfirmedNavDate || undefined,
           confirmed_nav: optionalNumber(trackingConfirmedNav),
           confirmed_shares: optionalNumber(trackingConfirmedShares),
@@ -2383,6 +2936,7 @@ function ShortTermClient() {
       setTrackingAmount("3000");
       setTrackingDate(todayInputValue());
       setTrackingOrderTime(defaultOrderTimeBucket());
+      setTrackingAlertPolicy("standard_dynamic_v2");
       setTrackingConfirmedNavDate("");
       setTrackingConfirmedNav("");
       setTrackingConfirmedShares("");
@@ -2400,7 +2954,10 @@ function ShortTermClient() {
         throw new Error("请先选择要编辑的追踪记录");
       }
       return (
-        await api.patch<TrackedPosition>(`/api/tracked-positions/${editingTrackingId}`, buildEditTrackingPayload())
+        await api.patch<TrackedPosition>(
+          `/api/tracked-positions/${editingTrackingId}`,
+          buildEditTrackingPayload()
+        )
       ).data;
     },
     onSuccess: async () => {
@@ -2417,10 +2974,13 @@ function ShortTermClient() {
   const closeTracking = useMutation({
     mutationFn: async (positionId: number) =>
       (
-        await api.post<TrackedPosition>(`/api/tracked-positions/${positionId}/close`, {
-          status: "closed",
-          note: "已在平台外手动处理"
-        })
+        await api.post<TrackedPosition>(
+          `/api/tracked-positions/${positionId}/close`,
+          {
+            status: "closed",
+            note: "已在平台外手动处理"
+          }
+        )
       ).data,
     onSuccess: async () => {
       await Promise.all([
@@ -2433,31 +2993,55 @@ function ShortTermClient() {
   const statusData = status.data;
   const currentLatestDate =
     statusData?.latest_data_date ??
-    (etfLiveData?.signal_as_of_date ?? shortAssetData?.as_of_date) ??
+    etfLiveData?.signal_as_of_date ??
+    shortAssetData?.as_of_date ??
     null;
   const etfLiveStatus = effectiveEtfLiveStatus;
   const currentDataIssueCount =
     assetType === "etf"
-      ? (statusData?.etf_data_stale_count ?? 0) + (statusData?.etf_failed_count ?? 0)
-      : statusData?.data_issue_count ?? 0;
-  const selectedKey = selected ? `${selected.asset_type}-${selected.code}` : null;
+      ? (statusData?.etf_data_stale_count ?? 0) +
+        (statusData?.etf_failed_count ?? 0)
+      : (statusData?.data_issue_count ?? 0);
+  const selectedKey = selected
+    ? `${selected.asset_type}-${selected.code}`
+    : null;
   const selectedListItem = selected
-    ? visibleAssets.find((item) => getItemAssetType(item) === selected.asset_type && toEtfItemCode(item) === selected.code)
+    ? visibleAssets.find(
+        (item) =>
+          getItemAssetType(item) === selected.asset_type &&
+          toEtfItemCode(item) === selected.code
+      )
     : undefined;
-  const selectedPreviewAsset = selectedListItem ? previewAssetFromRankedItem(selectedListItem, etfLiveData?.market_status) : null;
+  const selectedPreviewAsset = selectedListItem
+    ? previewAssetFromRankedItem(selectedListItem, etfLiveData?.market_status)
+    : null;
   const selectedDetailDataKey = selectedDetail.data
     ? `${selectedDetail.data.asset.asset_type}-${selectedDetail.data.asset.code}`
     : null;
-  const selectedDetailForCurrent = selectedKey && selectedDetailDataKey === selectedKey ? selectedDetail.data : undefined;
+  const selectedDetailForCurrent =
+    selectedKey && selectedDetailDataKey === selectedKey
+      ? selectedDetail.data
+      : undefined;
   const selectedAsset = selectedDetailForCurrent?.asset ?? selectedPreviewAsset;
-  const selectedAssetKey = selectedAsset ? `${selectedAsset.asset_type}-${selectedAsset.code}` : null;
-  const isSelectedDetailPending = Boolean(selectedKey && selectedAsset && !selectedDetailForCurrent && selectedDetail.isFetching);
+  const selectedAssetKey = selectedAsset
+    ? `${selectedAsset.asset_type}-${selectedAsset.code}`
+    : null;
+  const isSelectedDetailPending = Boolean(
+    selectedKey &&
+    selectedAsset &&
+    !selectedDetailForCurrent &&
+    selectedDetail.isFetching
+  );
   const advisorReport = selectedDetailForCurrent?.asset.advisor_report ?? null;
   const detailPoints = chartPoints(selectedDetailForCurrent);
   const windowPoints = returnWindowChart(selectedAsset ?? undefined);
   const totalAssetCount = assets.data?.total ?? 0;
   useEffect(() => {
-    const lastValidOffset = Math.max(0, Math.floor(Math.max(0, totalAssetCount - 1) / ASSET_PAGE_SIZE) * ASSET_PAGE_SIZE);
+    const lastValidOffset = Math.max(
+      0,
+      Math.floor(Math.max(0, totalAssetCount - 1) / ASSET_PAGE_SIZE) *
+        ASSET_PAGE_SIZE
+    );
     if (assetOffset > lastValidOffset) {
       setAssetOffset(lastValidOffset);
     }
@@ -2468,34 +3052,56 @@ function ShortTermClient() {
       .filter((value): value is string => Boolean(value));
     return quoteTimes.sort().at(-1) ?? null;
   }, [visibleAssets]);
-  const goToPreviousAssetPage = () => setAssetOffset((value) => Math.max(0, value - ASSET_PAGE_SIZE));
-  const goToNextAssetPage = () => setAssetOffset((value) => value + ASSET_PAGE_SIZE);
-  const observableCount = visibleAssets.filter((item) => itemConclusion(item) === "短线观察").length;
-  const highRiskCount = visibleAssets.filter((item) => itemConclusion(item) === "高位观察").length;
+  const goToPreviousAssetPage = () =>
+    setAssetOffset((value) => Math.max(0, value - ASSET_PAGE_SIZE));
+  const goToNextAssetPage = () =>
+    setAssetOffset((value) => value + ASSET_PAGE_SIZE);
+  const observableCount = visibleAssets.filter(
+    (item) => itemConclusion(item) === "短线观察"
+  ).length;
+  const highRiskCount = visibleAssets.filter(
+    (item) => itemConclusion(item) === "高位观察"
+  ).length;
   const dataIssues = dataIssuesQuery.data ?? [];
   const selectedTracked = activeTracked.filter(
-    (item) => selectedAsset && item.asset_type === selectedAsset.asset_type && item.asset_code === selectedAsset.code
+    (item) =>
+      selectedAsset &&
+      item.asset_type === selectedAsset.asset_type &&
+      item.asset_code === selectedAsset.code
   );
   const primaryTracked = selectedTracked[0] ?? null;
   const selectedLiveItem = selectedAsset
-    ? visibleAssets.find((item) => isLiveRankingItem(item) && item.etf_code === selectedAsset.code)
+    ? visibleAssets.find(
+        (item) =>
+          isLiveRankingItem(item) && item.etf_code === selectedAsset.code
+      )
     : null;
   const selectedLiveFallbackItem =
     selectedAsset?.asset_type === "etf"
-      ? selectedEtfLiveData.data?.items.find((item) => item.etf_code === selectedAsset.code) ?? null
+      ? (selectedEtfLiveData.data?.items.find(
+          (item) => item.etf_code === selectedAsset.code
+        ) ?? null)
       : null;
   const selectedLiveRankingItem =
-    selectedLiveItem && isLiveRankingItem(selectedLiveItem) ? selectedLiveItem : selectedLiveFallbackItem;
+    selectedLiveItem && isLiveRankingItem(selectedLiveItem)
+      ? selectedLiveItem
+      : selectedLiveFallbackItem;
   const selectedLiveQuote = selectedLiveRankingItem?.quote ?? null;
-  const selectedMarketStatus = etfLiveData?.market_status ?? selectedEtfLiveData.data?.market_status ?? effectiveEtfLiveStatus?.market_status;
-  const selectedIntradayChange = intradayChangeDisplay(selectedLiveQuote, selectedMarketStatus);
+  const selectedMarketStatus =
+    etfLiveData?.market_status ??
+    selectedEtfLiveData.data?.market_status ??
+    effectiveEtfLiveStatus?.market_status;
+  const selectedIntradayChange = intradayChangeDisplay(
+    selectedLiveQuote,
+    selectedMarketStatus
+  );
   const selectedEntryTiming =
     assetType === "etf" && selectedLiveRankingItem
       ? itemEntryTimingDisplay(selectedLiveRankingItem, selectedMarketStatus)
       : {
           title: "今日买点",
           label: selectedAsset?.entry_timing_label ?? "暂无",
-          reason: selectedAsset?.entry_timing_reason ?? "暂无买点原因",
+          reason: selectedAsset?.entry_timing_reason ?? "暂无买点原因"
         };
   const selectedDailyEntryTiming =
     assetType === "etf" && selectedLiveRankingItem
@@ -2504,52 +3110,88 @@ function ShortTermClient() {
           label: selectedLiveRankingItem.daily_entry_timing_label,
           reason: dailyReferenceReason(
             selectedLiveRankingItem.daily_entry_timing_reason,
-            etfLiveData?.signal_as_of_date ?? selectedEtfLiveData.data?.signal_as_of_date,
+            etfLiveData?.signal_as_of_date ??
+              selectedEtfLiveData.data?.signal_as_of_date
           ),
           parts: dailyReferenceParts(
             selectedLiveRankingItem.daily_entry_timing_reason,
-            etfLiveData?.signal_as_of_date ?? selectedEtfLiveData.data?.signal_as_of_date,
-          ),
+            etfLiveData?.signal_as_of_date ??
+              selectedEtfLiveData.data?.signal_as_of_date
+          )
         }
       : null;
   const selectedAssetMetrics = selectedAsset?.metrics ?? {};
   const validationGroups = labelValidationGroups(statusData);
   const scoreBucketGroups = scoreBucketValidationGroups(statusData);
-  const scoreBucketCumulativeGroups = scoreBucketGroups.filter((item) => item.group_type === "cumulative");
-  const scoreBucketMarginalGroups = scoreBucketGroups.filter((item) => item.group_type === "marginal");
-  const scoreBucketBaselineGroup = scoreBucketGroups.find((item) => item.group_type === "baseline");
+  const scoreBucketCumulativeGroups = scoreBucketGroups.filter(
+    (item) => item.group_type === "cumulative"
+  );
+  const scoreBucketMarginalGroups = scoreBucketGroups.filter(
+    (item) => item.group_type === "marginal"
+  );
+  const scoreBucketBaselineGroup = scoreBucketGroups.find(
+    (item) => item.group_type === "baseline"
+  );
   const scoreBucketPrimaryGroup = scoreBucketGroups.find(
-    (item) => item.label === "Top 10" && item.entry_timing_label === "cumulative"
+    (item) =>
+      item.label === "Top 10" && item.entry_timing_label === "cumulative"
   );
   const scoreBucketValidation = statusData?.score_bucket_validation ?? {};
-  const scoreBucketExcludedSources = Array.isArray(scoreBucketValidation.excluded_source_snapshots)
+  const scoreBucketExcludedSources = Array.isArray(
+    scoreBucketValidation.excluded_source_snapshots
+  )
     ? scoreBucketValidation.excluded_source_snapshots.filter(
-        (item): item is { source_signal_run_id?: number; source_date?: string; reason?: string } =>
-          typeof item === "object" && item !== null
+        (
+          item
+        ): item is {
+          source_signal_run_id?: number;
+          source_date?: string;
+          reason?: string;
+        } => typeof item === "object" && item !== null
       )
     : [];
   const scoreBucketSourceRuns =
-    typeof scoreBucketValidation.source_signal_run_count === "number" ? scoreBucketValidation.source_signal_run_count : 0;
+    typeof scoreBucketValidation.source_signal_run_count === "number"
+      ? scoreBucketValidation.source_signal_run_count
+      : 0;
   const scoreBucketScoredItems =
-    typeof scoreBucketValidation.scored_item_count === "number" ? scoreBucketValidation.scored_item_count : 0;
+    typeof scoreBucketValidation.scored_item_count === "number"
+      ? scoreBucketValidation.scored_item_count
+      : 0;
   const scoreBucketExcludedItems =
     typeof scoreBucketValidation.excluded_unavailable_score_count === "number"
       ? scoreBucketValidation.excluded_unavailable_score_count
       : 0;
-  const selectedValidationEntryLabel = selectedDailyEntryTiming?.label ?? selectedEntryTiming.label;
+  const selectedValidationEntryLabel =
+    selectedDailyEntryTiming?.label ?? selectedEntryTiming.label;
   const selectedValidationGroup = selectedAsset
     ? validationGroups.find(
-        (item) => item.label === selectedAsset.conclusion && item.entry_timing_label === selectedValidationEntryLabel
+        (item) =>
+          item.label === selectedAsset.conclusion &&
+          item.entry_timing_label === selectedValidationEntryLabel
       )
     : undefined;
-  const selectedHistoricalEvidence = evidenceTrack(selectedAsset, "historical_replay");
+  const selectedHistoricalEvidence = evidenceTrack(
+    selectedAsset,
+    "historical_replay"
+  );
   const selectedForwardEvidence = evidenceTrack(selectedAsset, "forward_live");
-  const selectedHistoricalSummary = validationTrackSummary(selectedHistoricalEvidence, true);
-  const selectedForwardSummary = validationTrackSummary(selectedForwardEvidence);
-  const selectedAssetTrendScore = numericMetric(selectedAssetMetrics, "trend_score");
+  const selectedHistoricalSummary = validationTrackSummary(
+    selectedHistoricalEvidence,
+    true
+  );
+  const selectedForwardSummary = validationTrackSummary(
+    selectedForwardEvidence
+  );
+  const selectedAssetTrendScore = numericMetric(
+    selectedAssetMetrics,
+    "trend_score"
+  );
   const selectedAssetSource = selectedAsset?.source_note ?? "暂无";
-  const selectedHoldingStatus = primaryTracked?.current_snapshot.current_label ?? "未持仓";
-  const selectedHoldingDecision = primaryTracked?.exit_signal.label ?? "未触发持仓处理";
+  const selectedHoldingStatus =
+    primaryTracked?.current_snapshot.current_label ?? "未持仓";
+  const selectedHoldingDecision =
+    primaryTracked?.exit_signal.label ?? "未触发持仓处理";
   const selectedLatestReason =
     primaryTracked?.exit_signal.reason ??
     primaryTracked?.exit_signal.reasons?.[0] ??
@@ -2559,13 +3201,27 @@ function ShortTermClient() {
     queryKey: ["tracked-position", user?.id ?? "anonymous", primaryTracked?.id],
     enabled: Boolean(user) && primaryTracked !== null,
     queryFn: async ({ signal }) =>
-      (await api.get<TrackedPositionDetail>(`/api/tracked-positions/${primaryTracked?.id}`, { signal })).data
+      (
+        await api.get<TrackedPositionDetail>(
+          `/api/tracked-positions/${primaryTracked?.id}`,
+          { signal }
+        )
+      ).data
   });
   const trackedAudit = useQuery({
-    queryKey: ["tracked-position-audit", user?.id ?? "anonymous", primaryTracked?.id],
+    queryKey: [
+      "tracked-position-audit",
+      user?.id ?? "anonymous",
+      primaryTracked?.id
+    ],
     enabled: Boolean(user) && primaryTracked !== null,
     queryFn: async ({ signal }) =>
-      (await api.get<TrackedPositionAlertAuditList>(`/api/tracked-positions/${primaryTracked?.id}/audit?limit=20`, { signal })).data
+      (
+        await api.get<TrackedPositionAlertAuditList>(
+          `/api/tracked-positions/${primaryTracked?.id}/audit?limit=20`,
+          { signal }
+        )
+      ).data
   });
   const auditItems = trackedAudit.data?.items ?? [];
   const trackingPoints = trackingChartPoints(trackedDetail.data);
@@ -2715,7 +3371,10 @@ function ShortTermClient() {
     { id: "tracking", label: "追踪" },
     { id: "explanation", label: "说明" }
   ];
-  const detailNavItems: Array<{ label: string; section: "summary" | "charts" | "advisor" | "explanation" | "tracking" }> = [
+  const detailNavItems: Array<{
+    label: string;
+    section: "summary" | "charts" | "advisor" | "explanation" | "tracking";
+  }> = [
     { label: "摘要", section: "summary" },
     { label: "图表", section: "charts" },
     { label: "AI", section: "advisor" },
@@ -2723,7 +3382,9 @@ function ShortTermClient() {
     { label: "追踪", section: "tracking" }
   ];
 
-  const scrollToDetailSection = (section: "summary" | "charts" | "advisor" | "explanation" | "tracking") => {
+  const scrollToDetailSection = (
+    section: "summary" | "charts" | "advisor" | "explanation" | "tracking"
+  ) => {
     const target = {
       summary: summarySectionRef,
       charts: chartsSectionRef,
@@ -2757,16 +3418,28 @@ function ShortTermClient() {
     const trendWeakening = primaryTracked?.dynamic_thresholds?.trend_weakening
       ? "是"
       : primaryTracked?.dynamic_thresholds
-      ? "否"
-      : "暂无";
+        ? "否"
+        : "暂无";
     const thresholds = primaryTracked?.dynamic_thresholds
       ? {
-          hardStop: percentValueOrWaiting(primaryTracked.dynamic_thresholds.hard_stop_pct),
-          profitStart: percentValueOrWaiting(primaryTracked.dynamic_thresholds.profit_start_pct),
-          giveback: percentValueOrWaiting(primaryTracked.dynamic_thresholds.trailing_giveback_pct),
-          hardStopDistance: percentValueOrWaiting(primaryTracked.dynamic_thresholds.distance_to_hard_stop_pct),
-          profitDistance: percentValueOrWaiting(primaryTracked.dynamic_thresholds.distance_to_profit_start_pct),
-          givebackDistance: percentValueOrWaiting(primaryTracked.dynamic_thresholds.distance_to_trailing_giveback_pct),
+          hardStop: percentValueOrWaiting(
+            primaryTracked.dynamic_thresholds.hard_stop_pct
+          ),
+          profitStart: percentValueOrWaiting(
+            primaryTracked.dynamic_thresholds.profit_start_pct
+          ),
+          giveback: percentValueOrWaiting(
+            primaryTracked.dynamic_thresholds.trailing_giveback_pct
+          ),
+          hardStopDistance: percentValueOrWaiting(
+            primaryTracked.dynamic_thresholds.distance_to_hard_stop_pct
+          ),
+          profitDistance: percentValueOrWaiting(
+            primaryTracked.dynamic_thresholds.distance_to_profit_start_pct
+          ),
+          givebackDistance: percentValueOrWaiting(
+            primaryTracked.dynamic_thresholds.distance_to_trailing_giveback_pct
+          ),
           trendWeakening
         }
       : null;
@@ -2776,33 +3449,47 @@ function ShortTermClient() {
         ? "午休，等待下午开盘"
         : "等待盘中行情"
       : etfLiveData?.market_status !== "open"
-      ? etfLiveData?.market_status === "lunch_break"
-        ? "午休，使用上午最近行情"
-        : "休市，使用最近公开行情"
-      : selectedLiveQuote.is_stale
-      ? "行情滞后，仅网页参考"
-      : selectedLiveQuote.decision_eligible
-      ? "新鲜盘中行情"
-      : "仅网页参考";
+        ? etfLiveData?.market_status === "lunch_break"
+          ? "午休，使用上午最近行情"
+          : "休市，使用最近公开行情"
+        : selectedLiveQuote.is_stale
+          ? "行情滞后，仅网页参考"
+          : selectedLiveQuote.decision_eligible
+            ? "新鲜盘中行情"
+            : "仅网页参考";
     const intradayChangeValue = selectedLiveQuote?.change_percent;
-    const hasLargeIntradayDrop = assetType === "etf" && typeof intradayChangeValue === "number" && intradayChangeValue <= -3;
+    const hasLargeIntradayDrop =
+      assetType === "etf" &&
+      typeof intradayChangeValue === "number" &&
+      intradayChangeValue <= -3;
     const headlinePrice =
       assetType === "etf"
         ? selectedLivePrice === null || selectedLivePrice === undefined
           ? "暂无"
           : selectedLivePrice.toFixed(4)
         : selectedAsset.latest_value === null
-        ? "暂无"
-        : selectedAsset.latest_value.toFixed(4);
-    const themeProfile = (selectedAsset.theme_profile ?? selectedAssetMetrics.theme_profile ?? {}) as Record<string, unknown>;
+          ? "暂无"
+          : selectedAsset.latest_value.toFixed(4);
+    const themeProfile = (selectedAsset.theme_profile ??
+      selectedAssetMetrics.theme_profile ??
+      {}) as Record<string, unknown>;
     const themeText = (value: unknown, fallback = "暂无") =>
       typeof value === "string" && value.trim().length > 0 ? value : fallback;
     const secondaryThemes = Array.isArray(themeProfile.secondary_themes)
-      ? themeProfile.secondary_themes.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+      ? themeProfile.secondary_themes.filter(
+          (item): item is string =>
+            typeof item === "string" && item.trim().length > 0
+        )
       : [];
-    const dynamicContext = (selectedAssetMetrics.dynamic_threshold_context ?? selectedAsset.rationale.dynamic_threshold_context ?? {}) as Record<string, unknown>;
-    const dynamicThresholdMap = (dynamicContext.thresholds ?? {}) as Record<string, unknown>;
-    const dynamicNumber = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : null);
+    const dynamicContext = (selectedAssetMetrics.dynamic_threshold_context ??
+      selectedAsset.rationale.dynamic_threshold_context ??
+      {}) as Record<string, unknown>;
+    const dynamicThresholdMap = (dynamicContext.thresholds ?? {}) as Record<
+      string,
+      unknown
+    >;
+    const dynamicNumber = (value: unknown) =>
+      typeof value === "number" && Number.isFinite(value) ? value : null;
     const dynamicPercent = (key: string) => {
       const value = dynamicNumber(dynamicThresholdMap[key]);
       return value === null ? "暂无" : formatPercent(value);
@@ -2811,48 +3498,77 @@ function ShortTermClient() {
 
     return (
       <div className="mt-5 rounded-[10px] border border-ink/10 bg-white p-4">
-        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">观察与持仓摘要</p>
+        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">
+          观察与持仓摘要
+        </p>
         <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
           <div className="rounded-[8px] border border-ink/10 bg-paper px-3 py-2">
-            <p className="text-xs text-ink/45">{assetType === "etf" ? "盘中/最近价" : "最新净值"}</p>
-            <p className="mt-1 text-base font-semibold text-ink">{headlinePrice}</p>
+            <p className="text-xs text-ink/45">
+              {assetType === "etf" ? "盘中/最近价" : "最新净值"}
+            </p>
+            <p className="mt-1 text-base font-semibold text-ink">
+              {headlinePrice}
+            </p>
           </div>
           <div className="rounded-[8px] border border-ink/10 bg-paper px-3 py-2">
-            <p className="text-xs text-ink/45">{assetType === "etf" ? "盘中涨跌" : "最新日涨跌"}</p>
+            <p className="text-xs text-ink/45">
+              {assetType === "etf" ? "盘中涨跌" : "最新日涨跌"}
+            </p>
             <p className="mt-1 text-base font-semibold text-ink">
-              {assetType === "etf" ? selectedIntradayChange.value : percentMetric(selectedAssetMetrics, "today_return_pct")}
+              {assetType === "etf"
+                ? selectedIntradayChange.value
+                : percentMetric(selectedAssetMetrics, "today_return_pct")}
             </p>
           </div>
           <div className="rounded-[8px] border border-ink/10 bg-paper px-3 py-2">
             <p className="text-xs text-ink/45">行情时间</p>
-            <p className="mt-1 text-sm font-semibold text-ink">{assetType === "etf" ? selectedIntradayChange.time : formatDate(selectedAsset.latest_date)}</p>
+            <p className="mt-1 text-sm font-semibold text-ink">
+              {assetType === "etf"
+                ? selectedIntradayChange.time
+                : formatDate(selectedAsset.latest_date)}
+            </p>
           </div>
           <div className="rounded-[8px] border border-ink/10 bg-paper px-3 py-2">
             <p className="text-xs text-ink/45">数据状态</p>
-            <p className="mt-1 text-sm font-semibold text-ink">{assetType === "etf" ? quoteStatus : "公开净值"}</p>
+            <p className="mt-1 text-sm font-semibold text-ink">
+              {assetType === "etf" ? quoteStatus : "公开净值"}
+            </p>
           </div>
         </div>
 
         {hasLargeIntradayDrop ? (
           <div className="mt-3 rounded-[8px] border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-800">
-            盘中回撤较大：当前盘中涨跌 {formatPercent(intradayChangeValue)}，请优先看盘中风险，不要只看昨日日线趋势。
+            盘中回撤较大：当前盘中涨跌 {formatPercent(intradayChangeValue)}
+            ，请优先看盘中风险，不要只看昨日日线趋势。
           </div>
         ) : null}
 
         <div className="mt-3 grid gap-3 md:grid-cols-3">
           <div className="rounded-[8px] border border-ink/10 p-3">
             <p className="text-xs font-semibold text-accent">买入观察</p>
-            <p className="mt-2 text-base font-semibold text-ink">{selectedAsset.conclusion}</p>
+            <p className="mt-2 text-base font-semibold text-ink">
+              {selectedAsset.conclusion}
+            </p>
           </div>
           <div className="rounded-[8px] border border-ink/10 p-3">
-            <p className="text-xs font-semibold text-accent">{selectedEntryTiming.title}</p>
-            <p className="mt-2 text-base font-semibold text-ink">{selectedEntryTiming.label}</p>
-            <p className="mt-1 text-sm leading-6 text-ink/60">{selectedEntryTiming.reason}</p>
+            <p className="text-xs font-semibold text-accent">
+              {selectedEntryTiming.title}
+            </p>
+            <p className="mt-2 text-base font-semibold text-ink">
+              {selectedEntryTiming.label}
+            </p>
+            <p className="mt-1 text-sm leading-6 text-ink/60">
+              {selectedEntryTiming.reason}
+            </p>
           </div>
           <div className="rounded-[8px] border border-ink/10 p-3">
             <p className="text-xs font-semibold text-accent">持仓处理</p>
-            <p className="mt-2 text-base font-semibold text-ink">{selectedHoldingDecision}</p>
-            <p className="mt-1 text-sm leading-6 text-ink/60">{selectedLatestReason}</p>
+            <p className="mt-2 text-base font-semibold text-ink">
+              {selectedHoldingDecision}
+            </p>
+            <p className="mt-1 text-sm leading-6 text-ink/60">
+              {selectedLatestReason}
+            </p>
           </div>
         </div>
 
@@ -2860,11 +3576,16 @@ function ShortTermClient() {
           <div className="mt-3 rounded-[8px] border border-ink/10 bg-paper p-3">
             <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
               <p className="text-xs font-semibold text-accent">日线参考</p>
-              <span className="w-fit rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-ink/60">{selectedDailyEntryTiming.label}</span>
+              <span className="w-fit rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-ink/60">
+                {selectedDailyEntryTiming.label}
+              </span>
             </div>
             <div className="mt-2 grid gap-2 text-sm text-ink/70 md:grid-cols-2">
               {selectedDailyEntryTiming.parts.map((part) => (
-                <div key={`${part.label}-${part.value}`} className="rounded-[8px] bg-white px-3 py-2">
+                <div
+                  key={`${part.label}-${part.value}`}
+                  className="rounded-[8px] bg-white px-3 py-2"
+                >
                   <span className="text-ink/45">{part.label}：</span>
                   <span className="font-medium text-ink/75">{part.value}</span>
                 </div>
@@ -2874,11 +3595,22 @@ function ShortTermClient() {
         ) : null}
 
         <div className="mt-3 grid gap-2 text-sm text-ink/70 md:grid-cols-2">
-          <span>近5日涨跌：{percentMetric(selectedAssetMetrics, "return_5d")}</span>
-          <span>近20日涨跌：{percentMetric(selectedAssetMetrics, "return_20d")}</span>
-          <span>近60日涨跌：{percentMetric(selectedAssetMetrics, "return_60d")}</span>
-          <span>60日回撤：{percentMetric(selectedAssetMetrics, "max_drawdown_60d")}</span>
-          <span>波动（20日）：{percentMetric(selectedAssetMetrics, "volatility_20d")}</span>
+          <span>
+            近5日涨跌：{percentMetric(selectedAssetMetrics, "return_5d")}
+          </span>
+          <span>
+            近20日涨跌：{percentMetric(selectedAssetMetrics, "return_20d")}
+          </span>
+          <span>
+            近60日涨跌：{percentMetric(selectedAssetMetrics, "return_60d")}
+          </span>
+          <span>
+            60日回撤：{percentMetric(selectedAssetMetrics, "max_drawdown_60d")}
+          </span>
+          <span>
+            波动（20日）：
+            {percentMetric(selectedAssetMetrics, "volatility_20d")}
+          </span>
           <span>趋势强度：{scoreOrWaiting(selectedAssetTrendScore)}</span>
           <span>数据来源：{selectedAssetSource}</span>
           <span>持仓状态：{selectedHoldingStatus}</span>
@@ -2889,33 +3621,75 @@ function ShortTermClient() {
               <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
                 <p className="text-xs font-semibold text-accent">主题归类</p>
                 <span className="w-fit rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-ink/60">
-                  {themeText(themeProfile.classification_confidence, "未知置信度")}
+                  {themeText(
+                    themeProfile.classification_confidence,
+                    "未知置信度"
+                  )}
                 </span>
               </div>
               <div className="mt-2 grid gap-2 text-sm text-ink/70 sm:grid-cols-2">
-                <span>主主题：{themeText(themeProfile.primary_theme ?? selectedAsset.primary_theme, "未分类")}</span>
-                <span>主题组：{themeText(themeProfile.theme_group ?? selectedAsset.theme_group, "unknown")}</span>
-                <span>来源：{themeText(themeProfile.classification_source ?? selectedAsset.classification_source, "规则未命中")}</span>
-                <span>副主题：{secondaryThemes.length ? secondaryThemes.join(" / ") : "暂无"}</span>
+                <span>
+                  主主题：
+                  {themeText(
+                    themeProfile.primary_theme ?? selectedAsset.primary_theme,
+                    "未分类"
+                  )}
+                </span>
+                <span>
+                  主题组：
+                  {themeText(
+                    themeProfile.theme_group ?? selectedAsset.theme_group,
+                    "unknown"
+                  )}
+                </span>
+                <span>
+                  来源：
+                  {themeText(
+                    themeProfile.classification_source ??
+                      selectedAsset.classification_source,
+                    "规则未命中"
+                  )}
+                </span>
+                <span>
+                  副主题：
+                  {secondaryThemes.length
+                    ? secondaryThemes.join(" / ")
+                    : "暂无"}
+                </span>
               </div>
               <p className="mt-2 text-sm leading-6 text-ink/55">
-                {themeText(themeProfile.classification_reason ?? selectedAsset.classification_reason, "未找到足够明确的行业/主题证据，组合层会保守处理。")}
+                {themeText(
+                  themeProfile.classification_reason ??
+                    selectedAsset.classification_reason,
+                  "未找到足够明确的行业/主题证据，组合层会保守处理。"
+                )}
               </p>
             </div>
             <div className="rounded-[8px] border border-ink/10 bg-paper p-3">
               <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-                <p className="text-xs font-semibold text-accent">动态阈值依据</p>
+                <p className="text-xs font-semibold text-accent">
+                  动态阈值依据
+                </p>
                 <span className="w-fit rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-ink/60">
                   {themeText(dynamicContext.rule_version, "规则版本未知")}
                 </span>
               </div>
               <div className="mt-2 grid gap-2 text-sm text-ink/70 sm:grid-cols-2">
-                <span>阈值模式：{themeText(dynamicContext.threshold_mode, "暂无")}</span>
-                <span>波动单位：{volatilityUnit === null ? "暂无" : formatPercent(volatilityUnit)}</span>
+                <span>
+                  阈值模式：{themeText(dynamicContext.threshold_mode, "暂无")}
+                </span>
+                <span>
+                  波动单位：
+                  {volatilityUnit === null
+                    ? "暂无"
+                    : formatPercent(volatilityUnit)}
+                </span>
                 <span>追高线：{dynamicPercent("chase_daily")}</span>
                 <span>跌破等待线：{dynamicPercent("drop_wait")}</span>
                 <span>移动止盈启动：{dynamicPercent("profit_start_pct")}</span>
-                <span>高点回吐线：{dynamicPercent("trailing_giveback_pct")}</span>
+                <span>
+                  高点回吐线：{dynamicPercent("trailing_giveback_pct")}
+                </span>
               </div>
             </div>
           </div>
@@ -2930,7 +3704,10 @@ function ShortTermClient() {
                 </span>
               </div>
               <p className="mt-2 text-ink/55">
-                {evidenceContractText(selectedAsset.evidence_status, selectedAsset.evidence_summary)}
+                {evidenceContractText(
+                  selectedAsset.evidence_status,
+                  selectedAsset.evidence_summary
+                )}
               </p>
             </div>
             <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
@@ -2941,12 +3718,21 @@ function ShortTermClient() {
                 ["历史回放", selectedHistoricalSummary],
                 ["真实前瞻", selectedForwardSummary]
               ].map(([title, summary]) => {
-                const track = summary as ReturnType<typeof validationTrackSummary>;
+                const track = summary as ReturnType<
+                  typeof validationTrackSummary
+                >;
                 return (
-                  <div key={title as string} className="rounded-[8px] border border-ink/10 bg-white p-3">
+                  <div
+                    key={title as string}
+                    className="rounded-[8px] border border-ink/10 bg-white p-3"
+                  >
                     <div className="flex items-center justify-between gap-2">
-                      <p className="font-semibold text-ink">{title as string}</p>
-                      <span className="rounded-full bg-paper px-2 py-0.5 text-[11px] font-semibold text-ink/65">{track.status}</span>
+                      <p className="font-semibold text-ink">
+                        {title as string}
+                      </p>
+                      <span className="rounded-full bg-paper px-2 py-0.5 text-[11px] font-semibold text-ink/65">
+                        {track.status}
+                      </span>
                     </div>
                     <div className="mt-2 grid grid-cols-2 gap-1 text-ink/65">
                       <span>5日样本：{track.sampleCount}</span>
@@ -2960,13 +3746,21 @@ function ShortTermClient() {
                 );
               })}
             </div>
-            <p className="mt-2">{selectedValidationGroup ? labelValidationLine(selectedValidationGroup, "10") : "样本不足时只能继续观察，不能把标签当成买入结论。"}</p>
-            <p>历史回放与真实前瞻均为研究证据，不等同于正式策略业绩、邮件送达或用户确认成交。</p>
+            <p className="mt-2">
+              {selectedValidationGroup
+                ? labelValidationLine(selectedValidationGroup, "10")
+                : "样本不足时只能继续观察，不能把标签当成买入结论。"}
+            </p>
+            <p>
+              历史回放与真实前瞻均为研究证据，不等同于正式策略业绩、邮件送达或用户确认成交。
+            </p>
             <p>{observationPortfolioText(selectedAsset)}</p>
           </div>
         ) : null}
         <details className="mt-3 rounded-[8px] bg-paper px-3 py-2">
-          <summary className="cursor-pointer text-sm font-semibold">动态阈值</summary>
+          <summary className="cursor-pointer text-sm font-semibold">
+            动态阈值
+          </summary>
           <p className="mt-2 text-xs text-ink/65">
             {thresholds
               ? `硬止损${thresholds.hardStop}（距离${thresholds.hardStopDistance}）；止盈起点${thresholds.profitStart}（距离${thresholds.profitDistance}）；回撤减仓${thresholds.giveback}（距离${thresholds.givebackDistance}）；趋势减弱预警${thresholds.trendWeakening}`
@@ -2977,15 +3771,22 @@ function ShortTermClient() {
     );
   };
 
-  const isMobileLayout = () => typeof window !== "undefined" && window.matchMedia("(max-width: 1023px)").matches;
+  const isMobileLayout = () =>
+    typeof window !== "undefined" &&
+    window.matchMedia("(max-width: 1023px)").matches;
 
   const selectAsset = (item: RankedAssetItem) => {
-    const nextSelected = { asset_type: getItemAssetType(item), code: toEtfItemCode(item) };
+    const nextSelected = {
+      asset_type: getItemAssetType(item),
+      code: toEtfItemCode(item)
+    };
     setSelected(nextSelected);
     if (isMobileLayout()) {
       setMobileTab("detail");
     } else {
-      setPendingDesktopScrollKey(`${nextSelected.asset_type}-${nextSelected.code}`);
+      setPendingDesktopScrollKey(
+        `${nextSelected.asset_type}-${nextSelected.code}`
+      );
     }
   };
 
@@ -2997,7 +3798,10 @@ function ShortTermClient() {
       return;
     }
     const frame = window.requestAnimationFrame(() => {
-      summarySectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      summarySectionRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start"
+      });
       setPendingDesktopScrollKey(null);
     });
     return () => window.cancelAnimationFrame(frame);
@@ -3010,7 +3814,9 @@ function ShortTermClient() {
     }
   }, [visibleAssets.length]);
 
-  const setQuickLabelFilter = (preset: "safe" | "high" | "tracked" | "clear") => {
+  const setQuickLabelFilter = (
+    preset: "safe" | "high" | "tracked" | "clear"
+  ) => {
     if (preset === "clear") {
       setLabelFilters(emptyLabelFilters);
       return;
@@ -3020,10 +3826,18 @@ function ShortTermClient() {
       return;
     }
     if (preset === "high") {
-      setLabelFilters({ observation: ["高位观察"], entry: ["健康回踩", "趋势延续"], tracking: [] });
+      setLabelFilters({
+        observation: ["高位观察"],
+        entry: ["健康回踩", "趋势延续"],
+        tracking: []
+      });
       return;
     }
-    setLabelFilters({ observation: ["短线观察"], entry: ["健康回踩", "趋势延续"], tracking: [] });
+    setLabelFilters({
+      observation: ["短线观察"],
+      entry: ["健康回踩", "趋势延续"],
+      tracking: []
+    });
   };
 
   const toggleLabelFilter = (groupKey: LabelFilterKey, value: string) => {
@@ -3039,16 +3853,20 @@ function ShortTermClient() {
   const removeLabelFilter = (groupKey: LabelFilterKey, value: string) => {
     setLabelFilters((current) => ({
       ...current,
-      [groupKey]: current[groupKey].filter((item) => item !== value),
+      [groupKey]: current[groupKey].filter((item) => item !== value)
     }));
   };
 
-  const mobileTrackingButtonLabel = trackingOpen ? "收起" : "我已买入，开始追踪";
+  const mobileTrackingButtonLabel = trackingOpen
+    ? "收起"
+    : "我已买入，开始追踪";
   const labelFilterPanel = (
     <div className="mt-4 rounded-[8px] border border-border bg-white p-3">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">标签筛选</p>
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">
+            标签筛选
+          </p>
         </div>
         <span className="w-fit rounded-full bg-paper px-3 py-1 text-xs font-semibold text-ink/60">
           已选 {activeLabelFilterCount} 项
@@ -3094,20 +3912,30 @@ function ShortTermClient() {
       {showLabelFilterDetails ? (
         <div className="mt-4 grid gap-3 md:grid-cols-3">
           {labelFilterGroups.map((group) => (
-            <fieldset key={group.key} className="rounded-[8px] border border-border bg-paper/50 p-3">
-              <legend className="px-1 text-xs font-semibold text-ink">{group.title}</legend>
+            <fieldset
+              key={group.key}
+              className="rounded-[8px] border border-border bg-paper/50 p-3"
+            >
+              <legend className="px-1 text-xs font-semibold text-ink">
+                {group.title}
+              </legend>
               <div className="mt-2 grid gap-2">
                 {group.options.map((option) => {
                   const checked = labelFilters[group.key].includes(option);
                   return (
-                    <label key={option} className="flex cursor-pointer items-center gap-2 text-xs text-ink/70">
+                    <label
+                      key={option}
+                      className="flex cursor-pointer items-center gap-2 text-xs text-ink/70"
+                    >
                       <input
                         type="checkbox"
                         className="h-3.5 w-3.5 rounded border-border text-ink focus:ring-2 focus:ring-accent/20"
                         checked={checked}
                         onChange={() => toggleLabelFilter(group.key, option)}
                       />
-                      <span className={checked ? "font-semibold text-ink" : ""}>{option}</span>
+                      <span className={checked ? "font-semibold text-ink" : ""}>
+                        {option}
+                      </span>
                     </label>
                   );
                 })}
@@ -3138,7 +3966,9 @@ function ShortTermClient() {
     const listGap = compact ? "space-y-2" : "space-y-3";
     return (
       <>
-        <div className={`mb-5 flex flex-col ${compact ? "gap-1" : "gap-2"} md:flex-row md:items-end md:justify-between`}>
+        <div
+          className={`mb-5 flex flex-col ${compact ? "gap-1" : "gap-2"} md:flex-row md:items-end md:justify-between`}
+        >
           <SectionKicker
             eyebrow="榜单"
             title={`${mode.shortLabel} 排序`}
@@ -3186,8 +4016,10 @@ function ShortTermClient() {
             </p>
             <p className="mt-1 text-xs text-ink/45">
               当日复权覆盖：
-              {shortAssetData?.snapshot?.decision_data_coverage_ratio === null ||
-              shortAssetData?.snapshot?.decision_data_coverage_ratio === undefined
+              {shortAssetData?.snapshot?.decision_data_coverage_ratio ===
+                null ||
+              shortAssetData?.snapshot?.decision_data_coverage_ratio ===
+                undefined
                 ? "暂无"
                 : `${(shortAssetData.snapshot.decision_data_coverage_ratio * 100).toFixed(1)}%`}
               {" · "}61 日预热覆盖：
@@ -3195,8 +4027,10 @@ function ShortTermClient() {
               shortAssetData?.snapshot?.score_coverage_ratio === undefined
                 ? "暂无"
                 : `${(shortAssetData.snapshot.score_coverage_ratio * 100).toFixed(1)}%`}
-              {" · "}截至 {formatDate(shortAssetData?.snapshot?.as_of_trade_date)}
-              {" · "}生成于 {formatUtcDateTime(shortAssetData?.snapshot?.generated_at)}
+              {" · "}截至{" "}
+              {formatDate(shortAssetData?.snapshot?.as_of_trade_date)}
+              {" · "}生成于{" "}
+              {formatUtcDateTime(shortAssetData?.snapshot?.generated_at)}
             </p>
             <p className="mt-1 text-xs text-ink/45">
               策略：{shortAssetData?.snapshot?.policy_version ?? "暂无"}
@@ -3208,24 +4042,36 @@ function ShortTermClient() {
                 : ""}
             </p>
             <p className="mt-1 text-xs text-ink/45">
-              研究入榜：{shortAssetData?.snapshot?.research_ranked_item_count ?? "暂无"}
+              研究入榜：
+              {shortAssetData?.snapshot?.research_ranked_item_count ?? "暂无"}
               {shortAssetData?.snapshot?.expected_item_count
                 ? ` / ${shortAssetData.snapshot.expected_item_count}`
                 : ""}
               {" · "}行动质量达标：
-              {shortAssetData?.snapshot?.research_quality_eligible_item_count ?? "暂无"}
-              {" · "}仅观察：{shortAssetData?.snapshot?.observation_only_item_count ?? "暂无"}
-              {" · "}盘中可行动：{shortAssetData?.snapshot?.actionable_eligible_item_count ?? "暂无"}
+              {shortAssetData?.snapshot?.research_quality_eligible_item_count ??
+                "暂无"}
+              {" · "}仅观察：
+              {shortAssetData?.snapshot?.observation_only_item_count ?? "暂无"}
+              {" · "}盘中可行动：
+              {shortAssetData?.snapshot?.actionable_eligible_item_count ??
+                "暂无"}
             </p>
-            {etfSnapshotStateMessages(shortAssetData?.snapshot).map((message) => (
-              <p key={message.key} className="mt-2 rounded-md bg-amber-50 px-2.5 py-2 text-xs leading-5 text-amber-800">
-                {message.text}
-              </p>
-            ))}
+            {etfSnapshotStateMessages(shortAssetData?.snapshot).map(
+              (message) => (
+                <p
+                  key={message.key}
+                  className="mt-2 rounded-md bg-amber-50 px-2.5 py-2 text-xs leading-5 text-amber-800"
+                >
+                  {message.text}
+                </p>
+              )
+            )}
           </div>
         ) : null}
         <div className={`grid gap-3 ${compact ? "" : "md:grid-cols-2"}`}>
-          <div className="rounded-[6px] border border-border bg-white px-3 py-2 text-sm font-medium text-ink">{mode.classification}</div>
+          <div className="rounded-[6px] border border-border bg-white px-3 py-2 text-sm font-medium text-ink">
+            {mode.classification}
+          </div>
           <input
             className="rounded-[6px] border border-border bg-white px-3 py-2 text-sm outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/15"
             placeholder="搜索代码/名称"
@@ -3256,11 +4102,16 @@ function ShortTermClient() {
           </select>
         </div>
         {assetType === "etf" ? labelFilterPanel : null}
-        {assetType === "etf" && (etfThemeSource.data?.theme_heat?.length ?? 0) > 0 ? (
+        {assetType === "etf" &&
+        (etfThemeSource.data?.theme_heat?.length ?? 0) > 0 ? (
           <div className="mt-4 rounded-[8px] border border-border bg-white p-3">
             <div className="flex items-center justify-between gap-3">
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">主题热度</p>
-              <span className="text-xs text-ink/45">按最新短线排序缓存统计</span>
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">
+                主题热度
+              </p>
+              <span className="text-xs text-ink/45">
+                按最新短线排序缓存统计
+              </span>
             </div>
             <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
               {etfThemeSource.data?.theme_heat?.slice(0, 8).map((item) => (
@@ -3293,12 +4144,18 @@ function ShortTermClient() {
         </div>
         <div className={`mt-5 ${listGap}`}>
           {assets.isLoading ? (
-            <div className="rounded-[10px] border border-dashed border-ink/20 p-6 text-sm text-ink/55">正在加载榜单...</div>
+            <div className="rounded-[10px] border border-dashed border-ink/20 p-6 text-sm text-ink/55">
+              正在加载榜单...
+            </div>
           ) : null}
           {assets.isError ? (
             <div className="rounded-[10px] border border-rose-200 bg-rose-50 p-6 text-sm leading-6 text-rose-800">
               榜单请求失败：{errorText(assets.error)}
-              <button type="button" className="ml-2 font-semibold underline underline-offset-2" onClick={() => void assets.refetch()}>
+              <button
+                type="button"
+                className="ml-2 font-semibold underline underline-offset-2"
+                onClick={() => void assets.refetch()}
+              >
                 重试
               </button>
             </div>
@@ -3306,62 +4163,95 @@ function ShortTermClient() {
           {visibleAssets.map((item) => {
             const itemAssetType = getItemAssetType(item);
             const itemCode = toEtfItemCode(item);
-            const isSelected = selected?.asset_type === itemAssetType && selected.code === itemCode;
-            const trackedForItem = trackedByAsset.get(`${itemAssetType}-${itemCode}`);
+            const isSelected =
+              selected?.asset_type === itemAssetType &&
+              selected.code === itemCode;
+            const trackedForItem = trackedByAsset.get(
+              `${itemAssetType}-${itemCode}`
+            );
             const isLiveItem = isLiveRankingItem(item);
             const quote = liveRankingQuote(item);
             const livePrice = quote?.latest_price;
-            const timingDisplay = itemEntryTimingDisplay(item, etfLiveData?.market_status);
-            const liveChange = intradayChangeDisplay(quote, etfLiveData?.market_status);
+            const timingDisplay = itemEntryTimingDisplay(
+              item,
+              etfLiveData?.market_status
+            );
+            const liveChange = intradayChangeDisplay(
+              quote,
+              etfLiveData?.market_status
+            );
             const itemScoreVersion = isLiveItem
               ? item.score_version === "final_score_v3"
                 ? "当前评分口径"
                 : item.score_version
-                ? "旧口径结果"
-                : "暂无口径"
+                  ? "旧口径结果"
+                  : "暂无口径"
               : scoreVersionText(item as ShortResearchAsset);
             return (
               <button
                 key={`${itemAssetType}-${itemCode}`}
                 className={`w-full ${compact ? "rounded-[8px]" : "rounded-[10px]"} ${cardPadding} text-left transition ${
-                  isSelected ? "border-ink bg-ink text-white" : "border-ink/10 bg-white text-ink hover:border-accent"
+                  isSelected
+                    ? "border-ink bg-ink text-white"
+                    : "border-ink/10 bg-white text-ink hover:border-accent"
                 }`}
                 onClick={() => selectAsset(item)}
               >
-                <div className={`flex flex-col ${cardGap} md:flex-row md:items-start md:justify-between`}>
+                <div
+                  className={`flex flex-col ${cardGap} md:flex-row md:items-start md:justify-between`}
+                >
                   <div className="min-w-0">
-                    <p className={`text-xs font-semibold ${isSelected ? "text-white/60" : "text-accent"}`}>
+                    <p
+                      className={`text-xs font-semibold ${isSelected ? "text-white/60" : "text-accent"}`}
+                    >
                       {isLiveItem ? "实时排名" : `#${item.rank ?? "-"}`}
-                      {isLiveItem ? "" : ` · ${assetTypeLabel(item.asset_type)}`}
-                      {!isLiveItem ? ` · ${shortResearchThemeTags(item).slice(0, 3).join(" / ")}` : ""}
+                      {isLiveItem
+                        ? ""
+                        : ` · ${assetTypeLabel(item.asset_type)}`}
+                      {!isLiveItem
+                        ? ` · ${shortResearchThemeTags(item).slice(0, 3).join(" / ")}`
+                        : ""}
                     </p>
                     <h3 className="mt-2 text-xl font-semibold leading-tight">
                       {isLiveItem ? toEtfItemName(item) : item.name}
-                      <span className={`ml-2 text-sm font-normal ${isSelected ? "text-white/45" : "text-ink/45"}`}>
+                      <span
+                        className={`ml-2 text-sm font-normal ${isSelected ? "text-white/45" : "text-ink/45"}`}
+                      >
                         {isLiveItem ? itemCode : item.code}
                       </span>
                     </h3>
-                    <p className={`mt-2 line-clamp-2 text-sm leading-6 ${isSelected ? "text-white/65" : "text-ink/60"}`}>
+                    <p
+                      className={`mt-2 line-clamp-2 text-sm leading-6 ${isSelected ? "text-white/65" : "text-ink/60"}`}
+                    >
                       {timingDisplay.reason}
                     </p>
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white text-ink" : "bg-ink text-white"}`}>
-                      {isLiveItem
-                        ? liveScoreText(item)
-                        : assetScoreText(item)}
+                    <span
+                      className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white text-ink" : "bg-ink text-white"}`}
+                    >
+                      {isLiveItem ? liveScoreText(item) : assetScoreText(item)}
                     </span>
-                    {!isLiveItem && item.asset_type === "etf" && item.opportunity_score !== null && item.opportunity_score !== undefined ? (
-                      <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : "bg-accent text-white"}`}>
+                    {!isLiveItem &&
+                    item.asset_type === "etf" &&
+                    item.opportunity_score !== null &&
+                    item.opportunity_score !== undefined ? (
+                      <span
+                        className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : "bg-accent text-white"}`}
+                      >
                         {opportunityScoreText(item)}
                       </span>
                     ) : null}
-                    <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : "bg-paper text-ink/60"}`}>
+                    <span
+                      className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : "bg-paper text-ink/60"}`}
+                    >
                       {itemScoreVersion}
                     </span>
                     <span
                       className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                        isSelected ? "bg-white/15 text-white" : conclusionTone(itemConclusion(item))
+                        isSelected
+                          ? "bg-white/15 text-white"
+                          : conclusionTone(itemConclusion(item))
                       }`}
                     >
                       买入观察状态：{itemConclusion(item)}
@@ -3372,18 +4262,24 @@ function ShortTermClient() {
                       {timingDisplay.title}：{timingDisplay.label}
                     </span>
                     {isLiveItem ? (
-                      <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : ""}`}>
+                      <span
+                        className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : ""}`}
+                      >
                         实时排名变化：{etfLiveRankChangeText(item.rank_change)}
                       </span>
                     ) : item.advisor_report ? (
-                      <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : advisorTone(item.advisor_report.action_label)}`}>
+                      <span
+                        className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : advisorTone(item.advisor_report.action_label)}`}
+                      >
                         {item.advisor_report.action_label}
                       </span>
                     ) : null}
                     {trackedForItem?.exit_signal ? (
                       <span
                         className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                          isSelected ? "bg-white/15 text-white" : exitSignalTone(trackedForItem.exit_signal.level)
+                          isSelected
+                            ? "bg-white/15 text-white"
+                            : exitSignalTone(trackedForItem.exit_signal.level)
                         }`}
                       >
                         持仓处理：{trackedForItem.exit_signal.label}
@@ -3391,51 +4287,89 @@ function ShortTermClient() {
                     ) : null}
                   </div>
                 </div>
-                <div className={`mt-4 grid gap-2 text-sm sm:grid-cols-2 ${isSelected ? "text-white/75" : "text-ink/65"}`}>
+                <div
+                  className={`mt-4 grid gap-2 text-sm sm:grid-cols-2 ${isSelected ? "text-white/75" : "text-ink/65"}`}
+                >
                   {isLiveItem ? (
                     <>
-                      <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                      <span
+                        className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                      >
                         全局排名 #{etfGlobalRank(item) ?? "-"}
                       </span>
-                      <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
-                        当前范围排名 #{toEtfItemRank(item) ?? "-"} · 筛选位置 #{etfFilteredPosition(item) ?? "-"}
+                      <span
+                        className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                      >
+                        当前范围排名 #{toEtfItemRank(item) ?? "-"} · 筛选位置 #
+                        {etfFilteredPosition(item) ?? "-"}
                       </span>
-                      <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
-                        当前价：{quote ? (livePrice === null || livePrice === undefined ? "暂无" : livePrice.toFixed(4)) : "暂无"}
+                      <span
+                        className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                      >
+                        当前价：
+                        {quote
+                          ? livePrice === null || livePrice === undefined
+                            ? "暂无"
+                            : livePrice.toFixed(4)
+                          : "暂无"}
                       </span>
-                      <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                      <span
+                        className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                      >
                         盘中涨跌：{liveChange.value}
                       </span>
-                      <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                      <span
+                        className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                      >
                         行情：{liveChange.time}
                       </span>
-                      <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                      <span
+                        className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                      >
                         排名变化：{etfLiveRankChangeText(item.rank_change)}
                       </span>
-                      <span className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
-                        分数来源：{item.score_contribution_reasons.slice(0, 2).join("；") || "等待盘中数据"}
+                      <span
+                        className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                      >
+                        分数来源：
+                        {item.score_contribution_reasons
+                          .slice(0, 2)
+                          .join("；") || "等待盘中数据"}
                       </span>
-                      <span className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                      <span
+                        className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                      >
                         {quoteReliabilityLine(quote)}
                       </span>
                     </>
                   ) : (
                     <>
-                      <span className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                      <span
+                        className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                      >
                         {validationEvidenceText(item as ShortResearchAsset)}
                       </span>
                       {item.asset_type === "etf" ? (
                         <>
-                          <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
-                            研究榜 #{item.research_rank ?? "-"} · {formatOptionalScore(item.research_score)} 分
+                          <span
+                            className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                          >
+                            研究榜 #{item.research_rank ?? "-"} ·{" "}
+                            {formatOptionalScore(item.research_score)} 分
                           </span>
-                          <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                          <span
+                            className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                          >
                             {historyTierText(item.history_confidence_tier)}
                           </span>
-                          <span className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : item.observation_only ? "bg-amber-50 text-amber-800" : "bg-paper"}`}>
+                          <span
+                            className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : item.observation_only ? "bg-amber-50 text-amber-800" : "bg-paper"}`}
+                          >
                             {researchQualityStateText(item)}
                           </span>
-                          <span className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                          <span
+                            className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                          >
                             {actionableStateText(
                               item,
                               shortAssetData?.snapshot?.snapshot_state
@@ -3449,31 +4383,48 @@ function ShortTermClient() {
                               {message.text}
                             </span>
                           ))}
-                          {item.sector_trend_score !== null && item.sector_trend_score !== undefined ? (
-                            <span className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                          {item.sector_trend_score !== null &&
+                          item.sector_trend_score !== undefined ? (
+                            <span
+                              className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                            >
                               板块趋势：{sectorTrendText(item)}
                             </span>
                           ) : null}
-                          <span className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                          <span
+                            className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                          >
                             主题催化：{catalystSummaryText(item)}
                           </span>
                           {item.factor_profile_version ? (
-                            <span className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                            <span
+                              className={`rounded-[12px] px-3 py-2 sm:col-span-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                            >
                               {factorProfileText(item)}
                             </span>
                           ) : null}
                         </>
                       ) : null}
-                      <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
-                        最新日涨跌：{percentMetric(item.metrics, "today_return_pct")}
+                      <span
+                        className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                      >
+                        最新日涨跌：
+                        {percentMetric(item.metrics, "today_return_pct")}
                       </span>
-                      <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                      <span
+                        className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                      >
                         近 20 日：{percentMetric(item.metrics, "return_20d")}
                       </span>
-                      <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
-                        60 日回撤：{percentMetric(item.metrics, "max_drawdown_60d")}
+                      <span
+                        className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                      >
+                        60 日回撤：
+                        {percentMetric(item.metrics, "max_drawdown_60d")}
                       </span>
-                      <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                      <span
+                        className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                      >
                         样本：{item.usable_days} 天
                       </span>
                     </>
@@ -3482,9 +4433,12 @@ function ShortTermClient() {
               </button>
             );
           })}
-          {!assets.isLoading && rawAssets.length > 0 && visibleAssets.length === 0 ? (
+          {!assets.isLoading &&
+          rawAssets.length > 0 &&
+          visibleAssets.length === 0 ? (
             <div className="rounded-[10px] border border-dashed border-ink/20 p-6 text-sm leading-6 text-ink/55">
-              当前页没有匹配这些标签的 ETF。可以清空标签筛选、换一页，或调整主题/搜索条件。
+              当前页没有匹配这些标签的
+              ETF。可以清空标签筛选、换一页，或调整主题/搜索条件。
               <button
                 type="button"
                 className="ml-2 font-semibold text-accent underline underline-offset-2"
@@ -3517,47 +4471,72 @@ function ShortTermClient() {
 
   const renderMobileDetailPanel = () => {
     if (!selectedAsset) {
-      return <div className="rounded-[10px] border border-dashed border-ink/20 p-6 text-sm leading-6 text-ink/55">{mode.detailEmpty}</div>;
+      return (
+        <div className="rounded-[10px] border border-dashed border-ink/20 p-6 text-sm leading-6 text-ink/55">
+          {mode.detailEmpty}
+        </div>
+      );
     }
     return (
       <Panel className="rounded-[12px]">
         <div className="flex flex-col gap-3">
           <div>
             <p className="text-sm text-ink/50">
-              {assetTypeLabel(selectedAsset.asset_type)} · {selectedAsset.trading_rule_label}
+              {assetTypeLabel(selectedAsset.asset_type)} ·{" "}
+              {selectedAsset.trading_rule_label}
             </p>
             <h2 className="mt-2 text-2xl font-semibold text-ink">
               {selectedAsset.name}
-              <span className="ml-2 text-lg font-normal text-ink/45">{selectedAsset.code}</span>
+              <span className="ml-2 text-lg font-normal text-ink/45">
+                {selectedAsset.code}
+              </span>
             </h2>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="rounded-[8px] bg-paper px-4 py-3">
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">当前结论</p>
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">
+                当前结论
+              </p>
               <p className="mt-2 text-lg font-semibold text-ink">
-                {selectedAsset.conclusion} · {assetScoreSummaryText(selectedAsset)}
+                {selectedAsset.conclusion} ·{" "}
+                {assetScoreSummaryText(selectedAsset)}
               </p>
               <p className="mt-2 text-sm leading-6 text-ink/65">
                 {rationaleText(selectedAsset, "key_reason", "暂无")}
               </p>
             </div>
             <div className="rounded-[8px] bg-paper px-4 py-3">
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">{selectedEntryTiming.title}</p>
-              <p className="mt-2 text-lg font-semibold text-ink">{selectedEntryTiming.label}</p>
-              <p className="mt-2 text-sm leading-6 text-ink/65">{selectedEntryTiming.reason}</p>
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">
+                {selectedEntryTiming.title}
+              </p>
+              <p className="mt-2 text-lg font-semibold text-ink">
+                {selectedEntryTiming.label}
+              </p>
+              <p className="mt-2 text-sm leading-6 text-ink/65">
+                {selectedEntryTiming.reason}
+              </p>
             </div>
             <div className="rounded-[8px] bg-ink p-4 text-white">
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-white/50">持有建议</p>
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-white/50">
+                持有建议
+              </p>
               <p className="mt-2 text-sm leading-7 text-white/75">
-                {rationaleText(selectedAsset, "holding_plan", "建议结合数据与风险控制后再操作。")}
+                {rationaleText(
+                  selectedAsset,
+                  "holding_plan",
+                  "建议结合数据与风险控制后再操作。"
+                )}
               </p>
             </div>
             {selectedAsset.asset_type === "etf" ? (
               <div className="rounded-[8px] bg-paper px-4 py-3 sm:col-span-2">
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">研究榜与行动资格</p>
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">
+                  研究榜与行动资格
+                </p>
                 <p className="mt-2 text-sm leading-6 text-ink/65">
-                  研究榜 #{selectedAsset.research_rank ?? "-"} · {formatOptionalScore(selectedAsset.research_score)} 分
-                  {"；"}{historyTierText(selectedAsset.history_confidence_tier)}
+                  研究榜 #{selectedAsset.research_rank ?? "-"} ·{" "}
+                  {formatOptionalScore(selectedAsset.research_score)} 分{"；"}
+                  {historyTierText(selectedAsset.history_confidence_tier)}
                 </p>
                 <p className="mt-1 text-sm leading-6 text-ink/65">
                   {actionableStateText(
@@ -3565,20 +4544,31 @@ function ShortTermClient() {
                     shortAssetData?.snapshot?.snapshot_state
                   )}
                 </p>
-                <p className={`mt-1 text-sm leading-6 ${selectedAsset.observation_only ? "text-amber-700" : "text-ink/65"}`}>
+                <p
+                  className={`mt-1 text-sm leading-6 ${selectedAsset.observation_only ? "text-amber-700" : "text-ink/65"}`}
+                >
                   {researchQualityStateText(selectedAsset)}
                 </p>
                 {etfAssetStateMessages(selectedAsset).map((message) => (
-                  <p key={message.key} className="mt-1 text-sm leading-6 text-ink/65">
+                  <p
+                    key={message.key}
+                    className="mt-1 text-sm leading-6 text-ink/65"
+                  >
                     {message.text}
                   </p>
                 ))}
-                <p className="mt-3 text-xs font-semibold uppercase tracking-[0.18em] text-accent">主题/板块辅助</p>
+                <p className="mt-3 text-xs font-semibold uppercase tracking-[0.18em] text-accent">
+                  主题/板块辅助
+                </p>
                 <p className="mt-2 text-base font-semibold text-ink">
                   {opportunityStatusText(selectedAsset)}
                 </p>
-                <p className="mt-1 text-xs text-ink/50">{opportunityVersionText(selectedAsset)}</p>
-                <p className="mt-2 text-sm leading-6 text-ink/65">板块趋势：{sectorTrendText(selectedAsset)}</p>
+                <p className="mt-1 text-xs text-ink/50">
+                  {opportunityVersionText(selectedAsset)}
+                </p>
+                <p className="mt-2 text-sm leading-6 text-ink/65">
+                  板块趋势：{sectorTrendText(selectedAsset)}
+                </p>
               </div>
             ) : null}
             {selectedAsset.asset_type === "etf" ? (
@@ -3589,24 +4579,61 @@ function ShortTermClient() {
           </div>
 
           {assetType === "etf" ? (
-            <p className="rounded-[8px] bg-paper px-4 py-3 text-sm leading-6 text-ink/65">{quoteReliabilityLine(selectedLiveQuote)}</p>
+            <p className="rounded-[8px] bg-paper px-4 py-3 text-sm leading-6 text-ink/65">
+              {quoteReliabilityLine(selectedLiveQuote)}
+            </p>
           ) : null}
-          <div className={`grid gap-2 text-sm ${assetType === "etf" ? "sm:grid-cols-4" : "sm:grid-cols-5"}`}>
-            <StatPill label={mode.latestLabel} value={formatDate(selectedAsset.latest_date)} tone="bg-white text-ink" />
-            <StatPill label={mode.priceLabel} value={selectedAsset.latest_value === null ? "暂无" : selectedAsset.latest_value.toFixed(4)} />
+          <div
+            className={`grid gap-2 text-sm ${assetType === "etf" ? "sm:grid-cols-4" : "sm:grid-cols-5"}`}
+          >
+            <StatPill
+              label={mode.latestLabel}
+              value={formatDate(selectedAsset.latest_date)}
+              tone="bg-white text-ink"
+            />
+            <StatPill
+              label={mode.priceLabel}
+              value={
+                selectedAsset.latest_value === null
+                  ? "暂无"
+                  : selectedAsset.latest_value.toFixed(4)
+              }
+            />
             {assetType === "etf" ? (
-              <StatPill label="盘中涨跌" value={selectedIntradayChange.value} tone="bg-white text-ink" />
+              <StatPill
+                label="盘中涨跌"
+                value={selectedIntradayChange.value}
+                tone="bg-white text-ink"
+              />
             ) : null}
             {assetType === "etf" ? (
-              <StatPill label="行情时间" value={selectedIntradayChange.time} tone="bg-white text-ink" />
+              <StatPill
+                label="行情时间"
+                value={selectedIntradayChange.time}
+                tone="bg-white text-ink"
+              />
             ) : null}
-            <StatPill label="样本天数" value={`${selectedAsset.usable_days} 天`} tone="bg-accentSoft text-ink" />
-            <StatPill label="样本标签" value={selectedAsset.conclusion} tone="bg-white text-ink" />
-            <StatPill label={assetType === "etf" ? "盘中买点" : "今日买点"} value={selectedEntryTiming.label} tone="bg-white text-ink" />
+            <StatPill
+              label="样本天数"
+              value={`${selectedAsset.usable_days} 天`}
+              tone="bg-accentSoft text-ink"
+            />
+            <StatPill
+              label="样本标签"
+              value={selectedAsset.conclusion}
+              tone="bg-white text-ink"
+            />
+            <StatPill
+              label={assetType === "etf" ? "盘中买点" : "今日买点"}
+              value={selectedEntryTiming.label}
+              tone="bg-white text-ink"
+            />
             {assetType === "etf" ? (
               <StatPill
                 label="20日换手"
-                value={formatTurnover(numericMetric(selectedAsset.metrics, "average_turnover_20d"))}
+                value={formatTurnover(
+                  numericMetric(selectedAsset.metrics, "average_turnover_20d")
+                )}
                 tone="bg-white text-ink"
               />
             ) : null}
@@ -3618,7 +4645,9 @@ function ShortTermClient() {
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <p className="text-sm font-semibold">追踪入口</p>
-                <p className="mt-1 text-sm leading-6 text-white/75">提交买入记录并开始追踪该标的，显示持仓与预警信息。</p>
+                <p className="mt-1 text-sm leading-6 text-white/75">
+                  提交买入记录并开始追踪该标的，显示持仓与预警信息。
+                </p>
               </div>
               <button
                 className="rounded-[6px] bg-accent px-4 py-2.5 text-sm font-medium text-white transition hover:bg-accent/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
@@ -3652,40 +4681,85 @@ function ShortTermClient() {
                   <select
                     className="mt-2 w-full rounded-[6px] border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/15"
                     value={trackingOrderTime}
-                    onChange={(event) => setTrackingOrderTime(event.target.value as OrderTimeBucket)}
+                    onChange={(event) =>
+                      setTrackingOrderTime(
+                        event.target.value as OrderTimeBucket
+                      )
+                    }
                   >
                     <option value="before_15">15:00 前</option>
                     <option value="after_15">15:00 后</option>
                     <option value="unknown">未知</option>
                   </select>
                 </label>
+                {assetType === "etf" ? (
+                  <label className="text-sm text-ink/65 md:col-span-2">
+                    邮件提醒规则
+                    <select
+                      className="mt-2 w-full rounded-[6px] border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/15"
+                      value={trackingAlertPolicy}
+                      onChange={(event) =>
+                        setTrackingAlertPolicy(
+                          event.target.value as TrackingAlertPolicyId
+                        )
+                      }
+                    >
+                      <option value="standard_dynamic_v2">
+                        默认动态止盈止损（默认）
+                      </option>
+                      <option value="late_day_turnaround_t1_v1">
+                        尾盘转强 T+1
+                      </option>
+                      <option value="leader_tactics_exit_v1">
+                        龙头战法（仅卖出提醒）
+                      </option>
+                    </select>
+                    <span className="mt-2 block text-xs leading-5 text-ink/50">
+                      {trackingAlertPolicyDescription(trackingAlertPolicy)}
+                    </span>
+                  </label>
+                ) : null}
                 <label className="text-sm text-ink/65">
-                  {assetType === "etf" ? "买入价格日（可选）" : "确认净值日（可选）"}
+                  {assetType === "etf"
+                    ? "买入价格日（可选）"
+                    : "确认净值日（可选）"}
                   <input
                     className="mt-2 w-full rounded-[6px] border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/15"
                     type="date"
                     value={trackingConfirmedNavDate}
-                    onChange={(event) => setTrackingConfirmedNavDate(event.target.value)}
+                    onChange={(event) =>
+                      setTrackingConfirmedNavDate(event.target.value)
+                    }
                   />
                 </label>
                 <label className="text-sm text-ink/65">
-                  {assetType === "etf" ? "实际成交价（可选）" : "支付宝确认净值（可选）"}
+                  {assetType === "etf"
+                    ? "实际成交价（可选）"
+                    : "支付宝确认净值（可选）"}
                   <input
                     className="mt-2 w-full rounded-[6px] border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/15"
                     inputMode="decimal"
-                    placeholder={assetType === "etf" ? "例如：0.815" : "例如：7.3130"}
+                    placeholder={
+                      assetType === "etf" ? "例如：0.815" : "例如：7.3130"
+                    }
                     value={trackingConfirmedNav}
-                    onChange={(event) => setTrackingConfirmedNav(event.target.value)}
+                    onChange={(event) =>
+                      setTrackingConfirmedNav(event.target.value)
+                    }
                   />
                 </label>
                 <label className="text-sm text-ink/65">
-                  {assetType === "etf" ? "实际成交份额（可选）" : "支付宝确认份额（可选）"}
+                  {assetType === "etf"
+                    ? "实际成交份额（可选）"
+                    : "支付宝确认份额（可选）"}
                   <input
                     className="mt-2 w-full rounded-[6px] border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/15"
                     inputMode="decimal"
                     placeholder="确认份额最准确"
                     value={trackingConfirmedShares}
-                    onChange={(event) => setTrackingConfirmedShares(event.target.value)}
+                    onChange={(event) =>
+                      setTrackingConfirmedShares(event.target.value)
+                    }
                   />
                 </label>
                 <label className="text-sm text-ink/65">
@@ -3699,7 +4773,9 @@ function ShortTermClient() {
                 </label>
                 <button
                   className="self-end rounded-[6px] bg-ink px-4 py-2.5 text-sm font-medium text-white transition hover:bg-ink/90 disabled:opacity-60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-                  disabled={createTracking.isPending || Number(trackingAmount) <= 0}
+                  disabled={
+                    createTracking.isPending || Number(trackingAmount) <= 0
+                  }
                   onClick={() => createTracking.mutate()}
                 >
                   {createTracking.isPending ? "保存中..." : "保存追踪"}
@@ -3723,7 +4799,8 @@ function ShortTermClient() {
     }
     const priceLabel = item.asset_type === "etf" ? "实际成交价" : "确认净值";
     const sharesLabel = item.asset_type === "etf" ? "实际成交份额" : "确认份额";
-    const priceDateLabel = item.asset_type === "etf" ? "买入价格日" : "确认净值日";
+    const priceDateLabel =
+      item.asset_type === "etf" ? "买入价格日" : "确认净值日";
     return (
       <div className="mt-4 rounded-[10px] border border-ink/10 bg-paper p-4">
         <p className="text-sm font-semibold text-ink">编辑买入信息</p>
@@ -3751,7 +4828,9 @@ function ShortTermClient() {
             <select
               className="mt-1 w-full rounded-[6px] border border-ink/10 bg-white px-3 py-2 text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/15"
               value={editOrderTime}
-              onChange={(event) => setEditOrderTime(event.target.value as OrderTimeBucket)}
+              onChange={(event) =>
+                setEditOrderTime(event.target.value as OrderTimeBucket)
+              }
             >
               <option value="before_15">15:00 前</option>
               <option value="after_15">15:00 后</option>
@@ -3823,7 +4902,9 @@ function ShortTermClient() {
   };
 
   const renderPositionSizingRows = (item: TrackedPosition) => {
-    const tradeVerb = ["add", "reentry_candidate"].includes(item.position_action)
+    const tradeVerb = ["add", "reentry_candidate"].includes(
+      item.position_action
+    )
       ? "建议买入"
       : ["trim", "reduce", "exit"].includes(item.position_action)
         ? "建议卖出"
@@ -3837,24 +4918,45 @@ function ShortTermClient() {
     return (
       <>
         <span>
-          当前市值：{item.current_market_value === null ? "等待价格/份额" : formatCurrency(item.current_market_value)}
+          当前市值：
+          {item.current_market_value === null
+            ? "等待价格/份额"
+            : formatCurrency(item.current_market_value)}
         </span>
         <span>
-          ETF账户占比：{item.current_account_weight === null ? "暂无" : (item.current_account_weight * 100).toFixed(1) + "%"}
+          ETF账户占比：
+          {item.current_account_weight === null
+            ? "暂无"
+            : (item.current_account_weight * 100).toFixed(1) + "%"}
         </span>
         <span>
-          目标占比：{item.target_account_weight === null ? "暂无" : (item.target_account_weight * 100).toFixed(1) + "%"}
+          目标占比：
+          {item.target_account_weight === null
+            ? "暂无"
+            : (item.target_account_weight * 100).toFixed(1) + "%"}
         </span>
         <span>建议动作：{item.recommended_action_label}</span>
         {tradeVerb && item.recommended_trade_amount !== null ? (
-          <span>{tradeVerb}：{formatCurrency(item.recommended_trade_amount)}</span>
+          <span>
+            {tradeVerb}：{formatCurrency(item.recommended_trade_amount)}
+          </span>
         ) : null}
-        {tradeVerb && item.recommended_trade_shares !== null ? <span>建议份额：约 {item.recommended_trade_shares.toFixed(0)} 份</span> : null}
+        {tradeVerb && item.recommended_trade_shares !== null ? (
+          <span>
+            建议份额：约 {item.recommended_trade_shares.toFixed(0)} 份
+          </span>
+        ) : null}
         {item.reentry_state && item.reentry_state !== "not_applicable" ? (
-          <span>重新入场：{reentryLabels[item.reentry_state] ?? item.reentry_state}</span>
+          <span>
+            重新入场：{reentryLabels[item.reentry_state] ?? item.reentry_state}
+          </span>
         ) : null}
-        {item.reentry_reason ? <span>重入说明：{item.reentry_reason}</span> : null}
-        {item.position_sizing_reason ? <span>仓位说明：{item.position_sizing_reason}</span> : null}
+        {item.reentry_reason ? (
+          <span>重入说明：{item.reentry_reason}</span>
+        ) : null}
+        {item.position_sizing_reason ? (
+          <span>仓位说明：{item.position_sizing_reason}</span>
+        ) : null}
       </>
     );
   };
@@ -4251,17 +5353,39 @@ function ShortTermClient() {
       {activeTracked.length ? (
         <div className="grid gap-3">
           {activeTracked.map((item) => (
-            <div key={item.id} className="rounded-[10px] border border-ink/10 bg-white p-4">
+            <div
+              key={item.id}
+              className="rounded-[10px] border border-ink/10 bg-white p-4"
+            >
               <div className="flex items-start justify-between gap-2">
                 <div>
-                  <p className="text-xs font-semibold text-accent">{trackingStatusLabel(item.status)}</p>
+                  <p className="text-xs font-semibold text-accent">
+                    {trackingStatusLabel(item.status)}
+                  </p>
                   <h3 className="mt-1 text-lg font-semibold text-ink">
                     {item.asset_name}
-                    <span className="ml-2 text-sm font-normal text-ink/45">{item.asset_code}</span>
+                    <span className="ml-2 text-sm font-normal text-ink/45">
+                      {item.asset_code}
+                    </span>
                   </h3>
-                  <p className="mt-1 text-xs text-ink/45">{assetTypeLabel(item.asset_type)}</p>
+                  <p className="mt-1 text-xs text-ink/45">
+                    {assetTypeLabel(item.asset_type)}
+                  </p>
+                  <p className="mt-1 text-xs leading-5 text-ink/55">
+                    邮件规则：{trackingAlertPolicyLabel(item.alert_policy_id)} ·{" "}
+                    {trackingPolicyProvenanceLabel(
+                      item.alert_policy_provenance
+                    )}
+                  </p>
+                  {item.alert_policy_id === "leader_tactics_exit_v1" ? (
+                    <p className="mt-1 text-xs leading-5 text-amber-800">
+                      仅发送卖出提醒：合格复权日线灾难止损、保本线或收盘跌破五日线；候选与入场不发邮件。
+                    </p>
+                  ) : null}
                 </div>
-                <span className={`shrink-0 rounded-full px-3 py-1 text-xs font-semibold ${conclusionTone(item.current_snapshot.current_label ?? "数据不足")}`}>
+                <span
+                  className={`shrink-0 rounded-full px-3 py-1 text-xs font-semibold ${conclusionTone(item.current_snapshot.current_label ?? "数据不足")}`}
+                >
                   买入观察:{item.current_snapshot.current_label ?? "待确认"}
                 </span>
               </div>
@@ -4269,27 +5393,52 @@ function ShortTermClient() {
                 <span>盈亏: {pnlText(item)}</span>
                 {renderPositionSizingRows(item)}
                 <span>
-                  持有天数: {item.holding_days === null ? "暂无" : `${item.holding_days} 天`}
+                  持有天数:{" "}
+                  {item.holding_days === null
+                    ? "暂无"
+                    : `${item.holding_days} 天`}
                 </span>
                 <span>
-                  当前价: {item.current_snapshot.current_price?.toFixed(4) ?? "暂无"}
+                  当前价:{" "}
+                  {item.current_snapshot.current_price?.toFixed(4) ?? "暂无"}
                   {item.asset_type === "etf"
-                    ? "（" + priceSourceLabel(item.current_snapshot.price_source) + (item.intraday_snapshot?.quote_time ? "，" + formatDateTime(item.intraday_snapshot.quote_time) : "") + "）"
+                    ? "（" +
+                      priceSourceLabel(item.current_snapshot.price_source) +
+                      (item.intraday_snapshot?.quote_time
+                        ? "，" +
+                          formatDateTime(item.intraday_snapshot.quote_time)
+                        : "") +
+                      "）"
                     : ""}
                 </span>
                 {item.asset_type === "etf" ? (
-                  <span>数据口径: {reliabilityLabel(item.intraday_snapshot?.reliability_level)}</span>
+                  <span>
+                    数据口径:{" "}
+                    {reliabilityLabel(
+                      item.intraday_snapshot?.reliability_level
+                    )}
+                  </span>
                 ) : null}
-                {item.asset_type === "etf" ? <span>{snapshotReliabilityLine(item.intraday_snapshot)}</span> : null}
+                {item.asset_type === "etf" ? (
+                  <span>{snapshotReliabilityLine(item.intraday_snapshot)}</span>
+                ) : null}
                 <span>
-                  成本口径: {item.cost_basis === null ? "等待成本数据" : `${formatCurrency(item.cost_basis)} / ${costBasisSourceLabel(item.cost_basis_source)}`}
+                  成本口径:{" "}
+                  {item.cost_basis === null
+                    ? "等待成本数据"
+                    : `${formatCurrency(item.cost_basis)} / ${costBasisSourceLabel(item.cost_basis_source)}`}
                 </span>
                 <span>持仓处理状态: {item.exit_signal.label}</span>
-                <span>{item.exit_signal.email_eligible ? "满足邮件提醒条件" : "不会发邮件"}</span>
+                <span>
+                  {item.exit_signal.email_eligible
+                    ? "满足邮件提醒条件"
+                    : "不会发邮件"}
+                </span>
               </div>
               {item.latest_alert ? (
                 <p className="mt-3 rounded-[12px] bg-paper px-3 py-2 text-xs text-ink/65">
-                  最新预警: {alertTypeLabel(item.latest_alert.alert_type)} / {alertDeliveryLabel(item.latest_alert)}
+                  最新预警: {alertTypeLabel(item.latest_alert.alert_type)} /{" "}
+                  {alertDeliveryLabel(item.latest_alert)}
                 </p>
               ) : (
                 <p className="mt-3 rounded-[12px] bg-paper px-3 py-2 text-xs leading-5 text-ink/65">
@@ -4298,7 +5447,7 @@ function ShortTermClient() {
               )}
               {renderActionLifecyclePanel(item)}
 
-            <div className="mt-4 flex flex-wrap gap-2">
+              <div className="mt-4 flex flex-wrap gap-2">
                 <button
                   className="rounded-[6px] border border-border px-3 py-2 text-sm font-medium text-ink transition hover:border-ink/30 hover:text-ink disabled:opacity-60"
                   disabled={updateTracking.isPending}
@@ -4329,209 +5478,357 @@ function ShortTermClient() {
   const renderDesktopTrackingPanel = () => (
     <div ref={holdingsSectionRef} className="scroll-mt-28">
       <Panel className="rounded-[12px]">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <SectionKicker eyebrow="我的持仓观察" title={mode.trackingTitle} description={mode.trackingDescription} />
-        <div className="rounded-[10px] bg-paper px-4 py-3 text-sm leading-6 text-ink/65">
-          收件邮箱：{trackedPositions.data?.recipient_email ?? "19535838578@163.com"}
-          <br />
-          邮件通道：{trackedPositions.data?.email_configured ? "已配置" : "未配置授权码"}
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <SectionKicker
+            eyebrow="我的持仓观察"
+            title={mode.trackingTitle}
+            description={mode.trackingDescription}
+          />
+          <div className="rounded-[10px] bg-paper px-4 py-3 text-sm leading-6 text-ink/65">
+            收件邮箱：
+            {trackedPositions.data?.recipient_email ?? "19535838578@163.com"}
+            <br />
+            邮件通道：
+            {trackedPositions.data?.email_configured
+              ? "已配置"
+              : "未配置授权码"}
+          </div>
         </div>
-      </div>
 
-      <div className="mt-5 grid gap-4 xl:grid-cols-3">
-        {activeTracked.map((item) => (
-          <div key={item.id} className="rounded-[22px] border border-ink/10 bg-white p-4">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <p className="text-xs font-semibold text-accent">{trackingStatusLabel(item.status)}</p>
-                <h3 className="mt-1 text-xl font-semibold text-ink">
-                  {item.asset_name}
-                  <span className="ml-2 text-sm font-normal text-ink/45">{item.asset_code}</span>
-                </h3>
-                <p className="mt-1 text-xs text-ink/45">{assetTypeLabel(item.asset_type)}</p>
+        <div className="mt-5 grid gap-4 xl:grid-cols-3">
+          {activeTracked.map((item) => (
+            <div
+              key={item.id}
+              className="rounded-[22px] border border-ink/10 bg-white p-4"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold text-accent">
+                    {trackingStatusLabel(item.status)}
+                  </p>
+                  <h3 className="mt-1 text-xl font-semibold text-ink">
+                    {item.asset_name}
+                    <span className="ml-2 text-sm font-normal text-ink/45">
+                      {item.asset_code}
+                    </span>
+                  </h3>
+                  <p className="mt-1 text-xs text-ink/45">
+                    {assetTypeLabel(item.asset_type)}
+                  </p>
+                  <p className="mt-1 text-xs leading-5 text-ink/55">
+                    邮件规则：{trackingAlertPolicyLabel(item.alert_policy_id)} ·{" "}
+                    {trackingPolicyProvenanceLabel(
+                      item.alert_policy_provenance
+                    )}
+                  </p>
+                  {item.alert_policy_id === "leader_tactics_exit_v1" ? (
+                    <p className="mt-1 text-xs leading-5 text-amber-800">
+                      仅发送卖出提醒：合格复权日线灾难止损、保本线或收盘跌破五日线；候选与入场不发邮件。
+                    </p>
+                  ) : null}
+                </div>
+                <span
+                  className={`shrink-0 rounded-full px-3 py-1 text-xs font-semibold ${conclusionTone(item.current_snapshot.current_label ?? "数据不足")}`}
+                >
+                  买入观察：{item.current_snapshot.current_label ?? "等待排序"}
+                </span>
               </div>
-              <span className={`shrink-0 rounded-full px-3 py-1 text-xs font-semibold ${conclusionTone(item.current_snapshot.current_label ?? "数据不足")}`}>
-                买入观察：{item.current_snapshot.current_label ?? "等待排序"}
-              </span>
-            </div>
 
-            <div className="mt-4 grid gap-2 text-sm text-ink/65">
-              <span>下单：{formatCurrency(item.buy_amount)} / {formatDate(item.buy_date)}（{orderTimeBucketLabel(item.order_time_bucket)}）</span>
-              <span>{item.asset_type === "etf" ? "买入价格日" : "确认净值日"}：{formatDate(item.confirmed_nav_date ?? item.entry_price_date)}</span>
-              <span>{item.asset_type === "etf" ? "买入价" : "确认净值"}：{item.confirmed_nav?.toFixed(4) ?? item.entry_price?.toFixed(4) ?? "等待价格"}</span>
-              <span>
-                当前价：{item.current_snapshot.current_price?.toFixed(4) ?? "暂无"}
-                {item.asset_type === "etf"
-                  ? "（" + priceSourceLabel(item.current_snapshot.price_source) + (item.intraday_snapshot?.quote_time ? "，" + formatDateTime(item.intraday_snapshot.quote_time) : "") + "）"
-                  : ""}
-              </span>
-              <span>
-                展示口径：{priceSourceLabel(item.current_snapshot.price_source)} / {reliabilityLabel(item.current_snapshot.data_reliability)}
-                {item.current_snapshot.decision_eligible ? "，可用于提醒判断" : "，仅展示/估算参考"}
-              </span>
-              {item.current_snapshot.display_only_reason ? <span>说明：{item.current_snapshot.display_only_reason}</span> : null}
-              {item.asset_type === "etf" ? (
-                <>
-                  <span>
-                    数据口径：{reliabilityLabel(item.intraday_snapshot?.reliability_level)}
-                    {item.intraday_snapshot?.email_eligible ? "，可用于盘中提醒" : "，仅网页/估算参考"}
-                  </span>
-                  {item.asset_type === "etf" ? <span>{snapshotReliabilityLine(item.intraday_snapshot)}</span> : null}
-                </>
-              ) : null}
-              <span>
-                成本口径：{item.cost_basis === null ? "等待成本数据" : `${formatCurrency(item.cost_basis)} / ${costBasisSourceLabel(item.cost_basis_source)}`}
-              </span>
-              <span>持有：{item.holding_days === null ? "等待数据" : `${item.holding_days} 天`}</span>
-              <span>{item.confirmed_shares === null ? "估算份额" : "确认份额"}：{item.estimated_shares === null ? "等待价格" : item.estimated_shares.toFixed(2)}</span>
-              <span className={pnlTone(item.current_snapshot.estimated_pnl)}>估算盈亏：{pnlText(item)}</span>
-              {renderPositionSizingRows(item)}
-            </div>
-
-            <div className={`mt-4 rounded-[8px] p-3 text-sm leading-6 ${exitSignalTone(item.exit_signal.level)}`}>
-              <p className="text-xs font-semibold opacity-75">持仓处理状态</p>
-              <p className="font-semibold">{item.exit_signal.label}</p>
-              <p className="mt-1 text-xs opacity-75">
-                {item.exit_signal.action_class === "actionable_exit"
-                  ? "行动信号"
-                  : item.exit_signal.action_class === "soft_watch"
-                    ? "软提醒"
-                    : item.exit_signal.action_class === "guard_only"
-                      ? "风险警戒，仅网页展示"
-                      : item.exit_signal.action_class === "data_waiting"
-                        ? "等待数据"
-                        : "观察状态"}
-                {item.exit_signal.guard_state ? ` · ${item.exit_signal.guard_state}` : ""}
-              </p>
-              <p className="mt-1">{item.exit_signal.reason ?? "暂无持仓处理原因，继续观察公开数据。"}</p>
-              {item.exit_signal.guard_reasons.length > 0 ? (
-                <p className="mt-1 text-xs opacity-75">{item.exit_signal.guard_reasons[0]}</p>
-              ) : null}
-              {item.exit_signal.no_alert_reason ? (
-                <p className="mt-1 text-xs opacity-75">未发提醒原因：{item.exit_signal.no_alert_reason}</p>
-              ) : null}
-              <p className="mt-1 text-xs opacity-75">
-                {item.exit_signal.email_eligible ? "满足邮件提醒条件" : "不会发邮件"}
-                {item.exit_signal.email_eligibility_reason ? `：${item.exit_signal.email_eligibility_reason}` : ""}
-              </p>
-            </div>
-
-            {item.latest_alert ? (
-              <div className={`mt-4 rounded-[8px] p-3 text-sm leading-6 ${latestAlertTone(item.latest_alert)}`}>
-                <p className="font-semibold">
-                  {alertTypeLabel(item.latest_alert.alert_type)} · {alertDeliveryLabel(item.latest_alert)}
-                </p>
-                <p>{item.latest_alert.reasons[0] ?? item.latest_alert.trigger_label}</p>
-                <p className="mt-1 text-xs">
-                  {item.latest_alert.alert_source ? `来源：${priceSourceLabel(item.latest_alert.alert_source)}；` : ""}
-                  行情时间：{formatDateTime(item.latest_alert.quote_time)}
-                  {item.latest_alert.email_error_message ? `；${item.latest_alert.email_error_message}` : ""}
-                </p>
-              </div>
-            ) : (
-              <p className="mt-4 rounded-[8px] bg-paper p-3 text-sm leading-6 text-ink/55">
-                暂无可展示告警。
-              </p>
-            )}
-
-            {renderActionLifecyclePanel(item)}
-
-            <details className="mt-3 rounded-[8px] bg-paper p-3 text-xs leading-5 text-ink/60">
-              <summary className="cursor-pointer font-semibold text-ink">更多风控数据</summary>
-              <div className="mt-2 grid gap-1">
-                <span>最高盈利：{percentOrWaiting(item.max_profit_pct)}</span>
-                <span>高点回吐：{percentOrWaiting(item.profit_giveback_pct)}</span>
+              <div className="mt-4 grid gap-2 text-sm text-ink/65">
+                <span>
+                  下单：{formatCurrency(item.buy_amount)} /{" "}
+                  {formatDate(item.buy_date)}（
+                  {orderTimeBucketLabel(item.order_time_bucket)}）
+                </span>
+                <span>
+                  {item.asset_type === "etf" ? "买入价格日" : "确认净值日"}：
+                  {formatDate(item.confirmed_nav_date ?? item.entry_price_date)}
+                </span>
+                <span>
+                  {item.asset_type === "etf" ? "买入价" : "确认净值"}：
+                  {item.confirmed_nav?.toFixed(4) ??
+                    item.entry_price?.toFixed(4) ??
+                    "等待价格"}
+                </span>
+                <span>
+                  当前价：
+                  {item.current_snapshot.current_price?.toFixed(4) ?? "暂无"}
+                  {item.asset_type === "etf"
+                    ? "（" +
+                      priceSourceLabel(item.current_snapshot.price_source) +
+                      (item.intraday_snapshot?.quote_time
+                        ? "，" +
+                          formatDateTime(item.intraday_snapshot.quote_time)
+                        : "") +
+                      "）"
+                    : ""}
+                </span>
+                <span>
+                  展示口径：
+                  {priceSourceLabel(item.current_snapshot.price_source)} /{" "}
+                  {reliabilityLabel(item.current_snapshot.data_reliability)}
+                  {item.current_snapshot.decision_eligible
+                    ? "，可用于提醒判断"
+                    : "，仅展示/估算参考"}
+                </span>
+                {item.current_snapshot.display_only_reason ? (
+                  <span>说明：{item.current_snapshot.display_only_reason}</span>
+                ) : null}
                 {item.asset_type === "etf" ? (
                   <>
-                    <span>价格来源：{priceSourceLabel(item.intraday_snapshot?.price_source)}</span>
-                    <span>可靠性：{reliabilityLabel(item.intraday_snapshot?.reliability_level)}</span>
-                    <span>行情时间：{formatDateTime(item.intraday_snapshot?.quote_time)}</span>
-                    <span>{item.intraday_snapshot?.message ?? "暂无数据口径说明。"}</span>
                     <span>
-                      动态止损线：
-                      {item.dynamic_thresholds?.hard_stop_pct === null || item.dynamic_thresholds?.hard_stop_pct === undefined
-                        ? "等待数据"
-                        : formatPercent(item.dynamic_thresholds.hard_stop_pct)}
+                      数据口径：
+                      {reliabilityLabel(
+                        item.intraday_snapshot?.reliability_level
+                      )}
+                      {item.intraday_snapshot?.email_eligible
+                        ? "，可用于盘中提醒"
+                        : "，仅网页/估算参考"}
                     </span>
-                    <span>
-                      止盈启动线：
-                      {item.dynamic_thresholds?.profit_start_pct === null || item.dynamic_thresholds?.profit_start_pct === undefined
-                        ? "等待数据"
-                        : formatPercent(item.dynamic_thresholds.profit_start_pct)}
-                    </span>
-                    <span>
-                      允许从高点回吐：
-                      {item.dynamic_thresholds?.trailing_giveback_pct === null ||
-                      item.dynamic_thresholds?.trailing_giveback_pct === undefined
-                        ? "等待数据"
-                        : formatPercent(item.dynamic_thresholds.trailing_giveback_pct)}
-                    </span>
-                    <span>
-                      当前利润保护线：
-                      {item.dynamic_thresholds?.trailing_stop_pnl_pct === null ||
-                      item.dynamic_thresholds?.trailing_stop_pnl_pct === undefined
-                        ? "尚未启动"
-                        : formatPercent(item.dynamic_thresholds.trailing_stop_pnl_pct)}
-                    </span>
-                    <span>
-                      保护状态：{profitProtectionStateLabel(item.dynamic_thresholds?.profit_protection_state)}
-                    </span>
-                    <span>
-                      风险数据：
-                      {item.dynamic_thresholds?.risk_data_eligible
-                        ? `${item.dynamic_thresholds.risk_sample_count ?? 0} 日可决策复权数据`
-                        : "数据不足，不使用原始价格补算"}
-                    </span>
-                    <span>保护线由规则计算且只升不降，AI只做解释，不改写这些线。</span>
-                    <span>阈值说明：{thresholdExplanationLine(item)}</span>
-                    <span>
-                      买卖价差：
-                      {item.intraday_snapshot?.spread_pct === null || item.intraday_snapshot?.spread_pct === undefined
-                        ? "暂无"
-                        : formatPercent(item.intraday_snapshot.spread_pct)}
-                    </span>
-                    <span>
-                      折溢价：
-                      {item.intraday_snapshot?.premium_discount_pct === null ||
-                      item.intraday_snapshot?.premium_discount_pct === undefined
-                        ? "暂无"
-                        : formatPercent(item.intraday_snapshot.premium_discount_pct)}
-                    </span>
+                    {item.asset_type === "etf" ? (
+                      <span>
+                        {snapshotReliabilityLine(item.intraday_snapshot)}
+                      </span>
+                    ) : null}
                   </>
                 ) : null}
-                {item.recent_intraday_alerts.slice(0, 3).map((alert) => (
-                  <span key={alert.id}>
-                    {formatDateTime(alert.quote_time)} · {alertTypeLabel(alert.alert_type)} · {alertDeliveryLabel(alert)}
-                  </span>
-                ))}
+                <span>
+                  成本口径：
+                  {item.cost_basis === null
+                    ? "等待成本数据"
+                    : `${formatCurrency(item.cost_basis)} / ${costBasisSourceLabel(item.cost_basis_source)}`}
+                </span>
+                <span>
+                  持有：
+                  {item.holding_days === null
+                    ? "等待数据"
+                    : `${item.holding_days} 天`}
+                </span>
+                <span>
+                  {item.confirmed_shares === null ? "估算份额" : "确认份额"}：
+                  {item.estimated_shares === null
+                    ? "等待价格"
+                    : item.estimated_shares.toFixed(2)}
+                </span>
+                <span className={pnlTone(item.current_snapshot.estimated_pnl)}>
+                  估算盈亏：{pnlText(item)}
+                </span>
+                {renderPositionSizingRows(item)}
               </div>
-            </details>
 
-            <div className="mt-4 flex flex-wrap gap-2">
-              <button
-                className="rounded-[6px] border border-border px-3 py-2 text-sm font-medium text-ink transition hover:border-ink/30 hover:text-ink disabled:opacity-60"
-                disabled={updateTracking.isPending}
-                onClick={() => openEditTracking(item)}
+              <div
+                className={`mt-4 rounded-[8px] p-3 text-sm leading-6 ${exitSignalTone(item.exit_signal.level)}`}
               >
-                编辑买入信息
-              </button>
-              <button
-                className="rounded-[6px] border border-border px-3 py-2 text-sm font-medium text-ink transition hover:border-ink/30 hover:text-ink disabled:opacity-60"
-                disabled={closeTracking.isPending}
-                onClick={() => closeTracking.mutate(item.id)}
-              >
-                标记已卖出 / 停止提醒
-              </button>
+                <p className="text-xs font-semibold opacity-75">持仓处理状态</p>
+                <p className="font-semibold">{item.exit_signal.label}</p>
+                <p className="mt-1 text-xs opacity-75">
+                  {item.exit_signal.action_class === "actionable_exit"
+                    ? "行动信号"
+                    : item.exit_signal.action_class === "soft_watch"
+                      ? "软提醒"
+                      : item.exit_signal.action_class === "guard_only"
+                        ? "风险警戒，仅网页展示"
+                        : item.exit_signal.action_class === "data_waiting"
+                          ? "等待数据"
+                          : "观察状态"}
+                  {item.exit_signal.guard_state
+                    ? ` · ${item.exit_signal.guard_state}`
+                    : ""}
+                </p>
+                <p className="mt-1">
+                  {item.exit_signal.reason ??
+                    "暂无持仓处理原因，继续观察公开数据。"}
+                </p>
+                {item.exit_signal.guard_reasons.length > 0 ? (
+                  <p className="mt-1 text-xs opacity-75">
+                    {item.exit_signal.guard_reasons[0]}
+                  </p>
+                ) : null}
+                {item.exit_signal.no_alert_reason ? (
+                  <p className="mt-1 text-xs opacity-75">
+                    未发提醒原因：{item.exit_signal.no_alert_reason}
+                  </p>
+                ) : null}
+                <p className="mt-1 text-xs opacity-75">
+                  {item.exit_signal.email_eligible
+                    ? "满足邮件提醒条件"
+                    : "不会发邮件"}
+                  {item.exit_signal.email_eligibility_reason
+                    ? `：${item.exit_signal.email_eligibility_reason}`
+                    : ""}
+                </p>
+              </div>
+
+              {item.latest_alert ? (
+                <div
+                  className={`mt-4 rounded-[8px] p-3 text-sm leading-6 ${latestAlertTone(item.latest_alert)}`}
+                >
+                  <p className="font-semibold">
+                    {alertTypeLabel(item.latest_alert.alert_type)} ·{" "}
+                    {alertDeliveryLabel(item.latest_alert)}
+                  </p>
+                  <p>
+                    {item.latest_alert.reasons[0] ??
+                      item.latest_alert.trigger_label}
+                  </p>
+                  <p className="mt-1 text-xs">
+                    {item.latest_alert.alert_source
+                      ? `来源：${priceSourceLabel(item.latest_alert.alert_source)}；`
+                      : ""}
+                    行情时间：{formatDateTime(item.latest_alert.quote_time)}
+                    {item.latest_alert.email_error_message
+                      ? `；${item.latest_alert.email_error_message}`
+                      : ""}
+                  </p>
+                </div>
+              ) : (
+                <p className="mt-4 rounded-[8px] bg-paper p-3 text-sm leading-6 text-ink/55">
+                  暂无可展示告警。
+                </p>
+              )}
+
+              {renderActionLifecyclePanel(item)}
+
+              <details className="mt-3 rounded-[8px] bg-paper p-3 text-xs leading-5 text-ink/60">
+                <summary className="cursor-pointer font-semibold text-ink">
+                  更多风控数据
+                </summary>
+                <div className="mt-2 grid gap-1">
+                  <span>最高盈利：{percentOrWaiting(item.max_profit_pct)}</span>
+                  <span>
+                    高点回吐：{percentOrWaiting(item.profit_giveback_pct)}
+                  </span>
+                  {item.asset_type === "etf" ? (
+                    <>
+                      <span>
+                        价格来源：
+                        {priceSourceLabel(item.intraday_snapshot?.price_source)}
+                      </span>
+                      <span>
+                        可靠性：
+                        {reliabilityLabel(
+                          item.intraday_snapshot?.reliability_level
+                        )}
+                      </span>
+                      <span>
+                        行情时间：
+                        {formatDateTime(item.intraday_snapshot?.quote_time)}
+                      </span>
+                      <span>
+                        {item.intraday_snapshot?.message ??
+                          "暂无数据口径说明。"}
+                      </span>
+                      <span>
+                        动态止损线：
+                        {item.dynamic_thresholds?.hard_stop_pct === null ||
+                        item.dynamic_thresholds?.hard_stop_pct === undefined
+                          ? "等待数据"
+                          : formatPercent(
+                              item.dynamic_thresholds.hard_stop_pct
+                            )}
+                      </span>
+                      <span>
+                        止盈启动线：
+                        {item.dynamic_thresholds?.profit_start_pct === null ||
+                        item.dynamic_thresholds?.profit_start_pct === undefined
+                          ? "等待数据"
+                          : formatPercent(
+                              item.dynamic_thresholds.profit_start_pct
+                            )}
+                      </span>
+                      <span>
+                        允许从高点回吐：
+                        {item.dynamic_thresholds?.trailing_giveback_pct ===
+                          null ||
+                        item.dynamic_thresholds?.trailing_giveback_pct ===
+                          undefined
+                          ? "等待数据"
+                          : formatPercent(
+                              item.dynamic_thresholds.trailing_giveback_pct
+                            )}
+                      </span>
+                      <span>
+                        当前利润保护线：
+                        {item.dynamic_thresholds?.trailing_stop_pnl_pct ===
+                          null ||
+                        item.dynamic_thresholds?.trailing_stop_pnl_pct ===
+                          undefined
+                          ? "尚未启动"
+                          : formatPercent(
+                              item.dynamic_thresholds.trailing_stop_pnl_pct
+                            )}
+                      </span>
+                      <span>
+                        保护状态：
+                        {profitProtectionStateLabel(
+                          item.dynamic_thresholds?.profit_protection_state
+                        )}
+                      </span>
+                      <span>
+                        风险数据：
+                        {item.dynamic_thresholds?.risk_data_eligible
+                          ? `${item.dynamic_thresholds.risk_sample_count ?? 0} 日可决策复权数据`
+                          : "数据不足，不使用原始价格补算"}
+                      </span>
+                      <span>
+                        保护线由规则计算且只升不降，AI只做解释，不改写这些线。
+                      </span>
+                      <span>阈值说明：{thresholdExplanationLine(item)}</span>
+                      <span>
+                        买卖价差：
+                        {item.intraday_snapshot?.spread_pct === null ||
+                        item.intraday_snapshot?.spread_pct === undefined
+                          ? "暂无"
+                          : formatPercent(item.intraday_snapshot.spread_pct)}
+                      </span>
+                      <span>
+                        折溢价：
+                        {item.intraday_snapshot?.premium_discount_pct ===
+                          null ||
+                        item.intraday_snapshot?.premium_discount_pct ===
+                          undefined
+                          ? "暂无"
+                          : formatPercent(
+                              item.intraday_snapshot.premium_discount_pct
+                            )}
+                      </span>
+                    </>
+                  ) : null}
+                  {item.recent_intraday_alerts.slice(0, 3).map((alert) => (
+                    <span key={alert.id}>
+                      {formatDateTime(alert.quote_time)} ·{" "}
+                      {alertTypeLabel(alert.alert_type)} ·{" "}
+                      {alertDeliveryLabel(alert)}
+                    </span>
+                  ))}
+                </div>
+              </details>
+
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  className="rounded-[6px] border border-border px-3 py-2 text-sm font-medium text-ink transition hover:border-ink/30 hover:text-ink disabled:opacity-60"
+                  disabled={updateTracking.isPending}
+                  onClick={() => openEditTracking(item)}
+                >
+                  编辑买入信息
+                </button>
+                <button
+                  className="rounded-[6px] border border-border px-3 py-2 text-sm font-medium text-ink transition hover:border-ink/30 hover:text-ink disabled:opacity-60"
+                  disabled={closeTracking.isPending}
+                  onClick={() => closeTracking.mutate(item.id)}
+                >
+                  标记已卖出 / 停止提醒
+                </button>
+              </div>
+              {renderTrackingEditForm(item)}
             </div>
-            {renderTrackingEditForm(item)}
-          </div>
-        ))}
-        {!trackedPositions.isLoading && activeTracked.length === 0 ? (
-          <div className="rounded-[10px] border border-dashed border-ink/20 bg-white p-5 text-sm leading-7 text-ink/55 xl:col-span-3">
-            {mode.trackingEmpty}
-          </div>
-        ) : null}
-      </div>
+          ))}
+          {!trackedPositions.isLoading && activeTracked.length === 0 ? (
+            <div className="rounded-[10px] border border-dashed border-ink/20 bg-white p-5 text-sm leading-7 text-ink/55 xl:col-span-3">
+              {mode.trackingEmpty}
+            </div>
+          ) : null}
+        </div>
       </Panel>
     </div>
   );
@@ -4540,16 +5837,30 @@ function ShortTermClient() {
     <Panel className="rounded-[12px]">
       {selectedAsset ? (
         <div className="space-y-4">
-          <p className="font-semibold text-ink">{selectedAsset.name} - 低频说明</p>
+          <p className="font-semibold text-ink">
+            {selectedAsset.name} - 低频说明
+          </p>
           <div className="rounded-[10px] bg-paper p-4">
-            <p className="text-xs uppercase tracking-[0.18em] text-accent">图表</p>
+            <p className="text-xs uppercase tracking-[0.18em] text-accent">
+              图表
+            </p>
             <div className="mt-3 h-52">
               {detailPoints.length ? (
                 <ResponsiveContainer width="100%" height="100%">
                   <AreaChart data={detailPoints}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#e6e6e6" />
-                    <XAxis dataKey="label" tickLine={false} axisLine={false} minTickGap={28} />
-                    <YAxis tickLine={false} axisLine={false} width={56} domain={["dataMin", "dataMax"]} />
+                    <XAxis
+                      dataKey="label"
+                      tickLine={false}
+                      axisLine={false}
+                      minTickGap={28}
+                    />
+                    <YAxis
+                      tickLine={false}
+                      axisLine={false}
+                      width={56}
+                      domain={["dataMin", "dataMax"]}
+                    />
                     <Tooltip formatter={(value) => Number(value).toFixed(4)} />
                     <Area
                       type="monotone"
@@ -4561,26 +5872,38 @@ function ShortTermClient() {
                   </AreaChart>
                 </ResponsiveContainer>
               ) : (
-                <div className="flex h-full items-center justify-center rounded-[8px] bg-white text-sm text-ink/50">暂无图表数据</div>
+                <div className="flex h-full items-center justify-center rounded-[8px] bg-white text-sm text-ink/50">
+                  暂无图表数据
+                </div>
               )}
             </div>
           </div>
           <div className="rounded-[10px] bg-paper p-4">
             <p className="font-semibold text-ink">AI/规则说明</p>
             <p className="mt-2 text-sm leading-6 text-ink/65">
-              {advisorReport ? `${advisorReport.plain_summary}` : "暂无完整解释结果。"}
+              {advisorReport
+                ? `${advisorReport.plain_summary}`
+                : "暂无完整解释结果。"}
             </p>
           </div>
           <div className="rounded-[10px] border border-ink/10 bg-white p-4">
             <p className="font-semibold text-ink">标签原因</p>
             <p className="mt-2 text-sm leading-7 text-ink/65">
-              {selectedAsset.conclusion === "数据不足" ? labelMeaning("数据不足") : rationaleText(selectedAsset, "label_meaning", labelMeaning(selectedAsset.conclusion))}
+              {selectedAsset.conclusion === "数据不足"
+                ? labelMeaning("数据不足")
+                : rationaleText(
+                    selectedAsset,
+                    "label_meaning",
+                    labelMeaning(selectedAsset.conclusion)
+                  )}
             </p>
           </div>
           <div className="rounded-[10px] border border-ink/10 bg-white p-4">
             <p className="font-semibold text-ink">观察组合</p>
             <p className="mt-2 text-sm leading-7 text-ink/65">
-              {assetType === "etf" ? observationPortfolio.data?.note ?? "暂无观察组合说明" : "非 ETF 模式下暂不显示观察组合"}
+              {assetType === "etf"
+                ? (observationPortfolio.data?.note ?? "暂无观察组合说明")
+                : "非 ETF 模式下暂不显示观察组合"}
             </p>
           </div>
           {dataIssues.length ? (
@@ -4589,7 +5912,8 @@ function ShortTermClient() {
               <div className="mt-2 grid gap-2 text-sm text-ink/65">
                 {dataIssues.slice(0, 4).map((item) => (
                   <p key={`${item.asset_type}-${item.code}`}>
-                    {item.name} · {assetTypeLabel(item.asset_type)} · {formatDate(item.latest_date)}
+                    {item.name} · {assetTypeLabel(item.asset_type)} ·{" "}
+                    {formatDate(item.latest_date)}
                   </p>
                 ))}
               </div>
@@ -4606,23 +5930,39 @@ function ShortTermClient() {
 
   return (
     <div className="space-y-6">
-      <div className="hidden lg:block">
-        {renderDesktopTrackingPanel()}
-      </div>
+      <div className="hidden lg:block">{renderDesktopTrackingPanel()}</div>
 
       <Panel className="rounded-[12px] bg-white">
         <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-start">
-          <SectionKicker eyebrow="短线研究工作台" title={mode.title} description={mode.description} />
+          <SectionKicker
+            eyebrow="短线研究工作台"
+            title={mode.title}
+            description={mode.description}
+          />
           <div className="flex flex-wrap gap-2 xl:justify-end">
-            <TaskButton disabled={isResearchTaskPending} onClick={() => syncData.mutate()}>
+            <TaskButton
+              disabled={isResearchTaskPending}
+              onClick={() => syncData.mutate()}
+            >
               {syncData.isPending ? "准备数据中" : mode.dataButton}
             </TaskButton>
-            <TaskButton variant="primary" disabled={isResearchTaskPending} onClick={() => runSignals.mutate()}>
+            <TaskButton
+              variant="primary"
+              disabled={isResearchTaskPending}
+              onClick={() => runSignals.mutate()}
+            >
               {runSignals.isPending
-                ? (assetType === "etf" ? "刷新中" : "排序生成中")
-                : (assetType === "etf" ? "刷新综合排名" : "生成短线排序")}
+                ? assetType === "etf"
+                  ? "刷新中"
+                  : "排序生成中"
+                : assetType === "etf"
+                  ? "刷新综合排名"
+                  : "生成短线排序"}
             </TaskButton>
-            <TaskButton disabled={isResearchTaskPending || advisorSourceRunId === null} onClick={() => runAdvisor.mutate()}>
+            <TaskButton
+              disabled={isResearchTaskPending || advisorSourceRunId === null}
+              onClick={() => runAdvisor.mutate()}
+            >
               {runAdvisor.isPending ? "报告生成中" : "AI 研究说明"}
             </TaskButton>
           </div>
@@ -4635,7 +5975,9 @@ function ShortTermClient() {
               <button
                 key={item}
                 className={`rounded-[6px] px-3 py-2 text-sm font-medium transition ${
-                  isActive ? "bg-ink text-white shadow-sm" : "bg-white text-ink hover:text-accent"
+                  isActive
+                    ? "bg-ink text-white shadow-sm"
+                    : "bg-white text-ink hover:text-accent"
                 }`}
                 onClick={() => {
                   setAssetType(item);
@@ -4652,65 +5994,133 @@ function ShortTermClient() {
         </div>
 
         <div className="mt-5 grid gap-3 md:grid-cols-3 xl:grid-cols-6">
-          <WorkbenchMetric label={assetType === "etf" ? "ETF 全量池" : mode.poolLabel} value={`${assetCount(statusData, assetType)} 只`} />
+          <WorkbenchMetric
+            label={assetType === "etf" ? "ETF 全量池" : mode.poolLabel}
+            value={`${assetCount(statusData, assetType)} 只`}
+          />
           {assetType === "etf" ? (
-            <WorkbenchMetric label="默认精选" value={`${statusData?.etf_default_display_count ?? 0} 只`} tone="bg-emerald-50 text-emerald-800" />
+            <WorkbenchMetric
+              label="默认精选"
+              value={`${statusData?.etf_default_display_count ?? 0} 只`}
+              tone="bg-emerald-50 text-emerald-800"
+            />
           ) : null}
-          <WorkbenchMetric label="当前列表" value={`${visibleAssets.length}/${totalAssetCount} 只`} tone="bg-accentSoft text-ink" />
-          <WorkbenchMetric label={mode.latestLabel} value={formatDate(currentLatestDate)} />
+          <WorkbenchMetric
+            label="当前列表"
+            value={`${visibleAssets.length}/${totalAssetCount} 只`}
+            tone="bg-accentSoft text-ink"
+          />
+          <WorkbenchMetric
+            label={mode.latestLabel}
+            value={formatDate(currentLatestDate)}
+          />
           {assetType === "etf" ? (
-            <WorkbenchMetric label="盘中行情时间" value={formatDateTime(latestIntradayQuoteTime)} tone="bg-white text-ink" />
+            <WorkbenchMetric
+              label="盘中行情时间"
+              value={formatDateTime(latestIntradayQuoteTime)}
+              tone="bg-white text-ink"
+            />
           ) : null}
-          <WorkbenchMetric label="短线观察" value={`${observableCount} 只`} tone="bg-emerald-50 text-emerald-800" />
-          <WorkbenchMetric label="高位观察" value={`${highRiskCount} 只`} tone="bg-rose-50 text-rose-800" />
+          <WorkbenchMetric
+            label="短线观察"
+            value={`${observableCount} 只`}
+            tone="bg-emerald-50 text-emerald-800"
+          />
+          <WorkbenchMetric
+            label="高位观察"
+            value={`${highRiskCount} 只`}
+            tone="bg-rose-50 text-rose-800"
+          />
           {assetType === "etf" ? (
-            <WorkbenchMetric label="标签验证" value={`${validationGroups.length} 组`} tone="bg-white text-ink" />
+            <WorkbenchMetric
+              label="标签验证"
+              value={`${validationGroups.length} 组`}
+              tone="bg-white text-ink"
+            />
           ) : null}
           {assetType === "etf" ? (
-            <WorkbenchMetric label="验证时间" value={formatUtcDateTime(statusData?.label_validation_generated_at)} tone="bg-white text-ink" />
+            <WorkbenchMetric
+              label="验证时间"
+              value={formatUtcDateTime(
+                statusData?.label_validation_generated_at
+              )}
+              tone="bg-white text-ink"
+            />
           ) : null}
           {assetType === "etf" ? (
-            <WorkbenchMetric label="TopN验证" value={`${scoreBucketGroups.length} 组`} tone="bg-white text-ink" />
+            <WorkbenchMetric
+              label="TopN验证"
+              value={`${scoreBucketGroups.length} 组`}
+              tone="bg-white text-ink"
+            />
           ) : null}
           {assetType === "etf" ? (
-            <WorkbenchMetric label="TopN时间" value={formatUtcDateTime(statusData?.score_bucket_validation_generated_at)} tone="bg-white text-ink" />
+            <WorkbenchMetric
+              label="TopN时间"
+              value={formatUtcDateTime(
+                statusData?.score_bucket_validation_generated_at
+              )}
+              tone="bg-white text-ink"
+            />
           ) : null}
           {assetType === "etf" ? (
-            <WorkbenchMetric label="日线缺口/失败" value={`${statusData?.etf_data_stale_count ?? 0} / ${statusData?.etf_failed_count ?? 0} 只`} tone="bg-amber-50 text-amber-900" />
+            <WorkbenchMetric
+              label="日线缺口/失败"
+              value={`${statusData?.etf_data_stale_count ?? 0} / ${statusData?.etf_failed_count ?? 0} 只`}
+              tone="bg-amber-50 text-amber-900"
+            />
           ) : null}
           {assetType !== "etf" ? (
-            <WorkbenchMetric label="数据异常" value={`${currentDataIssueCount} 只`} tone="bg-amber-50 text-amber-900" />
+            <WorkbenchMetric
+              label="数据异常"
+              value={`${currentDataIssueCount} 只`}
+              tone="bg-amber-50 text-amber-900"
+            />
           ) : null}
         </div>
 
         {assetType === "etf" ? (
           <div className="mt-4 grid gap-3 rounded-[10px] border border-ink/10 bg-ink px-4 py-3 text-white md:grid-cols-5">
             <div>
-              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-white/50">盘中盯盘</p>
-              <p className="mt-1 text-sm text-white/75">评分前 20 + 短线/高位观察 + 已追踪 ETF</p>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-white/50">
+                盘中盯盘
+              </p>
+              <p className="mt-1 text-sm text-white/75">
+                评分前 20 + 短线/高位观察 + 已追踪 ETF
+              </p>
             </div>
             <div>
               <p className="text-xs text-white/50">市场状态</p>
-              <p className="font-semibold">{marketStatusLabel(etfLiveStatus?.market_status)}</p>
+              <p className="font-semibold">
+                {marketStatusLabel(etfLiveStatus?.market_status)}
+              </p>
             </div>
             <div>
               <p className="text-xs text-white/50">盯盘数量</p>
-              <p className="font-semibold">{etfLiveStatus?.watched_count ?? 0} 只</p>
+              <p className="font-semibold">
+                {etfLiveStatus?.watched_count ?? 0} 只
+              </p>
             </div>
             <div>
               <p className="text-xs text-white/50">盘中行情</p>
-              <p className="font-semibold">{formatDateTime(latestIntradayQuoteTime)}</p>
+              <p className="font-semibold">
+                {formatDateTime(latestIntradayQuoteTime)}
+              </p>
             </div>
             <div>
               <p className="text-xs text-white/50">最近运行</p>
-              <p className="font-semibold">{formatUtcDateTime(etfLiveStatus?.latest_run?.finished_at)}</p>
+              <p className="font-semibold">
+                {formatUtcDateTime(etfLiveStatus?.latest_run?.finished_at)}
+              </p>
             </div>
           </div>
         ) : null}
 
         {lastResult ? (
           <details className="mt-4 rounded-[10px] bg-paper px-4 py-3 text-sm text-ink/65">
-            <summary className="cursor-pointer font-semibold text-ink">查看最近一次任务结果</summary>
+            <summary className="cursor-pointer font-semibold text-ink">
+              查看最近一次任务结果
+            </summary>
             <pre className="mt-3 max-h-40 overflow-auto rounded-[8px] bg-white p-3 text-xs leading-5">
               {safeSummary(lastResult)}
             </pre>
@@ -4718,9 +6128,19 @@ function ShortTermClient() {
         ) : null}
       </Panel>
 
-      {(syncData.isError || runSignals.isError || runAdvisor.isError || status.isError || assets.isError) && (
+      {(syncData.isError ||
+        runSignals.isError ||
+        runAdvisor.isError ||
+        status.isError ||
+        assets.isError) && (
         <p className="rounded-[10px] bg-rose-50 px-4 py-3 text-sm text-rose-700">
-          {errorText(syncData.error ?? runSignals.error ?? runAdvisor.error ?? status.error ?? assets.error)}
+          {errorText(
+            syncData.error ??
+              runSignals.error ??
+              runAdvisor.error ??
+              status.error ??
+              assets.error
+          )}
         </p>
       )}
 
@@ -4728,16 +6148,33 @@ function ShortTermClient() {
         <Panel className="rounded-[12px] bg-white">
           <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
             <div>
-              <p className="text-sm font-semibold text-accent">综合关注分层验证</p>
-              <h2 className="mt-1 text-xl font-semibold text-ink">Top 5/10/20/50 的日期级净收益验证</h2>
+              <p className="text-sm font-semibold text-accent">
+                综合关注分层验证
+              </p>
+              <h2 className="mt-1 text-xl font-semibold text-ink">
+                Top 5/10/20/50 的日期级净收益验证
+              </h2>
               <p className="mt-2 text-sm leading-6 text-ink/60">
-                预设主终点为 Top 10 五日相对 all_scored 的配对净超额；其他组合仅作探索性展示，不参与实时排序、持仓提醒或邮件。
+                预设主终点为 Top 10 五日相对 all_scored
+                的配对净超额；其他组合仅作探索性展示，不参与实时排序、持仓提醒或邮件。
               </p>
             </div>
             <div className="grid gap-2 text-sm sm:grid-cols-3">
-              <StatPill label="来源 run" value={`${scoreBucketSourceRuns}`} tone="bg-paper text-ink" />
-              <StatPill label="可评分样本" value={`${scoreBucketScoredItems}`} tone="bg-paper text-ink" />
-              <StatPill label="排除缺失分" value={`${scoreBucketExcludedItems}`} tone="bg-paper text-ink" />
+              <StatPill
+                label="来源 run"
+                value={`${scoreBucketSourceRuns}`}
+                tone="bg-paper text-ink"
+              />
+              <StatPill
+                label="可评分样本"
+                value={`${scoreBucketScoredItems}`}
+                tone="bg-paper text-ink"
+              />
+              <StatPill
+                label="排除缺失分"
+                value={`${scoreBucketExcludedItems}`}
+                tone="bg-paper text-ink"
+              />
             </div>
           </div>
           {scoreBucketGroups.length ? (
@@ -4757,19 +6194,41 @@ function ShortTermClient() {
                   </thead>
                   <tbody className="divide-y divide-ink/10">
                     {scoreBucketCumulativeGroups.map((group) => (
-                      <tr key={`${group.label}-${group.entry_timing_label}`} className="bg-white">
-                        <td className="px-3 py-2 font-semibold text-ink">{group.label}</td>
-                        <td className="px-3 py-2 text-ink/65">{scoreBucketWindowText(group, "5")}</td>
-                        <td className="px-3 py-2 text-ink/65">{scoreBucketWindowText(group, "10")}</td>
-                        <td className="px-3 py-2 text-ink/65">{scoreBucketSampleText(group)}</td>
+                      <tr
+                        key={`${group.label}-${group.entry_timing_label}`}
+                        className="bg-white"
+                      >
+                        <td className="px-3 py-2 font-semibold text-ink">
+                          {group.label}
+                        </td>
+                        <td className="px-3 py-2 text-ink/65">
+                          {scoreBucketWindowText(group, "5")}
+                        </td>
+                        <td className="px-3 py-2 text-ink/65">
+                          {scoreBucketWindowText(group, "10")}
+                        </td>
+                        <td className="px-3 py-2 text-ink/65">
+                          {scoreBucketSampleText(group)}
+                        </td>
                       </tr>
                     ))}
                     {scoreBucketBaselineGroup ? (
                       <tr className="bg-paper/60">
-                        <td className="px-3 py-2 font-semibold text-ink">all_scored</td>
-                        <td className="px-3 py-2 text-ink/65">{scoreBucketWindowText(scoreBucketBaselineGroup, "5")}</td>
-                        <td className="px-3 py-2 text-ink/65">{scoreBucketWindowText(scoreBucketBaselineGroup, "10")}</td>
-                        <td className="px-3 py-2 text-ink/65">{scoreBucketSampleText(scoreBucketBaselineGroup)}</td>
+                        <td className="px-3 py-2 font-semibold text-ink">
+                          all_scored
+                        </td>
+                        <td className="px-3 py-2 text-ink/65">
+                          {scoreBucketWindowText(scoreBucketBaselineGroup, "5")}
+                        </td>
+                        <td className="px-3 py-2 text-ink/65">
+                          {scoreBucketWindowText(
+                            scoreBucketBaselineGroup,
+                            "10"
+                          )}
+                        </td>
+                        <td className="px-3 py-2 text-ink/65">
+                          {scoreBucketSampleText(scoreBucketBaselineGroup)}
+                        </td>
                       </tr>
                     ) : null}
                   </tbody>
@@ -4781,18 +6240,33 @@ function ShortTermClient() {
                     <thead className="bg-paper text-xs text-ink/55">
                       <tr>
                         <th className="px-3 py-2 font-semibold">边际组</th>
-                        <th className="px-3 py-2 font-semibold">5日中位/胜率</th>
-                        <th className="px-3 py-2 font-semibold">10日中位/胜率</th>
+                        <th className="px-3 py-2 font-semibold">
+                          5日中位/胜率
+                        </th>
+                        <th className="px-3 py-2 font-semibold">
+                          10日中位/胜率
+                        </th>
                         <th className="px-3 py-2 font-semibold">样本/入选</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-ink/10">
                       {scoreBucketMarginalGroups.map((group) => (
-                        <tr key={`${group.label}-${group.entry_timing_label}`} className="bg-white">
-                          <td className="px-3 py-2 font-semibold text-ink">{group.label}</td>
-                          <td className="px-3 py-2 text-ink/65">{scoreBucketWindowText(group, "5")}</td>
-                          <td className="px-3 py-2 text-ink/65">{scoreBucketWindowText(group, "10")}</td>
-                          <td className="px-3 py-2 text-ink/65">{scoreBucketSampleText(group)}</td>
+                        <tr
+                          key={`${group.label}-${group.entry_timing_label}`}
+                          className="bg-white"
+                        >
+                          <td className="px-3 py-2 font-semibold text-ink">
+                            {group.label}
+                          </td>
+                          <td className="px-3 py-2 text-ink/65">
+                            {scoreBucketWindowText(group, "5")}
+                          </td>
+                          <td className="px-3 py-2 text-ink/65">
+                            {scoreBucketWindowText(group, "10")}
+                          </td>
+                          <td className="px-3 py-2 text-ink/65">
+                            {scoreBucketSampleText(group)}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -4800,17 +6274,36 @@ function ShortTermClient() {
                 </div>
               ) : null}
               <p className="text-xs leading-5 text-ink/50">
-                窗口：{formatDate(String(scoreBucketValidation.replay_start_date ?? ""))} - {formatDate(String(scoreBucketValidation.replay_end_date ?? ""))}；
-                排序字段：{String(scoreBucketValidation.score_version ?? "final_score_v3")} / {String(scoreBucketValidation.score_field ?? "ranking_score")}；
-                执行：{String(scoreBucketValidation.execution_model ?? "等待执行模型")}；缺失真实综合关注分、复权价格或契约的 ETF 已排除。
+                窗口：
+                {formatDate(
+                  String(scoreBucketValidation.replay_start_date ?? "")
+                )}{" "}
+                -{" "}
+                {formatDate(
+                  String(scoreBucketValidation.replay_end_date ?? "")
+                )}
+                ； 排序字段：
+                {String(
+                  scoreBucketValidation.score_version ?? "final_score_v3"
+                )}{" "}
+                / {String(scoreBucketValidation.score_field ?? "ranking_score")}
+                ； 执行：
+                {String(
+                  scoreBucketValidation.execution_model ?? "等待执行模型"
+                )}
+                ；缺失真实综合关注分、复权价格或契约的 ETF 已排除。
               </p>
               {scoreBucketExcludedSources.length ? (
                 <details className="rounded-[8px] border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
-                  <summary className="cursor-pointer font-semibold">旧口径或不兼容来源已排除，不计入当前结论（{scoreBucketExcludedSources.length} 个）</summary>
+                  <summary className="cursor-pointer font-semibold">
+                    旧口径或不兼容来源已排除，不计入当前结论（
+                    {scoreBucketExcludedSources.length} 个）
+                  </summary>
                   <ul className="mt-2 list-disc pl-4">
                     {scoreBucketExcludedSources.slice(0, 6).map((item) => (
                       <li key={`${item.source_signal_run_id}-${item.reason}`}>
-                        run {item.source_signal_run_id ?? "-"} / {item.source_date ?? "-"}：{item.reason ?? "不兼容"}
+                        run {item.source_signal_run_id ?? "-"} /{" "}
+                        {item.source_date ?? "-"}：{item.reason ?? "不兼容"}
                       </li>
                     ))}
                   </ul>
@@ -4832,7 +6325,9 @@ function ShortTermClient() {
               <button
                 key={item.id}
                 className={`rounded-[6px] px-3 py-2 text-sm font-medium transition ${
-                  mobileTab === item.id ? "bg-ink text-white" : "bg-white text-ink hover:text-accent"
+                  mobileTab === item.id
+                    ? "bg-ink text-white"
+                    : "bg-white text-ink hover:text-accent"
                 }`}
                 onClick={() => setMobileTab(item.id)}
               >
@@ -4843,7 +6338,9 @@ function ShortTermClient() {
         </div>
         <div className="mt-4">
           {mobileTab === "ranking" ? (
-            <Panel className="rounded-[12px]">{rankingPanelContent({ compact: true })}</Panel>
+            <Panel className="rounded-[12px]">
+              {rankingPanelContent({ compact: true })}
+            </Panel>
           ) : null}
           {mobileTab === "detail" ? renderMobileDetailPanel() : null}
           {mobileTab === "tracking" ? renderMobileTrackingPanel() : null}
@@ -4920,7 +6417,11 @@ function ShortTermClient() {
             {assets.isError ? (
               <div className="rounded-[10px] border border-rose-200 bg-rose-50 p-6 text-sm leading-6 text-rose-800">
                 榜单请求失败：{errorText(assets.error)}
-                <button type="button" className="ml-2 font-semibold underline underline-offset-2" onClick={() => void assets.refetch()}>
+                <button
+                  type="button"
+                  className="ml-2 font-semibold underline underline-offset-2"
+                  onClick={() => void assets.refetch()}
+                >
                   重试
                 </button>
               </div>
@@ -4928,100 +6429,163 @@ function ShortTermClient() {
             {visibleAssets.map((item) => {
               const itemAssetType = getItemAssetType(item);
               const itemCode = toEtfItemCode(item);
-              const isSelected = selected?.asset_type === itemAssetType && selected.code === itemCode;
+              const isSelected =
+                selected?.asset_type === itemAssetType &&
+                selected.code === itemCode;
               const isLiveItem = isLiveRankingItem(item);
               const quote = liveRankingQuote(item);
               const livePrice = quote?.latest_price;
-              const timingDisplay = itemEntryTimingDisplay(item, etfLiveData?.market_status);
-              const liveChange = intradayChangeDisplay(quote, etfLiveData?.market_status);
+              const timingDisplay = itemEntryTimingDisplay(
+                item,
+                etfLiveData?.market_status
+              );
+              const liveChange = intradayChangeDisplay(
+                quote,
+                etfLiveData?.market_status
+              );
               return (
                 <button
                   key={`${itemAssetType}-${itemCode}`}
                   className={`w-full rounded-[10px] border p-4 text-left transition ${
-                    isSelected ? "border-ink bg-ink text-white" : "border-ink/10 bg-white text-ink hover:border-accent"
+                    isSelected
+                      ? "border-ink bg-ink text-white"
+                      : "border-ink/10 bg-white text-ink hover:border-accent"
                   }`}
                   onClick={() => selectAsset(item)}
                 >
                   <div className="flex flex-col gap-3">
                     <div className="min-w-0">
-                      <p className={`text-xs font-semibold ${isSelected ? "text-white/60" : "text-accent"}`}>
+                      <p
+                        className={`text-xs font-semibold ${isSelected ? "text-white/60" : "text-accent"}`}
+                      >
                         {isLiveItem ? "实时排名" : `#${item.rank ?? "-"}`}
-                        {isLiveItem ? "" : ` · ${assetTypeLabel(item.asset_type)}`}
-                        {!isLiveItem ? ` · ${shortResearchThemeTags(item).slice(0, 3).join(" / ")}` : ""}
+                        {isLiveItem
+                          ? ""
+                          : ` · ${assetTypeLabel(item.asset_type)}`}
+                        {!isLiveItem
+                          ? ` · ${shortResearchThemeTags(item).slice(0, 3).join(" / ")}`
+                          : ""}
                       </p>
                       <h3 className="mt-2 text-xl font-semibold leading-tight">
                         {isLiveItem ? toEtfItemName(item) : item.name}
-                        <span className={`ml-2 text-sm font-normal ${isSelected ? "text-white/45" : "text-ink/45"}`}>
+                        <span
+                          className={`ml-2 text-sm font-normal ${isSelected ? "text-white/45" : "text-ink/45"}`}
+                        >
                           {isLiveItem ? itemCode : item.code}
                         </span>
                       </h3>
-                      <p className={`mt-2 line-clamp-2 text-sm leading-6 ${isSelected ? "text-white/65" : "text-ink/60"}`}>
+                      <p
+                        className={`mt-2 line-clamp-2 text-sm leading-6 ${isSelected ? "text-white/65" : "text-ink/60"}`}
+                      >
                         {timingDisplay.reason}
                       </p>
                     </div>
                     <div className="flex flex-wrap gap-2">
-                      <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white text-ink" : "bg-ink text-white"}`}>
+                      <span
+                        className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white text-ink" : "bg-ink text-white"}`}
+                      >
                         {isLiveItem
                           ? liveScoreText(item)
                           : assetScoreText(item)}
                       </span>
-                      <span className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                        isSelected ? "bg-white/15 text-white" : conclusionTone(itemConclusion(item))
-                      }`}>
+                      <span
+                        className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                          isSelected
+                            ? "bg-white/15 text-white"
+                            : conclusionTone(itemConclusion(item))
+                        }`}
+                      >
                         买入观察状态：{itemConclusion(item)}
                       </span>
                       <span
                         className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                          isSelected ? "bg-white/15 text-white" : entryTimingTone(timingDisplay.label)
+                          isSelected
+                            ? "bg-white/15 text-white"
+                            : entryTimingTone(timingDisplay.label)
                         }`}
                       >
                         {timingDisplay.title}：{timingDisplay.label}
                       </span>
-                    {isLiveItem ? (
-                      <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : ""}`}>
-                        实时排名变化：{etfLiveRankChangeText(item.rank_change)}
-                      </span>
-                    ) : item.advisor_report ? (
-                      <span className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : advisorTone(item.advisor_report.action_label)}`}>
-                        {item.advisor_report.action_label}
-                      </span>
-                    ) : null}
+                      {isLiveItem ? (
+                        <span
+                          className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : ""}`}
+                        >
+                          实时排名变化：
+                          {etfLiveRankChangeText(item.rank_change)}
+                        </span>
+                      ) : item.advisor_report ? (
+                        <span
+                          className={`rounded-full px-3 py-1 text-xs font-semibold ${isSelected ? "bg-white/15 text-white" : advisorTone(item.advisor_report.action_label)}`}
+                        >
+                          {item.advisor_report.action_label}
+                        </span>
+                      ) : null}
                     </div>
                   </div>
-                  <div className={`mt-4 grid gap-2 text-sm sm:grid-cols-2 ${isSelected ? "text-white/75" : "text-ink/65"}`}>
+                  <div
+                    className={`mt-4 grid gap-2 text-sm sm:grid-cols-2 ${isSelected ? "text-white/75" : "text-ink/65"}`}
+                  >
                     {isLiveItem ? (
                       <>
-                        <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                        <span
+                          className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                        >
                           全局排名 #{etfGlobalRank(item) ?? "-"}
                         </span>
-                        <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
-                          当前范围排名 #{toEtfItemRank(item) ?? "-"} · 筛选位置 #{etfFilteredPosition(item) ?? "-"}
+                        <span
+                          className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                        >
+                          当前范围排名 #{toEtfItemRank(item) ?? "-"} · 筛选位置
+                          #{etfFilteredPosition(item) ?? "-"}
                         </span>
-                        <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
-                          当前价：{quote ? (livePrice === null || livePrice === undefined ? "暂无" : livePrice.toFixed(4)) : "暂无"}
+                        <span
+                          className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                        >
+                          当前价：
+                          {quote
+                            ? livePrice === null || livePrice === undefined
+                              ? "暂无"
+                              : livePrice.toFixed(4)
+                            : "暂无"}
                         </span>
-                        <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                        <span
+                          className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                        >
                           盘中涨跌：{liveChange.value}
                         </span>
-                        <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                        <span
+                          className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                        >
                           行情：{liveChange.time}
                         </span>
-                        <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                        <span
+                          className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                        >
                           排名变化：{etfLiveRankChangeText(item.rank_change)}
                         </span>
                       </>
                     ) : (
                       <>
-                        <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
-                          最新日涨跌：{percentMetric(item.metrics, "today_return_pct")}
+                        <span
+                          className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                        >
+                          最新日涨跌：
+                          {percentMetric(item.metrics, "today_return_pct")}
                         </span>
-                        <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                        <span
+                          className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                        >
                           近 20 日：{percentMetric(item.metrics, "return_20d")}
                         </span>
-                        <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
-                          60 日回撤：{percentMetric(item.metrics, "max_drawdown_60d")}
+                        <span
+                          className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                        >
+                          60 日回撤：
+                          {percentMetric(item.metrics, "max_drawdown_60d")}
                         </span>
-                        <span className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}>
+                        <span
+                          className={`rounded-[12px] px-3 py-2 ${isSelected ? "bg-white/10" : "bg-paper"}`}
+                        >
                           样本：{item.usable_days} 天
                         </span>
                       </>
@@ -5030,9 +6594,12 @@ function ShortTermClient() {
                 </button>
               );
             })}
-            {!assets.isLoading && rawAssets.length > 0 && visibleAssets.length === 0 ? (
+            {!assets.isLoading &&
+            rawAssets.length > 0 &&
+            visibleAssets.length === 0 ? (
               <div className="rounded-[10px] border border-dashed border-ink/20 bg-white p-6 text-sm leading-6 text-ink/55">
-                当前页没有匹配这些标签的 ETF。可以清空标签筛选、换一页，或调整方向/搜索条件。
+                当前页没有匹配这些标签的
+                ETF。可以清空标签筛选、换一页，或调整方向/搜索条件。
                 <button
                   type="button"
                   className="ml-2 font-semibold text-accent underline underline-offset-2"
@@ -5066,15 +6633,22 @@ function ShortTermClient() {
                 <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                   <div>
                     <p className="text-sm text-ink/50">
-                      {assetTypeLabel(selectedAsset.asset_type)} · {selectedAsset.trading_rule_label}
+                      {assetTypeLabel(selectedAsset.asset_type)} ·{" "}
+                      {selectedAsset.trading_rule_label}
                     </p>
                     <h2 className="mt-2 text-3xl font-semibold text-ink">
                       {selectedAsset.name}
-                      <span className="ml-2 text-lg font-normal text-ink/45">{selectedAsset.code}</span>
+                      <span className="ml-2 text-lg font-normal text-ink/45">
+                        {selectedAsset.code}
+                      </span>
                     </h2>
-                    <p className="mt-2 text-sm leading-6 text-ink/65">{selectedAsset.investment_direction}</p>
+                    <p className="mt-2 text-sm leading-6 text-ink/65">
+                      {selectedAsset.investment_direction}
+                    </p>
                     {selectedTracked.length ? (
-                      <p className="mt-2 text-sm text-emerald-700">你正在追踪这只资产的 {selectedTracked.length} 笔买入。</p>
+                      <p className="mt-2 text-sm text-emerald-700">
+                        你正在追踪这只资产的 {selectedTracked.length} 笔买入。
+                      </p>
                     ) : null}
                     {isSelectedDetailPending ? (
                       <p className="mt-2 inline-flex rounded-full bg-blush px-2.5 py-1 text-xs font-semibold text-ink/60 transition-opacity duration-150">
@@ -5086,7 +6660,9 @@ function ShortTermClient() {
                     <span className="rounded-full bg-ink px-4 py-2 text-sm font-semibold text-white">
                       {assetScoreSummaryText(selectedAsset)}
                     </span>
-                    {selectedAsset.asset_type === "etf" && selectedAsset.opportunity_score !== null && selectedAsset.opportunity_score !== undefined ? (
+                    {selectedAsset.asset_type === "etf" &&
+                    selectedAsset.opportunity_score !== null &&
+                    selectedAsset.opportunity_score !== undefined ? (
                       <span className="rounded-full bg-accent px-4 py-2 text-sm font-semibold text-white">
                         {opportunityScoreText(selectedAsset)}
                       </span>
@@ -5094,11 +6670,16 @@ function ShortTermClient() {
                     <span className="rounded-full bg-paper px-4 py-2 text-sm font-semibold text-ink/70">
                       {scoreVersionText(selectedAsset)}
                     </span>
-                    <span className={`rounded-full px-4 py-2 text-sm font-semibold ${conclusionTone(selectedAsset.conclusion)}`}>
+                    <span
+                      className={`rounded-full px-4 py-2 text-sm font-semibold ${conclusionTone(selectedAsset.conclusion)}`}
+                    >
                       买入观察：{selectedAsset.conclusion}
                     </span>
-                    <span className={`rounded-full px-4 py-2 text-sm font-semibold ${entryTimingTone(selectedEntryTiming.label)}`}>
-                      {assetType === "etf" ? "盘中买点" : "今日买点"}：{selectedEntryTiming.label}
+                    <span
+                      className={`rounded-full px-4 py-2 text-sm font-semibold ${entryTimingTone(selectedEntryTiming.label)}`}
+                    >
+                      {assetType === "etf" ? "盘中买点" : "今日买点"}：
+                      {selectedEntryTiming.label}
                     </span>
                   </div>
                 </div>
@@ -5118,16 +6699,25 @@ function ShortTermClient() {
                 <div ref={summarySectionRef} className="scroll-mt-28">
                   <div className="mt-5 grid gap-3 md:grid-cols-[1fr_0.82fr]">
                     <div className="rounded-[10px] bg-paper p-4">
-                      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">当前结论</p>
+                      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">
+                        当前结论
+                      </p>
                       <p className="mt-2 text-lg font-semibold text-ink">
-                        {selectedAsset.conclusion} · {assetScoreSummaryText(selectedAsset)}
+                        {selectedAsset.conclusion} ·{" "}
+                        {assetScoreSummaryText(selectedAsset)}
                       </p>
                       <p className="mt-2 text-sm leading-7 text-ink/65">
-                        {rationaleText(selectedAsset, "key_reason", "按近期趋势、回撤、波动、成交额和数据质量综合生成。")}
+                        {rationaleText(
+                          selectedAsset,
+                          "key_reason",
+                          "按近期趋势、回撤、波动、成交额和数据质量综合生成。"
+                        )}
                       </p>
                     </div>
                     <div className="rounded-[10px] bg-ink p-4 text-white">
-                      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-white/50">买点口径</p>
+                      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-white/50">
+                        买点口径
+                      </p>
                       <p className="mt-2 text-sm leading-7 text-white/75">
                         {assetType === "etf"
                           ? `短线观察 = 值得看；盘中买点以实时行情为准，日线买点只做参考。${selectedEntryTiming.reason}`
@@ -5138,10 +6728,14 @@ function ShortTermClient() {
 
                   {selectedAsset.asset_type === "etf" ? (
                     <div className="mt-3 rounded-[10px] border border-accent/20 bg-white p-4">
-                      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">研究榜与行动资格</p>
+                      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">
+                        研究榜与行动资格
+                      </p>
                       <p className="mt-2 text-sm leading-6 text-ink/65">
-                        研究榜 #{selectedAsset.research_rank ?? "-"} · {formatOptionalScore(selectedAsset.research_score)} 分
-                        {"；"}{historyTierText(selectedAsset.history_confidence_tier)}
+                        研究榜 #{selectedAsset.research_rank ?? "-"} ·{" "}
+                        {formatOptionalScore(selectedAsset.research_score)} 分
+                        {"；"}
+                        {historyTierText(selectedAsset.history_confidence_tier)}
                       </p>
                       <p className="mt-1 text-sm leading-6 text-ink/65">
                         {actionableStateText(
@@ -5149,37 +6743,79 @@ function ShortTermClient() {
                           shortAssetData?.snapshot?.snapshot_state
                         )}
                       </p>
-                      <p className={`mt-1 text-sm leading-6 ${selectedAsset.observation_only ? "text-amber-700" : "text-ink/65"}`}>
+                      <p
+                        className={`mt-1 text-sm leading-6 ${selectedAsset.observation_only ? "text-amber-700" : "text-ink/65"}`}
+                      >
                         {researchQualityStateText(selectedAsset)}
                       </p>
                       {etfAssetStateMessages(selectedAsset).map((message) => (
-                        <p key={message.key} className="mt-1 text-sm leading-6 text-ink/65">
+                        <p
+                          key={message.key}
+                          className="mt-1 text-sm leading-6 text-ink/65"
+                        >
                           {message.text}
                         </p>
                       ))}
                       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                        <p className="mt-4 text-xs font-semibold uppercase tracking-[0.18em] text-accent">主题/板块辅助</p>
+                        <p className="mt-4 text-xs font-semibold uppercase tracking-[0.18em] text-accent">
+                          主题/板块辅助
+                        </p>
                         <p className="text-sm font-semibold text-ink">
                           {opportunityStatusText(selectedAsset)}
                         </p>
                       </div>
-                      <p className="mt-1 text-xs text-ink/50">{opportunityVersionText(selectedAsset)}</p>
-                      <p className="mt-1 text-xs text-ink/50">{factorProfileText(selectedAsset)}</p>
-                      <p className="mt-1 text-xs text-ink/50">{activeRiskGateText(selectedAsset)}</p>
+                      <p className="mt-1 text-xs text-ink/50">
+                        {opportunityVersionText(selectedAsset)}
+                      </p>
+                      <p className="mt-1 text-xs text-ink/50">
+                        {factorProfileText(selectedAsset)}
+                      </p>
+                      <p className="mt-1 text-xs text-ink/50">
+                        {activeRiskGateText(selectedAsset)}
+                      </p>
                       <p className="mt-2 text-sm leading-6 text-ink/65">
-                        板块趋势：{selectedAsset.sector_trend_summary || sectorTrendText(selectedAsset)}
+                        板块趋势：
+                        {selectedAsset.sector_trend_summary ||
+                          sectorTrendText(selectedAsset)}
                       </p>
                       <div className="mt-3 grid gap-2 sm:grid-cols-3">
-                        <StatPill label="技术分" value={formatOptionalScore(selectedAsset.technical_score)} tone="bg-paper text-ink" />
-                        <StatPill label="因子综合" value={formatOptionalScore(selectedAsset.factor_profile_score)} tone="bg-paper text-ink" />
-                        <StatPill label="板块趋势" value={formatOptionalScore(selectedAsset.sector_trend_score)} tone="bg-paper text-ink" />
+                        <StatPill
+                          label="技术分"
+                          value={formatOptionalScore(
+                            selectedAsset.technical_score
+                          )}
+                          tone="bg-paper text-ink"
+                        />
+                        <StatPill
+                          label="因子综合"
+                          value={formatOptionalScore(
+                            selectedAsset.factor_profile_score
+                          )}
+                          tone="bg-paper text-ink"
+                        />
+                        <StatPill
+                          label="板块趋势"
+                          value={formatOptionalScore(
+                            selectedAsset.sector_trend_score
+                          )}
+                          tone="bg-paper text-ink"
+                        />
                       </div>
                       {factorGroupHighlights(selectedAsset).length ? (
                         <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                           {factorGroupHighlights(selectedAsset).map((item) => (
-                            <div key={item.key} className="rounded-[8px] border border-ink/10 bg-paper px-3 py-2">
-                              <p className="text-xs text-ink/45">{item.label}</p>
-                              <p className={`mt-1 text-sm font-semibold ${item.muted ? "text-ink/45" : "text-ink"}`}>{item.value}</p>
+                            <div
+                              key={item.key}
+                              className="rounded-[8px] border border-ink/10 bg-paper px-3 py-2"
+                            >
+                              <p className="text-xs text-ink/45">
+                                {item.label}
+                              </p>
+                              <p
+                                className={`mt-1 text-sm font-semibold ${item.muted ? "text-ink/45" : "text-ink"}`}
+                              >
+                                {item.value}
+                              </p>
                             </div>
                           ))}
                         </div>
@@ -5195,13 +6831,20 @@ function ShortTermClient() {
 
                   <div className="mt-3 rounded-[10px] border border-ink/10 bg-white p-4">
                     <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-                      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">评分拆解</p>
+                      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">
+                        评分拆解
+                      </p>
                     </div>
                     <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
                       {scoreDimensionLabels(selectedAsset).map((item) => (
-                        <div key={item.key} className="rounded-[8px] border border-ink/10 bg-paper px-3 py-2">
+                        <div
+                          key={item.key}
+                          className="rounded-[8px] border border-ink/10 bg-paper px-3 py-2"
+                        >
                           <p className="text-xs text-ink/45">{item.label}</p>
-                          <p className="mt-1 text-base font-semibold text-ink">{scoreDimensionValue(selectedAsset, item.key)}</p>
+                          <p className="mt-1 text-base font-semibold text-ink">
+                            {scoreDimensionValue(selectedAsset, item.key)}
+                          </p>
                         </div>
                       ))}
                     </div>
@@ -5210,10 +6853,15 @@ function ShortTermClient() {
                   {renderAssetStatusSummary()}
                 </div>
 
-                <div ref={trackingSectionRef} className="mt-5 scroll-mt-28 rounded-[10px] border border-ink/10 bg-white p-4">
+                <div
+                  ref={trackingSectionRef}
+                  className="mt-5 scroll-mt-28 rounded-[10px] border border-ink/10 bg-white p-4"
+                >
                   <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                     <div>
-                      <p className="text-sm font-semibold text-ink">我已买入，开始追踪</p>
+                      <p className="text-sm font-semibold text-ink">
+                        我已买入，开始追踪
+                      </p>
                     </div>
                     <button
                       className="rounded-[6px] bg-accent px-4 py-2.5 text-sm font-medium text-white transition hover:bg-accent/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
@@ -5230,7 +6878,9 @@ function ShortTermClient() {
                           className="mt-2 w-full rounded-[6px] border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/15"
                           inputMode="decimal"
                           value={trackingAmount}
-                          onChange={(event) => setTrackingAmount(event.target.value)}
+                          onChange={(event) =>
+                            setTrackingAmount(event.target.value)
+                          }
                         />
                       </label>
                       <label className="text-sm text-ink/65">
@@ -5239,7 +6889,9 @@ function ShortTermClient() {
                           className="mt-2 w-full rounded-[6px] border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/15"
                           type="date"
                           value={trackingDate}
-                          onChange={(event) => setTrackingDate(event.target.value)}
+                          onChange={(event) =>
+                            setTrackingDate(event.target.value)
+                          }
                         />
                       </label>
                       <label className="text-sm text-ink/65">
@@ -5247,54 +6899,110 @@ function ShortTermClient() {
                         <select
                           className="mt-2 w-full rounded-[6px] border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/15"
                           value={trackingOrderTime}
-                          onChange={(event) => setTrackingOrderTime(event.target.value as OrderTimeBucket)}
+                          onChange={(event) =>
+                            setTrackingOrderTime(
+                              event.target.value as OrderTimeBucket
+                            )
+                          }
                         >
                           <option value="before_15">15:00 前</option>
                           <option value="after_15">15:00 后</option>
                           <option value="unknown">不确定，按旧方式估算</option>
                         </select>
                       </label>
+                      {assetType === "etf" ? (
+                        <label className="text-sm text-ink/65 md:col-span-2 xl:col-span-2">
+                          邮件提醒规则
+                          <select
+                            className="mt-2 w-full rounded-[6px] border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/15"
+                            value={trackingAlertPolicy}
+                            onChange={(event) =>
+                              setTrackingAlertPolicy(
+                                event.target.value as TrackingAlertPolicyId
+                              )
+                            }
+                          >
+                            <option value="standard_dynamic_v2">
+                              默认动态止盈止损（默认）
+                            </option>
+                            <option value="late_day_turnaround_t1_v1">
+                              尾盘转强 T+1
+                            </option>
+                            <option value="leader_tactics_exit_v1">
+                              龙头战法（仅卖出提醒）
+                            </option>
+                          </select>
+                          <span className="mt-2 block text-xs leading-5 text-ink/50">
+                            {trackingAlertPolicyDescription(
+                              trackingAlertPolicy
+                            )}
+                          </span>
+                        </label>
+                      ) : null}
                       <label className="text-sm text-ink/65">
-                        {assetType === "etf" ? "买入价格日（可选）" : "确认净值日（可选）"}
+                        {assetType === "etf"
+                          ? "买入价格日（可选）"
+                          : "确认净值日（可选）"}
                         <input
                           className="mt-2 w-full rounded-[6px] border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/15"
                           type="date"
                           value={trackingConfirmedNavDate}
-                          onChange={(event) => setTrackingConfirmedNavDate(event.target.value)}
+                          onChange={(event) =>
+                            setTrackingConfirmedNavDate(event.target.value)
+                          }
                         />
                       </label>
                       <label className="text-sm text-ink/65">
-                        {assetType === "etf" ? "实际成交价（可选）" : "支付宝确认净值（可选）"}
+                        {assetType === "etf"
+                          ? "实际成交价（可选）"
+                          : "支付宝确认净值（可选）"}
                         <input
                           className="mt-2 w-full rounded-[6px] border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/15"
                           inputMode="decimal"
-                          placeholder={assetType === "etf" ? "例如：1.238" : "例如：7.3130"}
+                          placeholder={
+                            assetType === "etf" ? "例如：1.238" : "例如：7.3130"
+                          }
                           value={trackingConfirmedNav}
-                          onChange={(event) => setTrackingConfirmedNav(event.target.value)}
+                          onChange={(event) =>
+                            setTrackingConfirmedNav(event.target.value)
+                          }
                         />
                       </label>
                       <label className="text-sm text-ink/65">
-                        {assetType === "etf" ? "实际成交份额（可选）" : "支付宝确认份额（可选）"}
+                        {assetType === "etf"
+                          ? "实际成交份额（可选）"
+                          : "支付宝确认份额（可选）"}
                         <input
                           className="mt-2 w-full rounded-[6px] border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/15"
                           inputMode="decimal"
                           placeholder="确认份额最准确"
                           value={trackingConfirmedShares}
-                          onChange={(event) => setTrackingConfirmedShares(event.target.value)}
+                          onChange={(event) =>
+                            setTrackingConfirmedShares(event.target.value)
+                          }
                         />
                       </label>
                       <label className="text-sm text-ink/65">
                         备注
                         <input
                           className="mt-2 w-full rounded-[6px] border border-ink/10 bg-paper px-4 py-3 text-ink outline-none focus:border-accent focus:ring-2 focus:ring-accent/15"
-                          placeholder={assetType === "etf" ? "例如：证券账户手动买入" : "例如：支付宝手动买入"}
+                          placeholder={
+                            assetType === "etf"
+                              ? "例如：证券账户手动买入"
+                              : "例如：支付宝手动买入"
+                          }
                           value={trackingNote}
-                          onChange={(event) => setTrackingNote(event.target.value)}
+                          onChange={(event) =>
+                            setTrackingNote(event.target.value)
+                          }
                         />
                       </label>
                       <button
                         className="self-end rounded-[6px] bg-ink px-4 py-2.5 text-sm font-medium text-white transition hover:bg-ink/90 disabled:opacity-60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-                        disabled={createTracking.isPending || Number(trackingAmount) <= 0}
+                        disabled={
+                          createTracking.isPending ||
+                          Number(trackingAmount) <= 0
+                        }
                         onClick={() => createTracking.mutate()}
                       >
                         {createTracking.isPending ? "保存中..." : "保存追踪"}
@@ -5312,9 +7020,13 @@ function ShortTermClient() {
                   <div className="mt-5 rounded-[10px] border border-ink/10 bg-white p-4">
                     <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                       <div>
-                        <p className="text-sm font-semibold text-ink">追踪收益保护图</p>
+                        <p className="text-sm font-semibold text-ink">
+                          追踪收益保护图
+                        </p>
                       </div>
-                      <span className={`w-fit rounded-full px-3 py-1 text-xs font-semibold ${exitSignalTone(primaryTracked.exit_signal.level)}`}>
+                      <span
+                        className={`w-fit rounded-full px-3 py-1 text-xs font-semibold ${exitSignalTone(primaryTracked.exit_signal.level)}`}
+                      >
                         {primaryTracked.exit_signal.label}
                       </span>
                     </div>
@@ -5322,11 +7034,40 @@ function ShortTermClient() {
                       {trackingPoints.length ? (
                         <ResponsiveContainer width="100%" height="100%">
                           <LineChart data={trackingPoints}>
-                            <CartesianGrid strokeDasharray="3 3" stroke="#e6e6e6" />
-                            <XAxis dataKey="label" tickLine={false} axisLine={false} minTickGap={28} />
-                            <YAxis tickFormatter={(value) => `${Number(value).toFixed(0)}%`} tickLine={false} axisLine={false} width={56} />
-                            <Tooltip formatter={(value) => (value === null ? "暂无" : `${Number(value).toFixed(2)}%`)} />
-                            <Line type="monotone" dataKey="pnl" name="估算收益" stroke="#107d32" strokeWidth={2} dot={false} connectNulls />
+                            <CartesianGrid
+                              strokeDasharray="3 3"
+                              stroke="#e6e6e6"
+                            />
+                            <XAxis
+                              dataKey="label"
+                              tickLine={false}
+                              axisLine={false}
+                              minTickGap={28}
+                            />
+                            <YAxis
+                              tickFormatter={(value) =>
+                                `${Number(value).toFixed(0)}%`
+                              }
+                              tickLine={false}
+                              axisLine={false}
+                              width={56}
+                            />
+                            <Tooltip
+                              formatter={(value) =>
+                                value === null
+                                  ? "暂无"
+                                  : `${Number(value).toFixed(2)}%`
+                              }
+                            />
+                            <Line
+                              type="monotone"
+                              dataKey="pnl"
+                              name="估算收益"
+                              stroke="#107d32"
+                              strokeWidth={2}
+                              dot={false}
+                              connectNulls
+                            />
                             <Line
                               type="monotone"
                               dataKey="stop"
@@ -5346,51 +7087,123 @@ function ShortTermClient() {
                       )}
                     </div>
                     <div className="mt-3 grid gap-2 text-sm text-ink/65 md:grid-cols-3">
-                      <span>确认点：{trackingEntry ? `${trackingEntry.label} / ${percentOrWaiting(trackingEntry.pnl)}` : "等待数据"}</span>
-                      <span>最高点：{trackingHigh ? `${trackingHigh.label} / ${percentOrWaiting(trackingHigh.pnl)}` : "等待数据"}</span>
-                      <span>当前点：{trackingCurrent ? `${trackingCurrent.label} / ${percentOrWaiting(trackingCurrent.pnl)}` : "等待数据"}</span>
+                      <span>
+                        确认点：
+                        {trackingEntry
+                          ? `${trackingEntry.label} / ${percentOrWaiting(trackingEntry.pnl)}`
+                          : "等待数据"}
+                      </span>
+                      <span>
+                        最高点：
+                        {trackingHigh
+                          ? `${trackingHigh.label} / ${percentOrWaiting(trackingHigh.pnl)}`
+                          : "等待数据"}
+                      </span>
+                      <span>
+                        当前点：
+                        {trackingCurrent
+                          ? `${trackingCurrent.label} / ${percentOrWaiting(trackingCurrent.pnl)}`
+                          : "等待数据"}
+                      </span>
                     </div>
                     <p className="mt-2 text-xs leading-5 text-ink/50">
                       虚线只从止盈启动后出现，并按当日可见信息逐日抬高；它是风险规则轨迹，不代表已经成交。
                     </p>
                     <p className="mt-3 rounded-[8px] bg-paper px-4 py-3 text-sm leading-6 text-ink/65">
-                      {primaryTracked.exit_signal.reason ?? "暂无持仓处理原因，继续观察公开数据。"}
+                      {primaryTracked.exit_signal.reason ??
+                        "暂无持仓处理原因，继续观察公开数据。"}
                     </p>
                   </div>
                 ) : null}
 
-                <div className={`mt-5 grid gap-3 ${assetType === "etf" ? "md:grid-cols-3 xl:grid-cols-6" : "md:grid-cols-5"}`}>
-                  <StatPill label={mode.latestLabel} value={formatDate(selectedAsset.latest_date)} tone="bg-white text-ink" />
-                  <StatPill label={mode.priceLabel} value={selectedAsset.latest_value === null ? "暂无" : selectedAsset.latest_value.toFixed(4)} />
-                  {assetType === "etf" ? (
-                    <StatPill label="盘中价" value={selectedLiveQuote?.latest_price === undefined ? "暂无" : selectedLiveQuote.latest_price.toFixed(4)} tone="bg-white text-ink" />
-                  ) : null}
-                  {assetType === "etf" ? (
-                    <StatPill label="盘中涨跌" value={selectedIntradayChange.value} tone="bg-white text-ink" />
-                  ) : null}
-                  {assetType === "etf" ? (
-                    <StatPill label="行情时间" value={selectedIntradayChange.time} tone="bg-white text-ink" />
-                  ) : null}
-                  <StatPill label="可用样本" value={`${selectedAsset.usable_days} 天`} tone="bg-accentSoft text-ink" />
-                  <StatPill label={assetType === "etf" ? "盘中买点" : "今日买点"} value={selectedEntryTiming.label} tone="bg-white text-ink" />
+                <div
+                  className={`mt-5 grid gap-3 ${assetType === "etf" ? "md:grid-cols-3 xl:grid-cols-6" : "md:grid-cols-5"}`}
+                >
+                  <StatPill
+                    label={mode.latestLabel}
+                    value={formatDate(selectedAsset.latest_date)}
+                    tone="bg-white text-ink"
+                  />
+                  <StatPill
+                    label={mode.priceLabel}
+                    value={
+                      selectedAsset.latest_value === null
+                        ? "暂无"
+                        : selectedAsset.latest_value.toFixed(4)
+                    }
+                  />
                   {assetType === "etf" ? (
                     <StatPill
-                      label="20 日成交额"
-                      value={formatTurnover(numericMetric(selectedAsset.metrics, "average_turnover_20d"))}
+                      label="盘中价"
+                      value={
+                        selectedLiveQuote?.latest_price === undefined
+                          ? "暂无"
+                          : selectedLiveQuote.latest_price.toFixed(4)
+                      }
                       tone="bg-white text-ink"
                     />
                   ) : null}
-                  <StatPill label="60 日回撤" value={percentMetric(selectedAsset.metrics, "max_drawdown_60d")} tone="bg-white text-ink" />
+                  {assetType === "etf" ? (
+                    <StatPill
+                      label="盘中涨跌"
+                      value={selectedIntradayChange.value}
+                      tone="bg-white text-ink"
+                    />
+                  ) : null}
+                  {assetType === "etf" ? (
+                    <StatPill
+                      label="行情时间"
+                      value={selectedIntradayChange.time}
+                      tone="bg-white text-ink"
+                    />
+                  ) : null}
+                  <StatPill
+                    label="可用样本"
+                    value={`${selectedAsset.usable_days} 天`}
+                    tone="bg-accentSoft text-ink"
+                  />
+                  <StatPill
+                    label={assetType === "etf" ? "盘中买点" : "今日买点"}
+                    value={selectedEntryTiming.label}
+                    tone="bg-white text-ink"
+                  />
+                  {assetType === "etf" ? (
+                    <StatPill
+                      label="20 日成交额"
+                      value={formatTurnover(
+                        numericMetric(
+                          selectedAsset.metrics,
+                          "average_turnover_20d"
+                        )
+                      )}
+                      tone="bg-white text-ink"
+                    />
+                  ) : null}
+                  <StatPill
+                    label="60 日回撤"
+                    value={percentMetric(
+                      selectedAsset.metrics,
+                      "max_drawdown_60d"
+                    )}
+                    tone="bg-white text-ink"
+                  />
                 </div>
 
                 {assetType === "etf" ? (
-                  <p className="mt-4 rounded-[8px] bg-paper px-4 py-3 text-sm leading-6 text-ink/65">{quoteReliabilityLine(selectedLiveQuote)}</p>
+                  <p className="mt-4 rounded-[8px] bg-paper px-4 py-3 text-sm leading-6 text-ink/65">
+                    {quoteReliabilityLine(selectedLiveQuote)}
+                  </p>
                 ) : null}
 
-                <div ref={advisorSectionRef} className="mt-6 scroll-mt-28 rounded-[10px] border border-ink/10 bg-white p-5">
+                <div
+                  ref={advisorSectionRef}
+                  className="mt-6 scroll-mt-28 rounded-[10px] border border-ink/10 bg-white p-5"
+                >
                   <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                     <div>
-                      <p className="text-xs font-semibold uppercase tracking-[0.22em] text-accent">今日研究建议</p>
+                      <p className="text-xs font-semibold uppercase tracking-[0.22em] text-accent">
+                        今日研究建议
+                      </p>
                       <h3 className="mt-2 text-xl font-semibold text-ink">
                         {advisorReport
                           ? advisorReport.plain_summary
@@ -5400,11 +7213,15 @@ function ShortTermClient() {
                       </h3>
                       {advisorReport ? (
                         <p className="mt-2 text-sm leading-6 text-ink/60">
-                          {advisorSourceLabel(advisorReport.source)} · {advisorReport.model_name} · {formatDate(advisorReport.generated_at)}
+                          {advisorSourceLabel(advisorReport.source)} ·{" "}
+                          {advisorReport.model_name} ·{" "}
+                          {formatDate(advisorReport.generated_at)}
                         </p>
                       ) : null}
                     </div>
-                    <span className={`w-fit rounded-full px-4 py-2 text-sm font-semibold ${advisorTone(advisorReport?.action_label ?? "暂不考虑")}`}>
+                    <span
+                      className={`w-fit rounded-full px-4 py-2 text-sm font-semibold ${advisorTone(advisorReport?.action_label ?? "暂不考虑")}`}
+                    >
                       {advisorReport?.action_label ?? "暂无报告"}
                     </span>
                   </div>
@@ -5425,7 +7242,9 @@ function ShortTermClient() {
                             <li key={item}>{item}</li>
                           ))}
                         </ul>
-                        <p className="mt-3 text-sm leading-6 text-ink/65">{advisorReport.opposing_view}</p>
+                        <p className="mt-3 text-sm leading-6 text-ink/65">
+                          {advisorReport.opposing_view}
+                        </p>
                       </div>
                       <div className="rounded-[10px] bg-paper p-4">
                         <p className="font-semibold text-ink">接下来观察</p>
@@ -5437,29 +7256,59 @@ function ShortTermClient() {
                       </div>
                       <div className="rounded-[10px] bg-paper p-4">
                         <p className="font-semibold text-ink">持有和数据限制</p>
-                        <p className="mt-2 text-sm leading-6 text-ink/65">{advisorReport.holding_note}</p>
-                        <p className="mt-3 text-sm leading-6 text-ink/65">{advisorReport.data_limitations}</p>
+                        <p className="mt-2 text-sm leading-6 text-ink/65">
+                          {advisorReport.holding_note}
+                        </p>
+                        <p className="mt-3 text-sm leading-6 text-ink/65">
+                          {advisorReport.data_limitations}
+                        </p>
                       </div>
                     </div>
                   ) : null}
                 </div>
 
-                <div ref={chartsSectionRef} className="mt-6 grid scroll-mt-28 gap-5 xl:grid-cols-2">
+                <div
+                  ref={chartsSectionRef}
+                  className="mt-6 grid scroll-mt-28 gap-5 xl:grid-cols-2"
+                >
                   <div className="rounded-[10px] bg-paper p-4">
                     <p className="font-semibold text-ink">走势</p>
                     <div className="mt-4 h-72">
                       {detailPoints.length ? (
                         <ResponsiveContainer width="100%" height="100%">
                           <AreaChart data={detailPoints}>
-                            <CartesianGrid strokeDasharray="3 3" stroke="#e6e6e6" />
-                            <XAxis dataKey="label" tickLine={false} axisLine={false} minTickGap={28} />
-                            <YAxis tickLine={false} axisLine={false} width={56} domain={["dataMin", "dataMax"]} />
-                            <Tooltip formatter={(value) => Number(value).toFixed(4)} />
-                            <Area type="monotone" dataKey="value" name={assetType === "etf" ? "收盘价" : "净值"} stroke="#107d32" fill="#dce9df" />
+                            <CartesianGrid
+                              strokeDasharray="3 3"
+                              stroke="#e6e6e6"
+                            />
+                            <XAxis
+                              dataKey="label"
+                              tickLine={false}
+                              axisLine={false}
+                              minTickGap={28}
+                            />
+                            <YAxis
+                              tickLine={false}
+                              axisLine={false}
+                              width={56}
+                              domain={["dataMin", "dataMax"]}
+                            />
+                            <Tooltip
+                              formatter={(value) => Number(value).toFixed(4)}
+                            />
+                            <Area
+                              type="monotone"
+                              dataKey="value"
+                              name={assetType === "etf" ? "收盘价" : "净值"}
+                              stroke="#107d32"
+                              fill="#dce9df"
+                            />
                           </AreaChart>
                         </ResponsiveContainer>
                       ) : isSelectedDetailPending ? (
-                        <DetailLoadingPlaceholder text={`正在更新 ${selectedAsset.code} 走势图...`} />
+                        <DetailLoadingPlaceholder
+                          text={`正在更新 ${selectedAsset.code} 走势图...`}
+                        />
                       ) : (
                         <div className="flex h-full items-center justify-center rounded-[10px] bg-white text-sm text-ink/50">
                           暂无走势图。先准备数据后再查看。
@@ -5474,15 +7323,42 @@ function ShortTermClient() {
                       {detailPoints.length ? (
                         <ResponsiveContainer width="100%" height="100%">
                           <AreaChart data={detailPoints}>
-                            <CartesianGrid strokeDasharray="3 3" stroke="#e6e6e6" />
-                            <XAxis dataKey="label" tickLine={false} axisLine={false} minTickGap={28} />
-                            <YAxis tickFormatter={(value) => `${Number(value).toFixed(0)}%`} tickLine={false} axisLine={false} width={56} />
-                            <Tooltip formatter={(value) => `${Number(value).toFixed(2)}%`} />
-                            <Area type="monotone" dataKey="drawdown" name="回落幅度" stroke="#006bff" fill="#f1d8ca" />
+                            <CartesianGrid
+                              strokeDasharray="3 3"
+                              stroke="#e6e6e6"
+                            />
+                            <XAxis
+                              dataKey="label"
+                              tickLine={false}
+                              axisLine={false}
+                              minTickGap={28}
+                            />
+                            <YAxis
+                              tickFormatter={(value) =>
+                                `${Number(value).toFixed(0)}%`
+                              }
+                              tickLine={false}
+                              axisLine={false}
+                              width={56}
+                            />
+                            <Tooltip
+                              formatter={(value) =>
+                                `${Number(value).toFixed(2)}%`
+                              }
+                            />
+                            <Area
+                              type="monotone"
+                              dataKey="drawdown"
+                              name="回落幅度"
+                              stroke="#006bff"
+                              fill="#f1d8ca"
+                            />
                           </AreaChart>
                         </ResponsiveContainer>
                       ) : isSelectedDetailPending ? (
-                        <DetailLoadingPlaceholder text={`正在更新 ${selectedAsset.code} 回撤图...`} />
+                        <DetailLoadingPlaceholder
+                          text={`正在更新 ${selectedAsset.code} 回撤图...`}
+                        />
                       ) : (
                         <div className="flex h-full items-center justify-center rounded-[10px] bg-white text-sm text-ink/50">
                           暂无回撤图。
@@ -5497,10 +7373,32 @@ function ShortTermClient() {
                       <ResponsiveContainer width="100%" height="100%">
                         <BarChart data={windowPoints}>
                           <CartesianGrid stroke="#e6e6e6" vertical={false} />
-                          <XAxis dataKey="label" tickLine={false} axisLine={false} />
-                          <YAxis tickFormatter={(value) => `${Number(value).toFixed(0)}%`} tickLine={false} axisLine={false} width={56} />
-                          <Tooltip formatter={(value) => (value === null ? "暂无" : `${Number(value).toFixed(2)}%`)} />
-                          <Bar dataKey="percent" name="涨跌幅" fill="#107d32" radius={[8, 8, 0, 0]} />
+                          <XAxis
+                            dataKey="label"
+                            tickLine={false}
+                            axisLine={false}
+                          />
+                          <YAxis
+                            tickFormatter={(value) =>
+                              `${Number(value).toFixed(0)}%`
+                            }
+                            tickLine={false}
+                            axisLine={false}
+                            width={56}
+                          />
+                          <Tooltip
+                            formatter={(value) =>
+                              value === null
+                                ? "暂无"
+                                : `${Number(value).toFixed(2)}%`
+                            }
+                          />
+                          <Bar
+                            dataKey="percent"
+                            name="涨跌幅"
+                            fill="#107d32"
+                            radius={[8, 8, 0, 0]}
+                          />
                         </BarChart>
                       </ResponsiveContainer>
                     </div>
@@ -5510,18 +7408,48 @@ function ShortTermClient() {
                     <div className="rounded-[10px] bg-paper p-4">
                       <p className="font-semibold text-ink">成交额</p>
                       <div className="mt-4 h-64">
-                        {detailPoints.some((point) => point.turnover !== null) ? (
+                        {detailPoints.some(
+                          (point) => point.turnover !== null
+                        ) ? (
                           <ResponsiveContainer width="100%" height="100%">
                             <BarChart data={detailPoints}>
-                              <CartesianGrid stroke="#e6e6e6" vertical={false} />
-                              <XAxis dataKey="label" tickLine={false} axisLine={false} minTickGap={28} />
-                              <YAxis tickFormatter={(value) => `${Number(value).toFixed(1)}亿`} tickLine={false} axisLine={false} width={56} />
-                              <Tooltip formatter={(value) => (value === null ? "暂无" : `${Number(value).toFixed(2)} 亿元`)} />
-                              <Bar dataKey="turnover" name="成交额" fill="#e3b873" radius={[8, 8, 0, 0]} />
+                              <CartesianGrid
+                                stroke="#e6e6e6"
+                                vertical={false}
+                              />
+                              <XAxis
+                                dataKey="label"
+                                tickLine={false}
+                                axisLine={false}
+                                minTickGap={28}
+                              />
+                              <YAxis
+                                tickFormatter={(value) =>
+                                  `${Number(value).toFixed(1)}亿`
+                                }
+                                tickLine={false}
+                                axisLine={false}
+                                width={56}
+                              />
+                              <Tooltip
+                                formatter={(value) =>
+                                  value === null
+                                    ? "暂无"
+                                    : `${Number(value).toFixed(2)} 亿元`
+                                }
+                              />
+                              <Bar
+                                dataKey="turnover"
+                                name="成交额"
+                                fill="#e3b873"
+                                radius={[8, 8, 0, 0]}
+                              />
                             </BarChart>
                           </ResponsiveContainer>
                         ) : isSelectedDetailPending ? (
-                          <DetailLoadingPlaceholder text={`正在更新 ${selectedAsset.code} 成交额...`} />
+                          <DetailLoadingPlaceholder
+                            text={`正在更新 ${selectedAsset.code} 成交额...`}
+                          />
                         ) : (
                           <div className="flex h-full items-center justify-center rounded-[10px] bg-white text-sm text-ink/50">
                             暂无成交额数据。
@@ -5537,9 +7465,14 @@ function ShortTermClient() {
                       <div className="flex h-full flex-col justify-center rounded-[10px] bg-white p-5 text-sm leading-7 text-ink/60">
                         <p>{selectedAsset.sample_level}</p>
                         <p className="mt-2">
-                          风险标签：{selectedAsset.risk_flags.length ? selectedAsset.risk_flags.join("、") : "暂未触发主要风险标签"}
+                          风险标签：
+                          {selectedAsset.risk_flags.length
+                            ? selectedAsset.risk_flags.join("、")
+                            : "暂未触发主要风险标签"}
                         </p>
-                        <p className="mt-2">数据来源：{selectedAsset.source_note}</p>
+                        <p className="mt-2">
+                          数据来源：{selectedAsset.source_note}
+                        </p>
                       </div>
                     </div>
                   </div>
@@ -5562,22 +7495,35 @@ function ShortTermClient() {
                       正在更新 {selectedAsset.code} 的完整分析说明...
                     </div>
                   ) : null}
-                  {Object.entries(selectedDetailForCurrent?.explanation_sections ?? {}).map(([title, text]) => (
-                    <div key={title} className="rounded-[10px] border border-ink/10 bg-white p-4">
+                  {Object.entries(
+                    selectedDetailForCurrent?.explanation_sections ?? {}
+                  ).map(([title, text]) => (
+                    <div
+                      key={title}
+                      className="rounded-[10px] border border-ink/10 bg-white p-4"
+                    >
                       <p className="font-semibold text-ink">{title}</p>
-                      <p className="mt-2 text-sm leading-7 text-ink/65">{text}</p>
+                      <p className="mt-2 text-sm leading-7 text-ink/65">
+                        {text}
+                      </p>
                     </div>
                   ))}
                   <div className="rounded-[10px] border border-ink/10 bg-white p-4">
                     <p className="font-semibold text-ink">标签原因</p>
                     <p className="mt-2 text-sm leading-7 text-ink/65">
-                      {rationaleText(selectedAsset, "label_meaning", labelMeaning(selectedAsset.conclusion))}
+                      {rationaleText(
+                        selectedAsset,
+                        "label_meaning",
+                        labelMeaning(selectedAsset.conclusion)
+                      )}
                     </p>
                   </div>
                   <div className="rounded-[10px] border border-ink/10 bg-white p-4">
                     <p className="font-semibold text-ink">风险标签</p>
                     <p className="mt-2 text-sm leading-7 text-ink/65">
-                      {selectedAsset.risk_flags.length ? selectedAsset.risk_flags.join("、") : "暂未触发主要风险标签。"}
+                      {selectedAsset.risk_flags.length
+                        ? selectedAsset.risk_flags.join("、")
+                        : "暂未触发主要风险标签。"}
                     </p>
                   </div>
                 </div>
@@ -5588,328 +7534,462 @@ function ShortTermClient() {
       </div>
 
       <div className="hidden lg:block">
-
-
-      {assetType === "etf" ? (
-        <Panel className="rounded-[12px] bg-white/70">
-          <details>
-            <summary className="cursor-pointer text-lg font-semibold text-ink">
-              ETF 资金配置参考
-              <span className="ml-3 rounded-full bg-accentSoft/60 px-3 py-1 text-xs text-ink">
-                权重合计 {observationPortfolio.data ? formatPercent((observationPortfolio.data.weight_sum ?? 0) * 100) : "暂无"}
-              </span>
-              <span className="ml-2 rounded-full bg-white px-3 py-1 text-xs text-ink/60">
-                {observationPortfolio.data?.portfolio_mode === "defensive"
-                  ? "防守优先"
-                  : observationPortfolio.data?.portfolio_mode === "cash_wait"
-                    ? "等待现金"
-                    : observationPortfolio.data?.portfolio_mode === "neutral"
-                      ? "混合配置"
-                      : "进攻配置"}
-              </span>
-            </summary>
-            <p className="mt-3 rounded-[8px] bg-paper px-4 py-3 text-xs leading-5 text-ink/55">
-              {observationPortfolio.data?.methodology ?? "按买点、风险和数据可靠性筛选，再做分散约束。"}
-              {observationPortfolio.data
-                ? ` 单只 ETF 上限 ${formatPercent((observationPortfolio.data.single_weight_cap ?? 0) * 100)}，ETF 资金最高投入 ${formatPercent((observationPortfolio.data.target_invested_weight ?? 1) * 100)}。`
-                : ""}
-            </p>
-            <div className="mt-3 rounded-[8px] border border-ink/10 bg-white px-4 py-3 text-xs leading-5 text-ink/60">
-              <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-                <p className="font-semibold text-ink">组合证据契约</p>
-                <span className="w-fit rounded-full bg-paper px-2.5 py-1 text-[11px] font-semibold text-ink/65">
-                  {observationPortfolio.data?.evidence_status ?? "等待验证"}
+        {assetType === "etf" ? (
+          <Panel className="rounded-[12px] bg-white/70">
+            <details>
+              <summary className="cursor-pointer text-lg font-semibold text-ink">
+                ETF 资金配置参考
+                <span className="ml-3 rounded-full bg-accentSoft/60 px-3 py-1 text-xs text-ink">
+                  权重合计{" "}
+                  {observationPortfolio.data
+                    ? formatPercent(
+                        (observationPortfolio.data.weight_sum ?? 0) * 100
+                      )
+                    : "暂无"}
                 </span>
-              </div>
-              <p className="mt-2">
-                {evidenceContractText(observationPortfolio.data?.evidence_status, observationPortfolio.data?.evidence_summary)}
+                <span className="ml-2 rounded-full bg-white px-3 py-1 text-xs text-ink/60">
+                  {observationPortfolio.data?.portfolio_mode === "defensive"
+                    ? "防守优先"
+                    : observationPortfolio.data?.portfolio_mode === "cash_wait"
+                      ? "等待现金"
+                      : observationPortfolio.data?.portfolio_mode === "neutral"
+                        ? "混合配置"
+                        : "进攻配置"}
+                </span>
+              </summary>
+              <p className="mt-3 rounded-[8px] bg-paper px-4 py-3 text-xs leading-5 text-ink/55">
+                {observationPortfolio.data?.methodology ??
+                  "按买点、风险和数据可靠性筛选，再做分散约束。"}
+                {observationPortfolio.data
+                  ? ` 单只 ETF 上限 ${formatPercent((observationPortfolio.data.single_weight_cap ?? 0) * 100)}，ETF 资金最高投入 ${formatPercent((observationPortfolio.data.target_invested_weight ?? 1) * 100)}。`
+                  : ""}
               </p>
-            </div>
-            <div className="mt-3 rounded-[10px] border border-ink/10 bg-white px-4 py-3">
-              <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                <div>
-                  <p className="text-sm font-semibold text-ink">优化组合对照</p>
+              <div className="mt-3 rounded-[8px] border border-ink/10 bg-white px-4 py-3 text-xs leading-5 text-ink/60">
+                <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                  <p className="font-semibold text-ink">组合证据契约</p>
+                  <span className="w-fit rounded-full bg-paper px-2.5 py-1 text-[11px] font-semibold text-ink/65">
+                    {observationPortfolio.data?.evidence_status ?? "等待验证"}
+                  </span>
                 </div>
-                <button
-                  type="button"
-                  className="w-fit rounded-[6px] border border-ink bg-ink px-3 py-2 text-xs font-semibold text-white transition hover:bg-ink/85 disabled:opacity-60"
-                  disabled={isResearchTaskPending}
-                  onClick={() => runEtfOptimizedAllocation.mutate()}
-                >
-                  {runEtfOptimizedAllocation.isPending ? "正在优化..." : "运行优化对照"}
-                </button>
+                <p className="mt-2">
+                  {evidenceContractText(
+                    observationPortfolio.data?.evidence_status,
+                    observationPortfolio.data?.evidence_summary
+                  )}
+                </p>
               </div>
-              {runEtfOptimizedAllocation.isError ? (
-                <p className="mt-3 rounded-[8px] border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
-                  {errorText(runEtfOptimizedAllocation.error)}
+              <div className="mt-3 rounded-[10px] border border-ink/10 bg-white px-4 py-3">
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                  <div>
+                    <p className="text-sm font-semibold text-ink">
+                      优化组合对照
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    className="w-fit rounded-[6px] border border-ink bg-ink px-3 py-2 text-xs font-semibold text-white transition hover:bg-ink/85 disabled:opacity-60"
+                    disabled={isResearchTaskPending}
+                    onClick={() => runEtfOptimizedAllocation.mutate()}
+                  >
+                    {runEtfOptimizedAllocation.isPending
+                      ? "正在优化..."
+                      : "运行优化对照"}
+                  </button>
+                </div>
+                {runEtfOptimizedAllocation.isError ? (
+                  <p className="mt-3 rounded-[8px] border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                    {errorText(runEtfOptimizedAllocation.error)}
+                  </p>
+                ) : null}
+                {optimizedAllocationData?.methods.length ? (
+                  <div className="mt-3 grid gap-3 lg:grid-cols-3">
+                    {optimizedAllocationData.methods.map((method) => (
+                      <div
+                        key={method.method}
+                        className="rounded-[8px] border border-border bg-paper/40 p-3"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <p className="text-sm font-semibold text-ink">
+                            {method.label}
+                          </p>
+                          <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-ink/55">
+                            {formatPercent(method.weight_sum * 100)}
+                          </span>
+                        </div>
+                        <p className="mt-2 text-xs leading-5 text-ink/55">
+                          {method.unavailable_reason ??
+                            (method.method === "black_litterman"
+                              ? "按市场先验、结构化标签 view、证据置信度和约束生成的 Black-Litterman 对照。"
+                              : "按历史波动、单只上限和主题集中度约束生成的数学权重对照。")}
+                        </p>
+                        {method.method === "black_litterman" ? (
+                          <div className="mt-3 grid gap-1 rounded-[8px] bg-white px-3 py-2 text-[11px] leading-5 text-ink/55">
+                            <p>
+                              先验来源：
+                              {String(
+                                method.summary.prior_source ?? "等待数据"
+                              )}
+                            </p>
+                            <p>
+                              结构化 view：
+                              {String(method.summary.view_count ?? 0)}{" "}
+                              个；平均置信度：
+                              {recordNumber(
+                                method.summary.confidence_summary,
+                                "avg"
+                              ) === null
+                                ? "暂无"
+                                : formatPercent(
+                                    (recordNumber(
+                                      method.summary.confidence_summary,
+                                      "avg"
+                                    ) ?? 0) * 100
+                                  )}
+                            </p>
+                            <p>
+                              约束：单只上限{" "}
+                              {formatPercent(
+                                Number(
+                                  method.summary.constraints
+                                    ?.single_weight_cap ?? 0.3
+                                ) * 100
+                              )}
+                              ； 主题上限{" "}
+                              {formatPercent(
+                                Number(
+                                  method.summary.constraints
+                                    ?.theme_exposure_cap ?? 0.6
+                                ) * 100
+                              )}
+                            </p>
+                            <p>
+                              排除资产：
+                              {String(method.summary.excluded_count ?? 0)}{" "}
+                              只；仅作研究对照，需要人工判断。
+                            </p>
+                          </div>
+                        ) : null}
+                        <div className="mt-3 space-y-2">
+                          {method.items.slice(0, 4).map((item) => (
+                            <div
+                              key={item.code}
+                              className="flex items-center justify-between gap-3 text-xs text-ink/60"
+                            >
+                              <span className="truncate">{item.name}</span>
+                              <span className="font-semibold text-ink">
+                                {formatPercent(item.target_weight * 100)}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-3 rounded-[8px] border border-dashed border-ink/20 bg-paper px-3 py-3 text-xs leading-5 text-ink/55">
+                    {optimizedAllocationData?.unavailable_reason ??
+                      "暂无优化组合对照。候选数量、历史数据或主题分散度不足时不会硬凑数学权重。"}
+                  </p>
+                )}
+              </div>
+              <div className="mt-4 grid gap-3 md:grid-cols-4">
+                <div className="rounded-[10px] border border-ink/10 bg-white px-4 py-3">
+                  <p className="text-xs text-ink/45">主配置</p>
+                  <p className="mt-1 text-lg font-semibold text-ink">
+                    {formatPercent(
+                      (observationPortfolio.data?.primary_weight ??
+                        observationPortfolio.data?.risk_exposure_weight ??
+                        0) * 100
+                    )}
+                  </p>
+                </div>
+                <div className="rounded-[10px] border border-ink/10 bg-white px-4 py-3">
+                  <p className="text-xs text-ink/45">小仓观察</p>
+                  <p className="mt-1 text-lg font-semibold text-ink">
+                    {formatPercent(
+                      (observationPortfolio.data?.satellite_weight ?? 0) * 100
+                    )}
+                  </p>
+                </div>
+                <div className="rounded-[10px] border border-ink/10 bg-white px-4 py-3">
+                  <p className="text-xs text-ink/45">防守仓位</p>
+                  <p className="mt-1 text-lg font-semibold text-ink">
+                    {formatPercent(
+                      (observationPortfolio.data?.defensive_weight ?? 0) * 100
+                    )}
+                  </p>
+                </div>
+                <div className="rounded-[10px] border border-ink/10 bg-white px-4 py-3">
+                  <p className="text-xs text-ink/45">等待资金</p>
+                  <p className="mt-1 text-lg font-semibold text-ink">
+                    {formatPercent(
+                      (observationPortfolio.data?.cash_weight ?? 0) * 100
+                    )}
+                  </p>
+                </div>
+              </div>
+              {observationPortfolio.data?.portfolio_mode === "defensive" ? (
+                <p className="mt-4 rounded-[10px] border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-800">
+                  当前市场不适合全仓进攻，优先使用防守 ETF 做资金配置参考。
                 </p>
               ) : null}
-              {optimizedAllocationData?.methods.length ? (
-                <div className="mt-3 grid gap-3 lg:grid-cols-3">
-                  {optimizedAllocationData.methods.map((method) => (
-                    <div key={method.method} className="rounded-[8px] border border-border bg-paper/40 p-3">
-                      <div className="flex items-start justify-between gap-3">
-                        <p className="text-sm font-semibold text-ink">{method.label}</p>
-                        <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-ink/55">
-                          {formatPercent(method.weight_sum * 100)}
-                        </span>
+              {(observationPortfolio.data?.cash_weight ?? 0) > 0 &&
+              observationPortfolio.data?.portfolio_mode !== "cash_wait" ? (
+                <p className="mt-4 rounded-[10px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                  {observationPortfolio.data?.cash_reason ??
+                    "合格 ETF 不足以用满资金，剩余资金等待，不硬凑标的。"}
+                </p>
+              ) : null}
+              {observationPortfolio.data?.portfolio_mode === "cash_wait" ? (
+                <p className="mt-4 rounded-[10px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                  {observationPortfolio.data.cash_reason ??
+                    observationPortfolio.data.unavailable_reason ??
+                    "当前没有满足条件的进攻/防守 ETF，建议等待，不给买入权重。"}
+                </p>
+              ) : observationPortfolio.data?.unavailable_reason ? (
+                <p className="mt-4 rounded-[10px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                  {observationPortfolio.data.unavailable_reason}
+                </p>
+              ) : null}
+              <div className="mt-5 flex items-center justify-between gap-3">
+                <p className="text-sm font-semibold text-ink">主配置</p>
+                <span className="rounded-full bg-ink px-3 py-1 text-xs font-semibold text-white">
+                  {observationPortfolio.data?.items.length ?? 0} 只
+                </span>
+              </div>
+              <div className="mt-3 grid gap-3 lg:grid-cols-3">
+                {(observationPortfolio.data?.items ?? []).map((item) => (
+                  <div
+                    key={item.code}
+                    className="rounded-[10px] border border-ink/10 bg-white p-4"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-semibold text-ink">
+                          {item.name}
+                        </p>
+                        <p className="mt-1 text-xs text-ink/45">
+                          {item.code} · {formatDate(item.data_date)}
+                        </p>
                       </div>
-                      <p className="mt-2 text-xs leading-5 text-ink/55">
-                        {method.unavailable_reason ??
-                          (method.method === "black_litterman"
-                            ? "按市场先验、结构化标签 view、证据置信度和约束生成的 Black-Litterman 对照。"
-                            : "按历史波动、单只上限和主题集中度约束生成的数学权重对照。")}
-                      </p>
-                      {method.method === "black_litterman" ? (
-                        <div className="mt-3 grid gap-1 rounded-[8px] bg-white px-3 py-2 text-[11px] leading-5 text-ink/55">
-                          <p>先验来源：{String(method.summary.prior_source ?? "等待数据")}</p>
-                          <p>
-                            结构化 view：{String(method.summary.view_count ?? 0)} 个；平均置信度：
-                            {recordNumber(method.summary.confidence_summary, "avg") === null
-                              ? "暂无"
-                              : formatPercent((recordNumber(method.summary.confidence_summary, "avg") ?? 0) * 100)}
-                          </p>
-                          <p>
-                            约束：单只上限 {formatPercent(Number(method.summary.constraints?.single_weight_cap ?? 0.3) * 100)}；
-                            主题上限 {formatPercent(Number(method.summary.constraints?.theme_exposure_cap ?? 0.6) * 100)}
-                          </p>
-                          <p>排除资产：{String(method.summary.excluded_count ?? 0)} 只；仅作研究对照，需要人工判断。</p>
-                        </div>
-                      ) : null}
-                      <div className="mt-3 space-y-2">
-                        {method.items.slice(0, 4).map((item) => (
-                          <div key={item.code} className="flex items-center justify-between gap-3 text-xs text-ink/60">
-                            <span className="truncate">{item.name}</span>
-                            <span className="font-semibold text-ink">{formatPercent(item.target_weight * 100)}</span>
-                          </div>
-                        ))}
-                      </div>
+                      <span className="rounded-full bg-ink px-3 py-1 text-xs font-semibold text-white">
+                        {formatPercent(item.target_weight * 100)}
+                      </span>
                     </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="mt-3 rounded-[8px] border border-dashed border-ink/20 bg-paper px-3 py-3 text-xs leading-5 text-ink/55">
-                  {optimizedAllocationData?.unavailable_reason ?? "暂无优化组合对照。候选数量、历史数据或主题分散度不足时不会硬凑数学权重。"}
-                </p>
-              )}
-            </div>
-            <div className="mt-4 grid gap-3 md:grid-cols-4">
-              <div className="rounded-[10px] border border-ink/10 bg-white px-4 py-3">
-                <p className="text-xs text-ink/45">主配置</p>
-                <p className="mt-1 text-lg font-semibold text-ink">
-                  {formatPercent((observationPortfolio.data?.primary_weight ?? observationPortfolio.data?.risk_exposure_weight ?? 0) * 100)}
-                </p>
+                    <p className="mt-3 text-sm text-ink/65">
+                      综合分 {item.score.toFixed(1)} · {item.conclusion}
+                    </p>
+                    <p className="mt-3 rounded-[8px] bg-paper px-3 py-2 text-xs leading-5 text-ink/55">
+                      {item.weight_explanation ??
+                        `风险：${item.risk_reasons.join("；")}`}
+                    </p>
+                  </div>
+                ))}
               </div>
-              <div className="rounded-[10px] border border-ink/10 bg-white px-4 py-3">
-                <p className="text-xs text-ink/45">小仓观察</p>
-                <p className="mt-1 text-lg font-semibold text-ink">
-                  {formatPercent((observationPortfolio.data?.satellite_weight ?? 0) * 100)}
+              {!observationPortfolio.isLoading &&
+              !(observationPortfolio.data?.items ?? []).length ? (
+                <p className="mt-4 rounded-[10px] bg-paper px-4 py-3 text-sm text-ink/55">
+                  暂无进攻仓位。当前高分 ETF
+                  可能偏高位、买点不合适、候选不足，或数据不足。
                 </p>
-              </div>
-              <div className="rounded-[10px] border border-ink/10 bg-white px-4 py-3">
-                <p className="text-xs text-ink/45">防守仓位</p>
-                <p className="mt-1 text-lg font-semibold text-ink">
-                  {formatPercent((observationPortfolio.data?.defensive_weight ?? 0) * 100)}
-                </p>
-              </div>
-              <div className="rounded-[10px] border border-ink/10 bg-white px-4 py-3">
-                <p className="text-xs text-ink/45">等待资金</p>
-                <p className="mt-1 text-lg font-semibold text-ink">
-                  {formatPercent((observationPortfolio.data?.cash_weight ?? 0) * 100)}
-                </p>
-              </div>
-            </div>
-            {observationPortfolio.data?.portfolio_mode === "defensive" ? (
-              <p className="mt-4 rounded-[10px] border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-800">
-                当前市场不适合全仓进攻，优先使用防守 ETF 做资金配置参考。
-              </p>
-            ) : null}
-            {(observationPortfolio.data?.cash_weight ?? 0) > 0 && observationPortfolio.data?.portfolio_mode !== "cash_wait" ? (
-              <p className="mt-4 rounded-[10px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-                {observationPortfolio.data?.cash_reason ?? "合格 ETF 不足以用满资金，剩余资金等待，不硬凑标的。"}
-              </p>
-            ) : null}
-            {observationPortfolio.data?.portfolio_mode === "cash_wait" ? (
-              <p className="mt-4 rounded-[10px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-                {observationPortfolio.data.cash_reason ?? observationPortfolio.data.unavailable_reason ?? "当前没有满足条件的进攻/防守 ETF，建议等待，不给买入权重。"}
-              </p>
-            ) : observationPortfolio.data?.unavailable_reason ? (
-              <p className="mt-4 rounded-[10px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-                {observationPortfolio.data.unavailable_reason}
-              </p>
-            ) : null}
-            <div className="mt-5 flex items-center justify-between gap-3">
-              <p className="text-sm font-semibold text-ink">主配置</p>
-              <span className="rounded-full bg-ink px-3 py-1 text-xs font-semibold text-white">
-                {observationPortfolio.data?.items.length ?? 0} 只
-              </span>
-            </div>
-            <div className="mt-3 grid gap-3 lg:grid-cols-3">
-              {(observationPortfolio.data?.items ?? []).map((item) => (
-                <div key={item.code} className="rounded-[10px] border border-ink/10 bg-white p-4">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-semibold text-ink">{item.name}</p>
-                      <p className="mt-1 text-xs text-ink/45">{item.code} · {formatDate(item.data_date)}</p>
-                    </div>
-                    <span className="rounded-full bg-ink px-3 py-1 text-xs font-semibold text-white">
-                      {formatPercent(item.target_weight * 100)}
+              ) : null}
+              {(observationPortfolio.data?.satellite_items ?? []).length ? (
+                <>
+                  <div className="mt-6 flex items-center justify-between gap-3">
+                    <p className="text-sm font-semibold text-ink">小仓观察</p>
+                    <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700">
+                      {observationPortfolio.data?.satellite_items?.length ?? 0}{" "}
+                      只
                     </span>
                   </div>
-                  <p className="mt-3 text-sm text-ink/65">综合分 {item.score.toFixed(1)} · {item.conclusion}</p>
-                  <p className="mt-3 rounded-[8px] bg-paper px-3 py-2 text-xs leading-5 text-ink/55">
-                    {item.weight_explanation ?? `风险：${item.risk_reasons.join("；")}`}
+                  <p className="mt-2 text-xs leading-5 text-ink/55">
+                    小仓观察通常来自高位但买点尚未明显转弱的
+                    ETF，权重上限更低，只作观察参考。
+                  </p>
+                  <div className="mt-3 grid gap-3 lg:grid-cols-3">
+                    {(observationPortfolio.data?.satellite_items ?? []).map(
+                      (item) => (
+                        <div
+                          key={`satellite-${item.code}`}
+                          className="rounded-[10px] border border-amber-100 bg-amber-50/50 p-4"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <p className="text-sm font-semibold text-ink">
+                                {item.name}
+                              </p>
+                              <p className="mt-1 text-xs text-ink/45">
+                                {item.code} · {formatDate(item.data_date)}
+                              </p>
+                            </div>
+                            <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-amber-700">
+                              {formatPercent(item.target_weight * 100)}
+                            </span>
+                          </div>
+                          <p className="mt-3 text-sm text-ink/65">
+                            综合分 {item.score.toFixed(1)} · {item.conclusion}
+                          </p>
+                          <p className="mt-3 rounded-[8px] bg-white/70 px-3 py-2 text-xs leading-5 text-ink/55">
+                            {item.weight_explanation ??
+                              `小仓原因：${item.risk_reasons.slice(0, 3).join("；")}`}
+                          </p>
+                        </div>
+                      )
+                    )}
+                  </div>
+                </>
+              ) : null}
+              {(observationPortfolio.data?.defensive_items ?? []).length ? (
+                <>
+                  <div className="mt-6 flex items-center justify-between gap-3">
+                    <p className="text-sm font-semibold text-ink">防守仓位</p>
+                    <span className="rounded-full bg-sky-50 px-3 py-1 text-xs font-semibold text-sky-700">
+                      {observationPortfolio.data?.defensive_items?.length ?? 0}{" "}
+                      只
+                    </span>
+                  </div>
+                  <div className="mt-3 grid gap-3 lg:grid-cols-3">
+                    {(observationPortfolio.data?.defensive_items ?? []).map(
+                      (item) => (
+                        <div
+                          key={`defensive-${item.code}`}
+                          className="rounded-[10px] border border-sky-100 bg-sky-50/50 p-4"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <p className="text-sm font-semibold text-ink">
+                                {item.name}
+                              </p>
+                              <p className="mt-1 text-xs text-ink/45">
+                                {item.code} · {formatDate(item.data_date)}
+                              </p>
+                            </div>
+                            <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-sky-700">
+                              {formatPercent(item.target_weight * 100)}
+                            </span>
+                          </div>
+                          <p className="mt-3 text-sm text-ink/65">
+                            综合分 {item.score.toFixed(1)} · {item.conclusion}
+                          </p>
+                          <p className="mt-3 rounded-[8px] bg-white/70 px-3 py-2 text-xs leading-5 text-ink/55">
+                            {item.weight_explanation ??
+                              `防守原因：${item.risk_reasons.slice(0, 3).join("；")}`}
+                          </p>
+                        </div>
+                      )
+                    )}
+                  </div>
+                </>
+              ) : null}
+              {(observationPortfolio.data?.watch_only_items ?? []).length ? (
+                <>
+                  <div className="mt-6 flex items-center justify-between gap-3">
+                    <p className="text-sm font-semibold text-ink">强势但别追</p>
+                    <span className="rounded-full bg-rose-50 px-3 py-1 text-xs font-semibold text-rose-700">
+                      {observationPortfolio.data?.watch_only_items.length ?? 0}{" "}
+                      只
+                    </span>
+                  </div>
+                  <div className="mt-3 grid gap-3 lg:grid-cols-3">
+                    {(observationPortfolio.data?.watch_only_items ?? []).map(
+                      (item) => (
+                        <div
+                          key={`watch-${item.code}`}
+                          className="rounded-[10px] border border-rose-100 bg-rose-50/40 p-4"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <p className="text-sm font-semibold text-ink">
+                                {item.name}
+                              </p>
+                              <p className="mt-1 text-xs text-ink/45">
+                                {item.code} · {formatDate(item.data_date)}
+                              </p>
+                            </div>
+                            <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-rose-700">
+                              不给权重
+                            </span>
+                          </div>
+                          <p className="mt-3 text-sm text-ink/65">
+                            综合分 {item.score.toFixed(1)} · {item.conclusion}
+                          </p>
+                          <p className="mt-3 rounded-[8px] bg-white/70 px-3 py-2 text-xs leading-5 text-ink/55">
+                            {item.exclusion_explanation ??
+                              `原因：${item.risk_reasons.slice(0, 3).join("；")}`}
+                          </p>
+                        </div>
+                      )
+                    )}
+                  </div>
+                </>
+              ) : null}
+              {(observationPortfolio.data?.excluded_items ?? []).length ? (
+                <>
+                  <div className="mt-6 flex items-center justify-between gap-3">
+                    <p className="text-sm font-semibold text-ink">
+                      等待 / 回避
+                    </p>
+                    <span className="rounded-full bg-blush px-2.5 py-1 text-xs font-semibold text-ink/55">
+                      {observationPortfolio.data?.excluded_items.length ?? 0} 只
+                    </span>
+                  </div>
+                  <div className="mt-3 grid gap-3 lg:grid-cols-3">
+                    {(observationPortfolio.data?.excluded_items ?? []).map(
+                      (item) => (
+                        <div
+                          key={`excluded-${item.code}`}
+                          className="rounded-[10px] border border-ink/10 bg-white/60 p-4"
+                        >
+                          <p className="text-sm font-semibold text-ink">
+                            {item.name}{" "}
+                            <span className="text-ink/40">{item.code}</span>
+                          </p>
+                          <p className="mt-2 text-xs leading-5 text-ink/55">
+                            {item.exclusion_explanation ??
+                              item.risk_reasons.slice(0, 3).join("；")}
+                          </p>
+                        </div>
+                      )
+                    )}
+                  </div>
+                </>
+              ) : null}
+            </details>
+          </Panel>
+        ) : null}
+
+        {dataIssues.length ? (
+          <Panel className="rounded-[12px]">
+            <p className="text-lg font-semibold text-ink">需要留意的数据问题</p>
+            <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {dataIssues.map((item) => (
+                <div
+                  key={`${item.asset_type}-${item.code}`}
+                  className="rounded-[10px] border border-ink/10 bg-white p-4 text-sm leading-6"
+                >
+                  <p className="font-semibold text-ink">
+                    {item.name} <span className="text-ink/45">{item.code}</span>
+                  </p>
+                  <p className="mt-1 text-ink/60">
+                    {assetTypeLabel(item.asset_type)} ·{" "}
+                    {item.status === "missing" ? "缺少数据" : "数据滞后"} ·
+                    最新：
+                    {formatDate(item.latest_date)}
                   </p>
                 </div>
               ))}
             </div>
-            {!observationPortfolio.isLoading && !(observationPortfolio.data?.items ?? []).length ? (
-              <p className="mt-4 rounded-[10px] bg-paper px-4 py-3 text-sm text-ink/55">
-                暂无进攻仓位。当前高分 ETF 可能偏高位、买点不合适、候选不足，或数据不足。
-              </p>
-            ) : null}
-            {(observationPortfolio.data?.satellite_items ?? []).length ? (
-              <>
-                <div className="mt-6 flex items-center justify-between gap-3">
-                  <p className="text-sm font-semibold text-ink">小仓观察</p>
-                  <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700">
-                    {observationPortfolio.data?.satellite_items?.length ?? 0} 只
-                  </span>
-                </div>
-                <p className="mt-2 text-xs leading-5 text-ink/55">
-                  小仓观察通常来自高位但买点尚未明显转弱的 ETF，权重上限更低，只作观察参考。
-                </p>
-                <div className="mt-3 grid gap-3 lg:grid-cols-3">
-                  {(observationPortfolio.data?.satellite_items ?? []).map((item) => (
-                    <div key={`satellite-${item.code}`} className="rounded-[10px] border border-amber-100 bg-amber-50/50 p-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className="text-sm font-semibold text-ink">{item.name}</p>
-                          <p className="mt-1 text-xs text-ink/45">{item.code} · {formatDate(item.data_date)}</p>
-                        </div>
-                        <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-amber-700">
-                          {formatPercent(item.target_weight * 100)}
-                        </span>
-                      </div>
-                      <p className="mt-3 text-sm text-ink/65">综合分 {item.score.toFixed(1)} · {item.conclusion}</p>
-                      <p className="mt-3 rounded-[8px] bg-white/70 px-3 py-2 text-xs leading-5 text-ink/55">
-                        {item.weight_explanation ?? `小仓原因：${item.risk_reasons.slice(0, 3).join("；")}`}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              </>
-            ) : null}
-            {(observationPortfolio.data?.defensive_items ?? []).length ? (
-              <>
-                <div className="mt-6 flex items-center justify-between gap-3">
-                  <p className="text-sm font-semibold text-ink">防守仓位</p>
-                  <span className="rounded-full bg-sky-50 px-3 py-1 text-xs font-semibold text-sky-700">
-                    {observationPortfolio.data?.defensive_items?.length ?? 0} 只
-                  </span>
-                </div>
-                <div className="mt-3 grid gap-3 lg:grid-cols-3">
-                  {(observationPortfolio.data?.defensive_items ?? []).map((item) => (
-                    <div key={`defensive-${item.code}`} className="rounded-[10px] border border-sky-100 bg-sky-50/50 p-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className="text-sm font-semibold text-ink">{item.name}</p>
-                          <p className="mt-1 text-xs text-ink/45">{item.code} · {formatDate(item.data_date)}</p>
-                        </div>
-                        <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-sky-700">
-                          {formatPercent(item.target_weight * 100)}
-                        </span>
-                      </div>
-                      <p className="mt-3 text-sm text-ink/65">综合分 {item.score.toFixed(1)} · {item.conclusion}</p>
-                      <p className="mt-3 rounded-[8px] bg-white/70 px-3 py-2 text-xs leading-5 text-ink/55">
-                        {item.weight_explanation ?? `防守原因：${item.risk_reasons.slice(0, 3).join("；")}`}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              </>
-            ) : null}
-            {(observationPortfolio.data?.watch_only_items ?? []).length ? (
-              <>
-                <div className="mt-6 flex items-center justify-between gap-3">
-                  <p className="text-sm font-semibold text-ink">强势但别追</p>
-                  <span className="rounded-full bg-rose-50 px-3 py-1 text-xs font-semibold text-rose-700">
-                    {observationPortfolio.data?.watch_only_items.length ?? 0} 只
-                  </span>
-                </div>
-                <div className="mt-3 grid gap-3 lg:grid-cols-3">
-                  {(observationPortfolio.data?.watch_only_items ?? []).map((item) => (
-                    <div key={`watch-${item.code}`} className="rounded-[10px] border border-rose-100 bg-rose-50/40 p-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className="text-sm font-semibold text-ink">{item.name}</p>
-                          <p className="mt-1 text-xs text-ink/45">{item.code} · {formatDate(item.data_date)}</p>
-                        </div>
-                        <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-rose-700">
-                          不给权重
-                        </span>
-                      </div>
-                      <p className="mt-3 text-sm text-ink/65">综合分 {item.score.toFixed(1)} · {item.conclusion}</p>
-                      <p className="mt-3 rounded-[8px] bg-white/70 px-3 py-2 text-xs leading-5 text-ink/55">
-                        {item.exclusion_explanation ?? `原因：${item.risk_reasons.slice(0, 3).join("；")}`}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              </>
-            ) : null}
-            {(observationPortfolio.data?.excluded_items ?? []).length ? (
-              <>
-                <div className="mt-6 flex items-center justify-between gap-3">
-                  <p className="text-sm font-semibold text-ink">等待 / 回避</p>
-                  <span className="rounded-full bg-blush px-2.5 py-1 text-xs font-semibold text-ink/55">
-                    {observationPortfolio.data?.excluded_items.length ?? 0} 只
-                  </span>
-                </div>
-                <div className="mt-3 grid gap-3 lg:grid-cols-3">
-                  {(observationPortfolio.data?.excluded_items ?? []).map((item) => (
-                    <div key={`excluded-${item.code}`} className="rounded-[10px] border border-ink/10 bg-white/60 p-4">
-                      <p className="text-sm font-semibold text-ink">
-                        {item.name} <span className="text-ink/40">{item.code}</span>
-                      </p>
-                      <p className="mt-2 text-xs leading-5 text-ink/55">
-                        {item.exclusion_explanation ?? item.risk_reasons.slice(0, 3).join("；")}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              </>
-            ) : null}
-          </details>
-        </Panel>
-      ) : null}
-
-      {dataIssues.length ? (
-        <Panel className="rounded-[12px]">
-          <p className="text-lg font-semibold text-ink">需要留意的数据问题</p>
-          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-            {dataIssues.map((item) => (
-              <div key={`${item.asset_type}-${item.code}`} className="rounded-[10px] border border-ink/10 bg-white p-4 text-sm leading-6">
-                <p className="font-semibold text-ink">
-                  {item.name} <span className="text-ink/45">{item.code}</span>
-                </p>
-                <p className="mt-1 text-ink/60">
-                  {assetTypeLabel(item.asset_type)} · {item.status === "missing" ? "缺少数据" : "数据滞后"} · 最新：
-                  {formatDate(item.latest_date)}
-                </p>
-              </div>
-            ))}
-          </div>
-        </Panel>
-      ) : null}
-
+          </Panel>
+        ) : null}
       </div>
     </div>
   );
 }
 export default function ShortTermPage() {
   return (
-    <Suspense fallback={<div className="text-sm text-ink/60">正在加载短线研究...</div>}>
+    <Suspense
+      fallback={<div className="text-sm text-ink/60">正在加载短线研究...</div>}
+    >
       <ShortTermClient />
     </Suspense>
   );

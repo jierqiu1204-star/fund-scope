@@ -39,6 +39,7 @@ export type Candidate = {
   tracked_index: string | null;
   formula_id: string;
   state: Exclude<Lifecycle, "all">;
+  effective_state?: Exclude<Lifecycle, "all">;
   availability: string;
   qualifies: boolean;
   score: number | null;
@@ -110,6 +111,206 @@ export type LeaderTacticsV2HttpGet = (
   path: string,
   config: { signal: AbortSignal }
 ) => Promise<{ data: CandidatesResponse }>;
+
+export type LeaderTrackingAssetType = "etf" | "stock";
+
+export type LeaderTrackingSourceMode = "candidate_backed" | "manual_selection";
+
+export type LeaderCandidateTrackingFormValues = {
+  buyDate: string;
+  buyAmount: number;
+  orderTimeBucket: "before_15" | "after_15" | "unknown";
+  confirmedNavDate: string;
+  confirmedNav: number | null;
+  confirmedShares: number | null;
+  note: string;
+};
+
+export type LeaderCandidateTrackingPayload = {
+  asset_type: LeaderTrackingAssetType;
+  asset_code: string;
+  buy_amount: number;
+  buy_date?: string;
+  order_time_bucket: "before_15" | "after_15" | "unknown";
+  confirmed_nav_date?: string;
+  confirmed_nav?: number;
+  confirmed_shares?: number;
+  note?: string;
+  alert_policy_id: "leader_tactics_exit_v1";
+  source_manifest_hash?: string;
+  source_decision_at?: string;
+};
+
+export type LeaderCandidateTrackingProvenance = {
+  kind: "candidate_backed" | "manual_selection";
+  source_manifest_hash: string | null;
+  source_decision_at: string | null;
+  reason:
+    | "candidate_backed"
+    | "not_confirmed"
+    | "not_qualifying"
+    | "missing_manifest_hash"
+    | "missing_decision_cutoff";
+};
+
+export const LEADER_TACTICS_EXIT_POLICY_COPY = {
+  label: "龙头战法（仅卖出提醒）",
+  description:
+    "候选和入场只在网页显示；用户确认买入后，仅在合格复权日线触发灾难止损、保本线或收盘跌破五日线的卖出提醒。",
+  researchBoundary:
+    "这是用户手动录入持仓，不会发送候选摘要/买入邮件，不会自动建仓、成交或修改综合排名。"
+} as const;
+
+export function effectiveLeaderCandidateState(candidate: Candidate) {
+  return candidate.effective_state ?? candidate.state;
+}
+
+function normalizeLeaderDecisionCutoff(value: string | null | undefined) {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) return null;
+  if (/([zZ]|[+-]\d{2}:?\d{2})$/.test(trimmed)) return trimmed;
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(trimmed)) {
+    return `${trimmed}+08:00`;
+  }
+  return null;
+}
+
+export function leaderCandidateTrackingProvenance(
+  candidate: Candidate,
+  manifestHash: string | null | undefined,
+  decisionCutoff: string | null | undefined
+): LeaderCandidateTrackingProvenance {
+  const sourceManifestHash =
+    candidate.manifest_hash || manifestHash?.trim() || null;
+  const sourceDecisionAt = normalizeLeaderDecisionCutoff(decisionCutoff);
+  const state = effectiveLeaderCandidateState(candidate);
+  if (state !== "confirmed") {
+    return {
+      kind: "manual_selection",
+      source_manifest_hash: null,
+      source_decision_at: null,
+      reason: "not_confirmed"
+    };
+  }
+  if (!candidate.qualifies) {
+    return {
+      kind: "manual_selection",
+      source_manifest_hash: null,
+      source_decision_at: null,
+      reason: "not_qualifying"
+    };
+  }
+  if (!sourceManifestHash) {
+    return {
+      kind: "manual_selection",
+      source_manifest_hash: null,
+      source_decision_at: null,
+      reason: "missing_manifest_hash"
+    };
+  }
+  if (!sourceDecisionAt) {
+    return {
+      kind: "manual_selection",
+      source_manifest_hash: null,
+      source_decision_at: null,
+      reason: "missing_decision_cutoff"
+    };
+  }
+  return {
+    kind: "candidate_backed",
+    source_manifest_hash: sourceManifestHash,
+    source_decision_at: sourceDecisionAt,
+    reason: "candidate_backed"
+  };
+}
+
+export function leaderCandidateTrackingProvenanceText(
+  provenance: LeaderCandidateTrackingProvenance
+) {
+  if (provenance.kind === "candidate_backed") {
+    return "来源：已确认龙头候选（manifest 与决策截止时间完整，将由后端再次校验）";
+  }
+  switch (provenance.reason) {
+    case "not_confirmed":
+      return "来源：手动选择；当前候选尚未确认，不绑定研究来源。";
+    case "not_qualifying":
+      return "来源：手动选择；当前观测未通过正式候选门槛，不绑定研究来源。";
+    case "missing_manifest_hash":
+      return "来源：手动选择；研究 manifest 不完整，不伪造候选来源。";
+    case "missing_decision_cutoff":
+      return "来源：手动选择；研究决策截止时间缺失，不伪造候选来源。";
+    default:
+      return "来源：手动选择；未绑定研究候选来源。";
+  }
+}
+
+export function buildLeaderCandidateTrackingPayload(
+  candidate: Candidate,
+  manifestHash: string | null | undefined,
+  decisionCutoff: string | null | undefined,
+  values: LeaderCandidateTrackingFormValues,
+  sourceMode: LeaderTrackingSourceMode = "candidate_backed"
+): LeaderCandidateTrackingPayload {
+  const provenance = leaderCandidateTrackingProvenance(
+    candidate,
+    manifestHash,
+    decisionCutoff
+  );
+  if (
+    sourceMode === "candidate_backed" &&
+    provenance.kind !== "candidate_backed"
+  ) {
+    throw new Error(
+      "当前候选来源不可绑定，请明确选择不绑定研究来源，按手动选择后再重试。"
+    );
+  }
+  const payload: LeaderCandidateTrackingPayload = {
+    asset_type: candidate.universe === "ashare" ? "stock" : "etf",
+    asset_code: candidate.asset_code,
+    buy_amount: values.buyAmount,
+    buy_date: values.buyDate || undefined,
+    order_time_bucket: values.orderTimeBucket,
+    confirmed_nav_date: values.confirmedNavDate || undefined,
+    confirmed_nav: values.confirmedNav ?? undefined,
+    confirmed_shares: values.confirmedShares ?? undefined,
+    note: values.note.trim() || undefined,
+    alert_policy_id: "leader_tactics_exit_v1"
+  };
+  if (
+    sourceMode === "candidate_backed" &&
+    provenance.kind === "candidate_backed"
+  ) {
+    payload.source_manifest_hash = provenance.source_manifest_hash ?? undefined;
+    payload.source_decision_at = provenance.source_decision_at ?? undefined;
+  }
+  return payload;
+}
+
+export function leaderTacticsTrackingErrorText(error: unknown) {
+  const detail =
+    typeof error === "object" && error !== null && "response" in error
+      ? (error as { response?: { data?: { detail?: unknown } } }).response?.data
+          ?.detail
+      : null;
+  const raw = typeof detail === "string" ? detail : "";
+  if (raw.includes("不支持") || raw.includes("只支持")) {
+    return "当前标的类型不能使用龙头战法邮件规则，请选择 ETF 或个股。";
+  }
+  if (
+    raw.includes("来源") ||
+    raw.includes("manifest") ||
+    raw.includes("截止")
+  ) {
+    return "候选来源校验失败，已停止创建；请在表单中明确选择“不绑定研究来源，按手动选择”后再重试，系统不会自动降级。";
+  }
+  if (raw.includes("数据") || raw.includes("复权") || raw.includes("调整")) {
+    return "当前缺少合格复权日线证据，暂时不能建立可验证的龙头战法追踪。";
+  }
+  if (raw.includes("登录") || raw.includes("权限")) {
+    return "登录状态或权限已失效，请重新登录后再创建追踪。";
+  }
+  return "创建龙头战法追踪失败，请检查买入信息后重试。";
+}
 
 export const LEADER_TACTICS_V2_PATH =
   "/api/short-research/leader-tactics-v2/candidates";

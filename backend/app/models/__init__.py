@@ -1,6 +1,7 @@
 """ORM models."""
 
 from app.models.entities import (
+    AshareIntraday10mFact,
     EtfDataHealth,
     EtfExitHyperoptItem,
     EtfExitHyperoptRun,
@@ -21,6 +22,9 @@ from app.models.entities import (
     Index,
     IndexValuationHistory,
     JobRun,
+    LateDayTurnaroundCaptureCheckpoint,
+    LateDayTurnaroundObservation,
+    LateDayTurnaroundRun,
     NewsItem,
     NewsSummary,
     NotificationLog,
@@ -43,7 +47,6 @@ from app.models.entities import (
     Stock,
     StockFundamental,
     StockMetric,
-    StockPriceHistory,
     StrategyDefinition,
     StrategyEquityCurve,
     StrategyEvaluation,
@@ -57,6 +60,7 @@ from app.models.entities import (
 )
 
 __all__ = [
+    "AshareIntraday10mFact",
     "EtfDataHealth",
     "EtfExitHyperoptItem",
     "EtfExitHyperoptRun",
@@ -77,6 +81,9 @@ __all__ = [
     "Index",
     "IndexValuationHistory",
     "JobRun",
+    "LateDayTurnaroundCaptureCheckpoint",
+    "LateDayTurnaroundObservation",
+    "LateDayTurnaroundRun",
     "NewsItem",
     "NewsSummary",
     "NotificationLog",
@@ -99,7 +106,6 @@ __all__ = [
     "Stock",
     "StockFundamental",
     "StockMetric",
-    "StockPriceHistory",
     "StrategyDefinition",
     "StrategyEquityCurve",
     "StrategyEvaluation",

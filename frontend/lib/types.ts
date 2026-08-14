@@ -1471,6 +1471,18 @@ export type TrackedPositionAlertAuditList = {
   next_cursor?: string | null;
 };
 
+export type TrackedPositionAssetType = "fund" | "etf" | "stock";
+
+export type TrackingAlertPolicyId =
+  | "standard_dynamic_v2"
+  | "late_day_turnaround_t1_v1"
+  | "leader_tactics_exit_v1";
+
+export type TrackingAlertPolicyProvenance =
+  | "default"
+  | "manual_selection"
+  | "candidate_backed";
+
 export type TrackedPositionChartPoint = {
   date: string;
   price: number;
@@ -1484,7 +1496,7 @@ export type TrackedPositionChartPoint = {
 
 export type TrackedPosition = {
   id: number;
-  asset_type: "fund" | "etf";
+  asset_type: TrackedPositionAssetType;
   asset_code: string;
   asset_name: string;
   buy_date: string;
@@ -1498,6 +1510,12 @@ export type TrackedPosition = {
   entry_price: number | null;
   entry_price_date: string | null;
   estimated_shares: number | null;
+  alert_policy_id: TrackingAlertPolicyId;
+  alert_policy_version: string;
+  alert_policy_provenance: TrackingAlertPolicyProvenance;
+  source_strategy: string | null;
+  source_manifest_hash: string | null;
+  source_decision_at: string | null;
   status: string;
   note: string | null;
   created_at: string;

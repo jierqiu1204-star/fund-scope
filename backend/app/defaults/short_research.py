@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 ASSET_TYPE_FUND = "fund"
 ASSET_TYPE_ETF = "etf"
+ASSET_TYPE_STOCK = "stock"
 
 
 @dataclass(frozen=True)

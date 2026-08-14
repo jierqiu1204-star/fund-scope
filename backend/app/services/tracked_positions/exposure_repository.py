@@ -105,8 +105,15 @@ class InitializeTrackedPositionCommand:
     entry_price_date: date | None
     estimated_shares: float | None
     note: str | None
+    alert_policy_id: str
+    alert_policy_version: str
+    alert_policy_provenance: str
+    source_strategy: str | None
+    source_manifest_hash: str | None
+    source_decision_at: datetime | None
     occurred_at: datetime
     request_id: str
+    initial_exit_state: dict[str, Any] | None = None
 
 
 def _validate_optional_number(name: str, value: object, *, allow_zero: bool = True) -> None:
@@ -202,6 +209,8 @@ async def initialize_tracked_position(
         "current_action_id": None,
         "open_action_cycle_id": None,
     }
+    if command.initial_exit_state:
+        state.update(dict(command.initial_exit_state))
     exposure_version = 0
     if raw_quantity is not None and raw_quantity > 0:
         exposure = initialize_position_exposure(
@@ -243,6 +252,12 @@ async def initialize_tracked_position(
         estimated_shares=command.estimated_shares,
         exit_state_json=state,
         exit_state_version=1,
+        alert_policy_id=command.alert_policy_id,
+        alert_policy_version=command.alert_policy_version,
+        alert_policy_provenance=command.alert_policy_provenance,
+        source_strategy=command.source_strategy,
+        source_manifest_hash=command.source_manifest_hash,
+        source_decision_at=command.source_decision_at,
         status="active",
         note=command.note,
     )

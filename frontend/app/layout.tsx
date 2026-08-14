@@ -17,6 +17,9 @@ const primaryNavItems = [
   ...(process.env.NEXT_PUBLIC_ETF_LEADER_TACTICS_V2_ENABLED === "true"
     ? [{ href: "/short-term/leader-tactics", label: "Leader tactics V2" }]
     : []),
+  ...(process.env.NEXT_PUBLIC_LATE_DAY_TURNAROUND_ENABLED === "true"
+    ? [{ href: "/short-term/late-day-turnaround", label: "尾盘转强" }]
+    : []),
   { href: "/admin/jobs", label: "数据任务" },
   { href: "/settings/notifications", label: "设置" }
 ];

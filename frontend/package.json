@@ -18,6 +18,8 @@
     "test:pit-evidence": "node ./scripts/check-etf-pit-evidence-surfaces.mjs",
     "test:leader-tactics": "node ./scripts/check-etf-leader-tactics-shadow.mjs",
     "test:leader-tactics-v2": "node ./scripts/check-leader-tactics-v2-pagination.mjs && node --experimental-strip-types --test ./scripts/leader-tactics-v2-interaction.test.mts",
+    "test:leader-tracking-policy": "node --experimental-strip-types --test ./scripts/leader-tactics-tracking-policy.test.mts",
+    "test:late-day-turnaround": "node ./scripts/check-late-day-turnaround.mjs",
     "typecheck": "tsc --noEmit",
     "format": "prettier --check ."
   },

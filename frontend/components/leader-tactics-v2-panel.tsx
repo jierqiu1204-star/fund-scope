@@ -1,15 +1,26 @@
 "use client";
 
-import { useInfiniteQuery } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQueryClient
+} from "@tanstack/react-query";
 import { useState } from "react";
 
 import { Panel } from "@/components/ui";
 import { api } from "@/lib/api";
 import {
+  type Candidate,
   type CandidatesResponse,
+  type LeaderTrackingSourceMode,
   LEADER_TACTICS_V2_RESEARCH_COPY,
+  buildLeaderCandidateTrackingPayload,
+  effectiveLeaderCandidateState,
   fetchLeaderTacticsV2Page,
   leaderTacticsV2QueryKey,
+  leaderCandidateTrackingProvenance,
+  leaderCandidateTrackingProvenanceText,
+  leaderTacticsTrackingErrorText,
   leaderTacticsV2UnavailableText,
   mergeLeaderTacticsV2Pages,
   sentimentActionLabel,
@@ -51,6 +62,267 @@ const stateLabels: Record<Lifecycle, string> = {
 function provenanceValue(provenance: Record<string, unknown>, key: string) {
   const value = provenance[key];
   return typeof value === "string" && value ? value : "none";
+}
+
+function todayInputValue() {
+  const today = new Date();
+  const month = String(today.getMonth() + 1).padStart(2, "0");
+  const day = String(today.getDate()).padStart(2, "0");
+  return `${today.getFullYear()}-${month}-${day}`;
+}
+
+function optionalPositiveNumber(value: string) {
+  if (!value.trim()) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function LeaderCandidateTrackingForm({
+  candidate,
+  manifestHash,
+  decisionCutoff
+}: {
+  candidate: Candidate;
+  manifestHash: string | null;
+  decisionCutoff: string | null;
+}) {
+  const queryClient = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [buyDate, setBuyDate] = useState(todayInputValue());
+  const [buyAmount, setBuyAmount] = useState("3000");
+  const [orderTimeBucket, setOrderTimeBucket] = useState<
+    "before_15" | "after_15" | "unknown"
+  >("unknown");
+  const [confirmedNavDate, setConfirmedNavDate] = useState("");
+  const [confirmedNav, setConfirmedNav] = useState("");
+  const [confirmedShares, setConfirmedShares] = useState("");
+  const [note, setNote] = useState("");
+  const [success, setSuccess] = useState(false);
+  const provenance = leaderCandidateTrackingProvenance(
+    candidate,
+    manifestHash,
+    decisionCutoff
+  );
+  const [sourceMode, setSourceMode] = useState<LeaderTrackingSourceMode>(() =>
+    provenance.kind === "candidate_backed"
+      ? "candidate_backed"
+      : "manual_selection"
+  );
+  const createTracking = useMutation({
+    mutationFn: async () => {
+      const amount = optionalPositiveNumber(buyAmount);
+      if (!buyDate || amount === null) {
+        throw new Error("请填写有效的买入日期和买入金额。");
+      }
+      if (
+        confirmedNav.trim() &&
+        optionalPositiveNumber(confirmedNav) === null
+      ) {
+        throw new Error("实际成交价必须是大于 0 的数字。");
+      }
+      if (
+        confirmedShares.trim() &&
+        optionalPositiveNumber(confirmedShares) === null
+      ) {
+        throw new Error("实际份额必须是大于 0 的数字。");
+      }
+      const payload = buildLeaderCandidateTrackingPayload(
+        candidate,
+        manifestHash,
+        decisionCutoff,
+        {
+          buyDate,
+          buyAmount: amount,
+          orderTimeBucket,
+          confirmedNavDate,
+          confirmedNav: optionalPositiveNumber(confirmedNav),
+          confirmedShares: optionalPositiveNumber(confirmedShares),
+          note
+        },
+        sourceMode
+      );
+      return (await api.post("/api/tracked-positions", payload)).data;
+    },
+    onSuccess: async () => {
+      setSuccess(true);
+      setOpen(false);
+      await queryClient.invalidateQueries({ queryKey: ["tracked-positions"] });
+    }
+  });
+
+  if (effectiveLeaderCandidateState(candidate) === "invalidated") {
+    return (
+      <p className="mt-3 rounded bg-ink/5 px-3 py-2 text-xs leading-5 text-ink/55">
+        当前候选已失效，不提供追踪入口；请等待新的龙头候选周期。
+      </p>
+    );
+  }
+
+  return (
+    <div className="mt-3 rounded border border-accent/20 bg-accent/5 p-3">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <p className="font-semibold text-ink">已买入，开始追踪</p>
+          <p className="mt-1 text-xs leading-5 text-ink/60">
+            龙头战法（仅卖出提醒）：候选和入场只在网页显示，不发送候选或买入邮件。
+          </p>
+          <p className="mt-1 text-xs leading-5 text-ink/60">
+            {leaderCandidateTrackingProvenanceText(provenance)}
+          </p>
+        </div>
+        <button
+          type="button"
+          className="rounded-md bg-accent px-3 py-2 text-xs font-semibold text-white transition hover:bg-accent/90"
+          onClick={() => {
+            setSuccess(false);
+            setOpen((value) => !value);
+          }}
+        >
+          {open ? "收起录入" : "我已买入，开始追踪"}
+        </button>
+      </div>
+      {open ? (
+        <div className="mt-3 grid gap-2 border-t border-accent/15 pt-3 sm:grid-cols-2 lg:grid-cols-4">
+          <label className="text-xs text-ink/70 sm:col-span-2 lg:col-span-4">
+            研究来源绑定
+            <select
+              className="mt-1 w-full rounded border border-border bg-white px-2 py-2 text-sm text-ink"
+              value={sourceMode}
+              onChange={(event) =>
+                setSourceMode(event.target.value as LeaderTrackingSourceMode)
+              }
+            >
+              <option
+                value="candidate_backed"
+                disabled={provenance.kind !== "candidate_backed"}
+              >
+                {provenance.kind === "candidate_backed"
+                  ? "绑定已确认候选来源（默认）"
+                  : "绑定已确认候选来源（当前不可用）"}
+              </option>
+              <option value="manual_selection">
+                不绑定研究来源，按手动选择
+              </option>
+            </select>
+            <span className="mt-1 block leading-5 text-ink/55">
+              {sourceMode === "candidate_backed"
+                ? "默认优先绑定 confirmed 候选；后端仍会校验 manifest 与决策截止时间。"
+                : "本次不会提交 source_manifest_hash/source_decision_at，也不会声称由研究候选生成。"}
+            </span>
+          </label>
+          <label className="text-xs text-ink/70">
+            买入日期
+            <input
+              className="mt-1 w-full rounded border border-border bg-white px-2 py-2 text-sm text-ink"
+              type="date"
+              value={buyDate}
+              onChange={(event) => setBuyDate(event.target.value)}
+            />
+          </label>
+          <label className="text-xs text-ink/70">
+            买入金额
+            <input
+              className="mt-1 w-full rounded border border-border bg-white px-2 py-2 text-sm text-ink"
+              inputMode="decimal"
+              value={buyAmount}
+              onChange={(event) => setBuyAmount(event.target.value)}
+            />
+          </label>
+          <label className="text-xs text-ink/70">
+            下单时间
+            <select
+              className="mt-1 w-full rounded border border-border bg-white px-2 py-2 text-sm text-ink"
+              value={orderTimeBucket}
+              onChange={(event) =>
+                setOrderTimeBucket(
+                  event.target.value as "before_15" | "after_15" | "unknown"
+                )
+              }
+            >
+              <option value="before_15">15:00 前</option>
+              <option value="after_15">15:00 后</option>
+              <option value="unknown">不确定</option>
+            </select>
+          </label>
+          <label className="text-xs text-ink/70">
+            成交价日期（可选）
+            <input
+              className="mt-1 w-full rounded border border-border bg-white px-2 py-2 text-sm text-ink"
+              type="date"
+              value={confirmedNavDate}
+              onChange={(event) => setConfirmedNavDate(event.target.value)}
+            />
+          </label>
+          <label className="text-xs text-ink/70">
+            实际成交价（可选）
+            <input
+              className="mt-1 w-full rounded border border-border bg-white px-2 py-2 text-sm text-ink"
+              inputMode="decimal"
+              value={confirmedNav}
+              onChange={(event) => setConfirmedNav(event.target.value)}
+            />
+          </label>
+          <label className="text-xs text-ink/70">
+            实际份额（可选）
+            <input
+              className="mt-1 w-full rounded border border-border bg-white px-2 py-2 text-sm text-ink"
+              inputMode="decimal"
+              value={confirmedShares}
+              onChange={(event) => setConfirmedShares(event.target.value)}
+            />
+          </label>
+          <label className="text-xs text-ink/70 sm:col-span-2">
+            备注（可选）
+            <input
+              className="mt-1 w-full rounded border border-border bg-white px-2 py-2 text-sm text-ink"
+              placeholder="例如：证券账户手动买入"
+              value={note}
+              onChange={(event) => setNote(event.target.value)}
+            />
+          </label>
+          <div className="sm:col-span-2 lg:col-span-4">
+            <p className="text-xs leading-5 text-ink/55">
+              标的类型：
+              {candidate.universe === "ashare" ? "A 股个股" : "场内 ETF"}
+              ；策略仅产生卖出提醒，不会自动成交。
+            </p>
+            <button
+              type="button"
+              className="mt-2 rounded-md bg-ink px-3 py-2 text-xs font-semibold text-white transition hover:bg-ink/90 disabled:opacity-60"
+              disabled={createTracking.isPending}
+              onClick={() => createTracking.mutate()}
+            >
+              {createTracking.isPending
+                ? "保存中..."
+                : "确认买入信息并开始追踪"}
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {success ? (
+        <p className="mt-2 rounded bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
+          已创建手动持仓追踪；后续只按龙头战法卖出规则评估。
+        </p>
+      ) : null}
+      {createTracking.isError ? (
+        <div className="mt-2 rounded bg-rose-50 px-3 py-2 text-xs leading-5 text-rose-800">
+          <p>{leaderTacticsTrackingErrorText(createTracking.error)}</p>
+          {sourceMode === "candidate_backed" ? (
+            <button
+              type="button"
+              className="mt-2 rounded border border-rose-300 px-2 py-1 font-semibold text-rose-900"
+              onClick={() => {
+                createTracking.reset();
+                setSourceMode("manual_selection");
+              }}
+            >
+              切换为手动选择后重试
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 export function LeaderTacticsV2Panel() {
@@ -382,6 +654,11 @@ export function LeaderTacticsV2Panel() {
                     </p>
                   </div>
                 </div>
+                <LeaderCandidateTrackingForm
+                  candidate={candidate}
+                  manifestHash={firstPage?.manifest_hash ?? null}
+                  decisionCutoff={firstPage?.manifest_decision_cutoff ?? null}
+                />
               </details>
             ))}
           </div>

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date
 from typing import TypedDict
 
 
@@ -10,16 +10,6 @@ class StockUniverseRow(TypedDict):
     name: str
     industry: str
 
-
-class StockPriceRow(TypedDict):
-    stock_code: str
-    trade_date: date
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float
-    turnover: float
 
 
 class StockFundamentalRow(TypedDict):
@@ -42,39 +32,6 @@ def default_stock_universe() -> list[StockUniverseRow]:
     ]
 
 
-def default_stock_price_history(as_of_date: date) -> list[StockPriceRow]:
-    rows: list[StockPriceRow] = []
-    seeds = {
-        "600519.SH": (100.0, 122.0, 1_800_000_000.0),
-        "000333.SZ": (50.0, 58.0, 900_000_000.0),
-        "600036.SH": (30.0, 31.5, 700_000_000.0),
-    }
-    for stock_code, (start, end, turnover) in seeds.items():
-        rows.append(
-            {
-                "stock_code": stock_code,
-                "trade_date": as_of_date - timedelta(days=180),
-                "open": start,
-                "high": start,
-                "low": start,
-                "close": start,
-                "volume": turnover / start,
-                "turnover": turnover,
-            }
-        )
-        rows.append(
-            {
-                "stock_code": stock_code,
-                "trade_date": as_of_date,
-                "open": end,
-                "high": end * 1.02,
-                "low": end * 0.98,
-                "close": end,
-                "volume": turnover / end,
-                "turnover": turnover,
-            }
-        )
-    return rows
 
 
 def default_stock_fundamentals(as_of_date: date) -> list[StockFundamentalRow]:

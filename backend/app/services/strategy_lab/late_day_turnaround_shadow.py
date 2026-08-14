@@ -4,8 +4,9 @@ This module is deliberately self-contained.  It operates on immutable inputs and
 does not know about downstream integrations, persistence, or network data.  The
 strategy is intended for research only:
 
-    14:30--14:50 Shanghai time -> buy the first eligible quote at T+10 minutes
-    next trading day 10:00--10:10 -> sell the first eligible quote
+    14:30--14:50 Shanghai time -> buy the first eligible quote within two minutes
+    next trading day 10:00--10:10 -> sell the first eligible quote (frozen
+    benchmark exit; live tracked-position mail uses its separate T+1 policy)
 
 The implementation is conservative about malformed data and always fails closed
 with a stable reason instead of raising an application-level exception.
@@ -27,7 +28,7 @@ from app.services.etf_research_evidence import stable_contract_hash
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 POLICY_MODE = "shadow_only"
 PRODUCTION_MUTATION_ALLOWED = False
-STRATEGY_VERSION = "late_day_turnaround_shadow.v1"
+STRATEGY_VERSION = "late_day_turnaround_shadow.v2"
 
 
 OK = "ok"
@@ -115,9 +116,11 @@ CONTRACT_PAYLOAD = {
         "sell_tax_bps": 10.0,
     },
     "execution": {
-        "entry_delay_minutes": 10,
+        "entry_delay_minutes": 0,
+        "entry_max_latency_minutes": 2,
         "entry_deadline": "14:55",
         "exit_window": ["10:00", "10:10"],
+        "exit_role": "fixed_research_benchmark",
         "calendar": "explicit_next_trading_session",
         "t_plus_one": True,
     },
@@ -725,14 +728,15 @@ def backtest_trade(
 
         signal_date = signal.signal_date
         decision_local = _shanghai(signal.decision_at)
-        buy_deadline = datetime.combine(signal_date, time(14, 55), tzinfo=SHANGHAI)
-        buy_start = decision_local + timedelta(minutes=10)
+        session_deadline = datetime.combine(signal_date, time(14, 55), tzinfo=SHANGHAI)
+        buy_deadline = min(session_deadline, decision_local + timedelta(minutes=2))
+        buy_start = decision_local
         buy_candidates = [
             quote
             for quote in raw_quotes
             if quote.observed_at >= buy_start
             and _shanghai(quote.observed_at).date() == signal_date
-            and quote.observed_at <= buy_deadline
+            and _shanghai(quote.observed_at) <= buy_deadline
         ]
         if not buy_candidates:
             return _unavailable_trade(MISSING_BUY_QUOTE, signal)

@@ -7,6 +7,9 @@ from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, model_validator
 
 from app.schemas.etf_quotes import DynamicExitThresholdsOut, TrackedEtfIntradaySnapshotOut
 
+TrackedPositionAlertPolicyInput = Literal[
+    "standard_dynamic_v2", "late_day_turnaround_t1_v1", "leader_tactics_exit_v1"
+]
 OrderTimeBucket = Literal["before_15", "after_15", "unknown"]
 ExposureMutationIntentInput = Literal[
     "correction",
@@ -135,7 +138,7 @@ class TrackedPositionActionTransitionOut(BaseModel):
 
 
 class TrackedPositionCreate(BaseModel):
-    asset_type: Literal["fund", "etf"]
+    asset_type: Literal["fund", "etf", "stock"]
     asset_code: str
     buy_date: date | None = None
     order_time_bucket: OrderTimeBucket = "unknown"
@@ -144,9 +147,35 @@ class TrackedPositionCreate(BaseModel):
     confirmed_shares: float | None = Field(default=None, gt=0)
     buy_amount: float = Field(default=3000, gt=0)
     note: str | None = None
+    alert_policy_id: TrackedPositionAlertPolicyInput = "standard_dynamic_v2"
+    source_manifest_hash: str | None = Field(default=None, min_length=16, max_length=128)
+    source_decision_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_alert_policy(self) -> TrackedPositionCreate:
+        if self.alert_policy_id == "late_day_turnaround_t1_v1" and self.asset_type != "etf":
+            raise ValueError("late_day_turnaround_t1_v1 只支持 ETF 追踪")
+        if self.alert_policy_id == "leader_tactics_exit_v1" and self.asset_type not in {
+            "etf",
+            "stock",
+        }:
+            raise ValueError("leader_tactics_exit_v1 只支持 ETF 或股票追踪")
+        if self.alert_policy_id == "standard_dynamic_v2" and self.asset_type == "stock":
+            raise ValueError("股票追踪必须选择 leader_tactics_exit_v1")
+        if self.alert_policy_id == "standard_dynamic_v2" and (
+            self.source_manifest_hash is not None or self.source_decision_at is not None
+        ):
+            raise ValueError("默认邮件规则不能附加尾盘候选来源")
+        if (self.source_manifest_hash is None) != (self.source_decision_at is None):
+            raise ValueError("source_manifest_hash 和 source_decision_at 必须同时提供")
+        if self.source_decision_at is not None and self.source_decision_at.tzinfo is None:
+            raise ValueError("source_decision_at 必须带时区")
+        return self
 
 
 class TrackedPositionUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     buy_date: date | None = None
     order_time_bucket: OrderTimeBucket | None = None
     confirmed_nav_date: date | None = None
@@ -154,11 +183,39 @@ class TrackedPositionUpdate(BaseModel):
     confirmed_shares: float | None = Field(default=None, gt=0)
     buy_amount: float | None = Field(default=None, gt=0)
     note: str | None = None
+    asset_type: Literal["fund", "etf", "stock"] | None = None
     status: Literal["active", "handled", "closed", "stopped"] | None = None
     expected_exit_state_version: int | None = Field(default=None, ge=0)
     exposure_mutation_intent: ExposureMutationIntentInput | None = None
     mutation_reason: str | None = None
 
+    alert_policy_id: TrackedPositionAlertPolicyInput | None = None
+    source_manifest_hash: str | None = Field(default=None, min_length=16, max_length=128)
+    source_decision_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_policy_provenance_pair(self) -> TrackedPositionUpdate:
+        fields = self.model_fields_set
+        manifest_set = "source_manifest_hash" in fields
+        decision_set = "source_decision_at" in fields
+        if manifest_set != decision_set:
+            raise ValueError("source_manifest_hash 和 source_decision_at 必须同时更新")
+        if self.source_decision_at is not None and self.source_decision_at.tzinfo is None:
+            raise ValueError("source_decision_at 必须带时区")
+        if self.alert_policy_id == "late_day_turnaround_t1_v1" and self.asset_type not in {
+            None,
+            "etf",
+        }:
+            raise ValueError("late_day_turnaround_t1_v1 只支持 ETF 追踪")
+        if self.alert_policy_id == "leader_tactics_exit_v1" and self.asset_type not in {
+            None,
+            "etf",
+            "stock",
+        }:
+            raise ValueError("leader_tactics_exit_v1 只支持 ETF 或股票追踪")
+        if self.alert_policy_id == "standard_dynamic_v2" and self.asset_type == "stock":
+            raise ValueError("股票追踪必须选择 leader_tactics_exit_v1")
+        return self
 
 class TrackedPositionCloseRequest(BaseModel):
     status: Literal["handled", "closed", "stopped"] = "closed"
@@ -350,6 +407,12 @@ class TrackedPositionOut(BaseModel):
     entry_price: float | None
     entry_price_date: date | None
     estimated_shares: float | None
+    alert_policy_id: str = "standard_dynamic_v2"
+    alert_policy_version: str = "standard_dynamic_v2"
+    alert_policy_provenance: str = "default"
+    source_strategy: str | None = None
+    source_manifest_hash: str | None = None
+    source_decision_at: datetime | None = None
     status: str
     note: str | None
     created_at: datetime

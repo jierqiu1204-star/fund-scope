@@ -16,6 +16,7 @@ from app.api.routes.auth import router as auth_router
 from app.api.routes.dual_universe_leader_tactics_v2 import router as leader_tactics_v2_router
 from app.api.routes.etf_quotes import router as etf_quotes_router
 from app.api.routes.health import router as health_router
+from app.api.routes.late_day_turnaround import router as late_day_turnaround_router
 from app.api.routes.news import router as news_router
 from app.api.routes.onboarding import router as onboarding_router
 from app.api.routes.portfolio import router as portfolio_router
@@ -118,6 +119,7 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
     app.include_router(strategy_lab_router, dependencies=approved_dependencies)
     app.include_router(short_etf_router, dependencies=approved_dependencies)
     app.include_router(short_research_router, dependencies=approved_dependencies)
+    app.include_router(late_day_turnaround_router, dependencies=approved_dependencies)
     app.include_router(leader_tactics_v2_router, dependencies=approved_dependencies)
     app.include_router(etf_quotes_router, dependencies=approved_dependencies)
     app.include_router(tracked_positions_router, dependencies=approved_dependencies)

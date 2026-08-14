@@ -15,6 +15,7 @@ from app.models.entities import (
 from app.services.tracked_positions.service import (
     ALERT_HARD_STOP,
     AlertDecision,
+    PreparedAlertEvaluation,
     create_alert_if_needed,
 )
 
@@ -129,7 +130,9 @@ async def test_tracked_position_alert_uses_owner_email(app, monkeypatch) -> None
     monkeypatch.setattr("app.services.tracked_positions.service.Notifier.send_template", fake_send_template)
     monkeypatch.setattr(
         "app.services.tracked_positions.service._email_payload",
-        lambda position, alert, decision, position_sizing=None: {"title": "测试提醒"},
+        lambda position, alert, decision, position_sizing=None, intraday_snapshot=None: {
+            "title": "测试提醒"
+        },
     )
 
     async def fake_decision(session, position):
@@ -147,9 +150,22 @@ async def test_tracked_position_alert_uses_owner_email(app, monkeypatch) -> None
             date(2026, 6, 2),
         )
 
+    async def fake_prepare(session, position, *, evaluation_mode="daily"):
+        decision, signal_date = await fake_decision(session, position)
+        return PreparedAlertEvaluation(
+            decision=decision,
+            signal_date=signal_date,
+            analysis=None,
+            data_reason_code="test_owner_email",
+        )
+
     monkeypatch.setattr(
-        "app.services.tracked_positions.service.evaluate_alert_decision_v2",
-        fake_decision,
+        "app.services.tracked_positions.service.prepare_alert_evaluation",
+        fake_prepare,
+    )
+    monkeypatch.setattr(
+        "app.services.tracked_positions.service._decision_email_data_eligible",
+        lambda *args, **kwargs: True,
     )
 
     async with app.state.db.session() as session:
