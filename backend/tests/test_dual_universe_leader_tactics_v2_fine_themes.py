@@ -25,8 +25,13 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_fine_themes impor
 
 
 def test_registered_theme_sources_have_stable_keys_and_labels() -> None:
-    assert fine_themes.REGISTERED_FINE_THEME_KEYS == ("rare_earth", "passive_components")
+    assert fine_themes.REGISTERED_FINE_THEME_KEYS == (
+        "innovation_drug",
+        "rare_earth",
+        "passive_components",
+    )
     assert fine_themes.REGISTERED_FINE_THEME_LABELS == (
+        "创新药",
         "稀土",
         "稀土永磁",
         "被动元件概念",
@@ -39,6 +44,7 @@ def test_registered_theme_sources_have_stable_keys_and_labels() -> None:
 
 
 def test_rare_earth_aliases_are_normalized_without_inferring_membership() -> None:
+    assert normalize_fine_theme_label("创新药概念") == ("innovation_drug", "创新药")
     assert normalize_fine_theme_label("稀土") == ("rare_earth", "稀土/稀土永磁")
     assert normalize_fine_theme_label(" 稀土永磁 ") == (
         "rare_earth",
@@ -85,6 +91,42 @@ def test_concept_snapshot_fetches_one_registered_theme(monkeypatch, capsys) -> N
     captured = capsys.readouterr()
     assert calls == ["稀土"]
     assert captured.out.count('"asset_code":"600111"') == 1
+
+
+def test_innovation_drug_snapshot_uses_registered_provider_code(
+    monkeypatch, capsys
+) -> None:
+    @dataclass
+    class _Column:
+        values: list[str]
+
+        def tolist(self) -> list[str]:
+            return self.values
+
+    class _Frame:
+        columns = ("代码",)
+
+        def __getitem__(self, _key: str) -> _Column:
+            return _Column(["002437"])
+
+    calls: list[str] = []
+
+    def fetch(*, symbol: str):
+        calls.append(symbol)
+        return _Frame()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "akshare",
+        SimpleNamespace(stock_board_concept_cons_em=fetch),
+    )
+    monkeypatch.setattr(sys, "argv", ["concept-snapshot", "创新药"])
+
+    assert dual_universe_leader_tactics_v2_concept_snapshot.main() == 0
+    captured = capsys.readouterr()
+    assert calls == ["BK1106"]
+    assert '"theme":"创新药"' in captured.out
+    assert '"asset_code":"002437"' in captured.out
 
 
 def test_concept_snapshot_rejects_multi_theme_invocation(monkeypatch, capsys) -> None:
@@ -176,7 +218,7 @@ async def test_compatibility_loader_serially_aggregates_and_deduplicates(monkeyp
     facts = await fine_themes.load_registered_fine_theme_facts(
         received_at=datetime(2026, 8, 14, 9, 0),
     )
-    assert calls == ["稀土", "稀土永磁", "被动元件概念", "MLCC"]
+    assert calls == ["创新药", "稀土", "稀土永磁", "被动元件概念", "MLCC"]
     assert len(facts) == 1
     assert facts[0].asset_code == "600111"
 

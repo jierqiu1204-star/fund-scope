@@ -10,6 +10,7 @@ from statistics import mean
 
 from app.services.etf_research_evidence import stable_contract_hash
 from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
+    LOW_BASE_CATCHUP_V1,
     POST_CLOSE_WATCHLIST_MODE,
     V2_CANDIDATE_IDS,
     V2_FORMULA_REGISTRY_HASH,
@@ -64,6 +65,7 @@ def build_v2_replay_selection(
     *,
     formula_id: str,
     replay_run_key: str,
+    limit: int | None = 10,
 ) -> RankingCandidateSelection:
     """Convert frozen V2 qualifying observations into an existing replay selection."""
 
@@ -71,6 +73,8 @@ def build_v2_replay_selection(
         raise ValueError("formula_id is not a frozen V2 candidate")
     if not replay_run_key.strip():
         raise ValueError("replay_run_key is required")
+    if limit is not None and not 1 <= limit <= 5_000:
+        raise ValueError("selection limit must be between 1 and 5000")
     if any(
         dict(row.gate_facts).get("decision_mode") == POST_CLOSE_WATCHLIST_MODE
         for row in result.observations
@@ -83,7 +87,9 @@ def build_v2_replay_selection(
             if row.formula_id == formula_id and row.qualifies and row.availability == "available"
         ),
         key=lambda row: (-(row.score if row.score is not None else float("-inf")), row.asset_code),
-    )[:10]
+    )
+    if limit is not None:
+        rows = rows[:limit]
     if not rows:
         raise ValueError("v2_candidate_not_materialized")
     selected = tuple(row.asset_code for row in rows)
@@ -161,6 +167,31 @@ def evaluate_v2_etf_primary(
     )
 
 
+def evaluate_low_base_ashare_forward_outcomes(
+    *,
+    result: V2ScreenResult,
+    replay_run_key: str,
+    trading_sessions: Sequence[date],
+    adjusted_closes: Sequence[ForwardAdjustedClose],
+) -> RankingForwardOutcomeBundle:
+    """Evaluate every qualifying A-share low-base observation at frozen horizons."""
+
+    if result.universe != "ashare":
+        raise ValueError("low-base forward outcomes require the A-share universe")
+    selection = build_v2_replay_selection(
+        result,
+        formula_id=LOW_BASE_CATCHUP_V1,
+        replay_run_key=replay_run_key,
+        limit=None,
+    )
+    return calculate_ranking_forward_outcomes(
+        selection=selection,
+        trading_sessions=trading_sessions,
+        adjusted_closes=adjusted_closes,
+        horizons=(1, 3, 5, 10, 20),
+    )
+
+
 def build_v2_walk_forward_folds(
     session_dates: Sequence[date],
     split: ChronologicalSplit,
@@ -196,4 +227,5 @@ __all__ = [
     "build_v2_replay_selection",
     "build_v2_walk_forward_folds",
     "evaluate_v2_etf_primary",
+    "evaluate_low_base_ashare_forward_outcomes",
 ]

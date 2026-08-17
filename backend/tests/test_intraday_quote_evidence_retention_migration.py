@@ -82,5 +82,5 @@ def test_intraday_quote_evidence_retention_is_single_migration_head() -> None:
     config.set_main_option("script_location", str(VERSIONS_DIR.parent))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["20260810_000064"]
+    assert script.get_heads() == ["20260817_000072"]
     assert script.get_revision("20260810_000064").down_revision == "20260809_000063"

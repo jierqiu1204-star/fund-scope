@@ -131,7 +131,7 @@ def test_authoritative_listing_date_migration_is_the_single_head() -> None:
     config.set_main_option("script_location", str(VERSIONS_DIR.parent))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["20260810_000064"]
+    assert script.get_heads() == ["20260817_000072"]
     assert script.get_revision("20260809_000063").down_revision == "20260804_000062"
     assert script.get_revision("20260727_000056").down_revision == ("20260726_000055")
     assert script.get_revision("20260726_000055").down_revision == ("20260725_000054")

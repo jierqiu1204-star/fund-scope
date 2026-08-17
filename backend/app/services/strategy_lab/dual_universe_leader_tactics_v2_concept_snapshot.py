@@ -19,10 +19,12 @@ class RegisteredFineThemeSource:
     provider_label: str
     normalized_theme_key: str
     canonical_label: str
+    provider_symbol: str | None = None
 
 
 # Ordered and append-only: resumable callers may persist provider_label.
 REGISTERED_FINE_THEME_SOURCES = (
+    RegisteredFineThemeSource("创新药", "innovation_drug", "创新药", "BK1106"),
     RegisteredFineThemeSource("稀土", "rare_earth", "稀土/稀土永磁"),
     RegisteredFineThemeSource("稀土永磁", "rare_earth", "稀土/稀土永磁"),
     RegisteredFineThemeSource("被动元件概念", "passive_components", "被动元件/MLCC"),
@@ -97,7 +99,9 @@ def main() -> int:
     alarm_installed = _start_timeout_alarm()
     try:
         try:
-            frame = ak.stock_board_concept_cons_em(symbol=source.provider_label)
+            frame = ak.stock_board_concept_cons_em(
+                symbol=source.provider_symbol or source.provider_label
+            )
         except Exception as exc:
             print(
                 f"fine_theme_provider_failed:{source.provider_label}:"

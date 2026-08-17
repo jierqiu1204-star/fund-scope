@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.etf_research_evidence import stable_contract_hash
 from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
+    V2_CANDIDATE_IDS,
     V2_FORMULA_REGISTRY_HASH,
     V2_SOURCE_REGISTRY,
     V2CandidateObservation,
@@ -546,7 +547,11 @@ async def advance_ashare_materialization(
     observation_identities = {
         (row.asset_code, row.formula_id, row.signal_date) for row in observations
     }
-    if len(observations) != len(features) * 3 or len(observation_identities) != len(observations):
+    expected_observation_count = len(features) * len(V2_CANDIDATE_IDS)
+    if (
+        len(observations) != expected_observation_count
+        or len(observation_identities) != len(observations)
+    ):
         await session.execute(
             text("DELETE FROM leader_tactics_v2_materialization_groups WHERE run_hash = :run_hash"),
             {"run_hash": run_hash},

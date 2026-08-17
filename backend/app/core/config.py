@@ -113,6 +113,10 @@ class Settings(BaseSettings):
         default=False,
         alias="ETF_LEADER_TACTICS_V2_ETF_MATERIALIZE_ENABLED",
     )
+    etf_leader_tactics_v2_morning_confirmation_enabled: bool = Field(
+        default=False,
+        alias="ETF_LEADER_TACTICS_V2_MORNING_CONFIRMATION_ENABLED",
+    )
     etf_leader_tactics_v2_code_version: str = Field(
         default="dual-universe-leader-tactics-v2",
         alias="ETF_LEADER_TACTICS_V2_CODE_VERSION",

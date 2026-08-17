@@ -43,6 +43,11 @@ from app.services.short_research.jobs import (
     publication_readiness_decision_context,
 )
 from app.services.strategy_lab.jobs import daily_strategy_paper_job
+from app.services.workflows.database_statistics import bounded_database_statistics_job
+from app.services.workflows.dual_universe_leader_tactics_v2_morning import (
+    V2_MORNING_CONFIRMATION_JOB_NAME,
+    dual_universe_leader_tactics_v2_morning_confirmation_job,
+)
 from app.services.workflows.etf_intraday_retention import intraday_etf_retention_job
 from app.services.workflows.etf_leader_tactics_shadow import (
     LEADER_CONTINUATION_JOB_NAME,
@@ -289,6 +294,33 @@ def register_default_jobs(
         return await preflight_etf_leader_tactics_shadow_job(
             session,
             settings=settings,
+        )
+
+    async def dual_universe_v2_morning_confirmation_tracked(
+        session: AsyncSession,
+    ) -> dict[str, Any]:
+        return await dual_universe_leader_tactics_v2_morning_confirmation_job(
+            session,
+            settings,
+        )
+
+    if settings.etf_leader_tactics_v2_morning_confirmation_enabled:
+        scheduler.add_job(
+            _run_tracked_job,
+            "cron",
+            args=[
+                db,
+                V2_MORNING_CONFIRMATION_JOB_NAME,
+                dual_universe_v2_morning_confirmation_tracked,
+            ],
+            day_of_week="mon-fri",
+            hour=10,
+            minute=42,
+            second=0,
+            id=V2_MORNING_CONFIRMATION_JOB_NAME,
+            max_instances=1,
+            coalesce=True,
+            replace_existing=True,
         )
 
     if (
@@ -604,9 +636,21 @@ def register_default_jobs(
         "cron",
         args=[db, "intraday_etf_cleanup", intraday_etf_retention_job],
         day_of_week="mon-sun",
-        hour=3,
+        hour="1-6",
         minute=20,
         id="intraday_etf_cleanup",
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_tracked_job,
+        "cron",
+        args=[db, "database_statistics_maintenance", bounded_database_statistics_job],
+        day_of_week="mon-sun",
+        hour=4,
+        minute=45,
+        id="database_statistics_maintenance",
         max_instances=1,
         coalesce=True,
         replace_existing=True,

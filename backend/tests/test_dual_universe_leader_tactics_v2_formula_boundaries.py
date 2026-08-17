@@ -218,7 +218,12 @@ def test_identical_factual_inputs_have_cross_adapter_formula_parity() -> None:
         )
         for row in ashare.observations
     }
-    assert etf_view == ashare_view
+    ashare_legacy_view = {
+        key: value for key, value in ashare_view.items() if key[1] != "low_base_catchup_proxy_v1"
+    }
+    assert etf_view == ashare_legacy_view
+    assert all(key[1] != "low_base_catchup_proxy_v1" for key in etf_view)
+    assert any(key[1] == "low_base_catchup_proxy_v1" for key in ashare_view)
 
 
 def test_future_membership_and_bar_receipt_are_not_looked_through() -> None:

@@ -3,6 +3,7 @@
 ## Purpose
 TBD - created by archiving change enhance-etf-signal-validation-portfolio-risk. Update Purpose after archive.
 ## Requirements
+
 ### Requirement: Observation portfolio uses constrained optimization
 The system SHALL generate ETF observation portfolio weights using decision-eligible assets, ranking scores, volatility, drawdown, liquidity, correlation, and theme concentration constraints.
 
@@ -128,3 +129,72 @@ The ETF observation portfolio optimizer SHALL provide a machine-readable and hum
 - **WHEN** an ETF is excluded from allocation
 - **THEN** the result includes a concrete exclusion reason and does not silently omit the asset from the audit payload
 
+### Requirement: Market-risk state uses a dedicated PIT observation universe
+The observation portfolio SHALL derive market-risk state from a versioned broad-market observation set that is independent of ranked TopN selection.
+
+#### Scenario: Ranked candidates omit broad ETFs
+- **WHEN** the current actionable ranking slice contains few or no broad-market ETFs
+- **THEN** the market-risk classifier still uses the dedicated cutoff-consistent observation set and does not infer risk state from two incidental candidates
+
+#### Scenario: State reopens after a risk reduction
+- **WHEN** broad-market evidence improves after a defensive or unavailable state
+- **THEN** risk reopening requires consecutive eligible trade sessions, while a deterioration may reduce risk immediately
+
+### Requirement: Portfolio risk V2 reports factor and clone concentration
+The observation portfolio SHALL report clone, theme, asset-class and unknown exposure separately and SHALL not treat unknown identity as proven diversification.
+
+#### Scenario: Multiple ETFs track the same underlying
+- **WHEN** final candidates share a decision-eligible clone group
+- **THEN** their combined exposure and representative identities are reported together in V2 risk evidence
+
+#### Scenario: Identity is unknown
+- **WHEN** a candidate lacks required underlying or theme identity
+- **THEN** V2 evidence reports unknown exposure and an unavailable or conservative status rather than silently granting diversification credit
+
+### Requirement: Portfolio risk V2 is bounded and shadow-first
+The observation portfolio SHALL calculate covariance, marginal risk contribution and deterministic stress evidence only for the bounded final portfolio and SHALL keep the new continuous metrics shadow-only until separately approved. This evidence-only status applies to `portfolio_risk_shadow_v1`; it does not disable the deterministic cash floors, exposure caps, theme caps, or correlation-cluster controls already governed by `portfolio_risk_budget_v1`.
+
+#### Scenario: Sufficient common history exists
+- **WHEN** at most 20 candidates have up to 252 common decision-eligible adjusted return observations
+- **THEN** the system reports shrinkage covariance risk, marginal/total risk contributions, concentration, effective holding count and fixed stress losses
+
+#### Scenario: History is insufficient
+- **WHEN** common history, clone identity or factor coverage is below the declared minimum
+- **THEN** V2 returns stable unavailable reasons and does not modify v1 hard weights or estimate missing exposure as zero
+
+#### Scenario: Full ETF universe is present
+- **WHEN** the authoritative universe contains more than one thousand ETFs
+- **THEN** V2 still computes only over the final bounded portfolio and MUST NOT construct a universe-wide intraday covariance matrix
+
+### Requirement: Observation portfolio applies a portfolio-level risk budget
+The ETF observation portfolio SHALL apply a versioned portfolio-level risk budget after asset selection and before publishing final observation weights.
+
+#### Scenario: Risk-on mode has sufficient evidence
+- **WHEN** the portfolio mode is `risk_on` and volatility, drawdown, liquidity, theme, and correlation evidence is decision-eligible
+- **THEN** final risky-asset exposure does not exceed the configured risk-on cap and the remaining weight is explicitly reported as cash
+
+#### Scenario: Neutral or defensive mode is selected
+- **WHEN** the portfolio mode is `neutral` or `defensive`
+- **THEN** the system enforces that mode's lower risky-exposure cap and minimum cash weight in addition to single-ETF, satellite, theme, and correlation constraints
+
+#### Scenario: Portfolio risk evidence is insufficient
+- **WHEN** aggregate volatility, drawdown, liquidity, or correlation evidence needed by the risk budget is missing, non-finite, stale, or based on too few observations
+- **THEN** the system fails closed to a stricter exposure cap or `cash_wait`, records the missing evidence, and MUST NOT renormalize eligible ETF weights back to full exposure
+
+### Requirement: Observation portfolio constrains correlated exposure clusters
+The ETF observation portfolio SHALL treat highly correlated same-theme or same-underlying ETFs as one exposure cluster for concentration control.
+
+#### Scenario: Multiple candidates form a correlated cluster
+- **WHEN** multiple eligible ETFs exceed the configured correlation threshold with sufficient overlapping observations
+- **THEN** their combined final weight is capped, weaker duplicates are reduced or excluded deterministically, and the cluster decision is included in the explanation
+
+#### Scenario: Correlation evidence is too short
+- **WHEN** a candidate pair lacks the minimum overlapping observations
+- **THEN** the pair is not declared diversified and receives a conservative unavailable or watch-only treatment instead of a zero-correlation assumption
+
+### Requirement: Risk scaling preserves cash instead of restoring full exposure
+The ETF observation portfolio SHALL preserve de-risking produced by concentration, volatility, drawdown, liquidity, or market-mode controls.
+
+#### Scenario: Raw allocation exceeds the risk budget
+- **WHEN** otherwise valid raw ETF weights exceed the applicable risky-exposure cap
+- **THEN** the system scales risky weights down deterministically, assigns the difference to cash, and MUST NOT subsequently normalize risky weights to one

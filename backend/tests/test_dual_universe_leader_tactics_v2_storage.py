@@ -92,7 +92,9 @@ def _transition_ddl() -> str:
         transition_date DATE NOT NULL,
         payload_json TEXT NOT NULL,
         transition_hash TEXT NOT NULL UNIQUE,
-        created_at DATETIME NOT NULL
+        created_at DATETIME NOT NULL,
+        evidence_cutoff DATETIME,
+        projected_entry_status TEXT
     )
     """
 
@@ -362,7 +364,7 @@ async def test_candidates_isolate_latest_manifest_and_use_composite_cursor(tmp_p
     assert first["summary"]["observation_count"] == 6
     assert first["summary"]["available_count"] == 5
     assert first["summary"]["qualifying_count"] == 4
-    assert first["summary"]["returned_count"] == 4
+    assert first["summary"]["returned_count"] == 5
     assert first["summary"]["exclusion_counts"]["batch_breadth_gate_failed"] == 1
     assert first["summary"]["exclusion_counts"]["insufficient_adjusted_history"] == 1
     assert as_of_old["manifest_hash"] == manifest_ids["old"]
@@ -568,3 +570,63 @@ async def test_turning_watch_filter_returns_non_actionable_observations(tmp_path
     )
     assert page["notification_provenance"] == "none"
     assert page["execution_provenance"] == "none"
+
+
+@pytest.mark.asyncio
+async def test_intraday_confirmation_is_visible_only_after_exact_evidence_cutoff(
+    tmp_path,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'intraday-pit.db'}")
+    manifest_ids = await _seed_read_db(engine)
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                """
+                INSERT INTO leader_tactics_v2_state_transitions
+                    (manifest_hash, universe, asset_code, formula_id, signal_date,
+                     from_state, to_state, transition_date, payload_json,
+                     transition_hash, created_at, evidence_cutoff,
+                     projected_entry_status)
+                VALUES
+                    (:manifest_hash, 'etf', '000002', 'leader_breakout_proxy_v2',
+                     '2026-08-04', 'turning_watch', 'confirmed', '2026-08-05',
+                     :payload_json, 'intraday-confirmation',
+                     '2026-08-05 02:42:30', '2026-08-05 10:42:00', 'actionable')
+                """
+            ),
+            {
+                "manifest_hash": manifest_ids["new"],
+                "payload_json": json.dumps(
+                    {
+                        "intraday_confirmation": {
+                            "reason": "morning_volume_and_price_confirmed",
+                            "evidence_hash": "e" * 64,
+                        }
+                    }
+                ),
+            },
+        )
+        before = await read_v2_candidates(
+            connection,
+            universe="etf",
+            state="turning_watch",
+            as_of="2026-08-05T10:41:59+08:00",
+            limit=10,
+        )
+        after = await read_v2_candidates(
+            connection,
+            universe="etf",
+            state="confirmed",
+            as_of="2026-08-05T10:43:00+08:00",
+            limit=10,
+        )
+    await engine.dispose()
+
+    assert [row["asset_code"] for row in before["candidates"]] == ["000002"]
+    assert before["candidates"][0]["entry_status"] == "watch"
+    assert [row["asset_code"] for row in after["candidates"]] == ["000002"]
+    assert after["candidates"][0]["qualifies"] is True
+    assert after["candidates"][0]["entry_status"] == "actionable"
+    assert after["candidates"][0]["gate_facts"]["intraday_confirmation"]["reason"] == (
+        "morning_volume_and_price_confirmed"
+    )

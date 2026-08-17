@@ -3,7 +3,8 @@ export type Formula =
   | "all"
   | "breakout"
   | "base_launch"
-  | "former_leader_repair";
+  | "former_leader_repair"
+  | "low_base_catchup";
 export type Lifecycle =
   | "all"
   | "preparing"
@@ -42,6 +43,7 @@ export type Candidate = {
   effective_state?: Exclude<Lifecycle, "all">;
   availability: string;
   qualifies: boolean;
+  entry_status: "watch" | "actionable" | "overextended" | "invalidated";
   score: number | null;
   signal_date: string;
   transition_date: string | null;

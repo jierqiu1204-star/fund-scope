@@ -13,6 +13,7 @@ from app.services.strategy_lab.ashare_sentiment_risk import (
     summarize_sentiment_risk,
 )
 from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
+    LEGACY_V2_CANDIDATE_IDS,
     V2_CANDIDATE_IDS,
     V2_EXPERIMENT_FAMILY,
     V2_FORMULA_REGISTRY_HASH,
@@ -56,6 +57,7 @@ def unavailable_v2_summary(
     reason: str,
 ) -> dict[str, Any]:
     validate_v2_unavailable_reason(reason)
+    candidate_ids = V2_CANDIDATE_IDS if universe == "ashare" else LEGACY_V2_CANDIDATE_IDS
     return {
         "schema_version": "dual_universe_leader_tactics_evidence_summary_v2",
         "experiment_family": V2_EXPERIMENT_FAMILY,
@@ -67,7 +69,7 @@ def unavailable_v2_summary(
             "schema_version": V2_SCHEMA_VERSION,
             "source_registry_hash": V2_SOURCE_REGISTRY.registry_hash,
             "formula_registry_hash": V2_FORMULA_REGISTRY_HASH,
-            "candidate_ids": list(V2_CANDIDATE_IDS),
+            "candidate_ids": list(candidate_ids),
         },
         "manifest": None,
         "layer_coverage": {},
@@ -171,6 +173,11 @@ async def read_v2_summary(
             exclusions[str(reason)] = max(exclusions.get(str(reason), 0), int(count))
 
     payload = _decode(manifest["manifest_payload_json"], {})
+    manifest_candidate_ids = (
+        payload.get("formula_ids")
+        if isinstance(payload, dict) and isinstance(payload.get("formula_ids"), list)
+        else (V2_CANDIDATE_IDS if universe == "ashare" else LEGACY_V2_CANDIDATE_IDS)
+    )
     payload_evidence = payload.get("economic_evidence") if isinstance(payload, dict) else None
     economic = (
         payload_evidence
@@ -191,7 +198,7 @@ async def read_v2_summary(
             "schema_version": V2_SCHEMA_VERSION,
             "source_registry_hash": str(manifest["source_registry_hash"]),
             "formula_registry_hash": str(manifest["formula_registry_hash"]),
-            "candidate_ids": list(V2_CANDIDATE_IDS),
+            "candidate_ids": list(manifest_candidate_ids),
         },
         "manifest": {
             "manifest_hash": manifest_hash,

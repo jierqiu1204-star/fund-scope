@@ -28,8 +28,8 @@ from app.services.strategy_lab.ashare_sentiment_risk import (
 V2_SCHEMA_VERSION = "dual_universe_leader_tactics_v2"
 V2_EXPERIMENT_FAMILY = "leader_tactics_shadow_v2"
 V2_SOURCE_REGISTRY_VERSION = "leader_tactics_source_registry_v2"
-V2_FORMULA_REGISTRY_VERSION = "leader_tactics_formula_registry_v5"
-V2_LIFECYCLE_VERSION = "leader_tactics_lifecycle_v2"
+V2_FORMULA_REGISTRY_VERSION = "leader_tactics_formula_registry_v8"
+V2_LIFECYCLE_VERSION = "leader_tactics_lifecycle_v3"
 V2_INPUT_HASH_SCHEMA_VERSION = "leader_tactics_v2_input_hash_v5"
 ASHARE_MEMBERSHIP_FACT_HASH_CONTRACT = "dual_universe_leader_tactics_v2_ashare_ingestion_v1"
 ASHARE_FINE_THEME_FACT_HASH_CONTRACT = "dual_universe_leader_tactics_v2_fine_theme_ingestion_v1"
@@ -41,7 +41,9 @@ SUPPORTED_UNIVERSES = (UNIVERSE_ETF, UNIVERSE_ASHARE)
 BREAKOUT_V2 = "leader_breakout_proxy_v2"
 BASE_LAUNCH_V2 = "base_launch_proxy_v2"
 FORMER_LEADER_REPAIR_V2 = "former_leader_repair_proxy_v2"
-V2_CANDIDATE_IDS = (BREAKOUT_V2, BASE_LAUNCH_V2, FORMER_LEADER_REPAIR_V2)
+LOW_BASE_CATCHUP_V1 = "low_base_catchup_proxy_v1"
+LEGACY_V2_CANDIDATE_IDS = (BREAKOUT_V2, BASE_LAUNCH_V2, FORMER_LEADER_REPAIR_V2)
+V2_CANDIDATE_IDS = (*LEGACY_V2_CANDIDATE_IDS, LOW_BASE_CATCHUP_V1)
 
 STATE_PREPARING = "preparing"
 STATE_TURNING_WATCH = "turning_watch"
@@ -68,10 +70,23 @@ VOLUME_LOOKBACK = 120
 BASE_VOLUME_LOOKBACK = 20
 BASE_RELATIVE_VOLUME_MIN = 1.20
 BASE_AMOUNT_PERCENTILE_MIN = 0.70
+STANDARD_HISTORY = 120
+LOW_BASE_SETUP_MEMORY_SESSIONS = 10
+LOW_BASE_REQUIRED_HISTORY = STANDARD_HISTORY + LOW_BASE_SETUP_MEMORY_SESSIONS - 1
+LOW_BASE_RANGE_POSITION_MAX = 0.40
+LOW_BASE_DRAWDOWN_MAX = -0.25
+LOW_BASE_VOLUME_EXPANSION_MIN = 1.30
+LOW_BASE_RELATIVE_VOLUME_MIN = 1.20
+LOW_BASE_RELATIVE_VOLUME_DAYS_MIN = 2
+LOW_BASE_SINGLE_DAY_VOLUME_WATCH_MIN = 2.00
+LOW_BASE_RETURN_5_MAX = 0.25
+LOW_BASE_OVEREXTENSION_ATR_MAX = 1.50
+LOW_BASE_OVEREXTENSION_ATR_HARD_MAX = 2.00
+LOW_BASE_WATCH_WINDOW_SESSIONS = 5
+LOW_BASE_CONFIRMATION_WINDOW_SESSIONS = 3
 BREAKOUT_LOOKBACK = 20
 REPAIR_LOOKBACK = 120
 REPAIR_HISTORY = 180
-STANDARD_HISTORY = 120
 MA5_COST_BPS_PER_SIDE = 5.0
 MA5_SLIPPAGE_BPS_PER_SIDE = 5.0
 
@@ -257,6 +272,70 @@ V2_SOURCE_REGISTRY.validate()
 
 
 @dataclass(frozen=True)
+class LowBaseSourceCapture:
+    capture_id: str
+    title: str
+    captured_content_hash: str
+    received_at: datetime
+    disclosed_rules: tuple[str, ...]
+    source_kind: str = "user_supplied_capture"
+    publication_status: str = "unknown"
+
+    def validate(self) -> None:
+        if not self.capture_id.strip() or not self.title.strip():
+            raise V2ContractError("low-base source capture identity is incomplete")
+        _require_sha256(self.captured_content_hash, "captured_content_hash")
+        if self.source_kind != "user_supplied_capture":
+            raise V2ContractError("low-base source capture kind is incompatible")
+        if self.publication_status != "unknown" or not self.disclosed_rules:
+            raise V2ContractError("low-base source capture metadata is incomplete")
+
+
+LOW_BASE_HYPOTHESIS_RECEIVED_AT = datetime(2026, 8, 17, 0, 0)
+LOW_BASE_SOURCE_CAPTURES = (
+    LowBaseSourceCapture(
+        capture_id="low-base-catchup-user-capture-conditions",
+        title="创新药低位补涨公开条件（用户截图一）",
+        captured_content_hash=(
+            "91a7a86cd795792e2a608bd5fcc3a14fbb4442ae74b644759e8a287a0291a817"
+        ),
+        received_at=LOW_BASE_HYPOTHESIS_RECEIVED_AT,
+        disclosed_rules=(
+            "oversold_low_base",
+            "hot_theme",
+            "repeated_bottom_volume",
+            "initial_strengthening",
+            "proprietary_signal_unavailable",
+        ),
+    ),
+    LowBaseSourceCapture(
+        capture_id="low-base-catchup-user-capture-chart",
+        title="誉衡药业底部连续放量案例（用户截图二）",
+        captured_content_hash=(
+            "2cb8e0057edbae11c005985408271fb69844e1907f36c0fe2273ce50c7e0a143"
+        ),
+        received_at=LOW_BASE_HYPOTHESIS_RECEIVED_AT,
+        disclosed_rules=(
+            "repeated_bottom_volume",
+            "initial_strengthening",
+            "proprietary_signal_unavailable",
+        ),
+    ),
+)
+for _capture in LOW_BASE_SOURCE_CAPTURES:
+    _capture.validate()
+LOW_BASE_SOURCE_REGISTRY_VERSION = "low_base_catchup_source_registry_v1"
+LOW_BASE_SOURCE_REGISTRY_HASH = stable_contract_hash(
+    {
+        "version": LOW_BASE_SOURCE_REGISTRY_VERSION,
+        "captures": tuple(asdict(item) for item in LOW_BASE_SOURCE_CAPTURES),
+        "publication_time_policy": "unknown_not_backfilled",
+        "non_equivalence_notice": "transparent proxy, not proprietary takeoff signal",
+    }
+)
+
+
+@dataclass(frozen=True)
 class V2FormulaDefinition:
     formula_id: str
     required_history_sessions: int
@@ -343,6 +422,40 @@ V2_FORMULAS = (
             ("hot_score_min", 2 / 3),
         ),
     ),
+    _formula(
+        LOW_BASE_CATCHUP_V1,
+        LOW_BASE_REQUIRED_HISTORY,
+        "ashare and hot_theme and exists(d in T-9:T,range_position_120_d<=0.40) and "
+        "exists(d in T-9:T,drawdown_120_d<=-0.25) and "
+        "exists(d in T-9:T,mean(volume[d-4:d])/mean(volume[d-24:d-5])>=1.30 "
+        "and count(volume[j]/mean(volume[j-20:j-1])>=1.20,j=d-4:d)>=2) and "
+        "close_T>ma5_T>ma5_T-1 and close_T>max(high[T-5:T-1]) and close_T>close_T-1 "
+        "and return_5<=0.25; entry actionable only when "
+        "abs(adjusted_close-adjusted_MA20)/adjusted_ATR20<=1.50, "
+        "extended_watch when <=2.00, otherwise overextended; a launch with "
+        "latest_relative_volume>=2.00 but without repeated-volume confirmation "
+        "is watch-only",
+        (
+            ("setup_memory_sessions", LOW_BASE_SETUP_MEMORY_SESSIONS),
+            ("range_position_120_max", LOW_BASE_RANGE_POSITION_MAX),
+            ("drawdown_120_max", LOW_BASE_DRAWDOWN_MAX),
+            ("volume_expansion_5v20_min", LOW_BASE_VOLUME_EXPANSION_MIN),
+            ("relative_volume_min", LOW_BASE_RELATIVE_VOLUME_MIN),
+            ("relative_volume_days_min", LOW_BASE_RELATIVE_VOLUME_DAYS_MIN),
+            (
+                "single_day_volume_watch_min",
+                LOW_BASE_SINGLE_DAY_VOLUME_WATCH_MIN,
+            ),
+            ("return_5_max", LOW_BASE_RETURN_5_MAX),
+            ("overextension_atr_max", LOW_BASE_OVEREXTENSION_ATR_MAX),
+            ("overextension_atr_hard_max", LOW_BASE_OVEREXTENSION_ATR_HARD_MAX),
+            ("hot_score_min", 2 / 3),
+            ("peer_count_min", MINIMUM_PEER_COUNT),
+            ("watch_window_sessions", LOW_BASE_WATCH_WINDOW_SESSIONS),
+            ("confirmation_window_sessions", LOW_BASE_CONFIRMATION_WINDOW_SESSIONS),
+            ("source_registry_hash", LOW_BASE_SOURCE_REGISTRY_HASH),
+        ),
+    ),
 )
 V2_FORMULA_REGISTRY_HASH = stable_contract_hash(
     {
@@ -356,10 +469,23 @@ V2_FORMULA_REGISTRY_HASH = stable_contract_hash(
             "breakout_confirmation": "hot_theme_and_core_leader",
             "repair_confirmation": "individual_former_leader",
         },
+        "low_base_source_registry_hash": LOW_BASE_SOURCE_REGISTRY_HASH,
     }
 )
 V2_LEGACY_FORMULA_REGISTRY_PAIRS = frozenset(
     {
+        (
+            "a34045d97551e2bc1c58d5c5f9b60a4942a4be1f0c22075f4852d3deb3fb6a1c",
+            "leader_tactics_v2_input_hash_v5",
+        ),
+        (
+            "f8461fdd97d75fc06985edf5b7d839b07d85bd42406ef3fb3afee6dd17447b9e",
+            "leader_tactics_v2_input_hash_v5",
+        ),
+        (
+            "d270a37280775b8fb51721380dcd757e1442c2a4b360a7c68e352ec07900fdb5",
+            "leader_tactics_v2_input_hash_v5",
+        ),
         (
             "f85819290cc7ec5105c8622c23567d9f8d76559f246d685070414a4187bbb89e",
             "leader_tactics_v2_input_hash_v3",
@@ -607,7 +733,7 @@ class V2ResearchManifest:
     research_only: bool
     manifest_hash: str
     input_hash_schema_version: str = V2_INPUT_HASH_SCHEMA_VERSION
-    formula_ids: tuple[str, ...] = V2_CANDIDATE_IDS
+    formula_ids: tuple[str, ...] = LEGACY_V2_CANDIDATE_IDS
     adjustment_version: str = PRICE_BASIS
     taxonomy_version: str = "pit_theme_taxonomy_v2"
     cost_model: tuple[tuple[str, float], ...] = (
@@ -643,7 +769,14 @@ class V2ResearchManifest:
             and registry_pair not in V2_LEGACY_FORMULA_REGISTRY_PAIRS
         ):
             raise V2ContractError("formula registry hash is incompatible")
-        if tuple(self.formula_ids) != V2_CANDIDATE_IDS:
+        expected_formula_ids = (
+            V2_CANDIDATE_IDS if self.universe == UNIVERSE_ASHARE else LEGACY_V2_CANDIDATE_IDS
+        )
+        legacy_formula_ids = (
+            registry_pair in V2_LEGACY_FORMULA_REGISTRY_PAIRS
+            and tuple(self.formula_ids) == LEGACY_V2_CANDIDATE_IDS
+        )
+        if tuple(self.formula_ids) != expected_formula_ids and not legacy_formula_ids:
             raise V2ContractError("manifest candidate set is not frozen")
         if self.adjustment_version != PRICE_BASIS:
             raise V2ContractError("manifest adjustment basis is incompatible")
@@ -691,6 +824,9 @@ def build_v2_manifest(
         holdout_identity=holdout_identity,
         research_only=True,
         manifest_hash="pending",
+        formula_ids=(
+            V2_CANDIDATE_IDS if universe == UNIVERSE_ASHARE else LEGACY_V2_CANDIDATE_IDS
+        ),
         pagination_cursor=pagination_cursor,
         exclusions=exclusions,
         provider_health=provider_health,
@@ -713,7 +849,7 @@ def validate_runtime_contract(
     holdout_identity: str = "holdout-2026-08-03-single-use-v1",
 ) -> None:
     if tuple(formula_ids) != V2_CANDIDATE_IDS:
-        raise V2ContractError("V2 accepts exactly the three frozen candidates")
+        raise V2ContractError("V2 candidate registry is incompatible")
     if source_registry_hash != V2_SOURCE_REGISTRY.registry_hash:
         raise V2ContractError("source registry substitution is not allowed")
     if formula_registry_hash != V2_FORMULA_REGISTRY_HASH:
@@ -864,6 +1000,236 @@ def _return(item: V2AssetInput, sessions: int, end: int = -1) -> float | None:
     return result if math.isfinite(result) else None
 
 
+def _low_base_catchup_features(item: V2AssetInput) -> dict[str, Any]:
+    """Calculate frozen low-base facts without looking beyond the signal bar."""
+
+    bars = item.bars
+    if len(bars) < LOW_BASE_REQUIRED_HISTORY:
+        return {}
+    close = _finite(bars[-1].adjusted_close)
+    previous_close = _finite(bars[-2].adjusted_close)
+    setup_start = len(bars) - LOW_BASE_SETUP_MEMORY_SESSIONS
+    setup_rows: list[dict[str, Any]] = []
+    volume_rows: list[dict[str, Any]] = []
+    for end_index in range(setup_start, len(bars)):
+        setup_window = bars[end_index - STANDARD_HISTORY + 1 : end_index + 1]
+        if len(setup_window) != STANDARD_HISTORY:
+            continue
+        evidence_close = _finite(bars[end_index].adjusted_close)
+        closes_120 = [bar.adjusted_close for bar in setup_window]
+        low_120 = min(closes_120)
+        high_120 = max(closes_120)
+        price_range = high_120 - low_120
+        range_position = (
+            (evidence_close - low_120) / price_range
+            if evidence_close is not None and price_range > 0
+            else None
+        )
+        drawdown = (
+            evidence_close / high_120 - 1.0
+            if evidence_close is not None and high_120 > 0
+            else None
+        )
+        setup_rows.append(
+            {
+                "date": bars[end_index].trade_date,
+                "range_low_120": low_120,
+                "range_high_120": high_120,
+                "range_position_120": range_position,
+                "drawdown_120": drawdown,
+            }
+        )
+
+        recent_five = bars[end_index - 4 : end_index + 1]
+        disjoint_prior_twenty = bars[end_index - 24 : end_index - 4]
+        recent_mean_volume = _mean_finite([bar.volume for bar in recent_five])
+        prior_mean_volume = _mean_finite([bar.volume for bar in disjoint_prior_twenty])
+        volume_expansion = (
+            recent_mean_volume / prior_mean_volume
+            if recent_mean_volume is not None and prior_mean_volume and prior_mean_volume > 0
+            else None
+        )
+        relative_volume_values: list[float | None] = []
+        for index in range(end_index - 4, end_index + 1):
+            prior_volume = _mean_finite([bar.volume for bar in bars[index - 20 : index]])
+            current_volume = _finite(bars[index].volume)
+            relative_volume_values.append(
+                current_volume / prior_volume
+                if current_volume is not None and prior_volume and prior_volume > 0
+                else None
+            )
+        relative_volume_days = sum(
+            value is not None and value >= LOW_BASE_RELATIVE_VOLUME_MIN
+            for value in relative_volume_values
+        )
+        volume_rows.append(
+            {
+                "date": bars[end_index].trade_date,
+                "recent_5_mean_volume": recent_mean_volume,
+                "disjoint_prior_20_mean_volume": prior_mean_volume,
+                "volume_expansion_5v20": volume_expansion,
+                "relative_volume_last_5": list(relative_volume_values),
+                "relative_volume_confirmed_days": relative_volume_days,
+            }
+        )
+
+    current_setup = setup_rows[-1]
+    current_volume = volume_rows[-1]
+    range_evidence = min(
+        (row for row in setup_rows if row["range_position_120"] is not None),
+        key=lambda row: (row["range_position_120"], row["date"]),
+        default=None,
+    )
+    drawdown_evidence = min(
+        (row for row in setup_rows if row["drawdown_120"] is not None),
+        key=lambda row: (row["drawdown_120"], row["date"]),
+        default=None,
+    )
+    qualifying_volume_rows = [
+        row
+        for row in volume_rows
+        if row["volume_expansion_5v20"] is not None
+        and row["volume_expansion_5v20"] >= LOW_BASE_VOLUME_EXPANSION_MIN
+        and row["relative_volume_confirmed_days"] >= LOW_BASE_RELATIVE_VOLUME_DAYS_MIN
+    ]
+    volume_evidence = max(
+        qualifying_volume_rows,
+        key=lambda row: (row["volume_expansion_5v20"], row["date"]),
+        default=None,
+    )
+    max_volume_expansion = max(
+        (row for row in volume_rows if row["volume_expansion_5v20"] is not None),
+        key=lambda row: (row["volume_expansion_5v20"], row["date"]),
+        default=None,
+    )
+    max_relative_volume_days = max(
+        volume_rows,
+        key=lambda row: (
+            row["relative_volume_confirmed_days"],
+            row["volume_expansion_5v20"] or -math.inf,
+            row["date"],
+        ),
+    )
+
+    ma5 = _ma(item, 5)
+    previous_ma5 = _ma(item, 5, len(bars) - 1)
+    ma20 = _ma(item, 20)
+    atr20 = _atr(item, 20)
+    prior_five_high = max(bar.adjusted_high for bar in bars[-6:-1])
+    return_5 = _return(item, 5)
+    overextension = (
+        abs(close - ma20) / atr20
+        if close is not None and ma20 is not None and atr20
+        else None
+    )
+    setup_range_position = (
+        range_evidence["range_position_120"] if range_evidence is not None else None
+    )
+    setup_drawdown = drawdown_evidence["drawdown_120"] if drawdown_evidence else None
+    low_base_gate = (
+        setup_range_position is not None
+        and setup_range_position <= LOW_BASE_RANGE_POSITION_MAX
+        and setup_drawdown is not None
+        and setup_drawdown <= LOW_BASE_DRAWDOWN_MAX
+    )
+    volume_gate = volume_evidence is not None
+    turning_gate = (
+        close is not None
+        and previous_close is not None
+        and ma5 is not None
+        and previous_ma5 is not None
+        and close > ma5
+        and ma5 > previous_ma5
+        and close > prior_five_high
+        and close > previous_close
+    )
+    latest_relative_volume = current_volume["relative_volume_last_5"][-1]
+    single_day_volume_watch = (
+        not volume_gate
+        and latest_relative_volume is not None
+        and latest_relative_volume >= LOW_BASE_SINGLE_DAY_VOLUME_WATCH_MIN
+        and turning_gate
+    )
+    if return_5 is None or overextension is None:
+        extension_band = "unavailable"
+    elif (
+        return_5 > LOW_BASE_RETURN_5_MAX
+        or overextension > LOW_BASE_OVEREXTENSION_ATR_HARD_MAX
+    ):
+        extension_band = "overextended"
+    elif overextension > LOW_BASE_OVEREXTENSION_ATR_MAX:
+        extension_band = "extended_watch"
+    else:
+        extension_band = "actionable"
+    signal_quality = extension_band if turning_gate else "not_triggered"
+    return {
+        "setup_memory_sessions": LOW_BASE_SETUP_MEMORY_SESSIONS,
+        "setup_memory_start_date": setup_rows[0]["date"].isoformat(),
+        "setup_memory_end_date": setup_rows[-1]["date"].isoformat(),
+        "setup_range_position_evidence_date": (
+            range_evidence["date"].isoformat() if range_evidence else None
+        ),
+        "setup_range_position_120": setup_range_position,
+        "setup_drawdown_evidence_date": (
+            drawdown_evidence["date"].isoformat() if drawdown_evidence else None
+        ),
+        "setup_drawdown_120": setup_drawdown,
+        "range_low_120": current_setup["range_low_120"],
+        "range_high_120": current_setup["range_high_120"],
+        "range_position_120": current_setup["range_position_120"],
+        "drawdown_120": current_setup["drawdown_120"],
+        "recent_5_mean_volume": current_volume["recent_5_mean_volume"],
+        "disjoint_prior_20_mean_volume": current_volume["disjoint_prior_20_mean_volume"],
+        "volume_expansion_5v20": current_volume["volume_expansion_5v20"],
+        "relative_volume_last_5": current_volume["relative_volume_last_5"],
+        "relative_volume_confirmed_days": current_volume[
+            "relative_volume_confirmed_days"
+        ],
+        "latest_relative_volume": latest_relative_volume,
+        "single_day_volume_watch": single_day_volume_watch,
+        "volume_memory_evidence_date": (
+            volume_evidence["date"].isoformat() if volume_evidence else None
+        ),
+        "volume_memory_expansion_5v20": (
+            volume_evidence["volume_expansion_5v20"] if volume_evidence else None
+        ),
+        "volume_memory_relative_volume_confirmed_days": (
+            volume_evidence["relative_volume_confirmed_days"] if volume_evidence else None
+        ),
+        "volume_memory_max_expansion_date": (
+            max_volume_expansion["date"].isoformat() if max_volume_expansion else None
+        ),
+        "volume_memory_max_expansion_5v20": (
+            max_volume_expansion["volume_expansion_5v20"]
+            if max_volume_expansion
+            else None
+        ),
+        "volume_memory_max_relative_days_date": max_relative_volume_days[
+            "date"
+        ].isoformat(),
+        "volume_memory_max_relative_volume_confirmed_days": max_relative_volume_days[
+            "relative_volume_confirmed_days"
+        ],
+        "adjusted_ma5": ma5,
+        "adjusted_ma5_previous": previous_ma5,
+        "adjusted_ma20": ma20,
+        "adjusted_atr20": atr20,
+        "signal_adjusted_close": close,
+        "signal_adjusted_high": _finite(bars[-1].adjusted_high),
+        "prior_5_adjusted_high": prior_five_high,
+        "return_5": return_5,
+        "overextension_atr": overextension,
+        "low_base_gate": low_base_gate,
+        "repeated_volume_gate": volume_gate,
+        "initial_turning_gate": turning_gate,
+        "launch_signal": turning_gate,
+        "extension_band": extension_band,
+        "signal_quality": signal_quality,
+        "extended_watch": extension_band == "extended_watch",
+        "overextended": extension_band == "overextended",
+    }
+
+
 def _group_key(item: V2AssetInput) -> str | None:
     return item.membership.group_id if item.membership is not None else None
 
@@ -884,6 +1250,8 @@ def _required_batch_qualifiers(
         return 1, "hot_theme_core_leader_v1"
     if formula_id == FORMER_LEADER_REPAIR_V2:
         return 1, "individual_former_leader_v1"
+    if formula_id == LOW_BASE_CATCHUP_V1:
+        return 1, "individual_low_base_catchup_v1"
     proportional = max(
         MINIMUM_BATCH_QUALIFIERS,
         math.ceil(max(peer_count, 0) * BATCH_BREADTH_MINIMUM),
@@ -1432,6 +1800,18 @@ def _observation(
             "historical_validation_eligible": item.decision_mode == SESSION_PIT_MODE,
         }
     )
+    if formula_id == LOW_BASE_CATCHUP_V1:
+        hypothesis_visible = item.source_cutoff >= LOW_BASE_HYPOTHESIS_RECEIVED_AT
+        facts.update(
+            {
+                "hypothesis_source_registry_hash": LOW_BASE_SOURCE_REGISTRY_HASH,
+                "hypothesis_received_at": LOW_BASE_HYPOTHESIS_RECEIVED_AT.isoformat(),
+                "retrospective_hypothesis_replay": not hypothesis_visible,
+                "historical_validation_eligible": (
+                    item.decision_mode == SESSION_PIT_MODE and hypothesis_visible
+                ),
+            }
+        )
     if clone_excluded:
         facts["clone_representative"] = False
     if sentiment_risk is not None:
@@ -1554,6 +1934,10 @@ def screen_dual_universe(
     standard_reasons = {
         item.asset_code: cached_base_reasons(item, STANDARD_HISTORY) for item in ordered
     }
+    low_base_reasons = {
+        item.asset_code: cached_base_reasons(item, LOW_BASE_REQUIRED_HISTORY)
+        for item in ordered
+    }
     repair_reasons = {
         item.asset_code: cached_base_reasons(item, REPAIR_HISTORY) for item in ordered
     }
@@ -1612,7 +1996,10 @@ def screen_dual_universe(
                 _ma(item, 20, len(item.bars) - 5) if len(item.bars) >= 25 else None
             ),
         }
-        for formula_id in V2_CANDIDATE_IDS:
+        applicable_formula_ids = (
+            V2_CANDIDATE_IDS if universe == UNIVERSE_ASHARE else LEGACY_V2_CANDIDATE_IDS
+        )
+        for formula_id in applicable_formula_ids:
             candidate_reasons = list(reasons)
             facts = dict(common_facts)
             raw_score_values: dict[str, float | None] = {}
@@ -1664,6 +2051,90 @@ def screen_dual_universe(
                     candidate_reasons.append("range_compression_failed")
                 if overextension is None or overextension > 1.0:
                     candidate_reasons.append("overextension_gate_failed")
+            elif formula_id == LOW_BASE_CATCHUP_V1:
+                candidate_reasons = list(low_base_reasons[item.asset_code])
+                low_base_facts = _low_base_catchup_features(item)
+                facts.update(low_base_facts)
+                hot_gate = hot_score is not None and hot_score >= 2 / 3
+                peer_gate = peer_counts.get(item.asset_code, 0) >= MINIMUM_PEER_COUNT
+                low_base_gate = low_base_facts.get("low_base_gate") is True
+                volume_gate = low_base_facts.get("repeated_volume_gate") is True
+                turning_gate = low_base_facts.get("initial_turning_gate") is True
+                overextended = low_base_facts.get("overextended") is True
+                facts.update(
+                    {
+                        "hot_theme_gate": hot_gate,
+                        "peer_count_gate": peer_gate,
+                        "gate_family_hot_theme": hot_gate and peer_gate,
+                        "gate_family_low_base": low_base_gate,
+                        "gate_family_repeated_volume": volume_gate,
+                        "gate_family_initial_turning": turning_gate,
+                    }
+                )
+                raw_score_values.update(
+                    {
+                        "low_base_position": _finite(
+                            low_base_facts.get("setup_range_position_120")
+                        ),
+                        "volume_expansion": _finite(
+                            low_base_facts.get("volume_memory_expansion_5v20")
+                        ),
+                        "initial_turning": _finite(low_base_facts.get("return_5")),
+                    }
+                )
+                if not hot_gate:
+                    candidate_reasons.append("hot_theme_gate_failed")
+                if not peer_gate:
+                    candidate_reasons.append("insufficient_peer_count")
+                if not low_base_gate:
+                    if low_base_facts.get("setup_range_position_120") is None:
+                        candidate_reasons.append("low_base_range_unavailable")
+                    elif (
+                        low_base_facts["setup_range_position_120"]
+                        > LOW_BASE_RANGE_POSITION_MAX
+                    ):
+                        candidate_reasons.append("low_base_range_position_failed")
+                    if low_base_facts.get("setup_drawdown_120") is None:
+                        candidate_reasons.append("low_base_drawdown_unavailable")
+                    elif low_base_facts["setup_drawdown_120"] > LOW_BASE_DRAWDOWN_MAX:
+                        candidate_reasons.append("low_base_drawdown_failed")
+                if not volume_gate:
+                    max_expansion = low_base_facts.get(
+                        "volume_memory_max_expansion_5v20"
+                    )
+                    max_relative_days = int(
+                        low_base_facts.get(
+                            "volume_memory_max_relative_volume_confirmed_days"
+                        )
+                        or 0
+                    )
+                    if max_expansion is None:
+                        candidate_reasons.append("low_base_volume_expansion_unavailable")
+                    elif max_expansion < LOW_BASE_VOLUME_EXPANSION_MIN:
+                        candidate_reasons.append("low_base_volume_expansion_failed")
+                    if max_relative_days < LOW_BASE_RELATIVE_VOLUME_DAYS_MIN:
+                        candidate_reasons.append("low_base_repeated_volume_failed")
+                    if (
+                        max_expansion is not None
+                        and max_expansion >= LOW_BASE_VOLUME_EXPANSION_MIN
+                        and max_relative_days >= LOW_BASE_RELATIVE_VOLUME_DAYS_MIN
+                    ):
+                        candidate_reasons.append("low_base_volume_memory_joint_gate_failed")
+                    if low_base_facts.get("single_day_volume_watch") is True:
+                        candidate_reasons.append("low_base_single_day_volume_watch")
+                if not turning_gate:
+                    candidate_reasons.append("low_base_initial_turning_failed")
+                if low_base_facts.get("return_5") is None:
+                    candidate_reasons.append("low_base_return_5_unavailable")
+                elif low_base_facts["return_5"] > LOW_BASE_RETURN_5_MAX:
+                    candidate_reasons.append("low_base_return_5_overextended")
+                if low_base_facts.get("overextension_atr") is None:
+                    candidate_reasons.append("low_base_overextension_unavailable")
+                elif low_base_facts["overextension_atr"] > LOW_BASE_OVEREXTENSION_ATR_HARD_MAX:
+                    candidate_reasons.append("low_base_atr_overextended")
+                elif low_base_facts["overextension_atr"] > LOW_BASE_OVEREXTENSION_ATR_MAX:
+                    candidate_reasons.append("low_base_atr_extended_watch")
+                facts["entry_status"] = "overextended" if overextended else "invalidated"
             else:
                 if hot_score is None or hot_score < 2 / 3:
                     candidate_reasons.append("hot_theme_gate_failed")
@@ -1814,6 +2285,11 @@ def screen_dual_universe(
         BREAKOUT_V2: {"breakout_magnitude": False},
         BASE_LAUNCH_V2: {"compression": True, "overextension": True},
         FORMER_LEADER_REPAIR_V2: {},
+        LOW_BASE_CATCHUP_V1: {
+            "low_base_position": True,
+            "volume_expansion": False,
+            "initial_turning": False,
+        },
     }
     component_percentiles: dict[str, dict[str, dict[tuple[str, str], float]]] = {}
     for formula_id, rows in intermediate.items():
@@ -1822,7 +2298,12 @@ def screen_dual_universe(
         eligible_rows = [
             (item, details)
             for item, details in rows
-            if item.asset_code in representatives and not standard_reasons[item.asset_code]
+            if item.asset_code in representatives
+            and not (
+                low_base_reasons[item.asset_code]
+                if formula_id == LOW_BASE_CATCHUP_V1
+                else standard_reasons[item.asset_code]
+            )
         ]
         component_percentiles[formula_id] = _group_component_percentiles(
             eligible_rows,
@@ -1893,6 +2374,38 @@ def screen_dual_universe(
                             compression_rank,
                             overextension_rank,
                         ]
+                elif formula_id == LOW_BASE_CATCHUP_V1:
+                    low_base_rank = (
+                        ranks["low_base_position"].get((group, item.asset_code))
+                        if group
+                        else None
+                    )
+                    volume_rank = (
+                        ranks["volume_expansion"].get((group, item.asset_code))
+                        if group
+                        else None
+                    )
+                    turning_rank = (
+                        ranks["initial_turning"].get((group, item.asset_code))
+                        if group
+                        else None
+                    )
+                    if None in (low_base_rank, volume_rank, turning_rank):
+                        reasons.append("low_base_score_percentile_unavailable")
+                    else:
+                        facts.update(
+                            {
+                                "low_base_position_reverse_percentile": low_base_rank,
+                                "volume_expansion_percentile": volume_rank,
+                                "initial_turning_percentile": turning_rank,
+                            }
+                        )
+                        score_components = [
+                            hot_component,
+                            float(low_base_rank),
+                            float(volume_rank),
+                            float(turning_rank),
+                        ]
                 elif not reasons:
                     compression = _finite(facts.get("atr5_atr20_ratio"))
                     overextension = _finite(facts.get("overextension_atr"))
@@ -1911,6 +2424,83 @@ def screen_dual_universe(
             qualifies = not reasons
             score = _mean_finite(score_components) if qualifies else None
             observation_state = STATE_PREPARING
+            if formula_id == LOW_BASE_CATCHUP_V1:
+                family_keys = (
+                    "gate_family_hot_theme",
+                    "gate_family_low_base",
+                    "gate_family_repeated_volume",
+                    "gate_family_initial_turning",
+                )
+                passed_families = tuple(
+                    key.removeprefix("gate_family_")
+                    for key in family_keys
+                    if facts.get(key) is True
+                )
+                failed_families = tuple(
+                    key.removeprefix("gate_family_")
+                    for key in family_keys
+                    if facts.get(key) is not True
+                )
+                facts.update(
+                    {
+                        "passed_gate_families": list(passed_families),
+                        "failed_gate_families": list(failed_families),
+                        "watch_window_sessions": LOW_BASE_WATCH_WINDOW_SESSIONS,
+                        "confirmation_window_sessions": LOW_BASE_CONFIRMATION_WINDOW_SESSIONS,
+                    }
+                )
+                setup_ready = (
+                    not low_base_reasons[item.asset_code]
+                    and group is not None
+                    and not clone
+                    and all(
+                        facts.get(key) is True
+                        for key in (
+                            "gate_family_hot_theme",
+                            "gate_family_low_base",
+                            "gate_family_repeated_volume",
+                        )
+                    )
+                )
+                low_base_setup_ready = (
+                    not low_base_reasons[item.asset_code]
+                    and group is not None
+                    and not clone
+                    and facts.get("gate_family_hot_theme") is True
+                    and facts.get("gate_family_low_base") is True
+                )
+                facts["setup_memory_ready"] = setup_ready
+                if qualifies:
+                    facts["entry_status"] = "actionable"
+                elif (
+                    facts.get("overextended") is True
+                    and facts.get("launch_signal") is True
+                    and low_base_setup_ready
+                ):
+                    observation_state = STATE_PREPARING
+                    facts["entry_status"] = "overextended"
+                elif (
+                    facts.get("extension_band") == "extended_watch"
+                    and facts.get("launch_signal") is True
+                    and setup_ready
+                ):
+                    observation_state = STATE_PREPARING
+                    facts["entry_status"] = "watch"
+                elif (
+                    facts.get("single_day_volume_watch") is True
+                    and low_base_setup_ready
+                ):
+                    observation_state = STATE_TURNING_WATCH
+                    facts["entry_status"] = "watch"
+                elif (
+                    setup_ready
+                    and failed_families == ("initial_turning",)
+                ):
+                    observation_state = STATE_TURNING_WATCH
+                    facts["entry_status"] = "watch"
+                else:
+                    observation_state = STATE_INVALIDATED
+                    facts["entry_status"] = "invalidated"
             if (
                 formula_id in {BASE_LAUNCH_V2, BREAKOUT_V2}
                 and not qualifies
@@ -1995,9 +2585,13 @@ def screen_dual_universe(
                     availability=(
                         "unavailable"
                         if (
-                            repair_reasons[item.asset_code]
-                            if required_history[formula_id] == REPAIR_HISTORY
-                            else standard_reasons[item.asset_code]
+                            low_base_reasons[item.asset_code]
+                            if formula_id == LOW_BASE_CATCHUP_V1
+                            else (
+                                repair_reasons[item.asset_code]
+                                if required_history[formula_id] == REPAIR_HISTORY
+                                else standard_reasons[item.asset_code]
+                            )
                         )
                         else "available"
                     ),
@@ -2069,8 +2663,11 @@ def derive_lifecycle(
     under those limits.
     """
 
-    if observation.state != STATE_PREPARING:
-        raise V2ContractError("lifecycle input must start in preparing state")
+    allowed_start_states = {STATE_PREPARING}
+    if observation.formula_id == LOW_BASE_CATCHUP_V1:
+        allowed_start_states.add(STATE_TURNING_WATCH)
+    if observation.state not in allowed_start_states:
+        raise V2ContractError("lifecycle input must start in an eligible research state")
     evaluation_cutoff = evaluation_cutoff or observation.source_cutoff
     if evaluation_cutoff < observation.source_cutoff:
         raise V2ContractError("lifecycle evaluation cutoff precedes signal cutoff")
@@ -2126,13 +2723,13 @@ def derive_lifecycle(
         raise V2ContractError("signal bar is not qualified and visible at signal cutoff")
 
     transitions: list[V2LifecycleTransition] = []
-    preparing = V2LifecycleTransition(
+    initial = V2LifecycleTransition(
         universe=observation.universe,
         asset_code=observation.asset_code,
         formula_id=observation.formula_id,
         signal_date=observation.signal_date,
         from_state=None,
-        to_state=STATE_PREPARING,
+        to_state=observation.state,
         transition_date=transition_start,
         signal_high=signal_bar.adjusted_high,
         adjusted_close=signal_bar.adjusted_close,
@@ -2142,14 +2739,21 @@ def derive_lifecycle(
         reason=(
             "formula_passed_for_post_close_watchlist"
             if decision_mode == POST_CLOSE_WATCHLIST_MODE
-            else "formula_passed_at_signal_cutoff"
+            else (
+                "turning_watch_observed_at_signal_cutoff"
+                if observation.state == STATE_TURNING_WATCH
+                else "formula_passed_at_signal_cutoff"
+            )
         ),
         transition_hash="pending",
     )
-    transitions.append(replace(preparing, transition_hash=_transition_hash(preparing)))
+    transitions.append(replace(initial, transition_hash=_transition_hash(initial)))
 
-    current_state = STATE_PREPARING
+    current_state = observation.state
     signal_high = signal_bar.adjusted_high
+    preparing_high = signal_high
+    preparing_started_index = -1 if current_state == STATE_PREPARING else None
+    entry_status = str(gate_facts.get("entry_status") or "")
     future_visible = tuple(
         bar
         for bar in ordered[signal_index + 1 :]
@@ -2165,8 +2769,37 @@ def derive_lifecycle(
         if ma5 is None:
             continue
         if (
-            current_state != STATE_CONFIRMED
+            current_state == STATE_TURNING_WATCH
+            and entry_status == "watch"
             and current.adjusted_close > signal_high
+            and current.adjusted_close >= ma5
+        ):
+            transition = V2LifecycleTransition(
+                universe=observation.universe,
+                asset_code=observation.asset_code,
+                formula_id=observation.formula_id,
+                signal_date=observation.signal_date,
+                from_state=current_state,
+                to_state=STATE_PREPARING,
+                transition_date=current.trade_date,
+                signal_high=signal_high,
+                adjusted_close=current.adjusted_close,
+                adjusted_ma5=ma5,
+                simulated_execution_date=None,
+                execution_model="research_state_only",
+                reason="watch_breaks_signal_high_and_holds_ma5",
+                transition_hash="pending",
+            )
+            transitions.append(replace(transition, transition_hash=_transition_hash(transition)))
+            current_state = STATE_PREPARING
+            preparing_high = current.adjusted_high
+            preparing_started_index = index
+            continue
+        if (
+            current_state == STATE_PREPARING
+            and preparing_started_index is not None
+            and index > preparing_started_index
+            and current.adjusted_close > preparing_high
             and current.adjusted_close >= ma5
         ):
             transition = V2LifecycleTransition(
@@ -2208,6 +2841,43 @@ def derive_lifecycle(
                     else "unavailable_future_execution"
                 ),
                 reason="adjusted_close_below_same_session_ma5",
+                transition_hash="pending",
+            )
+            transitions.append(replace(transition, transition_hash=_transition_hash(transition)))
+            break
+        timeout_sessions = (
+            LOW_BASE_WATCH_WINDOW_SESSIONS
+            if current_state == STATE_TURNING_WATCH
+            else LOW_BASE_CONFIRMATION_WINDOW_SESSIONS
+        )
+        elapsed_sessions = (
+            index + 1
+            if current_state == STATE_TURNING_WATCH or preparing_started_index is None
+            else index - preparing_started_index
+        )
+        if (
+            observation.formula_id == LOW_BASE_CATCHUP_V1
+            and current_state != STATE_CONFIRMED
+            and elapsed_sessions >= timeout_sessions
+        ):
+            transition = V2LifecycleTransition(
+                universe=observation.universe,
+                asset_code=observation.asset_code,
+                formula_id=observation.formula_id,
+                signal_date=observation.signal_date,
+                from_state=current_state,
+                to_state=STATE_INVALIDATED,
+                transition_date=current.trade_date,
+                signal_high=signal_high,
+                adjusted_close=current.adjusted_close,
+                adjusted_ma5=ma5,
+                simulated_execution_date=None,
+                execution_model="research_state_only",
+                reason=(
+                    "turning_watch_window_expired"
+                    if current_state == STATE_TURNING_WATCH
+                    else "confirmation_window_expired"
+                ),
                 transition_hash="pending",
             )
             transitions.append(replace(transition, transition_hash=_transition_hash(transition)))
@@ -2257,6 +2927,12 @@ __all__ = [
     "BASE_LAUNCH_V2",
     "BREAKOUT_V2",
     "FORMER_LEADER_REPAIR_V2",
+    "LOW_BASE_CATCHUP_V1",
+    "LOW_BASE_HYPOTHESIS_RECEIVED_AT",
+    "LOW_BASE_SOURCE_CAPTURES",
+    "LOW_BASE_SOURCE_REGISTRY_HASH",
+    "LOW_BASE_SOURCE_REGISTRY_VERSION",
+    "LEGACY_V2_CANDIDATE_IDS",
     "LIFECYCLE_STATES",
     "STATE_CONFIRMED",
     "STATE_INVALIDATED",

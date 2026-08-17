@@ -3,6 +3,7 @@
 ## Purpose
 为双标的池龙头战术的每次筛选、状态变化和历史验证保存不可变证据，确保页面看到的候选可复现、不可夸大来源，且研究运行不会产生任何生产交易副作用。
 ## Requirements
+
 ### Requirement: Every run has an immutable reproducibility manifest
 The system SHALL persist one immutable manifest per run containing code version, registry and source hashes, universe, formula candidates, decision cutoff, universe/input/feature hashes, adjustment and taxonomy versions, costs, clone policy, state policy, pagination cursor, exclusions, provider health, and runtime bounds.
 
@@ -64,3 +65,54 @@ The repository SHALL store source URL or identity, publication time, captured-co
 #### Scenario: Local source notes are available during registration
 - **WHEN** an authorized researcher registers an article from the local corpus
 - **THEN** only the compact source metadata and derived rule assertions required by the manifest are persisted in the repository
+
+### Requirement: Two-stage materialization evidence is complete
+Every two-stage materialization run SHALL expose its immutable run hash, signal date, source cutoff, current stage/status, expected assets, completed terminal feature assets, completed peer groups, and last update time. Resource-gated workflow results SHALL additionally carry the current and required headroom. A candidate manifest SHALL be visible only after all expected assets have compatible terminal feature facts and all peer groups pass integrity checks.
+
+#### Scenario: Feature preparation is incomplete
+- **WHEN** one or more expected assets lack a terminal feature fact
+- **THEN** progress reports exact completed and expected counts and the candidate API does not expose a partial cohort
+
+#### Scenario: Finalization completes
+- **WHEN** all feature facts and the final cross-section pass compatibility and integrity checks
+- **THEN** exactly one materialized manifest becomes visible and repeated finalization is idempotent
+
+### Requirement: Theme resolution and watch distance are auditable
+Candidate evidence SHALL persist the selected theme fact hash, taxonomy, hierarchy level, source, resolution mode, fallback reason, passed gate families, failed gate families, and finite normalized distances used for `turning_watch` classification.
+
+#### Scenario: Broad industry fallback is used
+- **WHEN** a candidate uses a broad industry because no cutoff-visible fine theme exists
+- **THEN** evidence explicitly reports `broad_industry_fallback` and does not relabel the industry as a fine theme
+
+#### Scenario: Turning watch is displayed
+- **WHEN** an observation is returned with `state=turning_watch`
+- **THEN** its evidence identifies the exact non-actionable watch contract and all remaining candidate blockers
+
+### Requirement: ETF V2 isolation is verifiable
+The materialization workflow SHALL be restricted to the V2 research namespace, and acceptance tests SHALL verify that comprehensive-ranking and other protected production identities cannot be written through this path.
+
+#### Scenario: ETF research materialization runs normally
+- **WHEN** ETF V2 creates or resumes a research manifest
+- **THEN** protected ranking, allocation, position, alert, notification, and execution identities are unchanged
+
+#### Scenario: Protected production state changes
+- **WHEN** an ETF V2 path attempts or causes a protected-state mutation
+- **THEN** the run fails closed with `research_boundary_violation`
+
+### Requirement: Sentiment risk evidence is immutable and self-describing
+Every A-share observation SHALL persist or deterministically project the risk contract hash, state, action mode, new-entry permission, metric values, cohort counts, thresholds, cutoff, source kind, unavailable reason, and explicit unsupported factual limit-board fields under the observation manifest.
+
+#### Scenario: Materialized evidence is read
+- **WHEN** the candidates or summary endpoint reads an A-share manifest
+- **THEN** it returns only persisted risk facts from that manifest and performs no provider call or current-market recomputation
+
+#### Scenario: Older evidence lacks the contract
+- **WHEN** a legacy materialization has no compatible sentiment-risk contract hash
+- **THEN** the API reports risk evidence as unavailable or absent with a stable reason rather than treating it as healthy
+
+### Requirement: Risk evidence remains research-only
+The evidence SHALL identify the action policy as shadow research and SHALL NOT claim that a candidate was bought, sold, notified, delivered, or executed.
+
+#### Scenario: Shadow entry is allowed
+- **WHEN** a healthy qualified breakout reports `shadow_entry_allowed`
+- **THEN** notification and execution provenance remain `none`, production mutation remains forbidden, and the UI describes an eligible research observation rather than a recommendation

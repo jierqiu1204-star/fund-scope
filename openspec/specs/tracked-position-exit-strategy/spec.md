@@ -3,6 +3,7 @@
 ## Purpose
 TBD - created by archiving change enhance-dynamic-exit-strategy. Update Purpose after archive.
 ## Requirements
+
 ### Requirement: Tracked Position Exit Strategy Separates Asset Types
 The system SHALL evaluate tracked position exit signals using asset-type-specific data cadence, price sources, and actionable-data eligibility.
 
@@ -231,3 +232,161 @@ The tracked-position exit strategy SHALL persist enough threshold context to rep
 - **WHEN** an ETF tracked position does not send an email because thresholds are not crossed or data is ineligible
 - **THEN** the latest position snapshot exposes the main no-email reason for the UI
 
+### Requirement: ETF trade sizing requires explicit capital confirmation
+The tracked-position exit strategy SHALL produce actionable ETF amount and share sizing only when the owner has explicitly confirmed a finite positive ETF sleeve capital.
+
+#### Scenario: Capital is unconfirmed
+- **WHEN** an owner still has a legacy/default capital value without explicit confirmation
+- **THEN** the system may show target weight but returns null trade amount and shares with a stable configuration reason
+
+#### Scenario: Capital or price is non-finite
+- **WHEN** capital, price, current value, quantity or target weight is NaN, infinite, zero where positive is required, or otherwise invalid
+- **THEN** sizing fails closed and does not emit an actionable amount
+
+### Requirement: Owner risk state controls only increases in risk
+The tracked-position strategy SHALL apply owner risk state before add or reentry recommendations without suppressing valid risk-reduction evidence.
+
+#### Scenario: State is reduce-only
+- **WHEN** the sizing result would add or reenter an ETF while the owner state is `reduce_only`
+- **THEN** the result becomes `no_add` with state reasons, while trim/reduce/exit results remain available
+
+#### Scenario: State is data-halt
+- **WHEN** owner sleeve evidence is unavailable
+- **THEN** new-risk sizing remains unavailable and existing exit warnings state the evidence limitation instead of claiming that no risk exists
+
+### Requirement: ETF liquidity capacity is size-aware
+The tracked-position strategy SHALL compare the proposed ETF trade amount with decision-eligible turnover and executable quote structure.
+
+#### Scenario: Entry capacity is adequate
+- **WHEN** proposed amount, ADV participation, spread, structure and quote eligibility pass the versioned entry policy
+- **THEN** the add recommendation includes normal and stressed capacity evidence and its contract identity
+
+#### Scenario: Entry capacity is inadequate or unavailable
+- **WHEN** required capacity evidence is missing or breaches the policy
+- **THEN** the strategy returns `no_add` or unavailable and MUST NOT use current turnover alone as proof that the planned amount is executable
+
+#### Scenario: Exit capacity is poor
+- **WHEN** a valid reduce or exit signal has a wide spread, low capacity or long estimated liquidation time
+- **THEN** the system keeps the risk-reduction signal and labels execution as stressed/unavailable rather than converting it to hold
+
+### Requirement: ETF profit protection uses eligible adjusted risk data
+
+For a tracked ETF routed to the versioned current dynamic holding policy, the system SHALL derive profit-protection risk units only from bounded, decision-eligible, total-return-adjusted daily facts and SHALL fail closed when that evidence is insufficient. This protection contract SHALL NOT be evaluated as an additional trigger for `late_day_turnaround_t1_v1` or `leader_tactics_exit_v1`.
+
+#### Scenario: Eligible adjusted history is available
+- **WHEN** at least 30 eligible adjusted sessions exist for a tracked ETF
+- **THEN** the system calculates a versioned robust risk unit and records the price basis, sample count and source status
+
+#### Scenario: Only raw or ineligible history exists
+- **WHEN** raw daily prices exist but eligible adjusted history is insufficient
+- **THEN** the system returns a stable data-waiting or conservative-display state and MUST NOT use those raw rows to make a trailing-profit email actionable
+
+### Requirement: Long profit protection ratchets monotonically
+
+The system SHALL persist the high-water profit and armed protection line for each active position episode, and the effective long protection line SHALL never move downward within that episode.
+
+#### Scenario: Position reaches a new profit high
+- **WHEN** current or observed profit exceeds the persisted high-water value after the start threshold is reached
+- **THEN** the system raises the high-water value and recalculates a protection line no lower than the previous line
+
+#### Scenario: Volatility expands after protection is armed
+- **WHEN** a later risk estimate would imply a wider giveback
+- **THEN** the existing protection line remains unchanged or rises and MUST NOT be loosened
+
+#### Scenario: A later chart window omits the historical peak
+- **WHEN** the bounded display chart no longer contains the historical peak
+- **THEN** the persisted high-water and protection line continue to govern the position
+
+### Requirement: Profit-protection display is historically truthful
+
+The system SHALL distinguish start threshold, allowed giveback and actual protection line, and SHALL expose the protection line as it evolved at each chart date.
+
+#### Scenario: Chart is rendered after protection is armed
+- **WHEN** the user opens a tracked ETF detail
+- **THEN** the chart shows no protection before arming and a non-decreasing step line afterward instead of backfilling the current line across prior dates
+
+### Requirement: ETF action emails require fresh explicit intraday eligibility
+The system SHALL apply the same fail-closed fresh-quote gate to intraday-priced ETF action emails under the current dynamic holding and late-day policies regardless of whether evaluation was started by an intraday or daily scheduled job. A position routed to `leader_tactics_exit_v1` MAY instead emit its explicitly daily-close-based manual exit reminder from a completed, decision-eligible, total-return-adjusted bar; that reminder SHALL disclose its daily-close basis and SHALL NOT claim a fresh executable quote or completed fill.
+
+#### Scenario: Daily ETF review only has closing price
+- **WHEN** a daily ETF position review has a usable same-day close but no fresh explicitly decision-eligible intraday snapshot
+- **THEN** the system may show the threshold context on the web but MUST NOT send an action email
+
+#### Scenario: Daily ETF review sees an old intraday snapshot
+- **WHEN** the latest stored ETF quote is stale, fallback, display-only, missing explicit eligibility, or provider-ineligible
+- **THEN** the system records `data_ineligible` or `web_only` and MUST NOT send an action email
+
+#### Scenario: Fund review uses confirmed NAV
+- **WHEN** a tracked fund is evaluated by the daily job with decision-eligible confirmed NAV evidence
+- **THEN** the fund-specific daily email behavior remains available and does not require ETF bid/ask fields
+
+#### Scenario: Leader-policy ETF closes through its protection line
+- **WHEN** an ETF routed to `leader_tactics_exit_v1` has a completed decision-eligible adjusted daily bar that triggers its frozen full-exit rule but no fresh intraday bid and ask
+- **THEN** the system may send the policy's daily-close manual exit reminder with explicit non-execution provenance, while generic intraday-priced ETF actions remain ineligible
+
+### Requirement: V2 lifecycle shadow accompanies production position evaluation
+The system SHALL evaluate the V2 tracked-position lifecycle in an isolated shadow mode alongside each eligible scheduled legacy position evaluation while legacy output remains the production source of alerts and emails.
+
+#### Scenario: Eligible position is evaluated
+- **WHEN** a scheduled daily or intraday job evaluates an active tracked position with a sealed, decision-eligible input snapshot
+- **THEN** the system records one idempotent V2 shadow evaluation for the same position, policy version, evaluation mode, and input snapshot without creating a V2 action or notification
+
+#### Scenario: Input data is not decision-eligible
+- **WHEN** a scheduled position evaluation only has stale, estimated, display-only, incomplete, or otherwise ineligible price evidence
+- **THEN** the V2 shadow records a data-waiting or ineligible result, freezes business-state progression, and MUST NOT infer an action from legacy or fallback data
+
+#### Scenario: Shadow evaluation fails
+- **WHEN** one V2 shadow evaluation raises a recoverable error
+- **THEN** the system records a bounded diagnostic, continues evaluating other positions, and does not suppress or duplicate the established legacy result
+
+### Requirement: Exit evaluation exposes execution-risk context
+The tracked-position exit strategy SHALL distinguish an observed threshold breach from a proven executable fill and SHALL expose the price, freshness, spread, signal-to-quote gap, and slippage evidence available at evaluation time.
+
+#### Scenario: Fresh executable quote context is available
+- **WHEN** an ETF exit signal is evaluated from a fresh decision-eligible quote with usable bid and ask
+- **THEN** the result records the quote time, reference price, executable-side price basis, spread, estimated base slippage, stressed slippage, and states that the output remains a manual action reminder
+
+#### Scenario: Executable price cannot be established
+- **WHEN** a threshold is crossed but fresh executable-side quote evidence is missing or inconsistent
+- **THEN** the system marks execution risk unavailable or display-only and MUST NOT describe the reminder, email, or threshold crossing as a completed trade
+
+### Requirement: Tracked Position Exit Strategy Routes By Persisted Policy
+The system SHALL route each tracked-position evaluation through the position's persisted alert policy and SHALL NOT combine triggers from different policies in one decision.
+
+#### Scenario: Default policy position is evaluated
+- **WHEN** a tracked position uses the current dynamic holding policy
+- **THEN** the existing hard-stop, profit-protection, trend-weakening, and data-eligibility behavior remains in effect
+
+#### Scenario: Late-day policy position is evaluated
+- **WHEN** an ETF tracked position uses `late_day_turnaround_t1_v1`
+- **THEN** the generic dynamic policy does not independently emit a competing sell or reduce email for that evaluation
+
+#### Scenario: Leader policy position is evaluated
+- **WHEN** an ETF or A-share tracked position uses `leader_tactics_exit_v1`
+- **THEN** only its adjusted daily-close stop contract is evaluated and the generic dynamic and late-day policies do not emit competing emails
+
+#### Scenario: Policy is changed explicitly
+- **WHEN** the owner changes a tracked position to another supported alert policy
+- **THEN** policy-specific high-water and lifecycle state is reset, owner-level sleeve risk state is preserved, the change is auditable, and evaluation starts under the new version without reusing incompatible policy state
+
+### Requirement: Alert Policy Choice Is Owner Scoped
+The system SHALL allow only the tracked-position owner to select or change its alert policy.
+
+#### Scenario: Another user attempts policy update
+- **WHEN** a user attempts to change the policy on a tracked position owned by someone else
+- **THEN** the system denies access and does not expose or mutate the other user's policy or provenance
+
+### Requirement: Leader Exit Uses The Highest Active Protection Line
+The system SHALL freeze the leader entry risk from eligible adjusted evidence and SHALL emit a full-exit decision when the latest eligible adjusted close reaches the highest active value among the immutable disaster stop, an armed one-R breakeven floor, and same-session adjusted MA5.
+
+#### Scenario: Trend breaks while the holding remains profitable
+- **WHEN** the adjusted close remains above the entry reference but closes at or below the adjusted MA5
+- **THEN** the system emits a leader MA5 full-exit signal rather than waiting for an account loss
+
+#### Scenario: One-R profit arms breakeven
+- **WHEN** the adjusted closing high reaches one immutable entry risk unit
+- **THEN** the round-trip-cost breakeven floor remains armed for that position episode and cannot move down
+
+#### Scenario: Adjusted evidence is unavailable
+- **WHEN** the required entry reference, ATR20, MA5, provider, receipt cutoff, revision, or common adjustment basis is unavailable or invalid
+- **THEN** the system reports data waiting and sends no actionable email

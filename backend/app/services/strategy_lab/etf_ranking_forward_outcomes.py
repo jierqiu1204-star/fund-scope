@@ -19,6 +19,7 @@ from .etf_ranking_candidates import (
 )
 
 FORWARD_HORIZONS = (1, 3, 5, 10)
+SUPPORTED_FORWARD_HORIZONS = (*FORWARD_HORIZONS, 20)
 FORWARD_EXECUTION_MODEL = "t_plus_one_adjusted_close_v1"
 _BPS_DENOMINATOR = 10_000.0
 FACTUAL_CUTOFF_VALID_COST_PROVENANCE = "factual_cutoff_valid"
@@ -251,11 +252,11 @@ def _validate_horizons(horizons: Iterable[int]) -> tuple[int, ...]:
         raise ForwardOutcomeContractError(
             "forward horizons must be a non-empty unique frozen subset"
         )
-    if any(value not in FORWARD_HORIZONS for value in values):
+    if any(value not in SUPPORTED_FORWARD_HORIZONS for value in values):
         raise ForwardOutcomeContractError(
-            "forward horizons must use the frozen 1/3/5/10-session set"
+            "forward horizons must use the frozen supported 1/3/5/10/20-session set"
         )
-    return tuple(value for value in FORWARD_HORIZONS if value in set(values))
+    return tuple(value for value in SUPPORTED_FORWARD_HORIZONS if value in set(values))
 
 
 def _index_adjusted_closes(

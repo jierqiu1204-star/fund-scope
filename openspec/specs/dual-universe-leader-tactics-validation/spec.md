@@ -3,6 +3,7 @@
 ## Purpose
 定义双标的池龙头战术的标签、样本外经济验证、锁定案例和晋升门槛，使任何“有效”结论都来自预注册、时间顺序且扣除成本的证据，而不是事后挑图或调参。
 ## Requirements
+
 ### Requirement: Source-derived labels preserve partial observability
 The validation registry SHALL include only asset/date/theme labels explicitly supported by captured articles, distinguish positive mentions, core mentions, formula descriptions, and unavailable identities, and SHALL NOT treat unmentioned assets as negative labels.
 
@@ -82,3 +83,14 @@ The validation system SHALL compare only the three frozen V2 candidates and SHAL
 #### Scenario: Optimizer proposes another configuration
 - **WHEN** an experiment attempts to choose thresholds or weights after reading out-of-sample outcomes
 - **THEN** the run is invalidated for V2 and its evidence cannot be merged with the pre-registered experiment
+
+### Requirement: Sentiment risk overlay is validated as a frozen policy shadow
+The validation system SHALL compare the frozen raw A-share breakout cohort with the same cohort after the sentiment-risk entry overlay on common PIT dates, using the existing five-session theme-relative cost-adjusted endpoint and separately reporting avoided losses, missed gains, coverage, state frequency, turnover, drawdown, and regime concentration.
+
+#### Scenario: Overlay appears beneficial in a short sample
+- **WHEN** warning or risk-off dates avoid losses but the existing sample, uncertainty, walk-forward, and holdout gates are incomplete
+- **THEN** the result remains `insufficient_data` and cannot alter production ranking, scoring, position, alert, or execution policy
+
+#### Scenario: Threshold tuning is attempted after outcomes are read
+- **WHEN** a run changes cohort bands, component thresholds, or state counts after observing validation outcomes
+- **THEN** it requires a new contract identity and its evidence cannot be merged with the frozen proxy

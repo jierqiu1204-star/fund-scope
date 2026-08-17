@@ -9,6 +9,7 @@ from app.services.etf_research_evidence import stable_contract_hash
 from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
     BREAKOUT_V2,
     FORMER_LEADER_REPAIR_V2,
+    LOW_BASE_SOURCE_CAPTURES,
     POST_CLOSE_WATCHLIST_MODE,
     STATE_CONFIRMED,
     STATE_INVALIDATED,
@@ -94,6 +95,7 @@ def test_v2_registry_and_candidates_are_frozen() -> None:
         "leader_breakout_proxy_v2",
         "base_launch_proxy_v2",
         "former_leader_repair_proxy_v2",
+        "low_base_catchup_proxy_v1",
     )
     assert all(
         "abs(adjusted_close-adjusted_MA20)/adjusted_ATR20" in item.formula_text
@@ -102,6 +104,13 @@ def test_v2_registry_and_candidates_are_frozen() -> None:
     validate_runtime_contract()
     with pytest.raises(V2ContractError):
         validate_runtime_contract(formula_ids=(BREAKOUT_V2,))
+
+
+def test_user_capture_keeps_unknown_publication_and_actual_receipt_time() -> None:
+    capture = LOW_BASE_SOURCE_CAPTURES[0]
+
+    assert capture.publication_status == "unknown"
+    assert capture.received_at == datetime(2026, 8, 17, 0, 0)
 
 
 def test_missing_membership_hash_and_forbidden_raw_price_fail_closed() -> None:
@@ -144,6 +153,9 @@ def test_ashare_sentiment_overlay_preserves_raw_screen_and_is_absent_from_etf() 
         key=lambda row: (row.formula_id, row.asset_code),
     )
 
+    ashare_rows = [
+        row for row in ashare_rows if row.formula_id != "low_base_catchup_proxy_v1"
+    ]
     assert len(etf_rows) == len(ashare_rows)
     snapshot_count = 0
     for etf_row, ashare_row in zip(etf_rows, ashare_rows, strict=True):

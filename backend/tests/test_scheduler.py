@@ -87,6 +87,25 @@ def test_scheduler_uses_configured_timezone() -> None:
     assert scheduler.timezone.key == "Asia/Shanghai"
 
 
+def test_morning_leader_confirmation_has_one_bounded_checkpoint(app) -> None:
+    scheduler = scheduler_module.build_scheduler("Asia/Shanghai")
+    settings = app.state.settings.model_copy(
+        update={"etf_leader_tactics_v2_morning_confirmation_enabled": True}
+    )
+
+    scheduler_module.register_default_jobs(scheduler, app.state.db, settings)
+
+    job = scheduler.get_job("dual_universe_leader_tactics_v2_morning_confirmation")
+    assert job is not None
+    fields = {field.name: str(field) for field in job.trigger.fields}
+    assert fields["day_of_week"] == "mon-fri"
+    assert fields["hour"] == "10"
+    assert fields["minute"] == "42"
+    assert fields["second"] == "0"
+    assert job.max_instances == 1
+    assert job.coalesce is True
+
+
 def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     scheduler = scheduler_module.build_scheduler("Asia/Shanghai")
 
@@ -109,6 +128,7 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     etf_exit_signal_credibility = scheduler.get_job("etf_exit_signal_credibility")
     etf_exit_hyperopt = scheduler.get_job("etf_exit_hyperopt")
     intraday_etf_cleanup = scheduler.get_job("intraday_etf_cleanup")
+    database_statistics = scheduler.get_job("database_statistics_maintenance")
 
     def trigger_field(job: object, name: str) -> str:
         return str(next(field for field in job.trigger.fields if field.name == name))
@@ -132,6 +152,7 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     assert "etf_exit_signal_credibility" in job_ids
     assert "etf_exit_hyperopt" in job_ids
     assert "intraday_etf_cleanup" in job_ids
+    assert "database_statistics_maintenance" in job_ids
     assert "intraday_etf_watch_1500" not in job_ids
     assert intraday_11 is not None
     assert daily_etf_universe is not None
@@ -147,6 +168,7 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     assert etf_exit_signal_credibility is not None
     assert etf_exit_hyperopt is not None
     assert intraday_etf_cleanup is not None
+    assert database_statistics is not None
     assert trigger_field(intraday_11, "minute") == "0-29"
     assert trigger_field(daily_etf_universe, "hour") == "15"
     assert trigger_field(daily_etf_universe, "minute") == "0"
@@ -179,8 +201,12 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     assert trigger_field(etf_exit_signal_credibility, "minute") == "30"
     assert trigger_field(etf_exit_hyperopt, "hour") == "23"
     assert trigger_field(etf_exit_hyperopt, "minute") == "45"
-    assert trigger_field(intraday_etf_cleanup, "hour") == "3"
+    assert trigger_field(intraday_etf_cleanup, "hour") == "1-6"
     assert trigger_field(intraday_etf_cleanup, "minute") == "20"
+    assert trigger_field(database_statistics, "hour") == "4"
+    assert trigger_field(database_statistics, "minute") == "45"
+    assert database_statistics.max_instances == 1
+    assert database_statistics.coalesce is True
     assert "daily_short_etf_data" not in job_ids
     assert "daily_short_etf_signals" not in job_ids
     assert "daily_short_etf_paper" not in job_ids

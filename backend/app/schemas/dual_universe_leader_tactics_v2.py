@@ -20,6 +20,7 @@ class LeaderTacticsV2CandidateOut(BaseModel):
     state: Literal["preparing", "turning_watch", "confirmed", "invalidated"]
     availability: Literal["available", "unavailable"]
     qualifies: bool
+    entry_status: Literal["watch", "actionable", "overextended", "invalidated"]
     score: float | None = None
     signal_date: date
     transition_date: date | None = None

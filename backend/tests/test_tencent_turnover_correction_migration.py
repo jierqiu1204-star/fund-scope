@@ -81,4 +81,4 @@ def test_tencent_turnover_correction_is_the_single_migration_head() -> None:
     config.set_main_option("script_location", str(VERSIONS_DIR.parent))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["20260811_000065"]
+    assert script.get_heads() == ["20260817_000072"]

@@ -66,4 +66,4 @@ def test_tracked_etf_sleeve_migration_is_the_single_head() -> None:
     config.set_main_option("script_location", str(VERSIONS_DIR.parent))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["20260811_000066"]
+    assert script.get_heads() == ["20260817_000072"]

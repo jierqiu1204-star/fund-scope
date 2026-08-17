@@ -36,6 +36,9 @@ from app.services.intraday_etf.exchange_calendar import (
     market_session,
     next_poll_seconds,
 )
+from app.services.intraday_etf.retention_policy import (
+    INTRADAY_FULL_DETAIL_RETENTION_TRADING_DAYS,
+)
 
 QUOTE_SOURCE_AKSHARE = "akshare"
 QUOTE_SOURCE_EASTMONEY = "eastmoney"
@@ -1137,7 +1140,7 @@ async def persist_quotes(
 async def summarize_and_cleanup_intraday_quotes(
     session: AsyncSession,
     *,
-    retention_trading_days: int = 60,
+    retention_trading_days: int = INTRADAY_FULL_DETAIL_RETENTION_TRADING_DAYS,
     batch_size: int = INTRADAY_CLEANUP_BATCH_SIZE,
     evidence_seal_complete: bool = False,
 ) -> dict[str, Any]:

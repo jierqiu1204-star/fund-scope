@@ -28,7 +28,12 @@ import {
 } from "@/lib/leader-tactics-v2-contract";
 
 type Universe = "etf" | "ashare";
-type Formula = "all" | "breakout" | "base_launch" | "former_leader_repair";
+type Formula =
+  | "all"
+  | "breakout"
+  | "base_launch"
+  | "former_leader_repair"
+  | "low_base_catchup";
 type Lifecycle =
   | "all"
   | "preparing"
@@ -48,7 +53,8 @@ const formulaLabels: Record<Formula, string> = {
   all: "全部公式",
   breakout: "突破代理",
   base_launch: "筑底启动代理",
-  former_leader_repair: "前龙修复代理"
+  former_leader_repair: "前龙修复代理",
+  low_base_catchup: "低位补涨影子"
 };
 
 const stateLabels: Record<Lifecycle, string> = {
@@ -401,7 +407,13 @@ export function LeaderTacticsV2Panel() {
           <select
             className="mt-1 w-full rounded-md border border-border bg-white px-3 py-2 text-ink"
             value={universe}
-            onChange={(event) => setUniverse(event.target.value as Universe)}
+            onChange={(event) => {
+              const nextUniverse = event.target.value as Universe;
+              setUniverse(nextUniverse);
+              if (nextUniverse === "etf" && formula === "low_base_catchup") {
+                setFormula("all");
+              }
+            }}
           >
             <option value="etf">ETF</option>
             <option value="ashare">个股</option>
@@ -414,11 +426,16 @@ export function LeaderTacticsV2Panel() {
             value={formula}
             onChange={(event) => setFormula(event.target.value as Formula)}
           >
-            {Object.entries(formulaLabels).map(([value, label]) => (
+            {Object.entries(formulaLabels)
+              .filter(
+                ([value]) =>
+                  universe === "ashare" || value !== "low_base_catchup"
+              )
+              .map(([value, label]) => (
               <option key={value} value={value}>
                 {label}
               </option>
-            ))}
+              ))}
           </select>
         </label>
         <label className="text-sm text-ink/70">
@@ -553,7 +570,8 @@ export function LeaderTacticsV2Panel() {
                       </p>
                       <p className="mt-1 text-xs text-ink/55">
                         {candidate.theme ?? "未提供主题"} ·{" "}
-                        {candidate.formula_id} · {candidate.state}
+                        {candidate.formula_id} · {candidate.state} · 入场状态：
+                        {candidate.entry_status}
                       </p>
                       {candidate.universe === "ashare" ? (
                         <p className="mt-1 text-xs text-amber-800">

@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 SNAPSHOT_URL = "https://82.push2.eastmoney.com/api/qt/clist/get"
+TARGETED_SNAPSHOT_URL = "https://push2.eastmoney.com/api/qt/ulist.np/get"
 KLINE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_DECLARED_POOL = 20
@@ -118,6 +119,60 @@ async def _market_snapshot(client: httpx.AsyncClient) -> list[SnapshotRow]:
         amount = _number(item.get("f6"))
         if (
             len(code) != 6
+            or latest is None
+            or today_open is None
+            or previous_close is None
+            or amount is None
+            or min(latest, today_open, previous_close) <= 0
+            or amount < 0
+        ):
+            continue
+        rows.append(
+            SnapshotRow(
+                code=code,
+                name=str(item.get("f14") or code),
+                latest=latest,
+                today_open=today_open,
+                previous_close=previous_close,
+                amount=amount,
+            )
+        )
+    return rows
+
+
+async def _targeted_snapshots(
+    client: httpx.AsyncClient,
+    *,
+    codes: list[str],
+) -> list[SnapshotRow]:
+    if not codes:
+        return []
+    if len(codes) > MAX_DECLARED_POOL:
+        raise ValueError("targeted_snapshot_pool_exceeds_bound")
+    response = await client.get(
+        TARGETED_SNAPSHOT_URL,
+        params={
+            "secids": ",".join(_secid(code) for code in codes),
+            "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+            "fltt": 2,
+            "invt": 2,
+            "fields": "f2,f6,f12,f14,f17,f18",
+        },
+    )
+    diff = (_payload(response).get("data") or {}).get("diff") or []
+    if not isinstance(diff, list) or len(diff) > MAX_DECLARED_POOL:
+        raise ValueError("eastmoney_invalid_targeted_snapshot")
+    rows: list[SnapshotRow] = []
+    for item in diff:
+        if not isinstance(item, dict):
+            continue
+        code = str(item.get("f12") or "")[-6:]
+        latest = _number(item.get("f2"))
+        today_open = _number(item.get("f17"))
+        previous_close = _number(item.get("f18"))
+        amount = _number(item.get("f6"))
+        if (
+            code not in codes
             or latest is None
             or today_open is None
             or previous_close is None
@@ -302,10 +357,31 @@ async def capture_bounded_ashare_pool(
     *,
     decision_at: datetime,
     client: httpx.AsyncClient | None = None,
+    declared_pool: list[tuple[str, str]] | None = None,
+    checkpoint_provider: str = "eastmoney_5m",
+    minimum_closed_bars: int = 7,
+    use_receipt_time_cutoff: bool = False,
 ) -> dict[str, Any]:
     """Capture a full-market gate then factual five-minute bars for at most 20 names."""
 
     cutoff = decision_at.astimezone(SHANGHAI)
+    pool_is_fixed = declared_pool is not None
+    if declared_pool is not None:
+        normalized_pool = _declared_pool_from_details(
+            {
+                "declared_pool": [
+                    {"asset_code": code, "asset_name": name}
+                    for code, name in declared_pool
+                ]
+            }
+        )
+        if len(normalized_pool) != len(declared_pool):
+            raise ValueError("declared_pool_invalid_or_exceeds_bound")
+        declared_pool = normalized_pool
+    if not checkpoint_provider.strip() or len(checkpoint_provider) > 64:
+        raise ValueError("checkpoint_provider_invalid")
+    if not 1 <= minimum_closed_bars <= 24:
+        raise ValueError("minimum_closed_bars_out_of_bounds")
     checkpoint = (
         await session.execute(
             text(
@@ -316,28 +392,41 @@ async def capture_bounded_ashare_pool(
                 WHERE universe = 'ashare'
                   AND trade_date = :trade_date
                   AND checkpoint_at = :checkpoint_at
-                  AND provider = 'eastmoney_5m'
+                  AND provider = :provider
                 """
             ),
             {
                 "trade_date": cutoff.date(),
                 "checkpoint_at": cutoff.replace(tzinfo=None),
+                "provider": checkpoint_provider,
             },
         )
     ).mappings().first()
     if checkpoint is not None and checkpoint["status"] == "complete":
+        checkpoint_details: dict[str, Any] = {}
+        try:
+            parsed_details = json.loads(str(checkpoint["details_json"] or "{}"))
+            if isinstance(parsed_details, dict):
+                checkpoint_details = parsed_details
+        except json.JSONDecodeError:
+            checkpoint_details = {}
         return {
             "status": "complete",
             "expected_count": int(checkpoint["expected_count"]),
             "completed_count": int(checkpoint["completed_count"]),
             "failed_count": int(checkpoint["failed_count"]),
             "manifest_hash": str(checkpoint["manifest_hash"]),
+            "evidence_cutoff": checkpoint_details.get("evidence_cutoff"),
             "research_only": True,
             "production_mutation_allowed": False,
             "provider_work_skipped": True,
         }
-    resume_pool = _declared_pool_from_details(
-        checkpoint["details_json"] if checkpoint is not None else None
+    resume_pool = (
+        declared_pool
+        if declared_pool is not None
+        else _declared_pool_from_details(
+            checkpoint["details_json"] if checkpoint is not None else None
+        )
     )
     owned_client = client is None
     if client is None:
@@ -365,10 +454,17 @@ async def capture_bounded_ashare_pool(
             )
         ).all()
         authoritative = {str(row[0])[-6:] for row in universe_rows}
-        market_rows = await _market_snapshot(client)
+        market_rows = (
+            await _targeted_snapshots(
+                client,
+                codes=[code for code, _name in resume_pool],
+            )
+            if pool_is_fixed or resume_pool
+            else await _market_snapshot(client)
+        )
         market_by_code = {row.code: row for row in market_rows if row.code in authoritative}
         failures: dict[str, str] = {}
-        if resume_pool:
+        if pool_is_fixed or resume_pool:
             declared_pool = resume_pool
             declared = []
             for code, _name in declared_pool:
@@ -414,11 +510,12 @@ async def capture_bounded_ashare_pool(
         loaded = await asyncio.gather(*(load(row) for row in declared))
         completed = 0
         received_at = datetime.now(SHANGHAI)
-        capture_eligible = received_at <= cutoff
+        evidence_cutoff = received_at if use_receipt_time_cutoff else cutoff
+        capture_eligible = received_at <= evidence_cutoff
         for snapshot, five_minute, error in loaded:
             factor_identity = factors.get(snapshot.code)
             bars = _aggregate_pairs(five_minute or [])
-            if error or factor_identity is None or len(bars) < 7:
+            if error or factor_identity is None or len(bars) < minimum_closed_bars:
                 failures[snapshot.code] = error or "normalization_or_bar_coverage_unavailable"
                 continue
             factor, identity = factor_identity
@@ -459,7 +556,9 @@ async def capture_bounded_ashare_pool(
                         "content_hash": content_hash,
                     },
                 )
-            if not capture_eligible:
+            if not capture_eligible or any(
+                bar["bar_end"] > evidence_cutoff for bar in bars
+            ):
                 failures[snapshot.code] = "received_after_cutoff"
                 continue
             completed += 1
@@ -501,7 +600,7 @@ async def capture_bounded_ashare_pool(
             {
                 "trade_date": cutoff.date(),
                 "checkpoint_at": cutoff.replace(tzinfo=None),
-                "provider": "eastmoney_5m",
+                "provider": checkpoint_provider,
                 "status": "complete" if completed == expected_count else "incomplete",
                 "expected_count": expected_count,
                 "completed_count": completed,
@@ -517,6 +616,8 @@ async def capture_bounded_ashare_pool(
                         "provider_calls": len(declared) + 1,
                         "max_concurrency": MAX_CONCURRENCY,
                         "response_cap_bytes": MAX_RESPONSE_BYTES,
+                        "minimum_closed_bars": minimum_closed_bars,
+                        "evidence_cutoff": evidence_cutoff.isoformat(),
                     },
                     sort_keys=True,
                 ),
@@ -530,6 +631,7 @@ async def capture_bounded_ashare_pool(
             "completed_count": completed,
             "failed_count": len(failures),
             "manifest_hash": manifest_hash,
+            "evidence_cutoff": evidence_cutoff.isoformat(),
             "research_only": True,
             "production_mutation_allowed": False,
         }

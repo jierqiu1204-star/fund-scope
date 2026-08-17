@@ -3,6 +3,7 @@
 ## Purpose
 TBD - created by archiving change add-intraday-etf-watch-top20. Update Purpose after archive.
 ## Requirements
+
 ### Requirement: Intraday ETF Watchlist Is Derived From Daily Signals
 The system SHALL build the intraday ETF watchlist from the latest daily short-term ETF ranking plus active tracked ETF positions.
 
@@ -294,3 +295,17 @@ The system SHALL send ETF tracked-position emails only when the current price co
 - **WHEN** a tracked ETF threshold would be crossed only by a diverged or display-only provider quote
 - **THEN** the system returns a web-only data-quality warning and MUST NOT send a sell, reduce, stop, or take-profit email
 
+### Requirement: Intraday quote decision eligibility is explicit
+The intraday ETF watch SHALL treat quote decision eligibility as an explicit positive fact rather than inferring eligibility from a missing field or a usable display price.
+
+#### Scenario: Quote explicitly passes decision checks
+- **WHEN** a fresh quote records `decision_eligible=true` together with an allowed reliability state and valid quote time
+- **THEN** downstream risk workflows may use it subject to their remaining bid, ask, spread, and provider checks
+
+#### Scenario: Legacy quote lacks eligibility field
+- **WHEN** an older stored quote has no explicit `decision_eligible` value
+- **THEN** the quote remains displayable but is decision-ineligible and MUST NOT trigger an ETF action email
+
+#### Scenario: Display price exists without executable quote
+- **WHEN** a quote has a positive latest price but lacks fresh valid bid or ask evidence required for an action
+- **THEN** the system MUST NOT infer executable buy or sell evidence from the latest price

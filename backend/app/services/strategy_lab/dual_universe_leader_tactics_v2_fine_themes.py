@@ -31,6 +31,8 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_concept_snapshot 
 )
 
 _FINE_THEME_ALIASES = {
+    "创新药": ("innovation_drug", "创新药"),
+    "创新药概念": ("innovation_drug", "创新药"),
     "稀土/稀土永磁": ("rare_earth", "稀土/稀土永磁"),
     "稀土": ("rare_earth", "稀土/稀土永磁"),
     "稀土永磁": ("rare_earth", "稀土/稀土永磁"),

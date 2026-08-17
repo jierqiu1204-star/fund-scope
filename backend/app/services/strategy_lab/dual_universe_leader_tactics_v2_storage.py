@@ -8,7 +8,7 @@ from base64 import urlsafe_b64decode, urlsafe_b64encode
 from binascii import Error as Base64Error
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, fields
-from datetime import date, datetime, time
+from datetime import UTC, date, datetime, time
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -21,6 +21,9 @@ from app.services.strategy_lab.ashare_sentiment_risk import (
     summarize_sentiment_risk,
 )
 from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
+    LOW_BASE_SOURCE_CAPTURES,
+    LOW_BASE_SOURCE_REGISTRY_HASH,
+    LOW_BASE_SOURCE_REGISTRY_VERSION,
     V2_SOURCE_REGISTRY,
     V2ContractError,
     V2ResearchManifest,
@@ -40,6 +43,7 @@ _FORMULA_IDS = {
     "breakout": "leader_breakout_proxy_v2",
     "base_launch": "base_launch_proxy_v2",
     "former_leader_repair": "former_leader_repair_proxy_v2",
+    "low_base_catchup": "low_base_catchup_proxy_v1",
 }
 
 
@@ -217,16 +221,16 @@ def _as_date(value: datetime | date | str | None) -> date:
 def _encode_cursor(
     *,
     score: float,
-    transition_cutoff: date,
+    transition_cutoff_at: datetime,
     signal_date: date,
     formula_id: str,
     asset_code: str,
     manifest_hash: str,
 ) -> str:
     payload = {
-        "version": 2,
+        "version": 3,
         "score": score,
-        "transition_cutoff": transition_cutoff.isoformat(),
+        "transition_cutoff_at": transition_cutoff_at.isoformat(),
         "signal_date": signal_date.isoformat(),
         "formula_id": formula_id,
         "asset_code": asset_code,
@@ -241,11 +245,12 @@ def _decode_cursor(cursor: str) -> dict[str, Any]:
         payload = json.loads(urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
     except (Base64Error, UnicodeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError("cursor is invalid") from exc
-    if not isinstance(payload, dict) or payload.get("version") != 2:
+    if not isinstance(payload, dict) or payload.get("version") not in {2, 3}:
         raise ValueError("cursor is invalid")
+    cutoff_key = "transition_cutoff_at" if payload.get("version") == 3 else "transition_cutoff"
     required = (
         "signal_date",
-        "transition_cutoff",
+        cutoff_key,
         "formula_id",
         "asset_code",
         "manifest_hash",
@@ -262,7 +267,10 @@ def _decode_cursor(cursor: str) -> dict[str, Any]:
     payload["score"] = float(score)
     try:
         date.fromisoformat(payload["signal_date"])
-        date.fromisoformat(payload["transition_cutoff"])
+        if payload.get("version") == 3:
+            datetime.fromisoformat(payload["transition_cutoff_at"])
+        else:
+            date.fromisoformat(payload["transition_cutoff"])
     except ValueError as exc:
         raise ValueError("cursor is invalid") from exc
     return payload
@@ -367,6 +375,30 @@ async def persist_v2_screen_result(
             "created_at": now,
         },
     )
+    if result.universe == "ashare":
+        await session.execute(
+            text(
+                """
+                INSERT INTO leader_tactics_v2_source_registries
+                    (registry_version, registry_hash, payload_json, created_at)
+                VALUES (:version, :hash, :payload, :created_at)
+                ON CONFLICT (registry_hash) DO NOTHING
+                """
+            ),
+            {
+                "version": LOW_BASE_SOURCE_REGISTRY_VERSION,
+                "hash": LOW_BASE_SOURCE_REGISTRY_HASH,
+                "payload": _json(
+                    {
+                        "version": LOW_BASE_SOURCE_REGISTRY_VERSION,
+                        "registry_hash": LOW_BASE_SOURCE_REGISTRY_HASH,
+                        "captures": [asdict(item) for item in LOW_BASE_SOURCE_CAPTURES],
+                        "publication_time_policy": "unknown_not_backfilled",
+                    }
+                ),
+                "created_at": now,
+            },
+        )
     await session.execute(
         text(
             """
@@ -481,6 +513,15 @@ def _candidate_projection(
     if not isinstance(persisted_gate_facts, dict):
         persisted_gate_facts = {}
     gate_facts = dict(persisted_gate_facts)
+    transition_payload = _decode_json(row.get("transition_payload_json"), {})
+    if not isinstance(transition_payload, dict):
+        transition_payload = {}
+    intraday_confirmation = transition_payload.get("intraday_confirmation")
+    if isinstance(intraday_confirmation, dict):
+        gate_facts["intraday_confirmation"] = dict(intraday_confirmation)
+    projected_entry_status = row.get("projected_entry_status")
+    if projected_entry_status in {"watch", "actionable", "overextended", "invalidated"}:
+        gate_facts["entry_status"] = projected_entry_status
     resolved_risk = resolve_sentiment_risk_snapshot(
         gate_facts=persisted_gate_facts,
         shared_snapshot=shared_sentiment_risk,
@@ -492,6 +533,16 @@ def _candidate_projection(
     candidate = {
         **dict(row),
         "qualifies": bool(row.get("qualifies")),
+        "entry_status": str(
+            gate_facts.get("entry_status")
+            or (
+                "actionable"
+                if bool(row.get("qualifies"))
+                else "watch"
+                if row.get("state") == "turning_watch"
+                else "invalidated"
+            )
+        ),
         "gate_facts": gate_facts,
         "exclusion_reasons": _decode_json(row.get("exclusion_reasons_json"), []),
         "provenance": _decode_json(row.get("provenance_json"), {}),
@@ -512,7 +563,8 @@ def _candidate_cte(filter_where: str) -> str:
     return f"""
         WITH visible_transitions AS (
             SELECT manifest_hash, universe, asset_code, formula_id, signal_date,
-                   to_state, transition_date,
+                   to_state, transition_date, payload_json,
+                   projected_entry_status, evidence_cutoff,
                    ROW_NUMBER() OVER (
                        PARTITION BY manifest_hash, universe, asset_code,
                                     formula_id, signal_date
@@ -521,12 +573,28 @@ def _candidate_cte(filter_where: str) -> str:
             FROM leader_tactics_v2_state_transitions
             WHERE manifest_hash = :manifest_hash
               AND universe = :universe
-              AND transition_date <= :transition_cutoff
+              AND (
+                    (projected_entry_status IS NULL
+                     AND transition_date <= :transition_date_cutoff
+                     AND created_at <= :transition_created_cutoff)
+                    OR
+                    (projected_entry_status IS NOT NULL
+                     AND evidence_cutoff IS NOT NULL
+                     AND evidence_cutoff <= :transition_evidence_cutoff
+                     AND created_at <= :transition_created_cutoff)
+                  )
         ),
         observations AS (
             SELECT o.*,
                    COALESCE(t.to_state, o.state) AS effective_state,
-                   t.transition_date AS transition_date
+                   CASE
+                       WHEN t.projected_entry_status = 'actionable' THEN TRUE
+                       ELSE o.qualifies
+                   END AS effective_qualifies,
+                   t.transition_date AS transition_date,
+                   t.payload_json AS transition_payload_json,
+                   t.projected_entry_status AS projected_entry_status,
+                   t.evidence_cutoff AS transition_evidence_cutoff
             FROM leader_tactics_v2_candidate_observations o
             LEFT JOIN visible_transitions t
               ON t.manifest_hash = o.manifest_hash
@@ -609,6 +677,8 @@ async def read_v2_candidates(
         raise ValueError("universe must be etf or ashare")
     if formula not in {"all", *_FORMULA_IDS}:
         raise ValueError("formula filter is invalid")
+    if universe == "etf" and formula == "low_base_catchup":
+        raise ValueError("low-base catch-up is A-share research only")
     if state not in {"all", "turning_watch", "preparing", "confirmed", "invalidated"}:
         raise ValueError("state filter is invalid")
     if not 1 <= limit <= MAX_V2_PAGE_SIZE:
@@ -698,19 +768,39 @@ async def read_v2_candidates(
     if decoded_cursor is not None and decoded_cursor["manifest_hash"] != manifest_hash:
         raise ValueError("cursor belongs to a different materialized manifest")
 
-    requested_transition_cutoff = _as_date(as_of) if as_of else datetime.now(_SHANGHAI).date()
+    requested_transition_at = _as_of_datetime(as_of) or datetime.now(_SHANGHAI)
+    if requested_transition_at.tzinfo is None:
+        requested_transition_at = requested_transition_at.replace(tzinfo=_SHANGHAI)
+    else:
+        requested_transition_at = requested_transition_at.astimezone(_SHANGHAI)
     if decoded_cursor is not None:
-        cursor_transition_cutoff = date.fromisoformat(decoded_cursor["transition_cutoff"])
-        if as_of and cursor_transition_cutoff != requested_transition_cutoff:
+        if decoded_cursor["version"] == 3:
+            cursor_transition_at = datetime.fromisoformat(
+                decoded_cursor["transition_cutoff_at"]
+            )
+            if cursor_transition_at.tzinfo is None:
+                cursor_transition_at = cursor_transition_at.replace(tzinfo=_SHANGHAI)
+            else:
+                cursor_transition_at = cursor_transition_at.astimezone(_SHANGHAI)
+        else:
+            cursor_transition_at = datetime.combine(
+                date.fromisoformat(decoded_cursor["transition_cutoff"]),
+                time.max,
+                tzinfo=_SHANGHAI,
+            )
+        if as_of and cursor_transition_at != requested_transition_at:
             raise ValueError("cursor belongs to a different transition cutoff")
-        requested_transition_cutoff = cursor_transition_cutoff
+        requested_transition_at = cursor_transition_at
 
     params: dict[str, Any] = {
         "manifest_hash": manifest_hash,
         "universe": universe,
-        "transition_cutoff": requested_transition_cutoff,
+        "transition_date_cutoff": requested_transition_at.date(),
+        "transition_evidence_cutoff": requested_transition_at.replace(tzinfo=None),
+        "transition_created_cutoff": requested_transition_at.astimezone(UTC).replace(
+            tzinfo=None
+        ),
         "available": "available",
-        "selected_qualifies": state != "turning_watch",
         "qualifies_true": True,
         "limit": limit + 1,
     }
@@ -722,6 +812,15 @@ async def read_v2_candidates(
         params["state"] = state
         filter_clauses.append("effective_state = :state")
     filter_where = " AND ".join(filter_clauses) or "1 = 1"
+    candidate_visibility = (
+        "(effective_qualifies = :qualifies_true OR effective_state = 'turning_watch')"
+        if state == "all"
+        else (
+            "effective_state = 'turning_watch'"
+            if state == "turning_watch"
+            else "effective_qualifies = :qualifies_true"
+        )
+    )
     cursor_clause = ""
     if decoded_cursor is not None:
         params.update(
@@ -750,14 +849,16 @@ async def read_v2_candidates(
                 {cte}
                 SELECT manifest_hash, universe, asset_code, asset_name, theme, sector,
                        tracked_index, formula_id, effective_state AS state,
-                       availability, qualifies, score,
+                       availability, effective_qualifies AS qualifies, score,
                        COALESCE(score, -1.0) AS sort_score,
                        signal_date, transition_date,
                        source_cutoff, gate_facts_json,
-                       exclusion_reasons_json, provenance_json, feature_hash
+                       exclusion_reasons_json, provenance_json, feature_hash,
+                       transition_payload_json, projected_entry_status,
+                       transition_evidence_cutoff
                 FROM filtered
                 WHERE availability = :available
-                  AND qualifies = :selected_qualifies
+                  AND {candidate_visibility}
                 {cursor_clause}
                 ORDER BY COALESCE(score, -1.0) DESC,
                          signal_date DESC, formula_id ASC, asset_code ASC
@@ -781,7 +882,7 @@ async def read_v2_candidates(
         last = candidates[-1]
         next_cursor = _encode_cursor(
             score=float(last["sort_score"]),
-            transition_cutoff=requested_transition_cutoff,
+            transition_cutoff_at=requested_transition_at,
             signal_date=_as_date(last["signal_date"]),
             formula_id=str(last["formula_id"]),
             asset_code=str(last["asset_code"]),
@@ -804,10 +905,10 @@ async def read_v2_candidates(
                 SELECT COUNT(*) AS count,
                        SUM(CASE WHEN availability = :available THEN 1 ELSE 0 END)
                            AS available,
-                       SUM(CASE WHEN qualifies = :qualifies_true THEN 1 ELSE 0 END)
+                       SUM(CASE WHEN effective_qualifies = :qualifies_true THEN 1 ELSE 0 END)
                            AS qualifying,
                        SUM(CASE WHEN availability = :available
-                                     AND qualifies = :selected_qualifies
+                                     AND {candidate_visibility}
                                 THEN 1 ELSE 0 END) AS returned
                 FROM filtered
                 """
@@ -829,7 +930,8 @@ async def read_v2_candidates(
                 text(
                     f"""
                 {cte}
-                SELECT universe, formula_id, qualifies, gate_facts_json,
+                SELECT universe, formula_id, effective_qualifies AS qualifies,
+                       gate_facts_json,
                        exclusion_reasons_json
                 FROM filtered
                 """

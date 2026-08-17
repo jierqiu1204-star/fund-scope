@@ -7,6 +7,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.models.entities import IntradayEtfWatchRun, utcnow
+from app.services.intraday_etf.retention_policy import (
+    INTRADAY_FULL_DETAIL_RETENTION_TRADING_DAYS,
+)
 from app.services.intraday_etf.service import (
     ASIA_SHANGHAI,
     build_watchlist,
@@ -225,7 +228,7 @@ def _sample_mapping(values: dict[str, Any], *, limit: int = 50) -> dict[str, Any
 async def intraday_etf_cleanup_job(
     session: AsyncSession,
     *,
-    retention_trading_days: int = 60,
+    retention_trading_days: int = INTRADAY_FULL_DETAIL_RETENTION_TRADING_DAYS,
 ) -> dict[str, Any]:
     return await summarize_and_cleanup_intraday_quotes(
         session,
@@ -248,4 +251,3 @@ def _result(run: IntradayEtfWatchRun) -> dict[str, Any]:
         "error_message": run.error_message,
         "details": dict(run.details_json or {}),
     }
-

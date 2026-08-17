@@ -20,6 +20,9 @@ from app.services.intraday_etf.evidence import (
     UNAVAILABLE_NO_QUOTE_AT_CUTOFF,
     seal_intraday_quote_evidence,
 )
+from app.services.intraday_etf.retention_policy import (
+    INTRADAY_FULL_DETAIL_RETENTION_TRADING_DAYS,
+)
 from app.services.intraday_etf.service import (
     INTRADAY_CLEANUP_BATCH_SIZE,
     summarize_and_cleanup_intraday_quotes,
@@ -278,7 +281,7 @@ async def _run_retention_slice(
 async def intraday_etf_retention_job(
     session: AsyncSession,
     *,
-    retention_trading_days: int = 60,
+    retention_trading_days: int = INTRADAY_FULL_DETAIL_RETENTION_TRADING_DAYS,
     batch_size: int = INTRADAY_CLEANUP_BATCH_SIZE,
 ) -> dict[str, Any]:
     try:

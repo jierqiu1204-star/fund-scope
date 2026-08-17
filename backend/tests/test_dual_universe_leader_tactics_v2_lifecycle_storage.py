@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.services.strategy_lab import dual_universe_leader_tactics_v2_lifecycle_storage
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_collector import (
     V2CollectorCheckpoint,
 )
@@ -132,7 +133,10 @@ async def test_checkpoint_lease_is_database_cas_and_save_cannot_clobber_owner(tm
 
 
 @pytest.mark.asyncio
-async def test_incremental_checkpoint_writes_only_changed_items(tmp_path) -> None:
+async def test_incremental_checkpoint_writes_only_changed_items(
+    tmp_path,
+    monkeypatch,
+) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'incremental.db'}")
     async with engine.begin() as connection:
         await connection.execute(
@@ -210,6 +214,13 @@ async def test_incremental_checkpoint_writes_only_changed_items(tmp_path) -> Non
             lease_owner="incremental-owner",
         )
         assert expiry is not None
+        monkeypatch.setattr(
+            dual_universe_leader_tactics_v2_lifecycle_storage,
+            "_json",
+            lambda _value: (_ for _ in ()).throw(
+                AssertionError("version-2 saves must not serialize cumulative JSON")
+            ),
+        )
         await save_v2_checkpoint(
             session,
             manifest_hash=manifest_hash,
@@ -265,7 +276,9 @@ async def test_lifecycle_transitions_are_idempotent_and_caller_transaction_owned
                     transition_date DATE NOT NULL,
                     payload_json TEXT NOT NULL,
                     transition_hash TEXT NOT NULL UNIQUE,
-                    created_at DATETIME NOT NULL
+                    created_at DATETIME NOT NULL,
+                    evidence_cutoff DATETIME,
+                    projected_entry_status TEXT
                 )
                 """
             )

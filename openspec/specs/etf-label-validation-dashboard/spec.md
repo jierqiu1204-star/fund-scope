@@ -3,6 +3,7 @@
 ## Purpose
 TBD - created by archiving change enhance-etf-research-quality. Update Purpose after archive.
 ## Requirements
+
 ### Requirement: ETF Label Validation Dashboard
 The system SHALL provide an ETF label validation view that summarizes historical outcomes for buy-observation labels and entry-timing labels.
 
@@ -180,15 +181,19 @@ The research evidence dashboard SHALL provide an `ETF` and `个股` universe swi
 - **THEN** the unavailable view shows its exact reason and the dashboard does not silently display the other universe
 
 ### Requirement: Leader-tactics candidates are filterable by formula and state
-The dashboard SHALL offer formula filters for all, breakout, base launch, and former-leader repair, plus lifecycle filters for preparing, confirmed, and invalidated, and SHALL show deterministic paginated candidate rows.
+The dashboard SHALL offer formula filters for all, breakout, base launch, and former-leader repair, plus separate state filters for turning watch, preparing, confirmed, and invalidated, and SHALL show deterministic paginated rows without mixing non-actionable observations with candidate lifecycle states.
+
+#### Scenario: User filters turning watches
+- **WHEN** the selected state is `turning_watch`
+- **THEN** rows are labeled `转强观察（研究）` and show resolved theme, theme source, passed gates, remaining blockers, threshold distance, signal date, and cutoff without buy or confirmation wording
 
 #### Scenario: User filters confirmed base-launch candidates
 - **WHEN** the selected formula is base launch and the selected state is confirmed
-- **THEN** only matching rows are displayed with code, name, theme, score, signal date, confirmation date, and cutoff
+- **THEN** only matching confirmed rows are displayed with code, name, theme, score, signal date, confirmation date, and cutoff
 
 #### Scenario: Filtered result is empty
 - **WHEN** no row matches the selected filters
-- **THEN** the page shows a Chinese empty state with candidate and exclusion counts rather than implying a loading failure
+- **THEN** the page shows a Chinese empty state with candidate, watch, and exclusion counts rather than implying a loading failure
 
 ### Requirement: Dashboard distinguishes disclosed rules from transparent proxies
 The leader-tactics panel SHALL display the source-disclosed conditions, the exact transparent proxy identity, unavailable proprietary elements, and a visible statement that the result is research evidence rather than the author's original signal or an investment recommendation.
@@ -207,3 +212,14 @@ The dashboard SHALL present preparing or confirmed research signals, historical 
 #### Scenario: Validation samples are insufficient
 - **WHEN** the promotion gates lack enough factual PIT sessions or independent dates
 - **THEN** the panel displays `样本不足` with exact counts and MUST NOT describe the formula as validated or currently usable for live trading
+
+### Requirement: Materialization status distinguishes universes and stages
+The dashboard SHALL keep ETF and A-share requests isolated, show the selected universe's manifest and cutoff, show A-share feature/group progress when available, and state that both V2 research surfaces are isolated from the ETF comprehensive ranking.
+
+#### Scenario: A-share materialization waits for memory
+- **WHEN** the latest A-share run is paused by the declared memory headroom gate
+- **THEN** the workflow records current and required headroom, while the page retains the completed feature count and current stage without exposing a partial cohort
+
+#### Scenario: ETF V2 is materialized independently
+- **WHEN** an ETF research manifest exists while the comprehensive ranking has another manifest identity
+- **THEN** the ETF research identity is shown only under the ETF selection and no relationship stronger than research isolation is implied

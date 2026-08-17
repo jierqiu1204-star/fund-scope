@@ -22,6 +22,7 @@ async def test_v2_contract_is_readable_when_candidate_materialization_is_disable
         "leader_breakout_proxy_v2",
         "base_launch_proxy_v2",
         "former_leader_repair_proxy_v2",
+        "low_base_catchup_proxy_v1",
     ]
     assert payload["research_only"] is True
 
