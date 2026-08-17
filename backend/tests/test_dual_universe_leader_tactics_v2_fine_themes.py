@@ -25,8 +25,13 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_fine_themes impor
 
 
 def test_registered_theme_sources_have_stable_keys_and_labels() -> None:
-    assert fine_themes.REGISTERED_FINE_THEME_KEYS == ("rare_earth",)
-    assert fine_themes.REGISTERED_FINE_THEME_LABELS == ("稀土", "稀土永磁")
+    assert fine_themes.REGISTERED_FINE_THEME_KEYS == ("rare_earth", "passive_components")
+    assert fine_themes.REGISTERED_FINE_THEME_LABELS == (
+        "稀土",
+        "稀土永磁",
+        "被动元件概念",
+        "MLCC",
+    )
     assert (
         tuple(source.provider_label for source in fine_themes.registered_fine_theme_sources())
         == fine_themes.REGISTERED_FINE_THEME_LABELS
@@ -38,6 +43,14 @@ def test_rare_earth_aliases_are_normalized_without_inferring_membership() -> Non
     assert normalize_fine_theme_label(" 稀土永磁 ") == (
         "rare_earth",
         "稀土/稀土永磁",
+    )
+    assert normalize_fine_theme_label("被动元件概念") == (
+        "passive_components",
+        "被动元件/MLCC",
+    )
+    assert normalize_fine_theme_label(" MLCC ") == (
+        "passive_components",
+        "被动元件/MLCC",
     )
 
 
@@ -163,7 +176,7 @@ async def test_compatibility_loader_serially_aggregates_and_deduplicates(monkeyp
     facts = await fine_themes.load_registered_fine_theme_facts(
         received_at=datetime(2026, 8, 14, 9, 0),
     )
-    assert calls == ["稀土", "稀土永磁"]
+    assert calls == ["稀土", "稀土永磁", "被动元件概念", "MLCC"]
     assert len(facts) == 1
     assert facts[0].asset_code == "600111"
 

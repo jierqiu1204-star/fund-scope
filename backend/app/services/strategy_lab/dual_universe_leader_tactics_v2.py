@@ -28,9 +28,9 @@ from app.services.strategy_lab.ashare_sentiment_risk import (
 V2_SCHEMA_VERSION = "dual_universe_leader_tactics_v2"
 V2_EXPERIMENT_FAMILY = "leader_tactics_shadow_v2"
 V2_SOURCE_REGISTRY_VERSION = "leader_tactics_source_registry_v2"
-V2_FORMULA_REGISTRY_VERSION = "leader_tactics_formula_registry_v4"
+V2_FORMULA_REGISTRY_VERSION = "leader_tactics_formula_registry_v5"
 V2_LIFECYCLE_VERSION = "leader_tactics_lifecycle_v2"
-V2_INPUT_HASH_SCHEMA_VERSION = "leader_tactics_v2_input_hash_v4"
+V2_INPUT_HASH_SCHEMA_VERSION = "leader_tactics_v2_input_hash_v5"
 ASHARE_MEMBERSHIP_FACT_HASH_CONTRACT = "dual_universe_leader_tactics_v2_ashare_ingestion_v1"
 ASHARE_FINE_THEME_FACT_HASH_CONTRACT = "dual_universe_leader_tactics_v2_fine_theme_ingestion_v1"
 
@@ -63,6 +63,7 @@ FORBIDDEN_DECISION_PROVIDERS = frozenset({"sina", "efinance"})
 MINIMUM_PEER_COUNT = 5
 MINIMUM_BATCH_QUALIFIERS = 3
 BATCH_BREADTH_MINIMUM = 0.20
+BROAD_INDUSTRY_BATCH_QUALIFIER_CAP = 5
 VOLUME_LOOKBACK = 120
 BASE_VOLUME_LOOKBACK = 20
 BASE_RELATIVE_VOLUME_MIN = 1.20
@@ -347,6 +348,14 @@ V2_FORMULA_REGISTRY_HASH = stable_contract_hash(
     {
         "version": V2_FORMULA_REGISTRY_VERSION,
         "formula_hashes": tuple(item.formula_hash for item in V2_FORMULAS),
+        "batch_confirmation_policy": {
+            "minimum_qualifiers": MINIMUM_BATCH_QUALIFIERS,
+            "fine_theme_breadth_minimum": BATCH_BREADTH_MINIMUM,
+            "broad_industry_qualifier_cap": BROAD_INDUSTRY_BATCH_QUALIFIER_CAP,
+            "applies_to": (BASE_LAUNCH_V2,),
+            "breakout_confirmation": "hot_theme_and_core_leader",
+            "repair_confirmation": "individual_former_leader",
+        },
     }
 )
 V2_LEGACY_FORMULA_REGISTRY_PAIRS = frozenset(
@@ -354,7 +363,11 @@ V2_LEGACY_FORMULA_REGISTRY_PAIRS = frozenset(
         (
             "f85819290cc7ec5105c8622c23567d9f8d76559f246d685070414a4187bbb89e",
             "leader_tactics_v2_input_hash_v3",
-        )
+        ),
+        (
+            "978c114bf9b60b89818fd1e2755d80764e496c6eed0a506b1a615877aee2ea5d",
+            "leader_tactics_v2_input_hash_v4",
+        ),
     }
 )
 
@@ -855,6 +868,34 @@ def _group_key(item: V2AssetInput) -> str | None:
     return item.membership.group_id if item.membership is not None else None
 
 
+def _required_batch_qualifiers(
+    *, formula_id: str, peer_count: int, membership: V2PITMembership | None
+) -> tuple[int, str]:
+    """Return an auditable confirmation count for the observed peer hierarchy.
+
+    Breakout already requires hot-theme breadth and an 80th-percentile core
+    leader, while former-leader repair is explicitly an individual lifecycle.
+    Requiring several peers to pass the *entire same formula* duplicates those
+    gates. Only base-launch keeps a batch confirmation: fine themes use the
+    proportional rule, and broad industries use a capped absolute count.
+    """
+
+    if formula_id == BREAKOUT_V2:
+        return 1, "hot_theme_core_leader_v1"
+    if formula_id == FORMER_LEADER_REPAIR_V2:
+        return 1, "individual_former_leader_v1"
+    proportional = max(
+        MINIMUM_BATCH_QUALIFIERS,
+        math.ceil(max(peer_count, 0) * BATCH_BREADTH_MINIMUM),
+    )
+    if membership is not None and membership.hierarchy_level == "fine_theme":
+        return proportional, "fine_theme_proportional_v1"
+    return (
+        min(proportional, BROAD_INDUSTRY_BATCH_QUALIFIER_CAP),
+        "broad_industry_capped_v1",
+    )
+
+
 def _clone_representatives(
     items: Sequence[V2AssetInput],
     *,
@@ -1098,6 +1139,10 @@ def _incremental_input_hash(items: Sequence[V2AssetInput]) -> str:
                 membership.source,
                 membership.confidence,
                 membership.supersedes_fact_hash,
+                membership.hierarchy_level,
+                membership.normalized_theme_key,
+                membership.resolution_mode,
+                membership.fallback_reason,
             ),
         )
         encoded_metadata = json.dumps(
@@ -1796,6 +1841,22 @@ def screen_dual_universe(
             reasons = list(details["reasons"])
             group = _group_key(item)
             peer_count = peer_counts.get(item.asset_code, 0)
+            batch_qualifier_count = basic_by_group.get(group or "", 0)
+            batch_required_count, batch_policy = _required_batch_qualifiers(
+                formula_id=formula_id,
+                peer_count=peer_count,
+                membership=item.membership,
+            )
+            facts.update(
+                {
+                    "batch_qualifier_count": batch_qualifier_count,
+                    "batch_required_count": batch_required_count,
+                    "batch_breadth": (
+                        batch_qualifier_count / peer_count if peer_count > 0 else None
+                    ),
+                    "batch_policy": batch_policy,
+                }
+            )
             ranks = component_percentiles[formula_id]
             score_components: list[float] = []
             hot_component = _finite(facts.get("hot_score")) or 0.0
@@ -1841,9 +1902,7 @@ def screen_dual_universe(
                         1.0 - min(overextension if overextension is not None else 1.0, 1.0),
                     ]
             if not reasons and (
-                basic_by_group.get(group or "", 0) < MINIMUM_BATCH_QUALIFIERS
-                or peer_count <= 0
-                or basic_by_group.get(group or "", 0) / max(peer_count, 1) < BATCH_BREADTH_MINIMUM
+                peer_count <= 0 or batch_qualifier_count < batch_required_count
             ):
                 reasons.append("batch_breadth_gate_failed")
             clone = item.asset_code in clone_excluded

@@ -11,6 +11,7 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
     V2AdjustedBar,
     V2AssetInput,
     V2PITMembership,
+    _required_batch_qualifiers,
     build_v2_staged_asset_feature,
     screen_dual_universe,
     staged_theme_percentile_overrides,
@@ -121,6 +122,75 @@ def test_peer_count_and_clone_policy_are_explicit() -> None:
     clone_rows = [row for row in result.observations if row.asset_code == "510001"]
     assert clone_rows
     assert all("clone_not_representative" in row.exclusion_reasons for row in clone_rows)
+
+
+def test_batch_confirmation_is_proportional_for_fine_themes_and_capped_for_broad_groups() -> None:
+    broad = _group_membership("sw1:electronics", "电子")
+    fine = _group_membership("fine_theme:passive_components", "被动元件/MLCC")
+
+    assert _required_batch_qualifiers(
+        formula_id=BASE_LAUNCH_V2, peer_count=5, membership=broad
+    ) == (3, "broad_industry_capped_v1")
+    assert _required_batch_qualifiers(
+        formula_id=BASE_LAUNCH_V2, peer_count=318, membership=broad
+    ) == (
+        5,
+        "broad_industry_capped_v1",
+    )
+    assert _required_batch_qualifiers(
+        formula_id=BASE_LAUNCH_V2, peer_count=20, membership=fine
+    ) == (
+        4,
+        "fine_theme_proportional_v1",
+    )
+    assert _required_batch_qualifiers(
+        formula_id=BASE_LAUNCH_V2, peer_count=318, membership=fine
+    ) == (
+        64,
+        "fine_theme_proportional_v1",
+    )
+    assert _required_batch_qualifiers(
+        formula_id=BREAKOUT_V2, peer_count=318, membership=fine
+    ) == (1, "hot_theme_core_leader_v1")
+
+
+def test_single_core_breakout_is_not_rejected_by_duplicate_batch_gate() -> None:
+    membership = _group_membership("fine_theme:passive_components", "被动元件/MLCC")
+    target_bars = list(_bars())
+    target_bars[-1] = replace(
+        target_bars[-1],
+        adjusted_open=119.0,
+        adjusted_high=121.0,
+        adjusted_low=118.0,
+        adjusted_close=120.0,
+        volume=10_000.0,
+        amount=10_000_000.0,
+        turnover=10_000_000.0,
+    )
+    items = (
+        _asset("000636", universe="ashare", bars=tuple(target_bars), membership=membership),
+        *tuple(
+            _asset(f"00000{index}", universe="ashare", membership=membership)
+            for index in range(1, 6)
+        ),
+    )
+
+    result = screen_dual_universe(
+        items,
+        theme_percentile_overrides={"fine_theme:passive_components": (1.0, 1.0, 1.0)},
+    )
+    target = next(
+        row
+        for row in result.observations
+        if row.asset_code == "000636" and row.formula_id == BREAKOUT_V2
+    )
+    facts = dict(target.gate_facts)
+
+    assert target.qualifies is True
+    assert target.exclusion_reasons == ()
+    assert facts["batch_qualifier_count"] == 1
+    assert facts["batch_required_count"] == 1
+    assert facts["batch_policy"] == "hot_theme_core_leader_v1"
 
 
 def test_identical_factual_inputs_have_cross_adapter_formula_parity() -> None:

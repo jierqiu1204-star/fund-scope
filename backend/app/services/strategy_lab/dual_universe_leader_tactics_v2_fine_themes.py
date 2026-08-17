@@ -35,6 +35,10 @@ _FINE_THEME_ALIASES = {
     "稀土": ("rare_earth", "稀土/稀土永磁"),
     "稀土永磁": ("rare_earth", "稀土/稀土永磁"),
     "稀土磁材": ("rare_earth", "稀土/稀土永磁"),
+    "被动元件/MLCC": ("passive_components", "被动元件/MLCC"),
+    "被动元件": ("passive_components", "被动元件/MLCC"),
+    "被动元件概念": ("passive_components", "被动元件/MLCC"),
+    "MLCC": ("passive_components", "被动元件/MLCC"),
 }
 
 FINE_THEME_SUBPROCESS_TIMEOUT_SECONDS = 15.0
