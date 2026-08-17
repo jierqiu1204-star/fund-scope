@@ -27,14 +27,34 @@ jobs:
     runs-on: [self-hosted, Linux, X64, fundscope-vps]
     timeout-minutes: 30
     steps:
-      - name: Check out pushed source
-        uses: actions/checkout@v4
+      - name: Fetch pushed source
         timeout-minutes: 1
-        with:
-          clean: true
-          fetch-depth: 1
-          persist-credentials: false
-          ref: ${{ github.sha }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          askpass="$RUNNER_TEMP/fundscope-git-askpass"
+          trap 'rm -f "$askpass"' EXIT
+          cat > "$askpass" <<'EOF'
+          #!/bin/sh
+          case "$1" in
+            *Username*) printf '%s\n' x-access-token ;;
+            *) printf '%s\n' "$GITHUB_TOKEN" ;;
+          esac
+          EOF
+          chmod 700 "$askpass"
+
+          mkdir -p "$GITHUB_WORKSPACE"
+          git -C "$GITHUB_WORKSPACE" init
+          git -C "$GITHUB_WORKSPACE" clean -ffdx
+          git -C "$GITHUB_WORKSPACE" remote remove origin 2>/dev/null || true
+          git -C "$GITHUB_WORKSPACE" remote add origin \
+            "https://github.com/$GITHUB_REPOSITORY.git"
+          GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 \
+            timeout 50 git -C "$GITHUB_WORKSPACE" fetch --depth=1 origin "$GITHUB_SHA"
+          git -C "$GITHUB_WORKSPACE" checkout --detach --force FETCH_HEAD
+          test "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" = "$GITHUB_SHA"
 
       - name: Deploy on VPS
         run: |
