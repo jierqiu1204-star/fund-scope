@@ -89,6 +89,16 @@ jobs:
               ;;
           esac
 
+          frontend_changed=true
+          if [ -d "$deploy_dir/frontend" ] && diff -qr \
+            --exclude .next \
+            --exclude node_modules \
+            --exclude out \
+            "$GITHUB_WORKSPACE/frontend" "$deploy_dir/frontend" > /dev/null; then
+            frontend_changed=false
+          fi
+          printf 'frontend_changed=%s\n' "$frontend_changed"
+
           mkdir -p "$deploy_dir"
           candidate_image="fundscope-backend-candidate:$GITHUB_SHA"
           sudo docker build --tag "$candidate_image" "$GITHUB_WORKSPACE/backend"
@@ -188,12 +198,16 @@ jobs:
 
           cd "$deploy_dir/deploy"
           sudo docker compose -f "$COMPOSE_FILE" build backend
-          sudo docker compose -f "$COMPOSE_FILE" build frontend-static-builder
+          if [ "$frontend_changed" = true ]; then
+            sudo docker compose -f "$COMPOSE_FILE" build frontend-static-builder
+          fi
 
           sudo docker compose -f "$COMPOSE_FILE" down --remove-orphans
-          sudo docker compose -f "$COMPOSE_FILE" rm -f -s frontend-static-builder 2>/dev/null || true
-          sudo docker rm -f deploy-frontend-static-builder-1 2>/dev/null || true
-          sudo docker compose -f "$COMPOSE_FILE" run --rm frontend-static-builder
+          if [ "$frontend_changed" = true ]; then
+            sudo docker compose -f "$COMPOSE_FILE" rm -f -s frontend-static-builder 2>/dev/null || true
+            sudo docker rm -f deploy-frontend-static-builder-1 2>/dev/null || true
+            sudo docker compose -f "$COMPOSE_FILE" run --rm frontend-static-builder
+          fi
           sudo docker compose -f "$COMPOSE_FILE" up -d postgres
           postgres_ready=false
           for attempt in $(seq 1 20); do

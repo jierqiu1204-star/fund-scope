@@ -1382,7 +1382,7 @@ async def _materialize_ashare(
         "decision_date": decision_date.isoformat(),
         "next_eligible_date": (next_eligible_date.isoformat() if next_eligible_date else None),
         "manifest_hash": manifest_hash,
-        "universe_count": len(inputs),
+        "universe_count": len(assets),
         "observation_count": len(result.observations),
         "candidate_count": len(qualifying),
         "candidate_codes": sorted({item.asset_code for item in qualifying}),
