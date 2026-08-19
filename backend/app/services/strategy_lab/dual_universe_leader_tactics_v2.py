@@ -33,6 +33,9 @@ V2_LIFECYCLE_VERSION = "leader_tactics_lifecycle_v3"
 V2_INPUT_HASH_SCHEMA_VERSION = "leader_tactics_v2_input_hash_v5"
 ASHARE_MEMBERSHIP_FACT_HASH_CONTRACT = "dual_universe_leader_tactics_v2_ashare_ingestion_v1"
 ASHARE_FINE_THEME_FACT_HASH_CONTRACT = "dual_universe_leader_tactics_v2_fine_theme_ingestion_v1"
+ASHARE_THEME_GRAPH_SCHEMA_VERSION = "ashare_multilayer_theme_graph_v1"
+ASHARE_INDUSTRY_PATH_FACT_HASH_CONTRACT = "ashare_industry_path_fact_v1"
+ASHARE_THEME_RELATION_FACT_HASH_CONTRACT = "ashare_theme_relation_fact_v1"
 
 UNIVERSE_ETF = "etf"
 UNIVERSE_ASHARE = "ashare"
@@ -63,6 +66,8 @@ DECISION_MODES = (SESSION_PIT_MODE, POST_CLOSE_WATCHLIST_MODE)
 PRICE_BASIS = "total_return_adjusted"
 FORBIDDEN_DECISION_PROVIDERS = frozenset({"sina", "efinance"})
 MINIMUM_PEER_COUNT = 5
+FINE_CONTEXT_MAX_AGE_DAYS = 7
+INDUSTRY_CONTEXT_MAX_AGE_DAYS = 370
 MINIMUM_BATCH_QUALIFIERS = 3
 BATCH_BREADTH_MINIMUM = 0.20
 BROAD_INDUSTRY_BATCH_QUALIFIER_CAP = 5
@@ -534,12 +539,30 @@ class V2PITMembership:
     fact_hash_contract: str = "v2_membership"
     source_asset_code: str | None = None
     source: str | None = None
-    confidence: str | None = None
+    confidence: str | float | None = None
     supersedes_fact_hash: str | None = None
     hierarchy_level: str = "broad_industry"
     normalized_theme_key: str | None = None
     resolution_mode: str = "broad_industry_fallback"
     fallback_reason: str | None = None
+    relation_kind: str = "broad_industry"
+    registry_priority: int = 100
+    hierarchy_depth: int = 1
+    industry_path: tuple[tuple[str, str, str], ...] = ()
+    snapshot_date: date | None = None
+    snapshot_hash: str | None = None
+    snapshot_complete: bool | None = None
+    eligible_peer_count: int | None = None
+    theme_state_hash: str | None = None
+    theme_state_available: bool | None = None
+    theme_state_percentiles: tuple[float, float, float] | None = None
+    theme_state_unavailable_reasons: tuple[str, ...] = ()
+    taxonomy: str | None = None
+    provider_theme_code: str | None = None
+    provider_theme_label: str | None = None
+    membership_reason: str | None = None
+    exposure_weight: float | None = None
+    capture_run_hash: str | None = None
 
     def canonical_payload(self) -> dict[str, Any]:
         # Avoid dataclasses.asdict's recursive deepcopy in the cross-section
@@ -563,6 +586,51 @@ class V2PITMembership:
         }
 
     def fact_identity_payload(self, *, asset_code: str) -> dict[str, Any]:
+        if self.fact_hash_contract == ASHARE_INDUSTRY_PATH_FACT_HASH_CONTRACT:
+            levels = {level: (code, label) for level, code, label in self.industry_path}
+            return {
+                "schema_version": ASHARE_THEME_GRAPH_SCHEMA_VERSION,
+                "fact_type": "ashare_industry_path",
+                "asset_code": self.source_asset_code or asset_code,
+                "taxonomy": self.taxonomy,
+                "taxonomy_version": self.taxonomy_version,
+                "mapping_kind": self.mapping_kind,
+                "level1_code": levels.get("industry_l1", (None, None))[0],
+                "level1_label": levels.get("industry_l1", (None, None))[1],
+                "level2_code": levels.get("industry_l2", (None, None))[0],
+                "level2_label": levels.get("industry_l2", (None, None))[1],
+                "level3_code": levels.get("industry_l3", (None, None))[0],
+                "level3_label": levels.get("industry_l3", (None, None))[1],
+                "effective_from": self.effective_from,
+                "effective_to": self.effective_to,
+                "snapshot_date": self.snapshot_date,
+                "received_at": self.observed_at,
+                "source": self.source,
+                "confidence": self.confidence,
+                "source_snapshot_hash": self.snapshot_hash,
+            }
+        if self.fact_hash_contract == ASHARE_THEME_RELATION_FACT_HASH_CONTRACT:
+            return {
+                "schema_version": ASHARE_THEME_GRAPH_SCHEMA_VERSION,
+                "fact_type": "ashare_theme_relation",
+                "asset_code": self.source_asset_code or asset_code,
+                "canonical_theme_key": self.normalized_theme_key,
+                "theme_label": self.theme,
+                "relation_kind": self.relation_kind,
+                "effective_from": self.effective_from,
+                "effective_to": self.effective_to,
+                "received_at": self.observed_at,
+                "taxonomy_version": self.taxonomy_version,
+                "source": self.source,
+                "confidence": self.confidence,
+                "source_snapshot_date": self.snapshot_date,
+                "source_snapshot_hash": self.snapshot_hash,
+                "capture_run_hash": self.capture_run_hash,
+                "provider_theme_code": self.provider_theme_code,
+                "provider_theme_label": self.provider_theme_label,
+                "membership_reason": self.membership_reason,
+                "exposure_weight": self.exposure_weight,
+            }
         if self.fact_hash_contract == ASHARE_FINE_THEME_FACT_HASH_CONTRACT:
             return {
                 "schema_version": ASHARE_FINE_THEME_FACT_HASH_CONTRACT,
@@ -617,6 +685,10 @@ class V2AssetInput:
     decision_mode: Literal["session_pit", "post_close_watchlist"] = SESSION_PIT_MODE
     membership_evaluation_date: date | None = None
     next_eligible_date: date | None = None
+    primary_industry: V2PITMembership | None = None
+    theme_memberships: tuple[V2PITMembership, ...] = ()
+    alternative_memberships: tuple[V2PITMembership, ...] = ()
+    rejected_contexts: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -699,6 +771,12 @@ class V2StagedAssetFeature:
     input_digest: str
     return_20: float | None = None
     below_adjusted_ma5: bool | None = None
+    selected_context_hash: str | None = None
+    alternative_context_hashes: tuple[str, ...] = ()
+    rejected_contexts: tuple[tuple[str, str], ...] = ()
+    theme_state_hash: str | None = None
+    selected_context_relation_kind: str | None = None
+    selected_context_snapshot_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -858,6 +936,193 @@ def validate_runtime_contract(
         raise V2ContractError("holdout identity substitution is not allowed")
 
 
+_CONTEXT_RELATION_PRIORITY = {
+    "provider_concept": 0,
+    "industry_union_proxy": 1,
+    "industry_l3": 2,
+    "industry_l2": 3,
+    "industry_l1": 4,
+    "broad_industry": 5,
+}
+_CONTEXT_CONFIDENCE_PRIORITY = {
+    "provider": 0,
+    "authoritative": 0,
+    "high": 1,
+    "research_proxy": 2,
+    "medium": 3,
+    "fallback": 4,
+}
+
+
+def _context_identity(membership: V2PITMembership) -> tuple[Any, ...]:
+    return (
+        membership.group_id,
+        membership.fact_hash,
+        membership.relation_kind,
+        membership.snapshot_date,
+        membership.snapshot_hash,
+        membership.theme_state_hash,
+    )
+
+
+def _context_sort_key(membership: V2PITMembership) -> tuple[Any, ...]:
+    relation_kind = membership.relation_kind or membership.hierarchy_level
+    confidence = membership.confidence
+    confidence_priority = (
+        -float(confidence)
+        if isinstance(confidence, int | float) and not isinstance(confidence, bool)
+        else _CONTEXT_CONFIDENCE_PRIORITY.get(str(confidence or "").lower(), 9)
+    )
+    return (
+        _CONTEXT_RELATION_PRIORITY.get(relation_kind, 99),
+        confidence_priority,
+        membership.registry_priority,
+        -membership.hierarchy_depth,
+        membership.group_id,
+        membership.fact_hash,
+    )
+
+
+def _context_rejection_reason(
+    item: V2AssetInput,
+    membership: V2PITMembership,
+    *,
+    peer_count: int,
+) -> str | None:
+    evaluation_date = item.membership_evaluation_date or item.signal_date
+    if not membership.group_id.strip():
+        return "missing_pit_peer_group"
+    if membership.mapping_kind not in {
+        "historical_pit",
+        "primary_hierarchy",
+        "broad_fallback",
+    }:
+        return "taxonomy_not_point_in_time"
+    if membership.effective_from > evaluation_date:
+        return "membership_effective_after_signal"
+    if membership.effective_to is not None and membership.effective_to < evaluation_date:
+        return "membership_expired_before_signal"
+    if membership.observed_at > item.source_cutoff:
+        return "membership_received_after_cutoff"
+    if membership.snapshot_complete is False:
+        return "partial_theme_capture"
+    if not membership.fact_hash:
+        return "missing_membership_fact_hash"
+    if membership.fact_hash != stable_contract_hash(
+        membership.fact_identity_payload(asset_code=item.asset_code)
+    ):
+        return "membership_fact_hash_mismatch"
+    relation_kind = membership.relation_kind or membership.hierarchy_level
+    snapshot_date = membership.snapshot_date or membership.effective_from
+    max_age_days = (
+        FINE_CONTEXT_MAX_AGE_DAYS
+        if relation_kind in {"provider_concept", "industry_union_proxy"}
+        or membership.hierarchy_level == "fine_theme"
+        else INDUSTRY_CONTEXT_MAX_AGE_DAYS
+    )
+    if (evaluation_date - snapshot_date).days > max_age_days:
+        return "stale_context_snapshot"
+    if peer_count < MINIMUM_PEER_COUNT:
+        return "insufficient_context_peers"
+    if membership.theme_state_available is False:
+        return (
+            membership.theme_state_unavailable_reasons[0]
+            if membership.theme_state_unavailable_reasons
+            else "theme_state_unavailable"
+        )
+    if membership.theme_state_available is True:
+        percentiles = membership.theme_state_percentiles
+        if (
+            not membership.theme_state_hash
+            or percentiles is None
+            or len(percentiles) != 3
+            or any(_finite(value) is None for value in percentiles)
+        ):
+            return "theme_state_unavailable"
+    return None
+
+
+def resolve_v2_asset_contexts(
+    items: Sequence[V2AssetInput],
+) -> tuple[V2AssetInput, ...]:
+    """Resolve one peer context while retaining every cutoff-compatible relation.
+
+    Legacy callers that only provide ``membership`` are returned unchanged.
+    Graph-aware callers provide ``primary_industry`` and/or
+    ``theme_memberships``.  Resolution never consumes price outcomes or the
+    formula score; its order is frozen by relation kind, confidence, registry
+    priority, hierarchy depth and stable identity.
+    """
+
+    graph_asset_codes = {
+        item.asset_code
+        for item in items
+        if item.primary_industry is not None or bool(item.theme_memberships)
+    }
+    if not graph_asset_codes:
+        return tuple(items)
+
+    eligible_assets = {
+        item.asset_code
+        for item in items
+        if not item.input_unavailable_reasons and not _bar_reasons(item, STANDARD_HISTORY)
+    }
+    observed_peer_counts: dict[str, set[str]] = defaultdict(set)
+    contexts_by_asset: dict[str, tuple[V2PITMembership, ...]] = {}
+    for item in items:
+        candidates = (
+            *item.theme_memberships,
+            *((item.primary_industry,) if item.primary_industry is not None else ()),
+            *((item.membership,) if item.membership is not None else ()),
+        )
+        unique: dict[tuple[Any, ...], V2PITMembership] = {}
+        for membership in candidates:
+            unique.setdefault(_context_identity(membership), membership)
+        contexts = tuple(sorted(unique.values(), key=_context_sort_key))
+        contexts_by_asset[item.asset_code] = contexts
+        if item.asset_code in eligible_assets:
+            for membership in contexts:
+                observed_peer_counts[membership.group_id].add(item.asset_code)
+
+    resolved: list[V2AssetInput] = []
+    for item in items:
+        contexts = contexts_by_asset[item.asset_code]
+        if item.asset_code not in graph_asset_codes:
+            resolved.append(item)
+            continue
+        accepted: list[V2PITMembership] = []
+        rejected: list[tuple[str, str]] = []
+        for membership in contexts:
+            peer_count = (
+                membership.eligible_peer_count
+                if membership.eligible_peer_count is not None
+                else len(observed_peer_counts[membership.group_id])
+            )
+            reason = _context_rejection_reason(
+                item,
+                membership,
+                peer_count=peer_count,
+            )
+            if reason is None:
+                accepted.append(membership)
+            else:
+                rejected.append((membership.group_id, reason))
+        selected = accepted[0] if accepted else None
+        reasons = set(item.input_unavailable_reasons)
+        if selected is None:
+            reasons.add("missing_compatible_peer_context")
+        resolved.append(
+            replace(
+                item,
+                membership=selected,
+                alternative_memberships=tuple(accepted[1:]),
+                rejected_contexts=tuple(sorted(set(rejected))),
+                input_unavailable_reasons=tuple(sorted(reasons)),
+            )
+        )
+    return tuple(resolved)
+
+
 def _membership_reasons(item: V2AssetInput) -> list[str]:
     membership = item.membership
     reasons = list(item.input_unavailable_reasons)
@@ -882,7 +1147,11 @@ def _membership_reasons(item: V2AssetInput) -> list[str]:
         return sorted(set(reasons))
     if not membership.group_id.strip():
         reasons.append("missing_pit_peer_group")
-    if membership.mapping_kind != "historical_pit":
+    if membership.mapping_kind not in {
+        "historical_pit",
+        "primary_hierarchy",
+        "broad_fallback",
+    }:
         reasons.append("taxonomy_not_point_in_time")
     if membership.effective_from > membership_date:
         reasons.append("membership_effective_after_signal")
@@ -1476,6 +1745,49 @@ def _incremental_input_hash(items: Sequence[V2AssetInput]) -> str:
     hasher.update(V2_INPUT_HASH_SCHEMA_VERSION.encode("utf-8"))
     for item in items:
         membership = item.membership
+        def membership_identity(value: V2PITMembership) -> tuple[Any, ...]:
+            return (
+                value.group_id,
+                value.effective_from,
+                value.effective_to,
+                value.observed_at,
+                value.mapping_kind,
+                value.taxonomy_version,
+                value.theme,
+                value.sector,
+                value.tracked_index,
+                value.clone_group,
+                value.issuer,
+                value.fact_hash,
+                value.fact_hash_contract,
+                value.source_asset_code,
+                value.source,
+                value.confidence,
+                value.supersedes_fact_hash,
+                value.hierarchy_level,
+                value.normalized_theme_key,
+                value.resolution_mode,
+                value.fallback_reason,
+                value.relation_kind,
+                value.registry_priority,
+                value.hierarchy_depth,
+                value.industry_path,
+                value.snapshot_date,
+                value.snapshot_hash,
+                value.snapshot_complete,
+                value.eligible_peer_count,
+                value.theme_state_hash,
+                value.theme_state_available,
+                value.theme_state_percentiles,
+                value.theme_state_unavailable_reasons,
+                value.taxonomy,
+                value.provider_theme_code,
+                value.provider_theme_label,
+                value.membership_reason,
+                value.exposure_weight,
+                value.capture_run_hash,
+            )
+
         metadata = (
             item.universe,
             item.asset_code,
@@ -1487,31 +1799,15 @@ def _incremental_input_hash(items: Sequence[V2AssetInput]) -> str:
             item.membership_evaluation_date,
             item.next_eligible_date,
             sorted(item.input_unavailable_reasons),
-            None
-            if membership is None
-            else (
-                membership.group_id,
-                membership.effective_from,
-                membership.effective_to,
-                membership.observed_at,
-                membership.mapping_kind,
-                membership.taxonomy_version,
-                membership.theme,
-                membership.sector,
-                membership.tracked_index,
-                membership.clone_group,
-                membership.issuer,
-                membership.fact_hash,
-                membership.fact_hash_contract,
-                membership.source_asset_code,
-                membership.source,
-                membership.confidence,
-                membership.supersedes_fact_hash,
-                membership.hierarchy_level,
-                membership.normalized_theme_key,
-                membership.resolution_mode,
-                membership.fallback_reason,
+            None if membership is None else membership_identity(membership),
+            (
+                membership_identity(item.primary_industry)
+                if item.primary_industry is not None
+                else None
             ),
+            tuple(membership_identity(value) for value in item.theme_memberships),
+            tuple(membership_identity(value) for value in item.alternative_memberships),
+            item.rejected_contexts,
         )
         encoded_metadata = json.dumps(
             metadata,
@@ -1602,6 +1898,18 @@ def build_v2_staged_asset_feature(item: V2AssetInput) -> V2StagedAssetFeature:
             adjusted_close < adjusted_ma5
             if adjusted_close is not None and adjusted_ma5 is not None
             else None
+        ),
+        selected_context_hash=(item.membership.fact_hash if item.membership else None),
+        alternative_context_hashes=tuple(
+            membership.fact_hash for membership in item.alternative_memberships
+        ),
+        rejected_contexts=item.rejected_contexts,
+        theme_state_hash=(item.membership.theme_state_hash if item.membership else None),
+        selected_context_relation_kind=(
+            item.membership.relation_kind if item.membership else None
+        ),
+        selected_context_snapshot_hash=(
+            item.membership.snapshot_hash if item.membership else None
         ),
     )
 
@@ -1776,8 +2084,122 @@ def _observation(
     facts = dict(gate_facts)
     membership_date = item.membership_evaluation_date or item.signal_date
     membership = item.membership
+    primary = item.primary_industry
+    industry_levels = {
+        level: {"code": code, "label": label}
+        for level, code, label in (primary.industry_path if primary else ())
+    }
+    selected_context = (
+        {
+            "context_key": membership.group_id,
+            "display_label": membership.theme or membership.sector,
+            "fact_hash": membership.fact_hash,
+            "relation_kind": membership.relation_kind,
+            "hierarchy_level": membership.hierarchy_level,
+            "taxonomy": membership.taxonomy,
+            "source": membership.source,
+            "snapshot_date": (
+                membership.snapshot_date.isoformat()
+                if membership.snapshot_date is not None
+                else None
+            ),
+            "snapshot_hash": membership.snapshot_hash,
+            "state_hash": membership.theme_state_hash,
+            "peer_count": membership.eligible_peer_count,
+            "confidence": membership.confidence,
+        }
+        if membership is not None
+        else None
+    )
+    classification_graph = {
+        "classification_status": (
+            "available"
+            if membership is not None and membership.theme_state_available is True
+            else "unavailable"
+        ),
+        "industry_path": (
+            {
+                "taxonomy": primary.taxonomy,
+                "taxonomy_version": primary.taxonomy_version,
+                "mapping_kind": primary.mapping_kind,
+                "source": primary.source,
+                "confidence": primary.confidence,
+                "level_1": industry_levels.get("industry_l1"),
+                "level_2": industry_levels.get("industry_l2"),
+                "level_3": industry_levels.get("industry_l3"),
+                "missing_levels": [
+                    label
+                    for label in ("level_1", "level_2", "level_3")
+                    if label.replace("level_", "industry_l") not in industry_levels
+                ],
+                "effective_from": primary.effective_from.isoformat(),
+                "effective_to": (
+                    primary.effective_to.isoformat() if primary.effective_to else None
+                ),
+                "received_at": primary.observed_at.isoformat(),
+                "fact_hash": primary.fact_hash,
+                "snapshot_hash": primary.snapshot_hash,
+            }
+            if primary is not None
+            else None
+        ),
+        "selected_context": selected_context,
+        "alternative_contexts": [
+            {
+                "context_key": alternative.group_id,
+                "display_label": alternative.theme or alternative.sector,
+                "fact_hash": alternative.fact_hash,
+                "relation_kind": alternative.relation_kind,
+                "hierarchy_level": alternative.hierarchy_level,
+                "taxonomy": alternative.taxonomy,
+                "source": alternative.source,
+                "snapshot_date": (
+                    alternative.snapshot_date.isoformat()
+                    if alternative.snapshot_date is not None
+                    else None
+                ),
+                "snapshot_hash": alternative.snapshot_hash,
+                "state_hash": alternative.theme_state_hash,
+                "peer_count": alternative.eligible_peer_count,
+                "confidence": alternative.confidence,
+            }
+            for alternative in item.alternative_memberships
+        ],
+        "rejected_contexts": [
+            {"context_key": context_key, "reason": reason}
+            for context_key, reason in item.rejected_contexts
+        ],
+        "theme_state": (
+            {
+                "status": (
+                    "available" if membership.theme_state_available else "unavailable"
+                ),
+                "state_hash": membership.theme_state_hash,
+                "session_date": item.signal_date.isoformat(),
+                "eligible_member_count": membership.eligible_peer_count,
+                "unavailable_reasons": list(
+                    membership.theme_state_unavailable_reasons
+                ),
+            }
+            if membership is not None
+            else None
+        ),
+        "classification_unavailable_reasons": [
+            reason
+            for reason in item.input_unavailable_reasons
+            if reason
+            in {
+                "partial_theme_capture",
+                "stale_context_snapshot",
+                "insufficient_context_peers",
+                "theme_state_unavailable",
+                "missing_compatible_peer_context",
+            }
+        ],
+    }
     facts.update(
         {
+            "classification_graph": classification_graph,
             "theme_hierarchy_level": (
                 membership.hierarchy_level if membership is not None else None
             ),
@@ -1791,6 +2213,40 @@ def _observation(
                 membership.fallback_reason if membership is not None else None
             ),
             "theme_fact_hash": membership.fact_hash if membership is not None else None,
+            "selected_context": selected_context,
+            "alternative_contexts": [
+                {
+                    "group_id": alternative.group_id,
+                    "fact_hash": alternative.fact_hash,
+                    "relation_kind": alternative.relation_kind,
+                    "hierarchy_level": alternative.hierarchy_level,
+                    "snapshot_date": (
+                        alternative.snapshot_date.isoformat()
+                        if alternative.snapshot_date is not None
+                        else None
+                    ),
+                    "snapshot_hash": alternative.snapshot_hash,
+                }
+                for alternative in item.alternative_memberships
+            ],
+            "rejected_contexts": [
+                {"context_key": context_key, "reason": reason}
+                for context_key, reason in item.rejected_contexts
+            ],
+            "primary_industry_path": (
+                [
+                    {"level": level, "code": code, "label": label}
+                    for level, code, label in item.primary_industry.industry_path
+                ]
+                if item.primary_industry is not None
+                else []
+            ),
+            "theme_state_hash": (
+                membership.theme_state_hash if membership is not None else None
+            ),
+            "theme_state_available": (
+                membership.theme_state_available if membership is not None else None
+            ),
             "decision_mode": item.decision_mode,
             "feature_trade_date": item.signal_date.isoformat(),
             "membership_evaluation_date": membership_date.isoformat(),
@@ -1920,7 +2376,9 @@ def screen_dual_universe(
         raise V2ContractError("unsupported screening universe")
     if len({item.asset_code for item in items}) != len(items):
         raise V2ContractError("screen input asset codes must be unique")
-    ordered = tuple(sorted(items, key=lambda item: item.asset_code))
+    ordered = resolve_v2_asset_contexts(
+        tuple(sorted(items, key=lambda item: item.asset_code))
+    )
     membership_reasons = {item.asset_code: tuple(_membership_reasons(item)) for item in ordered}
     intrinsic_bar_reasons = {item.asset_code: tuple(_bar_reasons(item, 0)) for item in ordered}
 
@@ -1951,6 +2409,15 @@ def screen_dual_universe(
         if item.asset_code in representatives and not standard_reasons[item.asset_code]
     )
     hot_1, hot_5, hot_breadth = _theme_features(eligible_standard, representatives)
+    persisted_theme_state = {
+        item.membership.group_id: item.membership.theme_state_percentiles
+        for item in eligible_standard
+        if item.membership is not None
+        and item.membership.theme_state_available is True
+        and item.membership.theme_state_percentiles is not None
+    }
+    for group, values in persisted_theme_state.items():
+        hot_1[group], hot_5[group], hot_breadth[group] = values
     if theme_percentile_overrides is not None:
         hot_1 = {key: values[0] for key, values in theme_percentile_overrides.items()}
         hot_5 = {key: values[1] for key, values in theme_percentile_overrides.items()}

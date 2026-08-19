@@ -20,6 +20,9 @@ import {
   leaderTacticsV2QueryKey,
   leaderCandidateTrackingProvenance,
   leaderCandidateTrackingProvenanceText,
+  leaderTacticsClassificationUnavailableText,
+  leaderTacticsContextText,
+  leaderTacticsIndustryPathText,
   leaderTacticsTrackingErrorText,
   leaderTacticsV2UnavailableText,
   mergeLeaderTacticsV2Pages,
@@ -68,6 +71,23 @@ const stateLabels: Record<Lifecycle, string> = {
 function provenanceValue(provenance: Record<string, unknown>, key: string) {
   const value = provenance[key];
   return typeof value === "string" && value ? value : "none";
+}
+
+function optionalPercent(value: number | null | undefined) {
+  return typeof value === "number" && Number.isFinite(value)
+    ? `${(value * 100).toFixed(1)}%`
+    : "暂无";
+}
+
+function compactRecord(value: Record<string, unknown> | undefined) {
+  if (!value) return "暂无";
+  const entries = Object.entries(value);
+  return entries.length
+    ? entries
+        .slice(0, 6)
+        .map(([key, state]) => `${key}=${String(state)}`)
+        .join("、")
+    : "暂无";
 }
 
 function todayInputValue() {
@@ -432,9 +452,9 @@ export function LeaderTacticsV2Panel() {
                   universe === "ashare" || value !== "low_base_catchup"
               )
               .map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
+                <option key={value} value={value}>
+                  {label}
+                </option>
               ))}
           </select>
         </label>
@@ -545,6 +565,46 @@ export function LeaderTacticsV2Panel() {
                 {summary.materialization_progress.completed_group_count}
               </p>
             ) : null}
+            {universe === "ashare" && summary.classification_readiness ? (
+              <div className="mt-3 rounded bg-paper px-3 py-2">
+                <p className="font-semibold text-ink">A 股行业与主题证据</p>
+                <p className="mt-1">
+                  状态：{summary.classification_readiness.status} · 权威池
+                  {summary.classification_readiness
+                    .authoritative_universe_count ?? "暂无"}{" "}
+                  · 完整三级行业
+                  {summary.classification_readiness.industry_level_3_count ??
+                    "暂无"}{" "}
+                  · 主题关系
+                  {summary.classification_readiness.theme_relation_count ??
+                    "暂无"}{" "}
+                  · 主题状态
+                  {summary.classification_readiness.theme_state_count ?? "暂无"}
+                </p>
+                <p className="mt-1">
+                  覆盖：
+                  {compactRecord(summary.classification_readiness.coverage)} ·
+                  来源健康：
+                  {compactRecord(
+                    summary.classification_readiness.provider_health
+                  )}
+                </p>
+                {summary.classification_readiness.stale_sources?.length ? (
+                  <p className="mt-1">
+                    过期来源：
+                    {summary.classification_readiness.stale_sources.join("、")}
+                  </p>
+                ) : null}
+                {summary.classification_readiness.unavailable_reasons.length ? (
+                  <p className="mt-1 text-amber-800">
+                    暂不可用：
+                    {summary.classification_readiness.unavailable_reasons
+                      .map(leaderTacticsClassificationUnavailableText)
+                      .join("；")}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
             {exclusionEntries.length ? (
               <p className="mt-1">
                 排除证据：
@@ -569,8 +629,11 @@ export function LeaderTacticsV2Panel() {
                         {candidate.asset_code} · {candidate.asset_name}
                       </p>
                       <p className="mt-1 text-xs text-ink/55">
-                        {candidate.theme ?? "未提供主题"} ·{" "}
-                        {candidate.formula_id} · {candidate.state} · 入场状态：
+                        {candidate.universe === "ashare"
+                          ? leaderTacticsContextText(candidate.selected_context)
+                          : (candidate.theme ?? "未提供主题")}{" "}
+                        · {candidate.formula_id} · {candidate.state} ·
+                        入场状态：
                         {candidate.entry_status}
                       </p>
                       {candidate.universe === "ashare" ? (
@@ -632,15 +695,51 @@ export function LeaderTacticsV2Panel() {
                       </p>
                     ) : null}
                     <p className="mt-2">
-                      主题层级：
-                      {String(
-                        candidate.gate_facts.theme_hierarchy_level ?? "未知"
-                      )}{" "}
-                      · 解析：
-                      {String(
-                        candidate.gate_facts.theme_resolution_mode ?? "未知"
-                      )}
+                      行业路径：
+                      {leaderTacticsIndustryPathText(candidate.industry_path)}
                     </p>
+                    {candidate.universe === "ashare" ? (
+                      <div className="mt-2 rounded bg-paper px-2 py-2">
+                        <p>
+                          采用上下文：
+                          {leaderTacticsContextText(candidate.selected_context)}
+                        </p>
+                        <p className="mt-1">
+                          其他关联：
+                          {candidate.alternative_contexts?.length
+                            ? candidate.alternative_contexts
+                                .map(leaderTacticsContextText)
+                                .join("、")
+                            : "无可用替代上下文"}
+                        </p>
+                        {candidate.theme_state ? (
+                          <p className="mt-1">
+                            主题状态：{candidate.theme_state.status} · 成员
+                            {candidate.theme_state.eligible_member_count ??
+                              "暂无"}{" "}
+                            · 上涨广度
+                            {optionalPercent(
+                              candidate.theme_state.up_breadth
+                            )}{" "}
+                            · 1 日中位收益
+                            {optionalPercent(
+                              candidate.theme_state.median_return_1d
+                            )}{" "}
+                            · 领涨数
+                            {candidate.theme_state.leader_count ?? "暂无"}
+                          </p>
+                        ) : null}
+                        {candidate.classification_unavailable_reasons
+                          ?.length ? (
+                          <p className="mt-1 text-amber-800">
+                            分类证据暂不可用：
+                            {candidate.classification_unavailable_reasons
+                              .map(leaderTacticsClassificationUnavailableText)
+                              .join("；")}
+                          </p>
+                        ) : null}
+                      </div>
+                    ) : null}
                     <pre className="mt-1 overflow-auto whitespace-pre-wrap">
                       {JSON.stringify(candidate.gate_facts, null, 2)}
                     </pre>

@@ -9,6 +9,9 @@ import {
   buildLeaderTacticsV2Url,
   fetchLeaderTacticsV2Page,
   getLeaderTacticsV2NextCursor,
+  leaderTacticsClassificationUnavailableText,
+  leaderTacticsContextText,
+  leaderTacticsIndustryPathText,
   leaderTacticsV2QueryKey,
   leaderTacticsV2UnavailableText,
   mergeLeaderTacticsV2Pages,
@@ -242,6 +245,94 @@ test("sentiment risk labels and A-share action mapping stay isolated from ETF", 
         { ...filters, universe: "ashare" }
       ),
     /action mapping is invalid/
+  );
+});
+
+test("multi-layer classification evidence stays explicit and backwards compatible", () => {
+  const classified = {
+    ...candidate("ashare"),
+    classification_status: "available" as const,
+    industry_path: {
+      taxonomy: "sw_2021",
+      level_1: { code: "270000", label: "电子" },
+      level_2: { code: "270500", label: "元件" },
+      level_3: { code: "270501", label: "被动元件" }
+    },
+    selected_context: {
+      context_key: "passive_components",
+      display_label: "被动元件/MLCC",
+      relation_kind: "industry_union_proxy",
+      peer_count: 8
+    },
+    alternative_contexts: [
+      {
+        context_key: "sw3:270501",
+        display_label: "被动元件",
+        relation_kind: "industry_l3",
+        peer_count: 8
+      }
+    ],
+    theme_state: {
+      status: "available" as const,
+      state_hash: "state-hash",
+      eligible_member_count: 8,
+      up_breadth: 0.625
+    },
+    classification_unavailable_reasons: []
+  };
+  const classifiedPage = page({
+    universe: "ashare",
+    candidates: [classified]
+  });
+
+  assert.equal(
+    assertLeaderTacticsV2PageContract(classifiedPage, {
+      ...filters,
+      universe: "ashare"
+    }),
+    classifiedPage
+  );
+  assert.equal(
+    leaderTacticsIndustryPathText(classified.industry_path),
+    "电子 / 元件 / 被动元件"
+  );
+  assert.equal(
+    leaderTacticsContextText(classified.selected_context),
+    "被动元件/MLCC（industry_union_proxy · 同行 8）"
+  );
+  assert.match(
+    leaderTacticsClassificationUnavailableText("theme_capture_partial"),
+    /未采用部分成员/
+  );
+
+  const oldPayload = page({
+    universe: "ashare",
+    candidates: [candidate("ashare")]
+  });
+  assert.equal(
+    assertLeaderTacticsV2PageContract(oldPayload, {
+      ...filters,
+      universe: "ashare"
+    }),
+    oldPayload
+  );
+  assert.throws(
+    () =>
+      assertLeaderTacticsV2PageContract(
+        page({
+          universe: "ashare",
+          candidates: [
+            {
+              ...classified,
+              classification_status: "unavailable" as const,
+              selected_context: null,
+              classification_unavailable_reasons: []
+            }
+          ]
+        }),
+        { ...filters, universe: "ashare" }
+      ),
+    /stable reason/
   );
 });
 

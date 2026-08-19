@@ -27,6 +27,9 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_availability impo
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_storage import (
     get_v2_materialized_manifest,
 )
+from app.services.strategy_lab.dual_universe_leader_tactics_v2_theme_graph_read import (
+    read_ashare_theme_graph_readiness,
+)
 
 
 def _decode(value: object, fallback: Any) -> Any:
@@ -187,6 +190,11 @@ async def read_v2_summary(
             "unavailable_reason": "economic_validation_not_materialized",
         }
     )
+    classification_readiness = (
+        await read_ashare_theme_graph_readiness(session, as_of=as_of)
+        if universe == "ashare"
+        else {"status": "not_applicable", "unavailable_reasons": []}
+    )
     return {
         "schema_version": "dual_universe_leader_tactics_evidence_summary_v2",
         "experiment_family": V2_EXPERIMENT_FAMILY,
@@ -249,6 +257,7 @@ async def read_v2_summary(
         ),
         "exclusion_counts": dict(sorted(exclusions.items())),
         "provider_health": _decode(manifest["provider_health_json"], {}),
+        "classification_readiness": classification_readiness,
         "economic_evidence": economic,
         "notification_provenance": "none",
         "execution_provenance": "none",

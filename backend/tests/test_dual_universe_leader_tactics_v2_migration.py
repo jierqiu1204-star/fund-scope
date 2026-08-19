@@ -53,13 +53,16 @@ def test_v2_migration_remains_on_the_linear_history() -> None:
     config.set_main_option("script_location", str(VERSIONS_DIR.parent))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["20260817_000072"]
+    assert script.get_heads() == ["20260819_000073"]
     staging_revision = script.get_revision("20260812_000067")
     assert staging_revision is not None
     assert staging_revision.nextrev == frozenset({"20260814_000068"})
     revision = script.get_revision("20260809_000063")
     assert revision is not None
     assert revision.down_revision == "20260804_000062"
+    confirmation_revision = script.get_revision("20260817_000072")
+    assert confirmation_revision is not None
+    assert confirmation_revision.nextrev == frozenset({"20260819_000073"})
 
 
 def test_v2_migration_preserves_same_day_universe_revisions_and_downgrades() -> None:

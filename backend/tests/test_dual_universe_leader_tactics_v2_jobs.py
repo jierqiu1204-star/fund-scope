@@ -14,6 +14,7 @@ from app.services.workflows.dual_universe_leader_tactics_v2 import AshareReadine
 
 def _settings(*, enabled: bool = True, etf_enabled: bool = False) -> Settings:
     settings = Settings(_env_file=None)
+    settings.etf_leader_tactics_v2_theme_graph_enabled = False
     settings.etf_leader_tactics_v2_materialize_enabled = enabled
     settings.etf_leader_tactics_v2_etf_materialize_enabled = etf_enabled
     return settings
@@ -114,6 +115,47 @@ async def test_fine_theme_capture_is_default_off_without_database_work() -> None
 
 
 @pytest.mark.asyncio
+async def test_theme_graph_only_flag_runs_bounded_hierarchy_before_provider_concepts(
+    monkeypatch,
+) -> None:
+    settings = _settings(enabled=False)
+    settings.etf_leader_tactics_v2_capture_enabled = False
+    settings.etf_leader_tactics_v2_theme_graph_enabled = True
+    settings.etf_leader_tactics_v2_code_version = "test-v2"
+    captured: dict[str, object] = {}
+
+    async def capture_graph(_session, *, signal_date, received_at):
+        captured["signal_date"] = signal_date
+        captured["received_at"] = received_at
+        return {
+            "status": "partial",
+            "job_status": "partial",
+            "next_cursor": 200,
+            "research_only": True,
+        }
+
+    async def unexpected_concept(*_args, **_kwargs):
+        raise AssertionError("provider concepts must wait for a complete hierarchy snapshot")
+
+    monkeypatch.setattr(jobs, "_capture_theme_graph_page", capture_graph)
+    monkeypatch.setattr(
+        jobs,
+        "load_fine_theme_facts_for_registered_theme",
+        unexpected_concept,
+    )
+    result = await jobs.dual_universe_leader_tactics_v2_fine_theme_capture_job(
+        object(),  # type: ignore[arg-type]
+        settings,
+        now=datetime(2026, 8, 7, 20, 30),
+        timeout_seconds=10.0,
+    )
+
+    assert result["status"] == "partial"
+    assert result["next_cursor"] == 200
+    assert captured["signal_date"] == date(2026, 8, 7)
+
+
+@pytest.mark.asyncio
 async def test_fine_theme_capture_uses_durable_checkpoint_path(monkeypatch) -> None:
     settings = _settings(enabled=False)
     settings.etf_leader_tactics_v2_capture_enabled = True
@@ -189,6 +231,55 @@ async def test_fine_theme_capture_uses_durable_checkpoint_path(monkeypatch) -> N
     assert captured["initial_status"] == "paused"
     assert captured["persisted"] == ["f" * 64] * 5
     assert all(isinstance(item, str) for item in captured["content_hashes"])
+
+
+@pytest.mark.asyncio
+async def test_provider_concept_snapshot_is_sealed_as_an_independent_graph_source(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def persist_relations(_session, facts):
+        captured["relations"] = facts
+        return len(facts)
+
+    async def persist_runs(_session, facts):
+        captured["runs"] = facts
+        return len(facts)
+
+    monkeypatch.setattr(jobs, "persist_theme_relation_batch", persist_relations)
+    monkeypatch.setattr(jobs, "persist_theme_capture_run_batch", persist_runs)
+    facts = (
+        SimpleNamespace(
+            asset_code="600111",
+            taxonomy_version="eastmoney.concept.current_v1",
+            source=jobs.FINE_THEME_PROVIDER,
+            fact_hash="a" * 64,
+        ),
+        SimpleNamespace(
+            asset_code="000831",
+            taxonomy_version="eastmoney.concept.current_v1",
+            source=jobs.FINE_THEME_PROVIDER,
+            fact_hash="b" * 64,
+        ),
+    )
+
+    await jobs._persist_provider_concept_graph_snapshot(
+        object(),  # type: ignore[arg-type]
+        provider_label="稀土永磁",
+        facts=facts,
+        signal_date=date(2026, 8, 19),
+        received_at=datetime(2026, 8, 19, 8),
+    )
+
+    relations = captured["relations"]
+    runs = captured["runs"]
+    assert len(relations) == 2  # type: ignore[arg-type]
+    assert all(item.relation_kind.value == "provider_concept" for item in relations)  # type: ignore[union-attr]
+    assert all(item.provider_theme_label == "稀土永磁" for item in relations)  # type: ignore[union-attr]
+    assert len(runs) == 1  # type: ignore[arg-type]
+    assert runs[0].status.value == "complete"  # type: ignore[index,union-attr]
+    assert runs[0].expected_count == 2  # type: ignore[index,union-attr]
 
 
 @pytest.mark.asyncio

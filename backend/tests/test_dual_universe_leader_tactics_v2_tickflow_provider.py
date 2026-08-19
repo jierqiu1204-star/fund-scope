@@ -17,6 +17,7 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_tickflow_provider
     TICKFLOW_ADJUSTMENT_VERSION,
     TICKFLOW_BASE_URL,
     TICKFLOW_PROVIDER,
+    TICKFLOW_SW_PATH_TAXONOMY_VERSION,
     TICKFLOW_TAXONOMY_VERSION,
     TICKFLOW_THEME_SOURCE,
     AshareIndustryClassification,
@@ -24,10 +25,84 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_tickflow_provider
     TickflowAshareProviderError,
     TickflowAshareV2Provider,
     load_capco_bse_industries,
+    parse_tickflow_sw_industry_catalog,
 )
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 RECEIVED_AT = datetime(2026, 8, 7, 20, 0, tzinfo=SHANGHAI)
+
+
+def test_tickflow_catalog_aligns_sw_parents_without_fetching_parent_pools() -> None:
+    catalog = parse_tickflow_sw_industry_catalog(
+        [
+            {"id": "CN_Equity_SW3_801011", "name": "SW3稀土", "symbol_count": 2},
+            {"id": "CN_Equity_SW1_801011", "name": "SW1有色金属", "symbol_count": 2},
+            {"id": "CN_Equity_SW2_801011", "name": "SW2金属新材料", "symbol_count": 2},
+            {"id": "CN_Equity_SW3_incomplete", "name": "SW3不完整", "symbol_count": 1},
+            {"id": "CN_Equity_A", "name": "A股", "symbol_count": 5_000},
+        ]
+    )
+
+    assert catalog.level3_count == 2
+    assert catalog.incomplete_terminal_codes == ("incomplete",)
+    assert len(catalog.paths) == 1
+    path = catalog.paths[0]
+    assert path.level1_label == "有色金属"
+    assert path.level2_label == "金属新材料"
+    assert path.level3_label == "稀土"
+    assert path.sw3_universe_id == "CN_Equity_SW3_801011"
+    assert TICKFLOW_SW_PATH_TAXONOMY_VERSION in catalog.catalog_hash or len(catalog.catalog_hash) == 64
+
+
+@pytest.mark.asyncio
+async def test_provider_fetches_only_one_bounded_sw3_page() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/universes"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {"id": "CN_Equity_SW1_1", "name": "SW1医药生物"},
+                        {"id": "CN_Equity_SW2_1", "name": "SW2化学制药"},
+                        {"id": "CN_Equity_SW3_1", "name": "SW3化学制剂"},
+                    ]
+                },
+            )
+        if request.url.path.endswith("/universes/batch"):
+            assert json.loads(request.content) == {"ids": ["CN_Equity_SW3_1"]}
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "CN_Equity_SW3_1": {
+                            "id": "CN_Equity_SW3_1",
+                            "name": "SW3化学制剂",
+                            "symbol_count": 2,
+                            "symbols": ["002437.SZ", "600001.SH"],
+                        }
+                    }
+                },
+            )
+        raise AssertionError(request.url)
+
+    async with httpx.AsyncClient(
+        base_url=TICKFLOW_BASE_URL,
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        async with TickflowAshareV2Provider(client=client) as provider:
+            catalog = await provider.fetch_sw_industry_catalog()
+            page = await provider.fetch_sw3_industry_path_page(
+                catalog=catalog,
+                expected_symbols=("002437.SZ",),
+            )
+
+    assert [member.symbol for member in page.members] == ["002437.SZ"]
+    assert page.members[0].path.level3_label == "化学制剂"
+    assert page.next_cursor is None
+    assert len(requests) == 2
 
 
 def test_capco_snapshot_only_supplements_missing_bse_members_at_real_receipt() -> None:

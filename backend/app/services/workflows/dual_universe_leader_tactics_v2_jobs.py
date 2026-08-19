@@ -63,6 +63,21 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_staging import (
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_storage import (
     get_v2_materialized_manifest,
 )
+from app.services.strategy_lab.dual_universe_leader_tactics_v2_theme_graph import (
+    MAX_THEME_GRAPH_BATCH_SIZE,
+    THEME_REGISTRY_HASH,
+    THEME_REGISTRY_VERSION,
+    AshareIndustryPathFact,
+    AshareThemeCaptureRunFact,
+    AshareThemeRelationFact,
+    CaptureStatus,
+    ThemeRelationKind,
+    persist_industry_path_batch,
+    persist_theme_capture_run_batch,
+    persist_theme_relation_batch,
+    registered_theme_definitions,
+    resolve_theme_definitions,
+)
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_tickflow_provider import (
     ASHARE_TAXONOMY_VERSION,
     BAOSTOCK_TAXONOMY_VERSION,
@@ -71,6 +86,8 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_tickflow_provider
     CAPCO_THEME_SOURCE,
     TICKFLOW_ADJUSTMENT_VERSION,
     TICKFLOW_PROVIDER,
+    TICKFLOW_SW_PATH_SOURCE,
+    TICKFLOW_SW_PATH_TAXONOMY_VERSION,
     TICKFLOW_UNIVERSE_SOURCE,
     AshareIndustryClassification,
     BaoStockIndustryBatchResult,
@@ -102,6 +119,7 @@ V2_ETF_MATERIALIZE_JOB_NAME = "dual_universe_leader_tactics_v2_materialize_etf"
 V2_JOB_TIMEOUT_SECONDS = 55.0
 V2_WORK_SECONDS = 52.0
 V2_FINE_THEME_WORK_SECONDS = 40.0
+V2_THEME_GRAPH_PAGE_SIZE = 200
 V2_MIN_MATERIALIZATION_HEADROOM_BYTES = 768 * 1024 * 1024
 V2_MAX_ASHARE_ASSETS = 6_000
 V2_UNIVERSE_PERSIST_PAGE_SIZE = 500
@@ -110,6 +128,12 @@ V2_PROVIDER_FAILURE_COOLDOWN_MINUTES = 30
 FINE_THEME_PROVIDER = "akshare.stock_board_concept_cons_em.current"
 FINE_THEME_TAXONOMY_VERSION = "eastmoney.concept.current_v1"
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
+
+
+def _batched(values: tuple[Any, ...], size: int) -> tuple[tuple[Any, ...], ...]:
+    if size <= 0:
+        raise ValueError("batch size must be positive")
+    return tuple(values[start : start + size] for start in range(0, len(values), size))
 
 
 def _utc_naive(value: datetime) -> datetime:
@@ -1329,6 +1353,7 @@ async def _materialize_ashare(
             provider_health=provider_health,
             budget_seconds=48.0,
             memory_reader=available_memory_bytes,
+            theme_graph_enabled=settings.etf_leader_tactics_v2_theme_graph_enabled,
         )
         if result is None:
             return {
@@ -1395,6 +1420,282 @@ async def _materialize_ashare(
     }
 
 
+async def _capture_theme_graph_page(
+    session: AsyncSession,
+    *,
+    signal_date: date,
+    received_at: datetime,
+) -> dict[str, Any]:
+    """Persist one deterministic SW3 page; partial runs never become selectable."""
+
+    async with TickflowAshareV2Provider() as provider:
+        catalog = await provider.fetch_sw_industry_catalog()
+        snapshot_id = stable_contract_hash(
+            {
+                "schema_version": "tickflow_sw_path_snapshot_identity_v1",
+                "source": TICKFLOW_SW_PATH_SOURCE,
+                "taxonomy_version": TICKFLOW_SW_PATH_TAXONOMY_VERSION,
+                "signal_date": signal_date,
+                "catalog_hash": catalog.catalog_hash,
+                "registry_hash": THEME_REGISTRY_HASH,
+            }
+        )
+        prior = (
+            await session.execute(
+                text(
+                    """
+                    SELECT status, completed_count, cursor, started_at, content_hash
+                    FROM ashare_theme_capture_runs
+                    WHERE source = :source
+                      AND source_snapshot_id = :snapshot_id
+                    ORDER BY received_at DESC, run_hash DESC
+                    LIMIT 1
+                    """
+                ),
+                {"source": TICKFLOW_SW_PATH_SOURCE, "snapshot_id": snapshot_id},
+            )
+        ).mappings().first()
+        if prior is not None and str(prior["status"]) == CaptureStatus.COMPLETE.value:
+            return {
+                "status": "complete",
+                "reason": "leader_tactics_v2_theme_graph_already_captured",
+                "signal_date": signal_date.isoformat(),
+                "source_snapshot_hash": snapshot_id,
+                "content_hash": prior["content_hash"],
+                "completed_source_count": len(catalog.paths),
+                "registered_source_count": len(catalog.paths),
+                "provider_health": {
+                    "provider": TICKFLOW_SW_PATH_SOURCE,
+                    "status": "healthy",
+                    "error_summary": None,
+                },
+                "research_only": True,
+            }
+        cursor = int(prior["cursor"] or 0) if prior is not None else 0
+        started_at = prior["started_at"] if prior is not None else received_at
+        page = await provider.fetch_sw3_industry_path_page(
+            catalog=catalog,
+            cursor=cursor,
+            page_size=V2_THEME_GRAPH_PAGE_SIZE,
+        )
+
+    path_facts = tuple(
+        AshareIndustryPathFact(
+            asset_code=member.symbol.split(".", maxsplit=1)[0],
+            taxonomy="SW2021",
+            taxonomy_version=TICKFLOW_SW_PATH_TAXONOMY_VERSION,
+            mapping_kind="primary_hierarchy",
+            level1_code=member.path.level1_code,
+            level1_label=member.path.level1_label,
+            level2_code=member.path.level2_code,
+            level2_label=member.path.level2_label,
+            level3_code=member.path.level3_code,
+            level3_label=member.path.level3_label,
+            effective_from=signal_date,
+            effective_to=None,
+            snapshot_date=signal_date,
+            received_at=received_at,
+            source=TICKFLOW_SW_PATH_SOURCE,
+            confidence=1.0,
+            source_snapshot_hash=snapshot_id,
+        )
+        for member in page.members
+    )
+    proxy_definitions = tuple(
+        definition
+        for definition in registered_theme_definitions()
+        if definition.relation_kind is ThemeRelationKind.INDUSTRY_UNION_PROXY
+    )
+    relation_facts = tuple(
+        AshareThemeRelationFact(
+            asset_code=fact.asset_code,
+            canonical_theme_key=definition.canonical_key,
+            theme_label=definition.display_label,
+            relation_kind=definition.relation_kind,
+            effective_from=signal_date,
+            effective_to=None,
+            received_at=received_at,
+            taxonomy_version=TICKFLOW_SW_PATH_TAXONOMY_VERSION,
+            source=definition.source,
+            confidence=1.0,
+            source_snapshot_date=signal_date,
+            source_snapshot_hash=snapshot_id,
+            capture_run_hash=snapshot_id,
+            membership_reason=f"SW3={fact.level3_label};registry={THEME_REGISTRY_VERSION}",
+        )
+        for fact in path_facts
+        for definition in proxy_definitions
+        if fact.level3_label in definition.sw3_component_labels
+    )
+    for batch in _batched(path_facts, MAX_THEME_GRAPH_BATCH_SIZE):
+        await persist_industry_path_batch(session, batch)
+    for batch in _batched(relation_facts, MAX_THEME_GRAPH_BATCH_SIZE):
+        await persist_theme_relation_batch(session, batch)
+
+    complete = page.next_cursor is None
+    completed_count = len(catalog.paths) if complete else int(page.next_cursor or cursor)
+    content_hash: str | None = None
+    if complete:
+        path_hashes = tuple(
+            (
+                await session.execute(
+                    text(
+                        """
+                        SELECT fact_hash
+                        FROM ashare_industry_path_facts
+                        WHERE source_snapshot_hash = :snapshot_hash
+                        ORDER BY asset_code, fact_hash
+                        """
+                    ),
+                    {"snapshot_hash": snapshot_id},
+                )
+            ).scalars()
+        )
+        relation_hashes = tuple(
+            (
+                await session.execute(
+                    text(
+                        """
+                        SELECT fact_hash
+                        FROM ashare_fine_theme_membership_facts
+                        WHERE source_snapshot_hash = :snapshot_hash
+                          AND relation_kind = 'industry_union_proxy'
+                        ORDER BY normalized_theme_key, asset_code, fact_hash
+                        """
+                    ),
+                    {"snapshot_hash": snapshot_id},
+                )
+            ).scalars()
+        )
+        content_hash = stable_contract_hash(
+            {
+                "schema_version": "tickflow_sw_path_snapshot_content_v1",
+                "source_snapshot_hash": snapshot_id,
+                "catalog_hash": catalog.catalog_hash,
+                "path_hashes": path_hashes,
+                "relation_hashes": relation_hashes,
+            }
+        )
+    run = AshareThemeCaptureRunFact(
+        source=TICKFLOW_SW_PATH_SOURCE,
+        source_snapshot_id=snapshot_id,
+        source_snapshot_date=signal_date,
+        taxonomy_version=TICKFLOW_SW_PATH_TAXONOMY_VERSION,
+        registry_version=THEME_REGISTRY_VERSION,
+        status=CaptureStatus.COMPLETE if complete else CaptureStatus.PARTIAL,
+        expected_count=len(catalog.paths),
+        completed_count=completed_count,
+        content_hash=content_hash,
+        cursor=None if complete else str(page.next_cursor),
+        started_at=started_at,
+        completed_at=received_at if complete else None,
+        received_at=received_at,
+    )
+    await persist_theme_capture_run_batch(session, (run,))
+    return {
+        "status": "complete" if complete else "partial",
+        "job_status": "success" if complete else "partial",
+        "signal_date": signal_date.isoformat(),
+        "source_snapshot_hash": snapshot_id,
+        "catalog_hash": catalog.catalog_hash,
+        "content_hash": content_hash,
+        "registered_source_count": len(catalog.paths),
+        "completed_source_count": completed_count,
+        "page_member_count": len(path_facts),
+        "page_theme_relation_count": len(relation_facts),
+        "next_cursor": page.next_cursor,
+        "incomplete_catalog_path_count": len(catalog.incomplete_terminal_codes),
+        "provider_health": {
+            "provider": TICKFLOW_SW_PATH_SOURCE,
+            "status": "healthy" if complete else "partial",
+            "error_summary": None,
+        },
+        "research_only": True,
+        "notification_provenance": "none",
+        "execution_provenance": "none",
+    }
+
+
+async def _persist_provider_concept_graph_snapshot(
+    session: AsyncSession,
+    *,
+    provider_label: str,
+    facts: tuple[Any, ...],
+    signal_date: date,
+    received_at: datetime,
+) -> None:
+    """Seal one independently fetched current-concept membership snapshot."""
+
+    definition = resolve_theme_definitions(
+        provider_label,
+        relation_kind=ThemeRelationKind.PROVIDER_CONCEPT,
+    )[0]
+    sources = {str(fact.source) for fact in facts}
+    if len(sources) != 1:
+        raise V2ContractError("provider concept snapshot source is not unique")
+    source = next(iter(sources))
+    source_snapshot_id = stable_contract_hash(
+        {
+            "schema_version": "ashare_provider_concept_snapshot_identity_v1",
+            "source": source,
+            "provider_label": provider_label,
+            "signal_date": signal_date,
+            "registry_hash": THEME_REGISTRY_HASH,
+            "source_fact_hashes": tuple(sorted(str(fact.fact_hash) for fact in facts)),
+        }
+    )
+    relations = tuple(
+        AshareThemeRelationFact(
+            asset_code=str(fact.asset_code),
+            canonical_theme_key=definition.canonical_key,
+            theme_label=definition.display_label,
+            relation_kind=ThemeRelationKind.PROVIDER_CONCEPT,
+            effective_from=signal_date,
+            effective_to=None,
+            received_at=received_at,
+            taxonomy_version=str(fact.taxonomy_version),
+            source=source,
+            confidence=1.0,
+            source_snapshot_date=signal_date,
+            source_snapshot_hash=source_snapshot_id,
+            capture_run_hash=source_snapshot_id,
+            provider_theme_code=definition.provider_theme_code,
+            provider_theme_label=provider_label,
+            membership_reason="observed current provider concept constituent",
+        )
+        for fact in facts
+    )
+    for batch in _batched(relations, MAX_THEME_GRAPH_BATCH_SIZE):
+        await persist_theme_relation_batch(session, batch)
+    content_hash = stable_contract_hash(
+        {
+            "schema_version": "ashare_provider_concept_snapshot_content_v1",
+            "source_snapshot_id": source_snapshot_id,
+            "relation_hashes": tuple(sorted(item.fact_hash for item in relations)),
+        }
+    )
+    await persist_theme_capture_run_batch(
+        session,
+        (
+            AshareThemeCaptureRunFact(
+                source=source,
+                source_snapshot_id=source_snapshot_id,
+                source_snapshot_date=signal_date,
+                taxonomy_version=str(facts[0].taxonomy_version),
+                registry_version=THEME_REGISTRY_VERSION,
+                status=CaptureStatus.COMPLETE,
+                expected_count=len(relations),
+                completed_count=len(relations),
+                content_hash=content_hash,
+                cursor=None,
+                started_at=received_at,
+                completed_at=received_at,
+                received_at=received_at,
+            ),
+        ),
+    )
+
+
 async def _capture_fine_themes(
     session: AsyncSession,
     *,
@@ -1417,6 +1718,15 @@ async def _capture_fine_themes(
             "job_message": "leader_tactics_v2_code_version_missing",
             "research_only": True,
         }
+    received_at = _utc_naive(local_now)
+    if settings.etf_leader_tactics_v2_theme_graph_enabled:
+        graph_result = await _capture_theme_graph_page(
+            session,
+            signal_date=signal_date,
+            received_at=received_at,
+        )
+        if graph_result.get("status") != "complete":
+            return graph_result
     provider_labels = REGISTERED_FINE_THEME_LABELS
     if not provider_labels:
         return {
@@ -1446,7 +1756,6 @@ async def _capture_fine_themes(
             status="paused",
             manifest_hash=manifest_hash,
         )
-    received_at = _utc_naive(local_now)
     facts_by_label: dict[str, tuple[Any, ...]] = {}
 
     async def fetch_one(provider_label: str) -> str:
@@ -1469,6 +1778,14 @@ async def _capture_fine_themes(
         if facts is None:
             raise V2ContractError("fine theme capture has no buffered facts")
         await persist_fine_theme_membership_batch(session, tuple(facts))
+        if settings.etf_leader_tactics_v2_theme_graph_enabled:
+            await _persist_provider_concept_graph_snapshot(
+                session,
+                provider_label=provider_label,
+                facts=tuple(facts),
+                signal_date=signal_date,
+                received_at=received_at,
+            )
 
     contract = _fine_theme_checkpoint_contract(manifest_hash=manifest_hash)
     batch = await run_v2_capture_batch(
@@ -1603,7 +1920,10 @@ async def dual_universe_leader_tactics_v2_fine_theme_capture_job(
 ) -> dict[str, Any]:
     """Capture registered fine themes independently from full-market prices."""
 
-    if not settings.etf_leader_tactics_v2_capture_enabled:
+    if not (
+        settings.etf_leader_tactics_v2_capture_enabled
+        or settings.etf_leader_tactics_v2_theme_graph_enabled
+    ):
         return {
             "status": "skipped",
             "reason": "leader_tactics_v2_capture_disabled",

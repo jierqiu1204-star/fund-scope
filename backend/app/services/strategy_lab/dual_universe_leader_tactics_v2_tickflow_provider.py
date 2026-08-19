@@ -37,8 +37,12 @@ TICKFLOW_PROVIDER = "tickflow"
 TICKFLOW_UNIVERSE_SOURCE = "tickflow.free.universes.CN_Equity_A"
 TICKFLOW_ADJUSTMENT_VERSION = "tickflow.free.klines.backward_v1"
 TICKFLOW_SW1_UNIVERSE_PREFIX = "CN_Equity_SW1_"
+TICKFLOW_SW2_UNIVERSE_PREFIX = "CN_Equity_SW2_"
+TICKFLOW_SW3_UNIVERSE_PREFIX = "CN_Equity_SW3_"
 TICKFLOW_THEME_SOURCE = "tickflow.free.universes.SW1"
 TICKFLOW_TAXONOMY_VERSION = "tickflow.sw1.current_v1"
+TICKFLOW_SW_PATH_SOURCE = "tickflow.free.universes.SW1_SW2_SW3"
+TICKFLOW_SW_PATH_TAXONOMY_VERSION = "tickflow.sw2021.current_v1"
 BAOSTOCK_THEME_SOURCE = "baostock.query_stock_industry.current"
 BAOSTOCK_TAXONOMY_VERSION = "baostock.industry.current_v1"
 CAPCO_THEME_SOURCE = "capco.2025_h2.listed_company_industry"
@@ -63,6 +67,7 @@ MAX_SUBPROCESS_BYTES = 2_000_000
 MAX_UNIVERSE_ROWS = 6_000
 MAX_INSTRUMENT_BATCH_SIZE = 1_000
 MAX_UNIVERSE_BATCH_IDS = 1_000
+MAX_SW3_PATH_PAGE_IDS = 200
 MAX_HISTORY_SESSIONS = 300
 DEFAULT_HISTORY_SESSIONS = 180
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 6.0
@@ -129,6 +134,78 @@ class AshareIndustryClassification:
             "confidence",
             _required_text(self.confidence, "industry_confidence", max_length=32),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class TickflowSWIndustryPath:
+    """One complete current SW1/SW2/SW3 path from a shared TickFlow code."""
+
+    terminal_code: str
+    level1_code: str
+    level1_label: str
+    level2_code: str
+    level2_label: str
+    level3_code: str
+    level3_label: str
+    sw3_universe_id: str
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "terminal_code",
+            "level1_code",
+            "level1_label",
+            "level2_code",
+            "level2_label",
+            "level3_code",
+            "level3_label",
+            "sw3_universe_id",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _required_text(getattr(self, field_name), field_name, max_length=128),
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class TickflowSWIndustryPathMember:
+    """A security-to-path relation returned by one bounded SW3 pool page."""
+
+    symbol: str
+    path: TickflowSWIndustryPath
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "symbol", _normalise_symbol(self.symbol)[0])
+
+
+@dataclass(frozen=True, slots=True)
+class TickflowSWIndustryCatalog:
+    paths: tuple[TickflowSWIndustryPath, ...]
+    level3_count: int
+    incomplete_terminal_codes: tuple[str, ...]
+    catalog_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class TickflowSWIndustryPathPage:
+    members: tuple[TickflowSWIndustryPathMember, ...]
+    cursor: int
+    next_cursor: int | None
+    source_count: int
+    page_hash: str
+
+
+def _sw_path_payload(path: TickflowSWIndustryPath) -> dict[str, str]:
+    return {
+        "terminal_code": path.terminal_code,
+        "level1_code": path.level1_code,
+        "level1_label": path.level1_label,
+        "level2_code": path.level2_code,
+        "level2_label": path.level2_label,
+        "level3_code": path.level3_code,
+        "level3_label": path.level3_label,
+        "sw3_universe_id": path.sw3_universe_id,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -362,6 +439,90 @@ def _payload_data(payload: object, kind: str) -> object:
     if not isinstance(payload, Mapping) or "data" not in payload:
         raise TickflowAshareProviderError(f"{kind}_payload_invalid")
     return payload["data"]
+
+
+def parse_tickflow_sw_industry_catalog(rows: object) -> TickflowSWIndustryCatalog:
+    """Build complete SW paths without fetching duplicate SW1/SW2 member pools."""
+
+    if not isinstance(rows, list) or not rows or len(rows) > 2_000:
+        raise TickflowAshareProviderError("industry_universe_list_invalid")
+    prefixes = {
+        1: TICKFLOW_SW1_UNIVERSE_PREFIX,
+        2: TICKFLOW_SW2_UNIVERSE_PREFIX,
+        3: TICKFLOW_SW3_UNIVERSE_PREFIX,
+    }
+    grouped: dict[str, dict[int, tuple[str, str]]] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise TickflowAshareProviderError("industry_universe_row_invalid")
+        universe_id = row.get("id")
+        if not isinstance(universe_id, str):
+            continue
+        level = next(
+            (candidate for candidate, prefix in prefixes.items() if universe_id.startswith(prefix)),
+            None,
+        )
+        if level is None:
+            continue
+        prefix = prefixes[level]
+        terminal_code = _required_text(
+            universe_id.removeprefix(prefix),
+            "industry_terminal_code",
+            max_length=64,
+        )
+        raw_name = _required_text(row.get("name"), "industry_name", max_length=128)
+        name_prefix = f"SW{level}"
+        if not raw_name.startswith(name_prefix):
+            raise TickflowAshareProviderError("industry_universe_name_invalid")
+        label = _required_text(
+            raw_name.removeprefix(name_prefix),
+            f"industry_level{level}_label",
+            max_length=128,
+        )
+        previous = grouped.setdefault(terminal_code, {}).setdefault(
+            level, (universe_id, label)
+        )
+        if previous != (universe_id, label):
+            raise TickflowAshareProviderError(
+                f"industry_catalog_conflict:{terminal_code}:level{level}"
+            )
+
+    level3_codes = sorted(code for code, levels in grouped.items() if 3 in levels)
+    paths: list[TickflowSWIndustryPath] = []
+    incomplete: list[str] = []
+    for terminal_code in level3_codes:
+        levels = grouped[terminal_code]
+        if set(levels) != {1, 2, 3}:
+            incomplete.append(terminal_code)
+            continue
+        paths.append(
+            TickflowSWIndustryPath(
+                terminal_code=terminal_code,
+                level1_code=levels[1][0],
+                level1_label=levels[1][1],
+                level2_code=levels[2][0],
+                level2_label=levels[2][1],
+                level3_code=levels[3][0],
+                level3_label=levels[3][1],
+                sw3_universe_id=levels[3][0],
+            )
+        )
+    if not paths:
+        raise TickflowAshareProviderError("industry_catalog_has_no_complete_sw3_paths")
+    ordered = tuple(sorted(paths, key=lambda item: item.sw3_universe_id))
+    return TickflowSWIndustryCatalog(
+        paths=ordered,
+        level3_count=len(level3_codes),
+        incomplete_terminal_codes=tuple(incomplete),
+        catalog_hash=stable_contract_hash(
+            {
+                "schema_version": "tickflow_sw_industry_catalog_v1",
+                "taxonomy_version": TICKFLOW_SW_PATH_TAXONOMY_VERSION,
+                "paths": tuple(_sw_path_payload(path) for path in ordered),
+                "incomplete_terminal_codes": tuple(incomplete),
+            }
+        ),
+    )
 
 
 def _parse_universe(payload: object) -> tuple[str, ...]:
@@ -777,6 +938,110 @@ class TickflowAshareV2Provider:
                         f"industry_universe_conflict:{symbol}"
                     )
         return classifications
+
+    async def fetch_sw_industry_catalog(self) -> TickflowSWIndustryCatalog:
+        """Fetch one bounded catalog and retain only complete SW1/SW2/SW3 paths."""
+
+        payload = await self._request_json(
+            "industry_universe_list",
+            "/universes",
+            timeout_seconds=self.config.request_timeout_seconds,
+        )
+        return parse_tickflow_sw_industry_catalog(
+            _payload_data(payload, "industry_universe_list")
+        )
+
+    async def fetch_sw3_industry_path_page(
+        self,
+        *,
+        catalog: TickflowSWIndustryCatalog,
+        cursor: int = 0,
+        page_size: int = MAX_SW3_PATH_PAGE_IDS,
+        expected_symbols: tuple[str, ...] | None = None,
+    ) -> TickflowSWIndustryPathPage:
+        """Fetch one deterministic SW3 pool page and join catalog parent labels."""
+
+        if cursor < 0 or cursor > len(catalog.paths):
+            raise TickflowAshareProviderError("industry_path_cursor_invalid")
+        if page_size <= 0 or page_size > MAX_SW3_PATH_PAGE_IDS:
+            raise TickflowAshareProviderError("industry_path_page_size_invalid")
+        page_paths = catalog.paths[cursor : cursor + page_size]
+        if not page_paths:
+            return TickflowSWIndustryPathPage(
+                members=(),
+                cursor=cursor,
+                next_cursor=None,
+                source_count=0,
+                page_hash=stable_contract_hash(
+                    {
+                        "schema_version": "tickflow_sw3_path_page_v1",
+                        "catalog_hash": catalog.catalog_hash,
+                        "cursor": cursor,
+                        "members": (),
+                    }
+                ),
+            )
+        ids = [path.sw3_universe_id for path in page_paths]
+        payload = await self._request_json(
+            "industry_sw3_batch",
+            "/universes/batch",
+            json_body={"ids": ids},
+            timeout_seconds=self.config.request_timeout_seconds,
+        )
+        pools = _payload_data(payload, "industry_sw3_batch")
+        if not isinstance(pools, Mapping) or set(pools) != set(ids):
+            raise TickflowAshareProviderError("industry_sw3_batch_partial")
+        expected = set(expected_symbols) if expected_symbols is not None else None
+        by_symbol: dict[str, TickflowSWIndustryPathMember] = {}
+        for path in page_paths:
+            pool = pools.get(path.sw3_universe_id)
+            if not isinstance(pool, Mapping) or pool.get("id") != path.sw3_universe_id:
+                raise TickflowAshareProviderError("industry_sw3_identity_mismatch")
+            symbols = pool.get("symbols")
+            declared = pool.get("symbol_count")
+            if (
+                not isinstance(symbols, list)
+                or isinstance(declared, bool)
+                or not isinstance(declared, int)
+                or declared != len(symbols)
+            ):
+                raise TickflowAshareProviderError("industry_sw3_symbols_invalid")
+            for raw_symbol in symbols:
+                symbol = _normalise_symbol(raw_symbol)[0]
+                if expected is not None and symbol not in expected:
+                    continue
+                member = TickflowSWIndustryPathMember(symbol=symbol, path=path)
+                previous = by_symbol.setdefault(symbol, member)
+                if previous.path != path:
+                    raise TickflowAshareProviderError(
+                        f"industry_sw3_membership_conflict:{symbol}"
+                    )
+        members = tuple(by_symbol[key] for key in sorted(by_symbol))
+        next_cursor_value = cursor + len(page_paths)
+        next_cursor = (
+            next_cursor_value if next_cursor_value < len(catalog.paths) else None
+        )
+        return TickflowSWIndustryPathPage(
+            members=members,
+            cursor=cursor,
+            next_cursor=next_cursor,
+            source_count=len(page_paths),
+            page_hash=stable_contract_hash(
+                {
+                    "schema_version": "tickflow_sw3_path_page_v1",
+                    "catalog_hash": catalog.catalog_hash,
+                    "cursor": cursor,
+                    "source_ids": tuple(ids),
+                    "members": tuple(
+                        {
+                            "symbol": member.symbol,
+                            "path": _sw_path_payload(member.path),
+                        }
+                        for member in members
+                    ),
+                }
+            ),
+        )
 
     async def fetch_universe(
         self, *, received_at: datetime

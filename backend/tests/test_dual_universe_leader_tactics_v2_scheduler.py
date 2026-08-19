@@ -35,6 +35,7 @@ def _trigger_field(job: object, name: str) -> str:
 
 def test_v2_scheduler_is_default_off_and_does_not_import_workflow_jobs(app, monkeypatch) -> None:
     app.state.settings.etf_leader_tactics_v2_capture_enabled = False
+    app.state.settings.etf_leader_tactics_v2_theme_graph_enabled = False
     app.state.settings.etf_leader_tactics_v2_materialize_enabled = False
     app.state.settings.etf_leader_tactics_v2_etf_materialize_enabled = False
     app.state.settings.etf_leader_tactics_v2_api_enabled = True
@@ -55,10 +56,17 @@ def test_v2_scheduler_is_default_off_and_does_not_import_workflow_jobs(app, monk
 
 
 @pytest.mark.parametrize(
-    ("capture_enabled", "materialize_enabled", "etf_materialize_enabled", "expected"),
+    (
+        "capture_enabled",
+        "theme_graph_enabled",
+        "materialize_enabled",
+        "etf_materialize_enabled",
+        "expected",
+    ),
     [
         (
             True,
+            False,
             False,
             False,
             {
@@ -68,11 +76,13 @@ def test_v2_scheduler_is_default_off_and_does_not_import_workflow_jobs(app, monk
         ),
         (
             False,
+            False,
             True,
             False,
             {scheduler_module.V2_MATERIALIZE_JOB_NAME},
         ),
         (
+            True,
             True,
             True,
             True,
@@ -86,8 +96,16 @@ def test_v2_scheduler_is_default_off_and_does_not_import_workflow_jobs(app, monk
         (
             False,
             False,
+            False,
             True,
             {scheduler_module.V2_ETF_MATERIALIZE_JOB_NAME},
+        ),
+        (
+            False,
+            True,
+            False,
+            False,
+            {scheduler_module.V2_FINE_THEME_CAPTURE_JOB_NAME},
         ),
     ],
 )
@@ -95,11 +113,13 @@ def test_v2_scheduler_registers_only_enabled_stages(
     app,
     monkeypatch: pytest.MonkeyPatch,
     capture_enabled: bool,
+    theme_graph_enabled: bool,
     materialize_enabled: bool,
     etf_materialize_enabled: bool,
     expected: set[str],
 ) -> None:
     app.state.settings.etf_leader_tactics_v2_capture_enabled = capture_enabled
+    app.state.settings.etf_leader_tactics_v2_theme_graph_enabled = theme_graph_enabled
     app.state.settings.etf_leader_tactics_v2_materialize_enabled = materialize_enabled
     app.state.settings.etf_leader_tactics_v2_etf_materialize_enabled = etf_materialize_enabled
     contract = scheduler_module._V2SchedulerJobContract(
@@ -165,6 +185,7 @@ def test_v2_scheduler_registers_only_enabled_stages(
 
 def test_v2_scheduler_fails_closed_if_enabled_jobs_module_is_missing(app, monkeypatch) -> None:
     app.state.settings.etf_leader_tactics_v2_capture_enabled = True
+    app.state.settings.etf_leader_tactics_v2_theme_graph_enabled = False
     app.state.settings.etf_leader_tactics_v2_materialize_enabled = False
     app.state.settings.etf_leader_tactics_v2_etf_materialize_enabled = False
 
@@ -198,5 +219,6 @@ def test_v2_staged_ashare_rollout_is_wired_without_etf_materialization() -> None
     assert expected_arg in ip_compose
     assert "ETF_LEADER_TACTICS_V2_API_ENABLED=true" in tracked_env
     assert "ETF_LEADER_TACTICS_V2_CAPTURE_ENABLED=true" in tracked_env
+    assert "ETF_LEADER_TACTICS_V2_THEME_GRAPH_ENABLED=true" in tracked_env
     assert "ETF_LEADER_TACTICS_V2_MATERIALIZE_ENABLED=true" in tracked_env
     assert "ETF_LEADER_TACTICS_V2_ETF_MATERIALIZE_ENABLED=true" in tracked_env

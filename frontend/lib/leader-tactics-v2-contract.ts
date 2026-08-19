@@ -23,6 +23,78 @@ export type SentimentActionMode =
   | "observe_only"
   | "not_applicable";
 
+export type ClassificationStatus =
+  | "available"
+  | "unavailable"
+  | "not_applicable";
+
+export type IndustryPath = {
+  taxonomy?: string | null;
+  taxonomy_version?: string | null;
+  mapping_kind?: string | null;
+  source?: string | null;
+  confidence?: number | null;
+  level_1?: Record<string, unknown> | null;
+  level_2?: Record<string, unknown> | null;
+  level_3?: Record<string, unknown> | null;
+  missing_levels?: string[];
+  effective_from?: string | null;
+  effective_to?: string | null;
+  received_at?: string | null;
+  fact_hash?: string | null;
+  snapshot_hash?: string | null;
+};
+
+export type PeerContext = {
+  context_key?: string | null;
+  display_label?: string | null;
+  relation_kind?: string | null;
+  hierarchy_level?: string | null;
+  taxonomy?: string | null;
+  source?: string | null;
+  snapshot_date?: string | null;
+  snapshot_hash?: string | null;
+  fact_hash?: string | null;
+  state_hash?: string | null;
+  peer_count?: number | null;
+  confidence?: number | null;
+  freshness_days?: number | null;
+};
+
+export type ThemeState = {
+  status: "available" | "unavailable";
+  state_hash?: string | null;
+  session_date?: string | null;
+  eligible_member_count?: number | null;
+  up_breadth?: number | null;
+  median_return_1d?: number | null;
+  median_return_5d?: number | null;
+  relative_market_return?: number | null;
+  amount_participation?: number | null;
+  leader_count?: number | null;
+  limit_board_metrics?: Record<string, unknown> | null;
+  source_cutoff?: string | null;
+  unavailable_reasons?: string[];
+};
+
+export type ClassificationReadiness = {
+  status: ClassificationStatus;
+  authoritative_universe_count?: number | null;
+  industry_path_count?: number | null;
+  industry_level_1_count?: number | null;
+  industry_level_2_count?: number | null;
+  industry_level_3_count?: number | null;
+  theme_member_count?: number | null;
+  theme_relation_count?: number | null;
+  theme_state_count?: number | null;
+  fallback_count?: number | null;
+  coverage?: Record<string, unknown>;
+  latest_snapshots?: Record<string, unknown>;
+  provider_health?: Record<string, unknown>;
+  stale_sources?: string[];
+  unavailable_reasons: string[];
+};
+
 export type LeaderTacticsV2Filters = {
   universe: Universe;
   formula: Formula;
@@ -56,6 +128,14 @@ export type Candidate = {
   sentiment_risk_action_mode: SentimentActionMode;
   sentiment_risk_new_entry_allowed: boolean | null;
   sentiment_risk_provenance: Record<string, unknown>;
+  classification_status?: ClassificationStatus;
+  industry_path?: IndustryPath | null;
+  selected_context?: PeerContext | null;
+  alternative_contexts?: PeerContext[];
+  rejected_contexts?: Array<Record<string, unknown>>;
+  theme_state?: ThemeState | null;
+  classification_provider_health?: Record<string, unknown>;
+  classification_unavailable_reasons?: string[];
 };
 
 export type CandidatesResponse = {
@@ -101,6 +181,7 @@ export type CandidatesResponse = {
       completed_group_count: number;
       updated_at: string;
     } | null;
+    classification_readiness?: ClassificationReadiness;
   };
   ranking_source_kind: "research_replay" | "post_close_watchlist";
   notification_provenance: "none";
@@ -335,7 +416,15 @@ const unavailableLabels: Record<string, string> = {
   leader_tactics_v2_not_materialized: "尚未生成可复现的研究物化结果。",
   leader_tactics_v2_empty_materialization: "最新物化结果没有候选观测。",
   leader_tactics_v2_invalid_filter: "筛选条件或分页游标无效。",
-  economic_validation_not_materialized: "经济验证证据尚未物化。"
+  economic_validation_not_materialized: "经济验证证据尚未物化。",
+  theme_capture_partial: "主题抓取尚未完整，未采用部分成员结果。",
+  theme_snapshot_stale: "主题快照已过期，当前上下文不可用于决策。",
+  theme_peer_count_insufficient: "同主题可决策同行不足 5 只。",
+  theme_state_unavailable: "主题成员存在，但当日主题状态尚不可用。",
+  incompatible_theme_taxonomy: "行业或主题分类体系不兼容，未混合同行。",
+  missing_compatible_peer_context:
+    "没有满足完整性、时效和同行数量要求的上下文。",
+  classification_graph_not_materialized: "A 股多层行业与主题图尚未物化。"
 };
 
 const sentimentRiskLabels: Record<SentimentRiskState, string> = {
@@ -358,6 +447,39 @@ export function sentimentRiskLabel(state: SentimentRiskState) {
 
 export function sentimentActionLabel(mode: SentimentActionMode) {
   return sentimentActionLabels[mode];
+}
+
+export function leaderTacticsClassificationUnavailableText(reason: string) {
+  return unavailableLabels[reason] ?? reason;
+}
+
+function levelLabel(level: Record<string, unknown> | null | undefined) {
+  if (!level) return null;
+  const label = level.label ?? level.name ?? level.display_label;
+  return typeof label === "string" && label.trim() ? label.trim() : null;
+}
+
+export function leaderTacticsIndustryPathText(
+  path: IndustryPath | null | undefined
+) {
+  if (!path) return "行业路径暂无";
+  const labels = [path.level_1, path.level_2, path.level_3]
+    .map(levelLabel)
+    .filter((label): label is string => Boolean(label));
+  return labels.length ? labels.join(" / ") : "行业路径暂无";
+}
+
+export function leaderTacticsContextText(
+  context: PeerContext | null | undefined
+) {
+  if (!context) return "未选中兼容主题/行业上下文";
+  const label = context.display_label ?? context.context_key ?? "未命名上下文";
+  const kind = context.relation_kind ?? context.hierarchy_level ?? "类型未知";
+  const peers =
+    typeof context.peer_count === "number"
+      ? ` · 同行 ${context.peer_count}`
+      : "";
+  return `${label}（${kind}${peers}）`;
 }
 
 export function leaderTacticsV2QueryKey(filters: LeaderTacticsV2Filters) {
@@ -465,6 +587,29 @@ export function assertLeaderTacticsV2PageContract(
       candidate.provenance.execution_provenance !== "none"
     ) {
       throw new Error("leader-tactics-v2 candidate has invalid provenance");
+    }
+    if (
+      candidate.classification_status === "available" &&
+      !candidate.selected_context
+    ) {
+      throw new Error(
+        "A-share classification context is marked available without selection"
+      );
+    }
+    if (
+      candidate.classification_status === "unavailable" &&
+      !candidate.classification_unavailable_reasons?.length
+    ) {
+      throw new Error(
+        "A-share classification unavailability lacks a stable reason"
+      );
+    }
+    if (
+      candidate.universe === "etf" &&
+      candidate.classification_status &&
+      candidate.classification_status !== "not_applicable"
+    ) {
+      throw new Error("ETF candidate crossed A-share classification boundary");
     }
     if (
       ![

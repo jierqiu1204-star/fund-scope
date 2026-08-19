@@ -105,6 +105,10 @@ class Settings(BaseSettings):
         default=False,
         alias="ETF_LEADER_TACTICS_V2_CAPTURE_ENABLED",
     )
+    etf_leader_tactics_v2_theme_graph_enabled: bool = Field(
+        default=False,
+        alias="ETF_LEADER_TACTICS_V2_THEME_GRAPH_ENABLED",
+    )
     etf_leader_tactics_v2_materialize_enabled: bool = Field(
         default=False,
         alias="ETF_LEADER_TACTICS_V2_MATERIALIZE_ENABLED",

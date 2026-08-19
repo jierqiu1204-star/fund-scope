@@ -33,6 +33,9 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_adapters import (
     read_ashare_asset_inputs,
 )
+from app.services.strategy_lab.dual_universe_leader_tactics_v2_theme_graph_state import (
+    materialize_theme_states_from_features,
+)
 
 STAGE_BATCH_MIN = 5
 STAGE_BATCH_MAX = 20
@@ -95,6 +98,7 @@ async def advance_ashare_materialization(
     budget_seconds: float = 48.0,
     batch_size: int = STAGE_BATCH_DEFAULT,
     memory_reader: Callable[[], int | None] | None = None,
+    theme_graph_enabled: bool = False,
 ) -> tuple[V2ScreenResult | None, dict[str, Any]]:
     """Advance Stage A or B and commit every bounded unit of work."""
 
@@ -113,6 +117,7 @@ async def advance_ashare_materialization(
                     SELECT run_hash, source_cutoff, provider_health_json
                     FROM leader_tactics_v2_materialization_runs
                     WHERE universe = 'ashare'
+                      AND status <> 'state_ready'
                       AND signal_date = :signal_date
                       AND decision_date = :decision_date
                       AND universe_hash = :universe_hash
@@ -274,6 +279,7 @@ async def advance_ashare_materialization(
             decision_mode=decision_mode,
             membership_evaluation_date=decision_date,
             next_eligible_date=next_eligible_date,
+            theme_graph_enabled=theme_graph_enabled,
         )
         expected_codes = tuple(code for code, _name in page)
         received_codes = tuple(item.asset_code for item in inputs)
@@ -406,6 +412,31 @@ async def advance_ashare_materialization(
         },
     )
     await session.commit()
+    if (
+        theme_graph_enabled
+        and any(feature.group_key for feature in features)
+        and any(
+            feature.group_key and feature.theme_state_hash is None
+            for feature in features
+        )
+    ):
+        states = await materialize_theme_states_from_features(
+            session,
+            features=features,
+            state_date=signal_date,
+            source_cutoff=source_cutoff,
+            received_at=_utc_now_naive(),
+        )
+        await session.commit()
+        await release_lease(status="state_ready")
+        return None, {
+            "status": "partial",
+            "materialization_stage": "theme_state",
+            "run_hash": run_hash,
+            "theme_state_count": len(states),
+            "unavailable_reason": "theme_state_materialized_waiting_next_cutoff",
+            "research_only": True,
+        }
     overrides = staged_theme_percentile_overrides(features)
     sentiment_risk = staged_sentiment_risk_snapshot(
         features,
@@ -465,6 +496,7 @@ async def advance_ashare_materialization(
             decision_mode=decision_mode,
             membership_evaluation_date=decision_date,
             next_eligible_date=next_eligible_date,
+            theme_graph_enabled=theme_graph_enabled,
         )
         partial = screen_dual_universe(
             inputs,

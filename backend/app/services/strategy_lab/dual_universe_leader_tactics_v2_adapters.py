@@ -9,24 +9,32 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
     ASHARE_FINE_THEME_FACT_HASH_CONTRACT,
+    ASHARE_INDUSTRY_PATH_FACT_HASH_CONTRACT,
     ASHARE_MEMBERSHIP_FACT_HASH_CONTRACT,
+    ASHARE_THEME_RELATION_FACT_HASH_CONTRACT,
     PRICE_BASIS,
     V2AdjustedBar,
     V2AssetInput,
     V2PITMembership,
+    resolve_v2_asset_contexts,
 )
 
 APPROVED_ASHARE_PROVIDERS = frozenset({"akshare", "eastmoney", "tickflow"})
 FORBIDDEN_RAW_PROVIDERS = frozenset({"sina", "efinance", "tencent"})
+_FINE_THEME_REGISTRY_PRIORITY = {
+    "innovation_drug": 10,
+    "rare_earth": 20,
+    "passive_components": 30,
+}
 
 
 @dataclass(frozen=True)
@@ -152,6 +160,16 @@ def ashare_membership_to_v2(row: dict[str, Any]) -> V2PITMembership:
         normalized_theme_key=None,
         resolution_mode="broad_industry_fallback",
         fallback_reason="fine_theme_unavailable_at_cutoff",
+        relation_kind="broad_industry",
+        registry_priority=10_000,
+        hierarchy_depth=1,
+        snapshot_date=effective_from,
+        snapshot_complete=True,
+        eligible_peer_count=(
+            int(row["eligible_peer_count"])
+            if row.get("eligible_peer_count") is not None
+            else None
+        ),
     )
 
 
@@ -167,6 +185,15 @@ def fine_theme_membership_to_v2(row: dict[str, Any]) -> V2PITMembership:
     observed_at = row["received_at"]
     if isinstance(observed_at, str):
         observed_at = datetime.fromisoformat(observed_at)
+    normalized_theme_key = str(row["normalized_theme_key"])
+    relation_kind = str(row.get("relation_kind") or "provider_concept")
+    snapshot_date = row.get("snapshot_date") or effective_from
+    if isinstance(snapshot_date, str):
+        snapshot_date = date.fromisoformat(snapshot_date[:10])
+    graph_relation = bool(row.get("relation_kind") and row.get("snapshot_hash"))
+    confidence_value = row.get("confidence")
+    if graph_relation:
+        confidence_value = float(confidence_value)
     return V2PITMembership(
         group_id=str(row["group_id"]),
         effective_from=effective_from,
@@ -177,13 +204,105 @@ def fine_theme_membership_to_v2(row: dict[str, Any]) -> V2PITMembership:
         theme=str(row["theme"]),
         sector=None,
         fact_hash=str(row["fact_hash"]),
-        fact_hash_contract=ASHARE_FINE_THEME_FACT_HASH_CONTRACT,
+        fact_hash_contract=(
+            ASHARE_THEME_RELATION_FACT_HASH_CONTRACT
+            if graph_relation
+            else ASHARE_FINE_THEME_FACT_HASH_CONTRACT
+        ),
         source_asset_code=str(row.get("asset_code") or "") or None,
         source=str(row.get("source") or "") or None,
-        confidence=str(row.get("confidence") or "") or None,
+        confidence=confidence_value if confidence_value not in {None, ""} else None,
         hierarchy_level=str(row.get("hierarchy_level") or "fine_theme"),
-        normalized_theme_key=str(row["normalized_theme_key"]),
+        normalized_theme_key=normalized_theme_key,
         resolution_mode="fine_theme_pit",
+        relation_kind=relation_kind,
+        registry_priority=int(
+            row.get("registry_priority")
+            if row.get("registry_priority") is not None
+            else _FINE_THEME_REGISTRY_PRIORITY.get(normalized_theme_key, 1_000)
+        ),
+        hierarchy_depth=4,
+        snapshot_date=snapshot_date,
+        snapshot_hash=str(row.get("snapshot_hash") or "") or None,
+        snapshot_complete=(
+            bool(row["snapshot_complete"])
+            if row.get("snapshot_complete") is not None
+            else None
+        ),
+        eligible_peer_count=(
+            int(row["eligible_peer_count"])
+            if row.get("eligible_peer_count") is not None
+            else None
+        ),
+        provider_theme_code=str(row.get("provider_theme_code") or "") or None,
+        provider_theme_label=str(row.get("provider_theme_label") or "") or None,
+        membership_reason=str(row.get("membership_reason") or "") or None,
+        exposure_weight=(
+            float(row["exposure_weight"])
+            if row.get("exposure_weight") is not None
+            else None
+        ),
+        capture_run_hash=str(row.get("capture_run_hash") or "") or None,
+    )
+
+
+def industry_path_membership_to_v2(row: dict[str, Any]) -> V2PITMembership:
+    """Convert one immutable primary-industry path into its finest context."""
+
+    effective_from = row["effective_from"]
+    if isinstance(effective_from, str):
+        effective_from = date.fromisoformat(effective_from[:10])
+    effective_to = row.get("effective_to")
+    if isinstance(effective_to, str):
+        effective_to = date.fromisoformat(effective_to[:10])
+    observed_at = row["received_at"]
+    if isinstance(observed_at, str):
+        observed_at = datetime.fromisoformat(observed_at)
+    snapshot_date = row.get("snapshot_date") or effective_from
+    if isinstance(snapshot_date, str):
+        snapshot_date = date.fromisoformat(snapshot_date[:10])
+    levels = tuple(
+        (f"industry_l{level}", str(row.get(f"level{level}_code") or ""), label)
+        for level in (1, 2, 3)
+        if (label := str(row.get(f"level{level}_label") or "").strip())
+    )
+    if not levels:
+        raise ValueError("industry path requires at least one labeled level")
+    hierarchy_level, leaf_code, leaf_label = levels[-1]
+    taxonomy = str(row.get("taxonomy") or "unknown")
+    return V2PITMembership(
+        group_id=f"{hierarchy_level}:{taxonomy}:{leaf_code or leaf_label}",
+        effective_from=effective_from,
+        effective_to=effective_to,
+        observed_at=observed_at,
+        mapping_kind=str(row["mapping_kind"]),
+        taxonomy_version=str(row["taxonomy_version"]),
+        theme=leaf_label,
+        sector=levels[0][2],
+        fact_hash=str(row["fact_hash"]),
+        fact_hash_contract=ASHARE_INDUSTRY_PATH_FACT_HASH_CONTRACT,
+        source_asset_code=str(row.get("asset_code") or "") or None,
+        source=str(row.get("source") or "") or None,
+        confidence=float(row["confidence"]),
+        hierarchy_level=hierarchy_level,
+        resolution_mode="primary_industry_path_pit",
+        relation_kind=hierarchy_level,
+        registry_priority=5_000,
+        hierarchy_depth=len(levels),
+        industry_path=levels,
+        snapshot_date=snapshot_date,
+        snapshot_hash=str(row.get("snapshot_hash") or "") or None,
+        snapshot_complete=(
+            bool(row["snapshot_complete"])
+            if row.get("snapshot_complete") is not None
+            else None
+        ),
+        eligible_peer_count=(
+            int(row["eligible_peer_count"])
+            if row.get("eligible_peer_count") is not None
+            else None
+        ),
+        taxonomy=taxonomy,
     )
 
 
@@ -371,6 +490,72 @@ def _asset_code_bindings(codes: tuple[str, ...], *, prefix: str) -> tuple[str, d
     return ", ".join(bindings), params
 
 
+async def _table_columns(session: AsyncSession, table_name: str) -> frozenset[str]:
+    if not hasattr(session, "run_sync"):
+        return frozenset()
+
+    def inspect_columns(sync_session: Any) -> frozenset[str]:
+        inspector = inspect(sync_session.connection())
+        if not inspector.has_table(table_name):
+            return frozenset()
+        return frozenset(str(column["name"]) for column in inspector.get_columns(table_name))
+
+    return await session.run_sync(inspect_columns)
+
+
+async def _load_persisted_theme_state_map(
+    session: AsyncSession,
+    *,
+    group_ids: tuple[str, ...],
+    signal_date: date,
+    source_cutoff: datetime,
+) -> dict[str, dict[str, Any]]:
+    """Load sealed state facts only when the additive graph is enabled."""
+
+    if not group_ids:
+        return {}
+    from app.services.strategy_lab.dual_universe_leader_tactics_v2_theme_graph_state import (  # noqa: PLC0415
+        load_persisted_theme_state_map,
+    )
+
+    values = await load_persisted_theme_state_map(
+        session,
+        group_ids=group_ids,
+        signal_date=signal_date,
+        source_cutoff=source_cutoff,
+    )
+    return {str(key): dict(value) for key, value in dict(values).items()}
+
+
+def _attach_persisted_theme_state(
+    membership: V2PITMembership,
+    state: dict[str, Any] | None,
+) -> V2PITMembership:
+    if state is None:
+        return membership
+    percentiles = state.get("percentiles")
+    normalized_percentiles = (
+        tuple(float(value) for value in percentiles)
+        if isinstance(percentiles, (tuple, list)) and len(percentiles) == 3
+        else None
+    )
+    unavailable_reasons = state.get("unavailable_reasons") or ()
+    return replace(
+        membership,
+        eligible_peer_count=(
+            int(state["eligible_member_count"])
+            if state.get("eligible_member_count") is not None
+            else membership.eligible_peer_count
+        ),
+        theme_state_hash=str(state.get("state_hash") or "") or None,
+        theme_state_available=bool(state.get("available")),
+        theme_state_percentiles=normalized_percentiles,
+        theme_state_unavailable_reasons=tuple(
+            sorted(str(reason) for reason in unavailable_reasons)
+        ),
+    )
+
+
 async def read_ashare_asset_inputs(
     session: AsyncSession,
     *,
@@ -382,6 +567,7 @@ async def read_ashare_asset_inputs(
     decision_mode: str = "session_pit",
     membership_evaluation_date: date | None = None,
     next_eligible_date: date | None = None,
+    theme_graph_enabled: bool = False,
 ) -> tuple[V2AssetInput, ...]:
     """Build ordered A-share inputs with three bounded queries per code page.
 
@@ -406,7 +592,32 @@ async def read_ashare_asset_inputs(
     signal_end = datetime.combine(signal_date, datetime.max.time())
     membership_date = membership_evaluation_date or signal_date
     result_inputs: list[V2AssetInput] = []
-    has_fine_theme_table = session.bind is not None and session.bind.dialect.name != "sqlite"
+    if theme_graph_enabled:
+        fine_columns = await _table_columns(session, "ashare_fine_theme_membership_facts")
+        path_columns = await _table_columns(session, "ashare_industry_path_facts")
+        capture_columns = await _table_columns(session, "ashare_theme_capture_runs")
+        has_fine_theme_table = bool(fine_columns)
+    else:
+        # Preserve the legacy reader's fixed three statements per page. Schema
+        # discovery belongs only to the additive graph path; doing it for every
+        # legacy request doubles query count on constrained production hosts.
+        fine_columns = frozenset()
+        path_columns = frozenset()
+        capture_columns = frozenset()
+        has_fine_theme_table = (
+            session.bind is not None and session.bind.dialect.name != "sqlite"
+        )
+    has_theme_graph = bool(
+        theme_graph_enabled
+        and path_columns
+        and capture_columns
+        and {
+            "relation_kind",
+            "source_snapshot_date",
+            "source_snapshot_hash",
+            "capture_run_hash",
+        }.issubset(fine_columns)
+    )
     for page in _asset_code_pages(requested, page_size=page_size):
         page_codes = tuple(code for code, _ in page)
         code_sql, code_params = _asset_code_bindings(page_codes, prefix="asset_code")
@@ -480,7 +691,11 @@ async def read_ashare_asset_inputs(
             str(row["asset_code"]): ashare_membership_to_v2(dict(row))
             for row in membership_result.mappings().all()
         }
-        if has_fine_theme_table:
+        theme_memberships_by_code: dict[str, list[V2PITMembership]] = {
+            code: [] for code in page_codes
+        }
+        primary_industry_by_code: dict[str, V2PITMembership] = {}
+        if has_fine_theme_table and not has_theme_graph:
             fine_result = await session.execute(
                 text(
                     f"""
@@ -515,6 +730,8 @@ async def read_ashare_asset_inputs(
                                     'eastmoney.concept.current_v1'
                                 AND snapshot.source =
                                     'akshare.stock_board_concept_cons_em.current'
+                                AND snapshot.normalized_theme_key =
+                                    fine.normalized_theme_key
                           )
                     ) latest_fine
                     WHERE membership_rank = 1
@@ -528,6 +745,144 @@ async def read_ashare_asset_inputs(
                     for row in fine_result.mappings().all()
                 }
             )
+
+        if has_theme_graph:
+            path_result = await session.execute(
+                text(
+                    f"""
+                    SELECT *
+                    FROM (
+                        SELECT paths.asset_code, paths.taxonomy,
+                               paths.taxonomy_version, paths.mapping_kind,
+                               paths.level1_code, paths.level1_label,
+                               paths.level2_code, paths.level2_label,
+                               paths.level3_code, paths.level3_label,
+                               paths.effective_from, paths.effective_to,
+                               paths.snapshot_date, paths.received_at,
+                               paths.source, paths.confidence, paths.fact_hash,
+                               paths.source_snapshot_hash AS snapshot_hash,
+                               TRUE AS snapshot_complete,
+                               (SELECT COUNT(*)
+                                  FROM ashare_industry_path_facts peers
+                                 WHERE peers.source_snapshot_hash =
+                                           paths.source_snapshot_hash
+                                   AND peers.taxonomy = paths.taxonomy
+                                   AND COALESCE(peers.level3_code, '') =
+                                       COALESCE(paths.level3_code, ''))
+                                   AS eligible_peer_count,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY paths.asset_code, paths.taxonomy
+                                   ORDER BY paths.snapshot_date DESC,
+                                            paths.received_at DESC,
+                                            paths.fact_hash DESC
+                               ) AS path_rank
+                        FROM ashare_industry_path_facts paths
+                        JOIN ashare_theme_capture_runs runs
+                          ON runs.source_snapshot_id = paths.source_snapshot_hash
+                         AND runs.source = paths.source
+                         AND runs.status = 'complete'
+                        WHERE paths.asset_code IN ({code_sql})
+                          AND paths.effective_from <= :membership_date
+                          AND (paths.effective_to IS NULL
+                               OR paths.effective_to >= :membership_date)
+                          AND paths.received_at <= :source_cutoff
+                          AND runs.received_at <= :source_cutoff
+                    ) ranked_paths
+                    WHERE path_rank = 1
+                    """
+                ),
+                base_params,
+            )
+            for row in path_result.mappings().all():
+                membership = industry_path_membership_to_v2(dict(row))
+                primary_industry_by_code[str(row["asset_code"])] = membership
+
+            graph_fine_result = await session.execute(
+                text(
+                    f"""
+                    SELECT *
+                    FROM (
+                        SELECT fine.asset_code, fine.group_id, fine.theme,
+                               fine.normalized_theme_key, fine.hierarchy_level,
+                               fine.effective_from, fine.effective_to,
+                               fine.received_at, fine.taxonomy_version,
+                               fine.source, fine.confidence, fine.mapping_kind,
+                               fine.fact_hash, fine.provider_theme_code,
+                               fine.provider_theme_label, fine.membership_reason,
+                               fine.exposure_weight, fine.relation_kind,
+                               fine.source_snapshot_date AS snapshot_date,
+                               fine.source_snapshot_hash AS snapshot_hash,
+                               fine.capture_run_hash,
+                               TRUE AS snapshot_complete,
+                               (SELECT COUNT(DISTINCT peers.asset_code)
+                                  FROM ashare_fine_theme_membership_facts peers
+                                 WHERE peers.source_snapshot_hash =
+                                           fine.source_snapshot_hash
+                                   AND peers.normalized_theme_key =
+                                       fine.normalized_theme_key
+                                   AND peers.relation_kind = fine.relation_kind)
+                                   AS eligible_peer_count,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY fine.asset_code, fine.group_id,
+                                                fine.relation_kind, fine.source
+                                   ORDER BY fine.source_snapshot_date DESC,
+                                            fine.received_at DESC,
+                                            fine.fact_hash DESC
+                               ) AS relation_rank
+                        FROM ashare_fine_theme_membership_facts fine
+                        JOIN ashare_theme_capture_runs runs
+                          ON runs.source_snapshot_id = fine.source_snapshot_hash
+                         AND runs.status = 'complete'
+                        WHERE fine.asset_code IN ({code_sql})
+                          AND fine.effective_from <= :membership_date
+                          AND (fine.effective_to IS NULL
+                               OR fine.effective_to >= :membership_date)
+                          AND fine.received_at <= :source_cutoff
+                          AND runs.received_at <= :source_cutoff
+                          AND fine.relation_kind IN
+                              ('provider_concept', 'industry_union_proxy')
+                    ) ranked_relations
+                    WHERE relation_rank = 1
+                    ORDER BY asset_code, relation_kind, normalized_theme_key, fact_hash
+                    """
+                ),
+                base_params,
+            )
+            for row in graph_fine_result.mappings().all():
+                theme_memberships_by_code.setdefault(str(row["asset_code"]), []).append(
+                    fine_theme_membership_to_v2(dict(row))
+                )
+
+            graph_group_ids = tuple(
+                sorted(
+                    {
+                        membership.group_id
+                        for memberships in theme_memberships_by_code.values()
+                        for membership in memberships
+                    }
+                    | {
+                        membership.group_id
+                        for membership in primary_industry_by_code.values()
+                    }
+                )
+            )
+            state_map = await _load_persisted_theme_state_map(
+                session,
+                group_ids=graph_group_ids,
+                signal_date=signal_date,
+                source_cutoff=source_cutoff,
+            )
+            primary_industry_by_code = {
+                code: _attach_persisted_theme_state(membership, state_map.get(membership.group_id))
+                for code, membership in primary_industry_by_code.items()
+            }
+            theme_memberships_by_code = {
+                code: [
+                    _attach_persisted_theme_state(membership, state_map.get(membership.group_id))
+                    for membership in memberships
+                ]
+                for code, memberships in theme_memberships_by_code.items()
+            }
 
         bars_result = await session.execute(
             text(
@@ -608,6 +963,7 @@ async def read_ashare_asset_inputs(
             elif reason:
                 exclusions_by_code.setdefault(code, set()).add(reason)
 
+        page_inputs: list[V2AssetInput] = []
         for code, asset_name in page:
             universe_row = universe_by_code.get(code)
             input_reasons: list[str] = []
@@ -621,7 +977,7 @@ async def read_ashare_asset_inputs(
                 if universe_row.get("exclusion_reason"):
                     input_reasons.append(str(universe_row["exclusion_reason"]))
             input_reasons.extend(exclusions_by_code.get(code, ()))
-            result_inputs.append(
+            page_inputs.append(
                 V2AssetInput(
                     universe="ashare",
                     asset_code=code,
@@ -634,8 +990,13 @@ async def read_ashare_asset_inputs(
                     decision_mode=decision_mode,
                     membership_evaluation_date=membership_date,
                     next_eligible_date=next_eligible_date,
+                    primary_industry=primary_industry_by_code.get(code),
+                    theme_memberships=tuple(theme_memberships_by_code.get(code, ())),
                 )
             )
+        result_inputs.extend(
+            resolve_v2_asset_contexts(page_inputs) if has_theme_graph else page_inputs
+        )
     return tuple(result_inputs)
 
 
@@ -650,6 +1011,7 @@ async def read_ashare_asset_input(
     decision_mode: str = "session_pit",
     membership_evaluation_date: date | None = None,
     next_eligible_date: date | None = None,
+    theme_graph_enabled: bool = False,
 ) -> V2AssetInput:
     """Build one A-share V2 input using the bounded batch reader."""
 
@@ -663,6 +1025,7 @@ async def read_ashare_asset_input(
         decision_mode=decision_mode,
         membership_evaluation_date=membership_evaluation_date,
         next_eligible_date=next_eligible_date,
+        theme_graph_enabled=theme_graph_enabled,
     )
     return inputs[0]
 
@@ -672,6 +1035,7 @@ __all__ = [
     "AshareReadinessMetric",
     "ashare_membership_to_v2",
     "fine_theme_membership_to_v2",
+    "industry_path_membership_to_v2",
     "ashare_price_fact_to_bar",
     "adjusted_fact_exclusion_reason",
     "read_ashare_adjusted_bars",

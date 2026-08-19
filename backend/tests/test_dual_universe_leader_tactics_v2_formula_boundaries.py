@@ -6,6 +6,8 @@ from datetime import date, datetime, time, timedelta
 
 from app.services.etf_research_evidence import stable_contract_hash
 from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
+    ASHARE_INDUSTRY_PATH_FACT_HASH_CONTRACT,
+    ASHARE_THEME_RELATION_FACT_HASH_CONTRACT,
     BASE_LAUNCH_V2,
     BREAKOUT_V2,
     V2AdjustedBar,
@@ -13,6 +15,7 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
     V2PITMembership,
     _required_batch_qualifiers,
     build_v2_staged_asset_feature,
+    resolve_v2_asset_contexts,
     screen_dual_universe,
     staged_theme_percentile_overrides,
     staged_v2_input_hash,
@@ -89,6 +92,149 @@ def _asset(
         bars=actual_bars,
         membership=membership or _membership(),
     )
+
+
+def _graph_membership(
+    *,
+    asset_code: str,
+    group_id: str,
+    relation_kind: str,
+    confidence: float,
+    registry_priority: int,
+) -> V2PITMembership:
+    signal_date = _bars()[-1].trade_date
+    draft = V2PITMembership(
+        group_id=group_id,
+        effective_from=signal_date,
+        effective_to=None,
+        observed_at=datetime.combine(signal_date, time(15)),
+        mapping_kind="historical_pit",
+        taxonomy_version="theme-graph-v1",
+        theme=group_id,
+        sector="technology",
+        fact_hash="",
+        fact_hash_contract=ASHARE_THEME_RELATION_FACT_HASH_CONTRACT,
+        source_asset_code=asset_code,
+        source="provider.current",
+        confidence=confidence,
+        hierarchy_level="fine_theme",
+        normalized_theme_key=group_id.removeprefix("fine_theme:"),
+        resolution_mode="fine_theme_pit",
+        relation_kind=relation_kind,
+        registry_priority=registry_priority,
+        hierarchy_depth=4,
+        snapshot_date=signal_date,
+        snapshot_hash=f"snapshot-{relation_kind}",
+        snapshot_complete=True,
+        eligible_peer_count=6,
+        theme_state_hash=f"state-{relation_kind}",
+        theme_state_available=True,
+        theme_state_percentiles=(0.8, 0.7, 0.9),
+        provider_theme_label=("provider-label" if relation_kind == "provider_concept" else None),
+        membership_reason=("disclosed SW3 union" if relation_kind == "industry_union_proxy" else None),
+        capture_run_hash=f"snapshot-{relation_kind}",
+    )
+    return replace(
+        draft,
+        fact_hash=stable_contract_hash(draft.fact_identity_payload(asset_code=asset_code)),
+    )
+
+
+def _primary_industry_membership(*, asset_code: str) -> V2PITMembership:
+    signal_date = _bars()[-1].trade_date
+    draft = V2PITMembership(
+        group_id="industry_l3:SW2021:850000",
+        effective_from=signal_date,
+        effective_to=None,
+        observed_at=datetime.combine(signal_date, time(15)),
+        mapping_kind="primary_hierarchy",
+        taxonomy_version="sw2021-v1",
+        theme="被动元件",
+        sector="电子",
+        fact_hash="",
+        fact_hash_contract=ASHARE_INDUSTRY_PATH_FACT_HASH_CONTRACT,
+        source_asset_code=asset_code,
+        source="tickflow.universes",
+        confidence=1.0,
+        hierarchy_level="industry_l3",
+        resolution_mode="primary_industry_path_pit",
+        relation_kind="industry_l3",
+        hierarchy_depth=3,
+        industry_path=(
+            ("industry_l1", "801080", "电子"),
+            ("industry_l2", "801081", "元件"),
+            ("industry_l3", "850000", "被动元件"),
+        ),
+        snapshot_date=signal_date,
+        snapshot_hash="industry-snapshot",
+        snapshot_complete=True,
+        eligible_peer_count=6,
+        theme_state_hash="industry-state",
+        theme_state_available=True,
+        theme_state_percentiles=(0.5, 0.6, 0.7),
+        taxonomy="SW2021",
+    )
+    return replace(
+        draft,
+        fact_hash=stable_contract_hash(draft.fact_identity_payload(asset_code=asset_code)),
+    )
+
+
+def test_multilayer_resolver_prefers_provider_context_and_retains_alternatives() -> None:
+    items = []
+    for index in range(6):
+        code = f"00000{index}"
+        provider = _graph_membership(
+            asset_code=code,
+            group_id="fine_theme:passive_components",
+            relation_kind="provider_concept",
+            confidence=0.95,
+            registry_priority=30,
+        )
+        proxy = _graph_membership(
+            asset_code=code,
+            group_id="fine_theme:passive_components",
+            relation_kind="industry_union_proxy",
+            confidence=1.0,
+            registry_priority=130,
+        )
+        items.append(
+            replace(
+                _asset(code, universe="ashare"),
+                membership=None,
+                primary_industry=_primary_industry_membership(asset_code=code),
+                theme_memberships=(proxy, provider),
+            )
+        )
+
+    resolved = resolve_v2_asset_contexts(tuple(items))
+
+    assert all(item.membership is not None for item in resolved)
+    assert all(item.membership.relation_kind == "provider_concept" for item in resolved)
+    assert all(
+        [context.relation_kind for context in item.alternative_memberships]
+        == ["industry_union_proxy", "industry_l3"]
+        for item in resolved
+    )
+    assert all(not item.rejected_contexts for item in resolved)
+    result = screen_dual_universe(resolved)
+    assert all("taxonomy_not_point_in_time" not in row.exclusion_reasons for row in result.observations)
+
+
+def test_primary_hierarchy_is_a_valid_point_in_time_fallback() -> None:
+    code = "600001"
+    item = replace(
+        _asset(code, universe="ashare"),
+        membership=None,
+        primary_industry=_primary_industry_membership(asset_code=code),
+    )
+
+    resolved = resolve_v2_asset_contexts((item,))[0]
+
+    assert resolved.membership is not None
+    assert resolved.membership.mapping_kind == "primary_hierarchy"
+    result = screen_dual_universe((resolved,))
+    assert all("taxonomy_not_point_in_time" not in row.exclusion_reasons for row in result.observations)
 
 
 def test_all_frozen_formulas_fail_closed_for_history_and_nonfinite_inputs() -> None:

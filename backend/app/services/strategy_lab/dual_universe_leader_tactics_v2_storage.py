@@ -33,6 +33,9 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_boundary import (
     assert_v2_research_table,
 )
+from app.services.strategy_lab.dual_universe_leader_tactics_v2_theme_graph_read import (
+    read_ashare_theme_graph_readiness,
+)
 
 V2_STORAGE_SCHEMA_VERSION = "leader_tactics_v2_storage_v1"
 V2_MANIFEST_STATUS = "materialized"
@@ -962,6 +965,11 @@ async def read_v2_candidates(
         for reason, value in manifest_exclusions.items():
             exclusion_counts[str(reason)] = max(exclusion_counts.get(str(reason), 0), int(value))
 
+    classification_readiness = (
+        await read_ashare_theme_graph_readiness(session, as_of=as_of)
+        if universe == "ashare"
+        else {"status": "not_applicable", "unavailable_reasons": []}
+    )
     return {
         "schema_version": "dual_universe_leader_tactics_screen_v2",
         "experiment_family": "leader_tactics_shadow_v2",
@@ -993,6 +1001,7 @@ async def read_v2_candidates(
                 risk_rows,
                 shared_snapshot=shared_sentiment_risk,
             ),
+            "classification_readiness": classification_readiness,
         },
         "ranking_source_kind": ranking_source_kind,
         "notification_provenance": "none",
