@@ -15,6 +15,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.entities import EtfFactorExperimentEvidence
 from app.services.etf_research_evidence import stable_contract_hash
+from app.services.strategy_lab.etf_leader_entry_quality import (
+    assess_leader_breakout_entry_quality,
+)
 from app.services.strategy_lab.etf_leader_tactics_shadow import (
     BREAKOUT_HISTORY_SESSIONS,
     CYCLE_ROUTED_LEADER_CANDIDATE,
@@ -580,6 +583,20 @@ def finalize_leader_observation_primitives(
             "latest_120_volume_max": item.latest_120_volume_max,
             "average_turnover20": item.average_turnover20,
         }
+        breakout_components.update(
+            assess_leader_breakout_entry_quality(
+                adjusted_close=item.adjusted_close,
+                preceding_adjusted_high=item.preceding_20_adjusted_high,
+                adjusted_ma20=item.adjusted_ma20,
+                adjusted_atr20=item.adjusted_atr20,
+                volume_confirmed=(
+                    item.current_volume >= item.latest_120_volume_max
+                    if item.current_volume is not None
+                    and item.latest_120_volume_max is not None
+                    else None
+                ),
+            ).component_payload()
+        )
         if item.breakout_unavailable_reasons:
             breakout = _observation_payload(
                 primitive=item,

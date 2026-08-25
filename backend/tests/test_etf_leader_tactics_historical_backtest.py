@@ -78,6 +78,36 @@ def _universe() -> tuple[HistoricalLeaderAsset, ...]:
     return tuple(rows)
 
 
+def _confirmed_universe() -> tuple[HistoricalLeaderAsset, ...]:
+    assets = list(_universe())
+    target = assets[4]
+    bars = list(target.bars)
+    for index in range(159, 179):
+        bar = bars[index]
+        bars[index] = replace(
+            bar,
+            adjusted_high=bar.adjusted_close + 0.7,
+            adjusted_low=bar.adjusted_close - 0.7,
+        )
+    bars[179] = replace(
+        bars[179],
+        adjusted_open=16.7,
+        adjusted_high=17.0,
+        adjusted_low=16.2,
+        adjusted_close=16.9,
+        volume=9_000_000.0,
+    )
+    bars[180] = replace(
+        bars[180],
+        adjusted_open=16.95,
+        adjusted_high=17.3,
+        adjusted_low=16.8,
+        adjusted_close=17.2,
+    )
+    assets[4] = replace(target, bars=tuple(bars))
+    return tuple(assets)
+
+
 def test_rolling_backtest_selects_at_t_and_executes_at_t_plus_one() -> None:
     assets = _universe()
     signal_date = assets[0].bars[179].trade_date
@@ -96,6 +126,45 @@ def test_rolling_backtest_selects_at_t_and_executes_at_t_plus_one() -> None:
     assert one_day.net_return == pytest.approx(
         one_day.gross_return - ROUND_TRIP_COST_RATE
     )
+    assert one_day.entry_quality_state == "overextended"
+    assert "atr_extension_excessive" in one_day.entry_quality_reason_codes
+    assert one_day.next_session_confirmation_state == "overextended"
+    assert one_day.confirmed_net_return is None
+
+
+def test_confirmed_daily_proxy_enters_at_next_open_after_confirmation_close() -> None:
+    assets = _confirmed_universe()
+    signal_date = assets[0].bars[179].trade_date
+
+    events = evaluate_historical_signal_date(assets, signal_date)
+
+    one_day = next(
+        item
+        for item in events
+        if item.asset_code == "04"
+        and item.candidate_id == "leader_breakout_proxy_v1"
+        and item.horizon_sessions == 1
+    )
+    assert one_day.entry_quality_state == "disciplined"
+    assert one_day.next_session_confirmation_state == "confirmed"
+    assert one_day.confirmation_date == assets[4].bars[180].trade_date
+    assert one_day.confirmed_entry_date == assets[4].bars[181].trade_date
+    assert one_day.confirmed_exit_date == assets[4].bars[181].trade_date
+    expected = (
+        assets[4].bars[181].adjusted_close
+        / assets[4].bars[181].adjusted_open
+        - 1.0
+        - ROUND_TRIP_COST_RATE
+    )
+    assert one_day.confirmed_net_return == pytest.approx(expected)
+    row = next(
+        item
+        for item in summarize_historical_events(events)
+        if item["candidate_id"] == "leader_breakout_proxy_v1"
+        and item["horizon_sessions"] == 1
+    )
+    assert row["next_session_confirmation_counts"]["confirmed"] == 1
+    assert row["confirmation_policy_performance"]["confirmed_event_count"] == 1
 
 
 def test_future_prices_cannot_change_signal_identity_but_change_outcome() -> None:
@@ -170,6 +239,11 @@ def test_summary_reports_costed_return_excess_and_event_series_drawdown() -> Non
     assert row["mean_net_return"] is not None
     assert row["mean_net_excess_return"] is not None
     assert row["event_series_max_drawdown"] is not None
+    assert row["entry_quality_counts"]["overextended"] > 0
+    assert row["entry_quality_performance"]["overextended"]["event_count"] > 0
+    assert row["entry_quality_performance"]["overextended"][
+        "mean_net_return"
+    ] is not None
 
 
 def _report() -> dict[str, object]:

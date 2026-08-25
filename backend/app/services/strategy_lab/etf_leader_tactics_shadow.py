@@ -11,6 +11,9 @@ from statistics import mean
 from typing import Any, Literal
 
 from app.services.etf_research_evidence import stable_contract_hash
+from app.services.strategy_lab.etf_leader_entry_quality import (
+    assess_leader_breakout_entry_quality,
+)
 from app.services.strategy_lab.etf_ranking_candidates import (
     RANKING_COST_CONTRACT_HASH,
     REGIME_LIQUIDITY_GATE_CONTRACT_HASH,
@@ -1006,6 +1009,13 @@ def _breakout_observations(
         return_pct = return_percentiles.get(item.asset_code)
         turnover_pct = turnover_percentiles.get(item.asset_code)
         current_turnover20 = mean(bar.turnover for bar in bars[-20:])
+        entry_quality = assess_leader_breakout_entry_quality(
+            adjusted_close=close,
+            preceding_adjusted_high=preceding_high,
+            adjusted_ma20=ma20,
+            adjusted_atr20=_atr(bars, 20),
+            volume_confirmed=bars[-1].volume >= volume_max,
+        )
         components.update(
             {
                 "adjusted_ma5": ma5,
@@ -1016,6 +1026,7 @@ def _breakout_observations(
                 "current_volume": bars[-1].volume,
                 "latest_120_volume_max": volume_max,
                 "average_turnover20": current_turnover20,
+                **entry_quality.component_payload(),
             }
         )
         missing_components = [
