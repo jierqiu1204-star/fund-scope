@@ -2663,7 +2663,7 @@ async def test_intraday_cleanup_never_deletes_protected_quote_and_persists_check
 
 
 @pytest.mark.asyncio
-async def test_intraday_cleanup_rejects_non_positive_price_without_deleting(app) -> None:
+async def test_intraday_cleanup_quarantines_invalid_price_and_continues(app) -> None:
     async with app.state.db.session() as session:
         session.add(_etf("510006"))
         await session.flush()
@@ -2684,11 +2684,77 @@ async def test_intraday_cleanup_rejects_non_positive_price_without_deleting(app)
             evidence_seal_complete=True,
         )
         raw_count = await session.scalar(select(func.count()).select_from(EtfIntradayQuote))
+        invalid_summary = await session.scalar(
+            select(EtfIntradayDailySummary).where(
+                EtfIntradayDailySummary.etf_code == "510006",
+                EtfIntradayDailySummary.trade_date == date(2026, 6, 10),
+            )
+        )
 
-    assert result["job_status"] == "partial"
-    assert result["unavailable_reason"] == "intraday_cleanup_invalid_price"
-    assert result["deleted_rows"] == 0
-    assert raw_count == 3
+    assert result["deleted_rows"] == 2
+    assert result["invalid_price_group_count"] == 1
+    assert result["invalid_price_row_count"] == 1
+    assert result["first_invalid_price_group"] == {
+        "asset_code": "510006",
+        "trade_date": "2026-06-10",
+    }
+    assert raw_count == 1
+    assert invalid_summary is not None
+    assert invalid_summary.open_price is None
+    assert invalid_summary.close_price is None
+    assert invalid_summary.summary_json["decision_evidence_source"] is False
+    assert invalid_summary.summary_json["data_quality_status"] == "unavailable"
+    assert invalid_summary.summary_json["invalid_price_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_intraday_cleanup_keeps_exactly_ten_latest_trade_dates(app) -> None:
+    trade_dates = (
+        date(2026, 6, 1),
+        date(2026, 6, 2),
+        date(2026, 6, 3),
+        date(2026, 6, 4),
+        date(2026, 6, 5),
+        date(2026, 6, 8),
+        date(2026, 6, 9),
+        date(2026, 6, 10),
+        date(2026, 6, 11),
+        date(2026, 6, 12),
+        date(2026, 6, 15),
+        date(2026, 6, 16),
+    )
+    async with app.state.db.session() as session:
+        session.add(_etf("510007"))
+        await session.flush()
+        session.add_all(
+            [
+                EtfIntradayQuote(
+                    etf_code="510007",
+                    quote_time=datetime.combine(trade_date, datetime.min.time()).replace(hour=14),
+                    trade_date=trade_date,
+                    latest_price=1.0,
+                )
+                for trade_date in trade_dates
+            ]
+        )
+        await session.commit()
+
+        result = await summarize_and_cleanup_intraday_quotes(
+            session,
+            retention_trading_days=10,
+            evidence_seal_complete=True,
+        )
+        remaining_dates = tuple(
+            await session.scalars(
+                select(EtfIntradayQuote.trade_date)
+                .where(EtfIntradayQuote.etf_code == "510007")
+                .order_by(EtfIntradayQuote.trade_date)
+            )
+        )
+
+    assert result["cutoff_date"] == "2026-06-03"
+    assert result["deleted_rows"] == 2
+    assert remaining_dates == trade_dates[-10:]
 
 
 def _normalized_provider_quote(

@@ -5,6 +5,7 @@ from datetime import date, datetime, time, timedelta
 from io import BytesIO
 from types import SimpleNamespace
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 import pandas as pd
@@ -13,6 +14,7 @@ from sqlalchemy import event, func, select, text
 
 from app.models.entities import (
     EtfListingDateObservation,
+    EtfPointInTimeMembershipFact,
     EtfPriceHistory,
     EtfUniverseMembership,
     ShortResearchSignalItem,
@@ -32,6 +34,9 @@ from app.services.short_research.universe import (
     discover_etf_universe,
     parse_provider_listing_date,
     refresh_etf_universe,
+)
+from app.services.strategy_lab.etf_point_in_time_decision_data import (
+    load_point_in_time_etf_decision_inputs,
 )
 from app.services.workflows.short_research_data import (
     sync_short_research_data_with_tracking_priority,
@@ -760,6 +765,100 @@ async def test_universe_refresh_persists_listing_observation_idempotently(app) -
     assert observations[0].listing_date == date(2020, 11, 16)
     assert observations[0].source == universe_module.SSE_LISTING_SOURCE
     assert len(observations[0].evidence_hash) == 64
+
+
+@pytest.mark.asyncio
+async def test_live_authoritative_refresh_persists_daily_membership_facts_idempotently(
+    app,
+    monkeypatch,
+) -> None:
+    effective_date = date(2026, 8, 25)
+    observed_at = datetime(2026, 8, 25, 7, 0)
+    records = (
+        EtfUniverseRecord(
+            code="588000",
+            name="科创50ETF",
+            exchange="SH",
+            category="broad",
+            theme_tags=["科创"],
+            trading_rule_label="证券账户 T+1 ETF",
+            source=universe_module.EASTMONEY_UNIVERSE_SOURCE,
+        ),
+        EtfUniverseRecord(
+            code="511990",
+            name="华宝添益货币ETF",
+            exchange="SH",
+            category="money",
+            theme_tags=["货币"],
+            trading_rule_label="货币 ETF",
+            source=universe_module.EASTMONEY_UNIVERSE_SOURCE,
+        ),
+    )
+    discovery = EtfUniverseDiscovery(
+        records=records,
+        status="authoritative",
+        source=universe_module.EASTMONEY_UNIVERSE_SOURCE,
+        source_row_count=2,
+        normalized_row_count=2,
+        provider_version=universe_module.EASTMONEY_UNIVERSE_PROVIDER_VERSION,
+        observed_at=observed_at,
+        universe_snapshot_hash="a" * 64,
+        raw_payload_hash="b" * 64,
+    )
+
+    async def discover() -> EtfUniverseDiscovery:
+        return discovery
+
+    async def enrich(items):
+        return tuple(items), {
+            "source_kind": "not_observed",
+            "expected_count": 2,
+            "observed_count": 0,
+            "coverage_ratio": 0.0,
+            "sources": [],
+        }
+
+    monkeypatch.setattr(universe_module, "discover_etf_universe", discover)
+    monkeypatch.setattr(universe_module, "enrich_with_official_listing_metadata", enrich)
+
+    async with app.state.db.session() as session:
+        first = await refresh_etf_universe(session, as_of_date=effective_date)
+        second = await refresh_etf_universe(session, as_of_date=effective_date)
+        facts = (
+            await session.scalars(
+                select(EtfPointInTimeMembershipFact).order_by(
+                    EtfPointInTimeMembershipFact.etf_code
+                )
+            )
+        ).all()
+        decision_inputs = await load_point_in_time_etf_decision_inputs(
+            session,
+            replay_date=effective_date,
+            decision_cutoff=datetime(
+                2026,
+                8,
+                25,
+                18,
+                tzinfo=ZoneInfo("Asia/Shanghai"),
+            ),
+            max_source_rows=61 * 2,
+            max_codes=2,
+            required_history_sessions=61,
+        )
+
+    assert first["pit_membership_facts_added"] == 2
+    assert second["pit_membership_facts_added"] == 0
+    assert len(facts) == 2
+    assert {fact.etf_code: fact.membership_state for fact in facts} == {
+        "511990": "excluded",
+        "588000": "included",
+    }
+    assert all(fact.observed_at == observed_at for fact in facts)
+    assert all(fact.effective_from == effective_date for fact in facts)
+    assert all(fact.effective_to == effective_date for fact in facts)
+    assert [item.asset_code for item in decision_inputs.authoritative_universe] == [
+        "588000"
+    ]
 
 
 @pytest.mark.asyncio

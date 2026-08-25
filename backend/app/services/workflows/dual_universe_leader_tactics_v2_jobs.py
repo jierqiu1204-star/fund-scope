@@ -121,6 +121,7 @@ V2_WORK_SECONDS = 52.0
 V2_FINE_THEME_WORK_SECONDS = 40.0
 V2_THEME_GRAPH_PAGE_SIZE = 200
 V2_MIN_MATERIALIZATION_HEADROOM_BYTES = 768 * 1024 * 1024
+V2_ETF_MIN_MATERIALIZATION_HEADROOM_BYTES = 640 * 1024 * 1024
 V2_MAX_ASHARE_ASSETS = 6_000
 V2_UNIVERSE_PERSIST_PAGE_SIZE = 500
 V2_ASHARE_INPUT_PAGE_SIZE = 500
@@ -1124,14 +1125,14 @@ async def _materialize_etf(
         }
 
     headroom = available_memory_bytes()
-    if headroom is not None and headroom < V2_MIN_MATERIALIZATION_HEADROOM_BYTES:
+    if headroom is not None and headroom < V2_ETF_MIN_MATERIALIZATION_HEADROOM_BYTES:
         return {
             "status": "waiting",
             "job_status": "partial",
             "signal_date": snapshot.trade_date.isoformat(),
             "unavailable_reason": "insufficient_materialization_memory_headroom",
             "available_memory_bytes": headroom,
-            "required_memory_bytes": V2_MIN_MATERIALIZATION_HEADROOM_BYTES,
+            "required_memory_bytes": V2_ETF_MIN_MATERIALIZATION_HEADROOM_BYTES,
             "research_only": True,
         }
     bundle = await read_etf_v2_asset_inputs(

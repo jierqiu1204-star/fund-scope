@@ -106,6 +106,24 @@ def test_morning_leader_confirmation_has_one_bounded_checkpoint(app) -> None:
     assert job.coalesce is True
 
 
+def test_etf_leader_materialization_retries_bounded_persisted_reads(app) -> None:
+    scheduler = scheduler_module.build_scheduler("Asia/Shanghai")
+    settings = app.state.settings.model_copy(
+        update={"etf_leader_tactics_v2_etf_materialize_enabled": True}
+    )
+
+    scheduler_module.register_default_jobs(scheduler, app.state.db, settings)
+
+    job = scheduler.get_job("dual_universe_leader_tactics_v2_materialize_etf")
+    assert job is not None
+    fields = {field.name: str(field) for field in job.trigger.fields}
+    assert fields["day_of_week"] == "tue-sat"
+    assert fields["hour"] == "9-10"
+    assert fields["minute"] == "10,30,50"
+    assert job.max_instances == 1
+    assert job.coalesce is True
+
+
 def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     scheduler = scheduler_module.build_scheduler("Asia/Shanghai")
 

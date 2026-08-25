@@ -192,7 +192,7 @@ def _observation_report(*, match: bool = True) -> dict:
         "research_only": True,
         "production_mutation_allowed": False,
         "observation_state": "observing",
-        "observation_unavailable_reason": "leader_observation_dates_below_252",
+        "observation_unavailable_reason": None,
         "observation_data_cutoff": "2026-07-31T16:00:00+08:00",
         "observation_counts": {
             "eligible_pit_sessions": 1,

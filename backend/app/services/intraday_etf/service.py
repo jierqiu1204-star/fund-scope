@@ -1333,40 +1333,35 @@ async def summarize_and_cleanup_intraday_quotes(
     summary_by_group = {
         (row.etf_code, row.trade_date): row for row in existing_summaries
     }
+    invalid_price_group_count = 0
+    invalid_price_row_count = 0
+    first_invalid_price_group: dict[str, str] | None = None
     for group_key in selected_groups:
         group_quotes = rows_by_group[group_key]
-        first_quote = group_quotes[0]
-        last_quote = group_quotes[-1]
-        prices = [
-            float(row.latest_price)
+        valid_quotes = [
+            row
             for row in group_quotes
             if isfinite(float(row.latest_price)) and float(row.latest_price) > 0
         ]
-        if len(prices) != len(group_quotes):
-            await session.rollback()
-            return {
-                "job_status": "partial",
-                "job_message": "日内分组包含非有限或非正价格。",
-                "retention_trading_days": safe_days,
-                "cutoff_date": cutoff_date.isoformat(),
-                "summarized_groups": 0,
-                "deleted_rows": 0,
-                "batch_size": safe_batch_size,
-                "unavailable_reason": "intraday_cleanup_invalid_price",
-                "blocked_group": {
-                    "asset_code": group_key[0],
-                    "trade_date": group_key[1].isoformat(),
-                },
-                "message": "价格证据异常，本次未删除任何明细。",
+        prices = [float(row.latest_price) for row in valid_quotes]
+        invalid_count = len(group_quotes) - len(valid_quotes)
+        if invalid_count:
+            invalid_price_group_count += 1
+            invalid_price_row_count += invalid_count
+            first_invalid_price_group = first_invalid_price_group or {
+                "asset_code": group_key[0],
+                "trade_date": group_key[1].isoformat(),
             }
+        first_quote = valid_quotes[0] if valid_quotes else group_quotes[0]
+        last_quote = valid_quotes[-1] if valid_quotes else group_quotes[-1]
         volume_values = [
             float(row.volume)
-            for row in group_quotes
+            for row in valid_quotes
             if row.volume is not None and isfinite(float(row.volume))
         ]
         turnover_values = [
             float(row.turnover)
-            for row in group_quotes
+            for row in valid_quotes
             if row.turnover is not None and isfinite(float(row.turnover))
         ]
         existing = summary_by_group.get(group_key)
@@ -1377,10 +1372,10 @@ async def summarize_and_cleanup_intraday_quotes(
         summary.quote_count = len(group_quotes)
         summary.first_quote_time = first_quote.quote_time
         summary.last_quote_time = last_quote.quote_time
-        summary.open_price = float(first_quote.latest_price)
-        summary.close_price = float(last_quote.latest_price)
-        summary.low_price = min(prices)
-        summary.high_price = max(prices)
+        summary.open_price = float(first_quote.latest_price) if valid_quotes else None
+        summary.close_price = float(last_quote.latest_price) if valid_quotes else None
+        summary.low_price = min(prices) if prices else None
+        summary.high_price = max(prices) if prices else None
         summary.total_volume = max(volume_values) if volume_values else None
         summary.total_turnover = max(turnover_values) if turnover_values else None
         summary.source = last_quote.source
@@ -1391,6 +1386,15 @@ async def summarize_and_cleanup_intraday_quotes(
             "volume_semantics": "max_cumulative_snapshot",
             "turnover_semantics": "max_cumulative_snapshot",
             "decision_evidence_source": False,
+            "data_quality_status": (
+                "complete"
+                if not invalid_count
+                else "degraded"
+                if valid_quotes
+                else "unavailable"
+            ),
+            "valid_price_count": len(valid_quotes),
+            "invalid_price_count": invalid_count,
         }
         if existing is None:
             session.add(summary)
@@ -1425,6 +1429,9 @@ async def summarize_and_cleanup_intraday_quotes(
         "selected_unprotected_count": selected_unprotected_count,
         "selected_group_count": len(selected_groups),
         "protected_rows_loaded": len(quote_rows) - selected_unprotected_count,
+        "invalid_price_group_count": invalid_price_group_count,
+        "invalid_price_row_count": invalid_price_row_count,
+        "first_invalid_price_group": first_invalid_price_group,
     }
     checkpoint.updated_at = utcnow()
     await session.commit()
@@ -1434,6 +1441,9 @@ async def summarize_and_cleanup_intraday_quotes(
         "summarized_groups": len(selected_groups),
         "deleted_rows": deleted_rows,
         "batch_size": safe_batch_size,
+        "invalid_price_group_count": invalid_price_group_count,
+        "invalid_price_row_count": invalid_price_row_count,
+        "first_invalid_price_group": first_invalid_price_group,
         "checkpoint": {
             "last_trade_date": selected_groups[-1][1].isoformat(),
             "last_etf_code": selected_groups[-1][0],

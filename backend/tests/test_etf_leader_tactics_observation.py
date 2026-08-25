@@ -21,6 +21,7 @@ from app.services.strategy_lab.etf_leader_tactics_observation import (
     build_leader_matured_outcome,
     build_leader_observation_primitive,
     finalize_leader_observation_primitives,
+    leader_observation_evidence_payload,
 )
 from app.services.strategy_lab.etf_leader_tactics_shadow import (
     FROZEN_LEADER_CANDIDATE_REGISTRY,
@@ -142,6 +143,16 @@ def test_complete_observation_report_is_research_only_and_zero_match_safe() -> N
     assert payload["research_only"] is True
     assert payload["production_mutation_allowed"] is False
     assert payload["progress"]["completion_ratio"] == 1.0
+
+    evidence = leader_observation_evidence_payload(manifest=manifest, report=report)
+    assert evidence["observation_state"] == "observing"
+    assert evidence["observation_unavailable_reason"] is None
+    assert evidence["observation_counts"]["sample_gates_passed"] is False
+    assert evidence["observation_counts"]["failed_gates"] == [
+        LEADER_OBSERVATION_DATES_INSUFFICIENT,
+        LEADER_OBSERVATION_INDEPENDENT_DATES_INSUFFICIENT,
+        LEADER_OBSERVATION_FOLDS_INSUFFICIENT,
+    ]
 
 
 def test_observation_match_rejects_non_finite_score() -> None:

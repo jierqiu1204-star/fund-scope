@@ -228,6 +228,8 @@ async def _run_retention_slice(
     cleanup_slices: list[dict[str, Any]] = []
     total_deleted_rows = 0
     total_summarized_groups = 0
+    total_invalid_price_groups = 0
+    total_invalid_price_rows = 0
     last_result: dict[str, Any] = preview
     for _ in range(INTRADAY_CLEANUP_SLICE_LIMIT):
         if loop.time() >= work_deadline - 2.0:
@@ -244,6 +246,8 @@ async def _run_retention_slice(
         summarized_groups = int(result.get("summarized_groups") or 0)
         total_deleted_rows += deleted_rows
         total_summarized_groups += summarized_groups
+        total_invalid_price_groups += int(result.get("invalid_price_group_count") or 0)
+        total_invalid_price_rows += int(result.get("invalid_price_row_count") or 0)
         cleanup_slices.append(
             {
                 "batch_size": current_batch_size,
@@ -270,6 +274,8 @@ async def _run_retention_slice(
         **last_result,
         "summarized_groups": total_summarized_groups,
         "deleted_rows": total_deleted_rows,
+        "invalid_price_group_count": total_invalid_price_groups,
+        "invalid_price_row_count": total_invalid_price_rows,
         "evidence_backfill": backfilled,
         "cleanup_slice_count": len(cleanup_slices),
         "cleanup_slices": cleanup_slices,

@@ -1253,9 +1253,9 @@ def leader_observation_evidence_payload(
             "observing" if report.progress.state == "complete" else "partial"
         ),
         "observation_unavailable_reason": (
-            report.promotion_gates.failed_gates[0]
-            if report.promotion_gates.failed_gates
-            else None
+            None
+            if report.progress.state == "complete"
+            else LEADER_OBSERVATION_PARTIAL
         ),
         "observation_data_cutoff": report.data_cutoff.isoformat(),
         "observation_manifest_hash": manifest.manifest_hash,

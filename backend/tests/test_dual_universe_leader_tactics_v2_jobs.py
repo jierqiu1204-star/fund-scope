@@ -542,6 +542,40 @@ async def test_etf_materialization_reads_persisted_pit_inputs_and_writes_manifes
 
 
 @pytest.mark.asyncio
+async def test_etf_materialization_keeps_a_bounded_container_headroom_gate(
+    monkeypatch,
+) -> None:
+    snapshot = _etf_decision_snapshot()
+
+    async def latest(*_args, **_kwargs):
+        return snapshot
+
+    async def existing(*_args, **_kwargs):
+        return None
+
+    async def unexpected(*_args, **_kwargs):
+        raise AssertionError("ETF inputs must not load below the ETF headroom gate")
+
+    monkeypatch.setattr(jobs, "latest_ready_etf_decision_data_snapshot", latest)
+    monkeypatch.setattr(jobs, "get_v2_materialized_manifest", existing)
+    monkeypatch.setattr(
+        jobs,
+        "available_memory_bytes",
+        lambda: jobs.V2_ETF_MIN_MATERIALIZATION_HEADROOM_BYTES - 1,
+    )
+    monkeypatch.setattr(jobs, "read_etf_v2_asset_inputs", unexpected)
+
+    result = await jobs.dual_universe_leader_tactics_v2_etf_materialize_job(
+        object(),  # type: ignore[arg-type]
+        _settings(etf_enabled=True),
+        now=datetime(2026, 8, 5, 9, 10),
+    )
+
+    assert result["unavailable_reason"] == "insufficient_materialization_memory_headroom"
+    assert result["required_memory_bytes"] == 640 * 1024 * 1024
+
+
+@pytest.mark.asyncio
 async def test_etf_materialization_history_gate_stops_before_screen(monkeypatch) -> None:
     snapshot = _etf_decision_snapshot()
     bundle = SimpleNamespace(

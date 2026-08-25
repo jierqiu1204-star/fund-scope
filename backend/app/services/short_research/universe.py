@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.entities import (
     EtfListingDateObservation,
+    EtfPointInTimeMembershipFact,
     EtfUniverseMembership,
     TradableEtf,
     utcnow,
@@ -39,6 +40,8 @@ EXCLUDED_ETF_KEYWORDS = (
 LIVE_DISCOVERY_MIN_RETENTION_RATIO = 0.8
 EASTMONEY_UNIVERSE_SOURCE = "eastmoney.push2.clist"
 AKSHARE_UNIVERSE_SOURCE = "akshare.fund_etf_spot_em"
+EASTMONEY_UNIVERSE_PROVIDER_VERSION = "push2-clist-etf-v1"
+AKSHARE_UNIVERSE_PROVIDER_VERSION = "fund-etf-spot-em-v1"
 ETF_UNIVERSE_PROVIDER_TIMEOUT_SECONDS = 20.0
 SSE_LISTING_SOURCE = "sse.etf.fundlist"
 SSE_LISTING_PROVIDER_VERSION = "COMMON_JJZWZ_JJLB_L_v1"
@@ -91,6 +94,10 @@ class EtfUniverseDiscovery:
     source_row_count: int
     normalized_row_count: int
     error_summary: str | None = None
+    provider_version: str | None = None
+    observed_at: datetime | None = None
+    universe_snapshot_hash: str | None = None
+    raw_payload_hash: str | None = None
 
     @property
     def authoritative(self) -> bool:
@@ -600,6 +607,9 @@ def _finalize_discovery(
     expected_total: int | None,
     provider_complete: bool,
     provider_error: str | None = None,
+    provider_version: str | None = None,
+    observed_at: datetime | None = None,
+    raw_payload_hash: str | None = None,
 ) -> EtfUniverseDiscovery:
     by_code = {item.code: item for item in records}
     normalized = tuple(sorted(by_code.values(), key=lambda item: item.code))
@@ -632,12 +642,27 @@ def _finalize_discovery(
         source_row_count=source_row_count,
         normalized_row_count=len(normalized),
         error_summary="; ".join(reasons) or None,
+        provider_version=provider_version,
+        observed_at=observed_at,
+        universe_snapshot_hash=canonical_hash(
+            [
+                {
+                    "code": item.code,
+                    "name": item.name,
+                    "exchange": item.exchange,
+                    "source": item.source,
+                }
+                for item in normalized
+            ]
+        ),
+        raw_payload_hash=raw_payload_hash,
     )
 
 
 async def _discover_eastmoney_universe() -> EtfUniverseDiscovery:
     source = EASTMONEY_UNIVERSE_SOURCE
     result = await fetch_eastmoney_etf_spot_rows()
+    observed_at = utcnow()
     records: list[EtfUniverseRecord] = []
     for row in result.rows:
         market = str(row.get("f13") or "")
@@ -660,6 +685,9 @@ async def _discover_eastmoney_universe() -> EtfUniverseDiscovery:
         expected_total=result.expected_total,
         provider_complete=result.complete,
         provider_error=result.error,
+        provider_version=EASTMONEY_UNIVERSE_PROVIDER_VERSION,
+        observed_at=observed_at,
+        raw_payload_hash=canonical_hash(result.rows),
     )
 
 
@@ -669,6 +697,10 @@ async def _discover_akshare_universe() -> EtfUniverseDiscovery:
     try:
         async with asyncio.timeout(ETF_UNIVERSE_PROVIDER_TIMEOUT_SECONDS):
             frame = await asyncio.to_thread(ak.fund_etf_spot_em)
+        observed_at = utcnow()
+        raw_payload_hash = hashlib.sha256(
+            frame.to_json(orient="records", date_format="iso", force_ascii=False).encode()
+        ).hexdigest()
         source_row_count = int(len(frame.index))
         for _, row in frame.iterrows():
             record = normalize_source_row(row, source=source)
@@ -689,6 +721,9 @@ async def _discover_akshare_universe() -> EtfUniverseDiscovery:
         source_row_count=source_row_count,
         expected_total=source_row_count,
         provider_complete=True,
+        provider_version=AKSHARE_UNIVERSE_PROVIDER_VERSION,
+        observed_at=observed_at,
+        raw_payload_hash=raw_payload_hash,
     )
 
 
@@ -717,6 +752,84 @@ async def discover_etf_universe() -> EtfUniverseDiscovery:
         normalized_row_count=best.normalized_row_count,
         error_summary="; ".join(errors)[:1000],
     )
+
+
+async def _persist_daily_membership_facts(
+    session: AsyncSession,
+    *,
+    discovery: EtfUniverseDiscovery,
+    effective_date: date,
+) -> int:
+    if not (
+        discovery.authoritative
+        and discovery.provider_version
+        and discovery.observed_at
+        and discovery.universe_snapshot_hash
+        and discovery.raw_payload_hash
+    ):
+        return 0
+
+    external_ids = {
+        record.code: f"{discovery.source}:{effective_date.isoformat()}:{record.code}"
+        for record in discovery.records
+    }
+    existing_ids = set(
+        await session.scalars(
+            select(EtfPointInTimeMembershipFact.external_source_id).where(
+                EtfPointInTimeMembershipFact.external_source_id.in_(
+                    tuple(external_ids.values())
+                )
+            )
+        )
+    )
+    facts: list[EtfPointInTimeMembershipFact] = []
+    for record in discovery.records:
+        external_source_id = external_ids[record.code]
+        if external_source_id in existing_ids:
+            continue
+        membership_state = (
+            "included"
+            if is_short_term_etf_eligible(record.name, code=record.code)
+            else "excluded"
+        )
+        evidence_hash = canonical_hash(
+            {
+                "universe_snapshot_hash": discovery.universe_snapshot_hash,
+                "raw_payload_hash": discovery.raw_payload_hash,
+                "effective_date": effective_date,
+                "asset_code": record.code,
+                "membership_state": membership_state,
+            }
+        )
+        fact_payload = {
+            "asset_code": record.code,
+            "external_source_id": external_source_id,
+            "provider": discovery.source,
+            "provider_version": discovery.provider_version,
+            "observed_at": discovery.observed_at,
+            "effective_from": effective_date,
+            "effective_to": effective_date,
+            "membership_state": membership_state,
+            "evidence_hash": evidence_hash,
+            "raw_payload_hash": discovery.raw_payload_hash,
+        }
+        facts.append(
+            EtfPointInTimeMembershipFact(
+                etf_code=record.code,
+                external_source_id=external_source_id,
+                provider=discovery.source,
+                provider_version=discovery.provider_version,
+                observed_at=discovery.observed_at,
+                effective_from=effective_date,
+                effective_to=effective_date,
+                membership_state=membership_state,
+                evidence_hash=evidence_hash,
+                raw_payload_hash=discovery.raw_payload_hash,
+                fact_hash=canonical_hash(fact_payload),
+            )
+        )
+    session.add_all(facts)
+    return len(facts)
 
 
 async def refresh_etf_universe(
@@ -946,6 +1059,15 @@ async def refresh_etf_universe(
             )
         )
         activated += 1
+    pit_membership_facts_added = (
+        await _persist_daily_membership_facts(
+            session,
+            discovery=discovery,
+            effective_date=effective_date,
+        )
+        if live_discovery
+        else 0
+    )
     await session.commit()
     default_display = await session.scalar(
         select(func.count()).select_from(TradableEtf).where(
@@ -972,4 +1094,5 @@ async def refresh_etf_universe(
         "normalized_row_count": discovery.normalized_row_count,
         "stale_universe": False,
         "listing_metadata": listing_metadata_evidence,
+        "pit_membership_facts_added": pit_membership_facts_added,
     }
