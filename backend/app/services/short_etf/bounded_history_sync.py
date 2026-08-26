@@ -43,6 +43,7 @@ PUBLICATION_READINESS_SELECTION_POLICY: Literal["publication_readiness"] = (
 )
 RESEARCH_DEPTH_SELECTION_POLICY: Literal["research_depth"] = "research_depth"
 HISTORY_AVAILABILITY_COOLDOWN_DAYS = 7
+PUBLICATION_NEAR_COMPLETE_COOLDOWN_MINUTES = 30
 
 
 @dataclass(frozen=True)
@@ -786,11 +787,14 @@ async def _active_history_cooldowns(
         RESEARCH_DEPTH_SELECTION_POLICY,
     }:
         return {}
+    now = _utcnow()
     rows = (
         await session.execute(
             select(
                 EtfAdjustedHistoryAvailability.etf_code,
                 EtfAdjustedHistoryAvailability.retry_after,
+                EtfAdjustedHistoryAvailability.observed_at,
+                EtfAdjustedHistoryAvailability.evidence_json,
             ).where(
                 EtfAdjustedHistoryAvailability.etf_code.in_(
                     request.eligible_codes
@@ -803,15 +807,33 @@ async def _active_history_cooldowns(
                 EtfAdjustedHistoryAvailability.status
                 == "source_history_shortfall",
                 EtfAdjustedHistoryAvailability.retry_after.is_not(None),
-                EtfAdjustedHistoryAvailability.retry_after > _utcnow(),
+                EtfAdjustedHistoryAvailability.retry_after > now,
             )
         )
     ).all()
-    return {
-        str(code): retry_after
-        for code, retry_after in rows
-        if retry_after is not None
-    }
+    active: dict[str, datetime] = {}
+    for code, retry_after, observed_at, evidence_json in rows:
+        if retry_after is None:
+            continue
+        evidence = evidence_json if isinstance(evidence_json, Mapping) else {}
+        requested = evidence.get("requested_sessions")
+        covered = evidence.get("covered_required_sessions")
+        if (
+            request.selection_policy == PUBLICATION_READINESS_SELECTION_POLICY
+            and isinstance(requested, int)
+            and requested > 0
+            and isinstance(covered, int)
+            and covered >= requested - 1
+            and observed_at is not None
+        ):
+            retry_after = min(
+                retry_after,
+                observed_at
+                + timedelta(minutes=PUBLICATION_NEAR_COMPLETE_COOLDOWN_MINUTES),
+            )
+        if retry_after > now:
+            active[str(code)] = retry_after
+    return active
 
 
 def _eligible_provider_observation(
@@ -888,11 +910,18 @@ async def _record_history_availability(
         if provider_depth_sufficient
         else "source_history_shortfall"
     )
-    retry_after = (
-        None
-        if provider_depth_sufficient
-        else now + timedelta(days=HISTORY_AVAILABILITY_COOLDOWN_DAYS)
+    near_complete_publication = (
+        request.selection_policy == PUBLICATION_READINESS_SELECTION_POLICY
+        and bool(effective_required_dates)
+        and covered_required_sessions >= len(effective_required_dates) - 1
     )
+    retry_after = None
+    if not provider_depth_sufficient:
+        retry_after = now + (
+            timedelta(minutes=PUBLICATION_NEAR_COMPLETE_COOLDOWN_MINUTES)
+            if near_complete_publication
+            else timedelta(days=HISTORY_AVAILABILITY_COOLDOWN_DAYS)
+        )
     key = (
         code,
         request.provider_policy_version,

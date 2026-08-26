@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select
@@ -332,6 +332,15 @@ async def test_publication_short_history_is_cooled_down_without_losing_denominat
             fetcher=fetch,
             rss_reader=lambda: 32 * 1024 * 1024,
         )
+        assert observation is not None
+        observation.observed_at = datetime.utcnow() - timedelta(minutes=31)
+        await session.commit()
+        third = await bounded_history_sync.run_bounded_history_sync_slice(
+            session,
+            request=request,
+            fetcher=fetch,
+            rss_reader=lambda: 32 * 1024 * 1024,
+        )
 
     assert first.status == "partial"
     assert first.completed_codes == ()
@@ -347,7 +356,8 @@ async def test_publication_short_history_is_cooled_down_without_losing_denominat
     assert second.status == "partial"
     assert second.stop_reason == "history_availability_cooldown"
     assert second.attempted_codes == ()
-    assert calls == [code]
+    assert third.attempted_codes == (code,)
+    assert calls == [code, code]
 
 
 @pytest.mark.asyncio
