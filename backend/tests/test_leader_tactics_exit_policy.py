@@ -163,7 +163,7 @@ def test_hard_stop_reason_wins_when_ma5_is_higher_than_the_hard_stop() -> None:
 
 
 def test_armed_breakeven_reason_wins_over_ma5_without_hard_stop() -> None:
-    closes = [10.0] * 21 + [12.0, 10.4, 10.3, 10.01]
+    closes = [10.0] * 21 + [12.0, 10.4, 10.3, 9.99]
 
     result = evaluate_leader_tactics_exit(_evaluation(_bars(closes)))
 
@@ -220,7 +220,10 @@ def test_truncated_window_preserves_persisted_high_water_arming() -> None:
     assert result.data_eligible is True
     assert result.threshold_context["high_water_adjusted_close"] == pytest.approx(11.25)
     assert result.threshold_context["armed"] is True
-    assert result.threshold_context["breakeven_line"] == pytest.approx(10.02)
+    assert result.threshold_context["breakeven_line"] == pytest.approx(10.0)
+    assert result.threshold_context["fee_bps_per_side"] == 0.0
+    assert result.threshold_context["slippage_bps_per_side"] == 0.0
+    assert result.threshold_context["round_trip_cost_bps"] == 0.0
 
 
 @pytest.mark.parametrize(

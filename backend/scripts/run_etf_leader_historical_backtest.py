@@ -27,7 +27,6 @@ from app.services.etf_research_evidence import stable_contract_hash
 from app.services.strategy_lab.etf_factor_evidence import persist_factor_evidence
 from app.services.strategy_lab.etf_leader_tactics_historical_backtest import (
     HISTORICAL_BACKTEST_CONTRACT_HASH,
-    HISTORICAL_BACKTEST_HORIZONS,
     LEADER_HISTORICAL_BACKTEST_EVIDENCE_MODE,
     LEADER_HISTORICAL_BACKTEST_EXPERIMENT_FAMILY,
     LEADER_HISTORICAL_BACKTEST_NOT_PIT,
@@ -58,7 +57,37 @@ UNCLASSIFIED_PEER_GROUPS = {
     "未分类",
 }
 FORBIDDEN_PROVIDERS = {"sina", "efinance"}
-ARTIFACT_SCHEMA_VERSION = "leader_historical_backtest_checkpoint_v1"
+ARTIFACT_SCHEMA_VERSION = "leader_historical_backtest_checkpoint_v2"
+
+EVENTS_TABLE_SQL = """
+    CREATE TABLE IF NOT EXISTS events (
+        signal_date TEXT NOT NULL,
+        candidate_id TEXT NOT NULL,
+        asset_code TEXT NOT NULL,
+        name TEXT,
+        peer_group TEXT NOT NULL,
+        score REAL NOT NULL,
+        feature_hash TEXT NOT NULL,
+        trade_status TEXT NOT NULL,
+        confirmation_date TEXT,
+        entry_date TEXT,
+        entry_price REAL,
+        exit_signal_date TEXT,
+        exit_date TEXT,
+        exit_price REAL,
+        exit_reason TEXT,
+        holding_sessions INTEGER,
+        gross_return REAL,
+        net_return REAL,
+        peer_net_return REAL,
+        net_excess_return REAL,
+        entry_quality_state TEXT,
+        entry_quality_reason_codes TEXT NOT NULL,
+        next_session_confirmation_state TEXT,
+        next_session_confirmation_reason_codes TEXT NOT NULL,
+        PRIMARY KEY(signal_date, candidate_id, asset_code)
+    )
+"""
 
 
 def _arguments() -> argparse.Namespace:
@@ -149,27 +178,7 @@ def _init_store(path: Path) -> sqlite3.Connection:
         )
         """
     )
-    store.execute(
-        """
-        CREATE TABLE IF NOT EXISTS events (
-            signal_date TEXT NOT NULL,
-            candidate_id TEXT NOT NULL,
-            asset_code TEXT NOT NULL,
-            name TEXT,
-            peer_group TEXT NOT NULL,
-            score REAL NOT NULL,
-            feature_hash TEXT NOT NULL,
-            entry_date TEXT NOT NULL,
-            exit_date TEXT NOT NULL,
-            horizon_sessions INTEGER NOT NULL,
-            gross_return REAL NOT NULL,
-            net_return REAL NOT NULL,
-            peer_net_return REAL NOT NULL,
-            net_excess_return REAL NOT NULL,
-            PRIMARY KEY(signal_date, candidate_id, asset_code, horizon_sessions)
-        )
-        """
-    )
+    store.execute(EVENTS_TABLE_SQL)
     store.execute(
         "CREATE INDEX IF NOT EXISTS ix_leader_backtest_bars_code_date ON bars(asset_code, trade_date)"
     )
@@ -177,7 +186,15 @@ def _init_store(path: Path) -> sqlite3.Connection:
         "SELECT value FROM meta WHERE key='artifact_schema_version'"
     ).fetchone()
     if existing is not None and existing[0] != ARTIFACT_SCHEMA_VERSION:
-        raise RuntimeError("historical_backtest_checkpoint_schema_changed")
+        with store:
+            store.execute("DROP TABLE events")
+            store.execute(EVENTS_TABLE_SQL)
+            store.execute("DELETE FROM evaluated_dates")
+            _set_meta(
+                store,
+                "stage",
+                "evaluate" if _meta(store, "load_complete") == "true" else "load",
+            )
     with store:
         store.execute(
             "INSERT OR REPLACE INTO meta(key,value) VALUES('artifact_schema_version',?)",
@@ -481,9 +498,12 @@ def _persist_date_events(
             """
             INSERT OR REPLACE INTO events(
                 signal_date,candidate_id,asset_code,name,peer_group,score,feature_hash,
-                entry_date,exit_date,horizon_sessions,gross_return,net_return,
-                peer_net_return,net_excess_return
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                trade_status,confirmation_date,entry_date,entry_price,exit_signal_date,
+                exit_date,exit_price,exit_reason,holding_sessions,gross_return,net_return,
+                peer_net_return,net_excess_return,entry_quality_state,
+                entry_quality_reason_codes,next_session_confirmation_state,
+                next_session_confirmation_reason_codes
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             [
                 (
@@ -494,13 +514,27 @@ def _persist_date_events(
                     event.peer_group,
                     event.score,
                     event.feature_hash,
-                    event.entry_date.isoformat(),
-                    event.exit_date.isoformat(),
-                    event.horizon_sessions,
+                    event.trade_status,
+                    event.confirmation_date.isoformat()
+                    if event.confirmation_date
+                    else None,
+                    event.entry_date.isoformat() if event.entry_date else None,
+                    event.entry_price,
+                    event.exit_signal_date.isoformat()
+                    if event.exit_signal_date
+                    else None,
+                    event.exit_date.isoformat() if event.exit_date else None,
+                    event.exit_price,
+                    event.exit_reason,
+                    event.holding_sessions,
                     event.gross_return,
                     event.net_return,
                     event.peer_net_return,
                     event.net_excess_return,
+                    event.entry_quality_state,
+                    json.dumps(event.entry_quality_reason_codes),
+                    event.next_session_confirmation_state,
+                    json.dumps(event.next_session_confirmation_reason_codes),
                 )
                 for event in events
             ],
@@ -562,20 +596,33 @@ def _load_events(store: sqlite3.Connection) -> tuple[HistoricalLeaderEvent, ...]
             peer_group=str(row[4]),
             score=float(row[5]),
             feature_hash=str(row[6]),
-            entry_date=date.fromisoformat(str(row[7])),
-            exit_date=date.fromisoformat(str(row[8])),
-            horizon_sessions=int(row[9]),
-            gross_return=float(row[10]),
-            net_return=float(row[11]),
-            peer_net_return=float(row[12]),
-            net_excess_return=float(row[13]),
+            trade_status=str(row[7]),
+            confirmation_date=date.fromisoformat(str(row[8])) if row[8] else None,
+            entry_date=date.fromisoformat(str(row[9])) if row[9] else None,
+            entry_price=float(row[10]) if row[10] is not None else None,
+            exit_signal_date=date.fromisoformat(str(row[11])) if row[11] else None,
+            exit_date=date.fromisoformat(str(row[12])) if row[12] else None,
+            exit_price=float(row[13]) if row[13] is not None else None,
+            exit_reason=str(row[14]) if row[14] else None,
+            holding_sessions=int(row[15]) if row[15] is not None else None,
+            gross_return=float(row[16]) if row[16] is not None else None,
+            net_return=float(row[17]) if row[17] is not None else None,
+            peer_net_return=float(row[18]) if row[18] is not None else None,
+            net_excess_return=float(row[19]) if row[19] is not None else None,
+            entry_quality_state=str(row[20]) if row[20] else None,
+            entry_quality_reason_codes=tuple(json.loads(str(row[21]))),
+            next_session_confirmation_state=str(row[22]) if row[22] else None,
+            next_session_confirmation_reason_codes=tuple(json.loads(str(row[23]))),
         )
         for row in store.execute(
             """
             SELECT signal_date,candidate_id,asset_code,name,peer_group,score,feature_hash,
-                   entry_date,exit_date,horizon_sessions,gross_return,net_return,
-                   peer_net_return,net_excess_return
-            FROM events ORDER BY signal_date,candidate_id,asset_code,horizon_sessions
+                   trade_status,confirmation_date,entry_date,entry_price,exit_signal_date,
+                   exit_date,exit_price,exit_reason,holding_sessions,gross_return,net_return,
+                   peer_net_return,net_excess_return,entry_quality_state,
+                   entry_quality_reason_codes,next_session_confirmation_state,
+                   next_session_confirmation_reason_codes
+            FROM events ORDER BY signal_date,candidate_id,asset_code
             """
         )
     )
@@ -658,8 +705,10 @@ def _build_report(store: sqlite3.Connection, events: tuple[HistoricalLeaderEvent
         "ranking_source_kind": "research_replay",
         "membership_mode": "sealed_source_snapshot_current_vintage_proxy",
         "price_basis": "total_return_adjusted",
-        "signal_timing": "signal_at_T_close_enter_at_T_plus_1_adjusted_close",
-        "horizons": list(HISTORICAL_BACKTEST_HORIZONS),
+        "signal_timing": "signal_at_T_close_confirm_at_T_plus_1_close",
+        "entry_timing": "enter_at_T_plus_2_adjusted_open",
+        "exit_signal_timing": "evaluate_email_exit_policy_at_each_daily_close",
+        "exit_execution_timing": "exit_at_next_session_adjusted_open",
         "first_signal_date": dates[0].isoformat() if dates else None,
         "last_signal_date": dates[-1].isoformat() if dates else None,
         "coverage": coverage,
@@ -670,8 +719,22 @@ def _build_report(store: sqlite3.Connection, events: tuple[HistoricalLeaderEvent
             {
                 **item,
                 "signal_date": item["signal_date"].isoformat(),
-                "entry_date": item["entry_date"].isoformat(),
-                "exit_date": item["exit_date"].isoformat(),
+                "confirmation_date": (
+                    item["confirmation_date"].isoformat()
+                    if item["confirmation_date"]
+                    else None
+                ),
+                "entry_date": (
+                    item["entry_date"].isoformat() if item["entry_date"] else None
+                ),
+                "exit_signal_date": (
+                    item["exit_signal_date"].isoformat()
+                    if item["exit_signal_date"]
+                    else None
+                ),
+                "exit_date": (
+                    item["exit_date"].isoformat() if item["exit_date"] else None
+                ),
             }
             for item in event_payloads[-40:]
         ],

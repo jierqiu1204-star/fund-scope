@@ -16,6 +16,14 @@ from app.services.etf_research_evidence import (
     OPERATIONAL_REENTRY_RULE_VERSION,
     stable_contract_hash,
 )
+from app.services.leader_tactics_exit_policy import (
+    LEADER_TACTICS_BREAKEVEN_EXIT,
+    LEADER_TACTICS_HARD_STOP,
+    LEADER_TACTICS_MA5_EXIT,
+    LEADER_TACTICS_ROUND_TRIP_COST_BPS,
+    evaluate_leader_exit_thresholds,
+    initial_leader_risk,
+)
 
 ALERT_EXIT_WATCH = "exit_watch"
 ALERT_RISK_WARNING = "risk_warning"
@@ -31,12 +39,8 @@ ALERT_LEADER_TACTICS_EXIT = "leader_tactics_exit"
 LEADER_TACTICS_EXIT_POLICY_ID = "leader_tactics_exit_v1"
 LEADER_TACTICS_EXIT_POLICY_VERSION = "leader_tactics_exit_v1"
 LEADER_TACTICS_EXIT_STATE_KEY = "leader_tactics_exit_v1"
-LEADER_TACTICS_HARD_STOP = "leader_tactics_hard_stop"
-LEADER_TACTICS_BREAKEVEN_EXIT = "leader_tactics_breakeven_exit"
-LEADER_TACTICS_MA5_EXIT = "leader_tactics_ma5_exit"
 LEADER_TACTICS_DATA_WAITING = "leader_tactics_data_waiting"
 LEADER_TACTICS_PRICE_BASIS = "total_return_adjusted"
-LEADER_TACTICS_ROUND_TRIP_COST_BPS = 20.0
 LEADER_TACTICS_APPROVED_PROVIDERS = frozenset({"akshare", "eastmoney", "tickflow"})
 _LEADER_TACTICS_SHANGHAI = ZoneInfo("Asia/Shanghai")
 
@@ -1036,8 +1040,8 @@ def evaluate_leader_tactics_exit(
         "evaluation_cutoff": evaluation_cutoff.isoformat(),
         "entry_anchor_date": entry_anchor_date.isoformat(),
         "source_strategy": value.source_strategy,
-        "fee_bps_per_side": 5.0,
-        "slippage_bps_per_side": 5.0,
+        "fee_bps_per_side": 0.0,
+        "slippage_bps_per_side": 0.0,
         "round_trip_cost_bps": LEADER_TACTICS_ROUND_TRIP_COST_BPS,
     }
     base_state: dict[str, Any] = {
@@ -1220,15 +1224,12 @@ def evaluate_leader_tactics_exit(
                 state=base_state,
             )
         candidate_low = _leader_positive_finite(value.source_signal_low)
-        usable_signal_low = candidate_low if candidate_low is not None and candidate_low < entry_close else None
-        initial_stop = max(
-            usable_signal_low if usable_signal_low is not None else 0.0,
-            entry_close - 2.0 * entry_atr20,
+        frozen_risk = initial_leader_risk(
+            entry_close=entry_close,
+            entry_atr20=entry_atr20,
+            source_signal_low=candidate_low,
         )
-        if initial_stop <= 0 or initial_stop >= entry_close:
-            initial_stop = entry_close - 2.0 * entry_atr20
-        risk_unit = entry_close - initial_stop
-        if not math.isfinite(risk_unit) or risk_unit <= 0:
+        if frozen_risk is None:
             return _leader_decision(
                 actionable=False,
                 data_eligible=False,
@@ -1237,9 +1238,8 @@ def evaluate_leader_tactics_exit(
                 context={**base_context, "data_reason": "initial_risk_unit_invalid"},
                 state=base_state,
             )
-        persisted["source_signal_low_ignored"] = (
-            candidate_low is not None and candidate_low >= entry_close
-        )
+        initial_stop, risk_unit, source_signal_low_ignored = frozen_risk
+        persisted["source_signal_low_ignored"] = source_signal_low_ignored
     assert entry_close is not None
     assert entry_atr20 is not None
     assert initial_stop is not None
@@ -1270,17 +1270,20 @@ def evaluate_leader_tactics_exit(
             context={**base_context, "data_reason": "high_water_unavailable"},
             state=base_state,
         )
-    high_water = max(
-        [item for item in visible_highs if item is not None]
-        + ([previous_high] if previous_high is not None else [])
+    thresholds = evaluate_leader_exit_thresholds(
+        entry_close=entry_close,
+        initial_stop=initial_stop,
+        risk_unit=risk_unit,
+        previous_high=previous_high,
+        visible_closes=tuple(item for item in visible_highs if item is not None),
+        ma5=ma5,
+        previously_armed=persisted.get("armed") is True,
     )
-    armed = bool(persisted.get("armed") is True or high_water >= entry_close + risk_unit)
+    high_water = thresholds.high_water
+    armed = thresholds.armed
     notification_sent = persisted.get("exit_notification_sent") is True
-    breakeven = entry_close * (1.0 + LEADER_TACTICS_ROUND_TRIP_COST_BPS / 10_000.0) if armed else None
-    effective_line = max(
-        initial_stop,
-        *(line for line in (breakeven, ma5) if line is not None),
-    )
+    breakeven = thresholds.breakeven_line
+    effective_line = thresholds.effective_exit_line
     context = {
         **base_context,
         "bar_date": bars[-1].trade_date.isoformat(),
@@ -1326,17 +1329,7 @@ def evaluate_leader_tactics_exit(
                 context=context,
                 state=state,
             )
-        hard_stop_hit = current <= initial_stop
-        breakeven_hit = breakeven is not None and current <= breakeven
-        ma5_hit = current <= ma5
-        if hard_stop_hit:
-            reason_code = LEADER_TACTICS_HARD_STOP
-        elif breakeven_hit:
-            reason_code = LEADER_TACTICS_BREAKEVEN_EXIT
-        elif ma5_hit:
-            reason_code = LEADER_TACTICS_MA5_EXIT
-        else:
-            reason_code = LEADER_TACTICS_MA5_EXIT
+        reason_code = thresholds.reason_code or LEADER_TACTICS_MA5_EXIT
         state["exit_triggered"] = True
         state["exit_triggered_date"] = bars[-1].trade_date.isoformat()
         return _leader_decision(

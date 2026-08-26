@@ -18,6 +18,11 @@ from statistics import mean, median
 from typing import Any
 
 from app.services.etf_research_evidence import stable_contract_hash
+from app.services.leader_tactics_exit_policy import (
+    LEADER_TACTICS_ROUND_TRIP_COST_BPS,
+    evaluate_leader_exit_thresholds,
+    initial_leader_risk,
+)
 from app.services.strategy_lab.etf_factor_evidence import (
     FactorEvidencePayload,
     FactorEvidencePromotion,
@@ -57,9 +62,8 @@ LEADER_HISTORICAL_BACKTEST_NOT_PIT = (
     "historical_backtest_membership_not_point_in_time"
 )
 
-HISTORICAL_BACKTEST_HORIZONS = (1, 3, 5, 10, 20)
-ONE_WAY_FEE_BPS = 5
-ONE_WAY_SLIPPAGE_BPS = 5
+ONE_WAY_FEE_BPS = 0
+ONE_WAY_SLIPPAGE_BPS = 0
 ROUND_TRIP_COST_RATE = 2 * (ONE_WAY_FEE_BPS + ONE_WAY_SLIPPAGE_BPS) / 10_000
 HISTORICAL_SECTOR_PROXY_VERSION = "sector_trend_historical_neutral_technical_v1"
 HISTORICAL_BACKTEST_CONTRACT = {
@@ -71,8 +75,10 @@ HISTORICAL_BACKTEST_CONTRACT = {
     ),
     "membership_mode": "sealed_source_snapshot_current_vintage_proxy",
     "price_basis": "total_return_adjusted",
-    "signal_timing": "signal_at_T_close_enter_at_T_plus_1_adjusted_close",
-    "horizons": HISTORICAL_BACKTEST_HORIZONS,
+    "signal_timing": "signal_at_T_close_confirm_at_T_plus_1_close",
+    "entry_timing": "enter_at_T_plus_2_adjusted_open",
+    "exit_signal_timing": "evaluate_email_exit_policy_at_each_daily_close",
+    "exit_execution_timing": "exit_at_next_session_adjusted_open",
     "one_way_fee_bps": ONE_WAY_FEE_BPS,
     "one_way_slippage_bps": ONE_WAY_SLIPPAGE_BPS,
     "sector_proxy_version": HISTORICAL_SECTOR_PROXY_VERSION,
@@ -80,9 +86,7 @@ HISTORICAL_BACKTEST_CONTRACT = {
     "clone_policy": "highest_average_turnover20_then_asset_code",
     "entry_quality_diagnostic": ENTRY_QUALITY_CONTRACT_VERSION,
     "next_session_confirmation": "daily_close_proxy",
-    "confirmation_entry_timing": (
-        "confirm_at_T_plus_1_close_enter_at_T_plus_2_adjusted_open"
-    ),
+    "round_trip_cost_bps": LEADER_TACTICS_ROUND_TRIP_COST_BPS,
     "production_mutation_allowed": False,
 }
 HISTORICAL_BACKTEST_CONTRACT_HASH = stable_contract_hash(
@@ -124,23 +128,23 @@ class HistoricalLeaderEvent:
     peer_group: str
     score: float
     feature_hash: str
-    entry_date: date
-    exit_date: date
-    horizon_sessions: int
-    gross_return: float
-    net_return: float
-    peer_net_return: float
-    net_excess_return: float
+    trade_status: str
+    confirmation_date: date | None
+    entry_date: date | None
+    entry_price: float | None
+    exit_signal_date: date | None
+    exit_date: date | None
+    exit_price: float | None
+    exit_reason: str | None
+    holding_sessions: int | None
+    gross_return: float | None
+    net_return: float | None
+    peer_net_return: float | None
+    net_excess_return: float | None
     entry_quality_state: str | None
     entry_quality_reason_codes: tuple[str, ...]
     next_session_confirmation_state: str | None
     next_session_confirmation_reason_codes: tuple[str, ...]
-    confirmation_date: date | None
-    confirmed_entry_date: date | None
-    confirmed_exit_date: date | None
-    confirmed_net_return: float | None
-    confirmed_peer_net_return: float | None
-    confirmed_net_excess_return: float | None
 
     def payload(self) -> dict[str, Any]:
         return asdict(self)
@@ -248,14 +252,14 @@ def _validate_assets(assets: Sequence[HistoricalLeaderAsset]) -> None:
 def eligible_historical_signal_dates(
     assets: Sequence[HistoricalLeaderAsset],
 ) -> tuple[date, ...]:
-    """Return dates with enough trailing data and complete 20-session outcomes."""
+    """Return dates with enough trailing data plus visible T+1 and T+2 sessions."""
 
     _validate_assets(assets)
     counts: dict[date, int] = defaultdict(int)
     for asset in assets:
         for index in range(
             REPAIR_HISTORY_SESSIONS - 1,
-            len(asset.bars) - max(HISTORICAL_BACKTEST_HORIZONS) - 1,
+            len(asset.bars) - 2,
         ):
             counts[asset.bars[index].trade_date] += 1
     return tuple(
@@ -531,62 +535,35 @@ def _select_candidates(
 def evaluate_historical_signal_date(
     assets: Sequence[HistoricalLeaderAsset], signal_date: date
 ) -> tuple[HistoricalLeaderEvent, ...]:
-    """Evaluate one date without using prices after T in candidate selection."""
+    """Replay the sole execution path without using post-T prices for selection."""
 
     _validate_assets(assets)
     features, by_code, indices = _feature_rows(assets, signal_date)
     selected = _select_candidates(features, by_code)
-    peer_forward: dict[tuple[str, int], float] = {}
-    confirmed_peer_forward: dict[tuple[str, int], float] = {}
-    for group in {asset.peer_group for asset in by_code.values()}:
-        peers = [asset for asset in by_code.values() if asset.peer_group == group]
-        for horizon in HISTORICAL_BACKTEST_HORIZONS:
-            values: list[float] = []
-            for asset in peers:
-                index = indices[asset.asset_code]
-                exit_index = index + 1 + horizon
-                if exit_index >= len(asset.bars):
-                    continue
-                entry = asset.bars[index + 1].adjusted_close
-                exit_price = asset.bars[exit_index].adjusted_close
-                values.append(exit_price / entry - 1.0 - ROUND_TRIP_COST_RATE)
-            if values:
-                peer_forward[(group, horizon)] = mean(values)
-            confirmed_values: list[float] = []
-            for asset in peers:
-                index = indices[asset.asset_code]
-                exit_index = index + 1 + horizon
-                if exit_index >= len(asset.bars):
-                    continue
-                entry = asset.bars[index + 2].adjusted_open
-                exit_price = asset.bars[exit_index].adjusted_close
-                confirmed_values.append(
-                    exit_price / entry - 1.0 - ROUND_TRIP_COST_RATE
-                )
-            if confirmed_values:
-                confirmed_peer_forward[(group, horizon)] = mean(confirmed_values)
-
     events: list[HistoricalLeaderEvent] = []
     for candidate in selected:
         code = str(candidate["asset_code"])
         asset = by_code[code]
         index = indices[code]
-        feature_payload = {
-            "contract_hash": HISTORICAL_BACKTEST_CONTRACT_HASH,
-            "signal_date": signal_date,
-            "candidate_id": candidate["candidate_id"],
-            "asset_code": code,
-            "score": candidate["score"],
-            "components": candidate["components"],
-        }
-        feature_hash = stable_contract_hash(feature_payload)
+        feature_hash = stable_contract_hash(
+            {
+                "contract_hash": HISTORICAL_BACKTEST_CONTRACT_HASH,
+                "signal_date": signal_date,
+                "candidate_id": candidate["candidate_id"],
+                "asset_code": code,
+                "score": candidate["score"],
+                "components": candidate["components"],
+            }
+        )
         entry_quality_state = candidate["components"].get("entry_quality_state")
         confirmation = None
-        if candidate["candidate_id"] == LEADER_BREAKOUT_CANDIDATE:
+        confirmation_date = None
+        if index + 1 < len(asset.bars):
             confirmation_bars = asset.bars[: index + 2]
             confirmation_bar = confirmation_bars[-1]
+            confirmation_date = confirmation_bar.trade_date
             confirmation = assess_leader_next_session_confirmation(
-                signal_quality_state=entry_quality_state,
+                signal_quality_state=entry_quality_state or "disciplined",
                 signal_adjusted_close=asset.bars[index].adjusted_close,
                 signal_adjusted_high=asset.bars[index].adjusted_high,
                 preceding_adjusted_high=max(
@@ -601,100 +578,148 @@ def evaluate_historical_signal_date(
                 ),
                 confirmation_adjusted_atr20=_atr(confirmation_bars, 20),
             )
-        for horizon in HISTORICAL_BACKTEST_HORIZONS:
-            exit_index = index + 1 + horizon
-            peer_return = peer_forward.get((asset.peer_group, horizon))
-            if exit_index >= len(asset.bars) or peer_return is None:
-                continue
-            entry_bar = asset.bars[index + 1]
-            exit_bar = asset.bars[exit_index]
-            gross_return = exit_bar.adjusted_close / entry_bar.adjusted_close - 1.0
-            net_return = gross_return - ROUND_TRIP_COST_RATE
-            confirmed_entry_index = index + 2
-            confirmed_exit_index = confirmed_entry_index + horizon - 1
-            confirmed_peer_return = confirmed_peer_forward.get(
-                (asset.peer_group, horizon)
-            )
-            confirmed_net_return = None
-            confirmed_entry_date = None
-            confirmed_exit_date = None
-            if (
-                confirmation is not None
-                and confirmation.state == "confirmed"
-                and confirmed_exit_index < len(asset.bars)
-            ):
-                confirmed_entry = asset.bars[confirmed_entry_index]
-                confirmed_exit = asset.bars[confirmed_exit_index]
-                confirmed_entry_date = confirmed_entry.trade_date
-                confirmed_exit_date = confirmed_exit.trade_date
-                confirmed_net_return = (
-                    confirmed_exit.adjusted_close / confirmed_entry.adjusted_open
-                    - 1.0
-                    - ROUND_TRIP_COST_RATE
+
+        trade_status = (
+            f"confirmation_{confirmation.state}"
+            if confirmation is not None and confirmation.state != "confirmed"
+            else "confirmation_pending"
+        )
+        entry_date = None
+        entry_price = None
+        exit_signal_date = None
+        exit_date = None
+        exit_price = None
+        exit_reason = None
+        holding_sessions = None
+        gross_return = None
+        peer_return = None
+        if confirmation is not None and confirmation.state == "confirmed":
+            entry_index = index + 2
+            if entry_index >= len(asset.bars):
+                trade_status = "entry_pending"
+            else:
+                entry_bar = asset.bars[entry_index]
+                entry_date = entry_bar.trade_date
+                entry_price = entry_bar.adjusted_open
+                entry_atr20 = _atr(asset.bars[: entry_index + 1], 20)
+                frozen_risk = (
+                    initial_leader_risk(
+                        entry_close=entry_bar.adjusted_close,
+                        entry_atr20=entry_atr20,
+                        source_signal_low=asset.bars[index].adjusted_low,
+                    )
+                    if entry_atr20 is not None
+                    else None
                 )
-            events.append(
-                HistoricalLeaderEvent(
-                    signal_date=signal_date,
-                    candidate_id=str(candidate["candidate_id"]),
-                    asset_code=code,
-                    name=asset.name,
-                    peer_group=asset.peer_group,
-                    score=float(candidate["score"]),
-                    feature_hash=feature_hash,
-                    entry_date=entry_bar.trade_date,
-                    exit_date=exit_bar.trade_date,
-                    horizon_sessions=horizon,
-                    gross_return=gross_return,
-                    net_return=net_return,
-                    peer_net_return=peer_return,
-                    net_excess_return=net_return - peer_return,
-                    entry_quality_state=(
-                        str(entry_quality_state) if entry_quality_state else None
-                    ),
-                    entry_quality_reason_codes=tuple(
-                        filter(
-                            None,
-                            str(
-                                candidate["components"].get(
-                                    "entry_quality_reason_codes", ""
-                                )
-                            ).split(";"),
+                if frozen_risk is None:
+                    trade_status = "exit_policy_unavailable"
+                else:
+                    initial_stop, risk_unit, _ = frozen_risk
+                    for close_index in range(entry_index, len(asset.bars) - 1):
+                        thresholds = evaluate_leader_exit_thresholds(
+                            entry_close=entry_bar.adjusted_close,
+                            initial_stop=initial_stop,
+                            risk_unit=risk_unit,
+                            previous_high=None,
+                            visible_closes=tuple(
+                                bar.adjusted_close
+                                for bar in asset.bars[
+                                    entry_index : close_index + 1
+                                ]
+                            ),
+                            ma5=mean(
+                                bar.adjusted_close
+                                for bar in asset.bars[
+                                    close_index - 4 : close_index + 1
+                                ]
+                            ),
                         )
-                    ),
-                    next_session_confirmation_state=(
-                        confirmation.state if confirmation is not None else None
-                    ),
-                    next_session_confirmation_reason_codes=(
-                        confirmation.reason_codes if confirmation is not None else ()
-                    ),
-                    confirmation_date=(
-                        asset.bars[index + 1].trade_date
-                        if confirmation is not None
-                        else None
-                    ),
-                    confirmed_entry_date=confirmed_entry_date,
-                    confirmed_exit_date=confirmed_exit_date,
-                    confirmed_net_return=confirmed_net_return,
-                    confirmed_peer_net_return=(
-                        confirmed_peer_return
-                        if confirmed_net_return is not None
-                        else None
-                    ),
-                    confirmed_net_excess_return=(
-                        confirmed_net_return - confirmed_peer_return
-                        if confirmed_net_return is not None
-                        and confirmed_peer_return is not None
-                        else None
-                    ),
-                )
+                        if thresholds.reason_code is None:
+                            continue
+                        exit_bar = asset.bars[close_index + 1]
+                        exit_signal_date = asset.bars[close_index].trade_date
+                        exit_date = exit_bar.trade_date
+                        exit_price = exit_bar.adjusted_open
+                        exit_reason = thresholds.reason_code
+                        holding_sessions = close_index + 1 - entry_index
+                        gross_return = exit_price / entry_price - 1.0
+                        trade_status = "closed"
+                        peer_values = []
+                        for peer in by_code.values():
+                            if peer.peer_group != asset.peer_group:
+                                continue
+                            peer_by_date = {
+                                bar.trade_date: bar for bar in peer.bars
+                            }
+                            peer_entry = peer_by_date.get(entry_date)
+                            peer_exit = peer_by_date.get(exit_date)
+                            if peer_entry is not None and peer_exit is not None:
+                                peer_values.append(
+                                    peer_exit.adjusted_open
+                                    / peer_entry.adjusted_open
+                                    - 1.0
+                                )
+                        peer_return = mean(peer_values) if peer_values else None
+                        break
+                    else:
+                        trade_status = "open"
+
+        net_return = gross_return
+        events.append(
+            HistoricalLeaderEvent(
+                signal_date=signal_date,
+                candidate_id=str(candidate["candidate_id"]),
+                asset_code=code,
+                name=asset.name,
+                peer_group=asset.peer_group,
+                score=float(candidate["score"]),
+                feature_hash=feature_hash,
+                trade_status=trade_status,
+                confirmation_date=confirmation_date,
+                entry_date=entry_date,
+                entry_price=entry_price,
+                exit_signal_date=exit_signal_date,
+                exit_date=exit_date,
+                exit_price=exit_price,
+                exit_reason=exit_reason,
+                holding_sessions=holding_sessions,
+                gross_return=gross_return,
+                net_return=net_return,
+                peer_net_return=peer_return,
+                net_excess_return=(
+                    net_return - peer_return
+                    if net_return is not None and peer_return is not None
+                    else None
+                ),
+                entry_quality_state=(
+                    str(entry_quality_state) if entry_quality_state else None
+                ),
+                entry_quality_reason_codes=tuple(
+                    filter(
+                        None,
+                        str(
+                            candidate["components"].get(
+                                "entry_quality_reason_codes", ""
+                            )
+                        ).split(";"),
+                    )
+                ),
+                next_session_confirmation_state=(
+                    confirmation.state if confirmation is not None else "pending"
+                ),
+                next_session_confirmation_reason_codes=(
+                    confirmation.reason_codes if confirmation is not None else ()
+                ),
             )
+        )
     return tuple(events)
 
 
 def _event_series_drawdown(events: Sequence[HistoricalLeaderEvent]) -> float | None:
     by_date: dict[date, list[float]] = defaultdict(list)
     for event in events:
-        by_date[event.signal_date].append(event.net_return)
+        if event.net_return is not None:
+            by_date[event.signal_date].append(event.net_return)
     if not by_date:
         return None
     equity = 1.0
@@ -727,58 +752,35 @@ def _block_bootstrap_interval(
 
 def _entry_quality_performance(
     events: Sequence[HistoricalLeaderEvent],
-) -> dict[str, dict[str, float | int]]:
+) -> dict[str, dict[str, float | int | None]]:
     groups: dict[str, list[HistoricalLeaderEvent]] = defaultdict(list)
     for event in events:
         groups[event.entry_quality_state or "not_applicable"].append(event)
-    return {
-        state: {
+    result: dict[str, dict[str, float | int | None]] = {}
+    for state, rows in sorted(groups.items()):
+        completed = [event for event in rows if event.net_return is not None]
+        excess = [
+            event.net_excess_return
+            for event in completed
+            if event.net_excess_return is not None
+        ]
+        result[state] = {
             "event_count": len(rows),
+            "closed_trade_count": len(completed),
             "signal_date_count": len({event.signal_date for event in rows}),
-            "mean_net_return": mean(event.net_return for event in rows),
-            "win_rate": mean(event.net_return > 0 for event in rows),
-            "mean_net_excess_return": mean(
-                event.net_excess_return for event in rows
+            "mean_net_return": (
+                mean(event.net_return for event in completed if event.net_return is not None)
+                if completed
+                else None
             ),
+            "win_rate": (
+                mean(event.net_return > 0 for event in completed if event.net_return is not None)
+                if completed
+                else None
+            ),
+            "mean_net_excess_return": mean(excess) if excess else None,
         }
-        for state, rows in sorted(groups.items())
-    }
-
-
-def _confirmation_policy_performance(
-    events: Sequence[HistoricalLeaderEvent],
-) -> dict[str, float | int | None]:
-    completed = [
-        event for event in events if event.confirmed_net_return is not None
-    ]
-    return {
-        "confirmed_event_count": len(completed),
-        "confirmed_signal_date_count": len(
-            {event.signal_date for event in completed}
-        ),
-        "mean_net_return": (
-            mean(float(event.confirmed_net_return) for event in completed)
-            if completed
-            else None
-        ),
-        "win_rate": (
-            mean(float(event.confirmed_net_return) > 0 for event in completed)
-            if completed
-            else None
-        ),
-        "mean_net_excess_return": (
-            mean(
-                float(event.confirmed_net_excess_return)
-                for event in completed
-                if event.confirmed_net_excess_return is not None
-            )
-            if any(
-                event.confirmed_net_excess_return is not None
-                for event in completed
-            )
-            else None
-        ),
-    }
+    return result
 
 
 def summarize_historical_events(
@@ -796,72 +798,80 @@ def summarize_historical_events(
             if candidate_id == "all_leader_candidates"
             else [event for event in events if event.candidate_id == candidate_id]
         )
-        for horizon in HISTORICAL_BACKTEST_HORIZONS:
-            subset = [event for event in source if event.horizon_sessions == horizon]
-            by_date: dict[date, list[float]] = defaultdict(list)
-            for event in subset:
-                by_date[event.signal_date].append(event.net_return)
-            date_values = [mean(by_date[key]) for key in sorted(by_date)]
-            lower, upper = _block_bootstrap_interval(
-                date_values,
-                seed=int(
-                    stable_contract_hash(
-                        {"candidate_id": candidate_id, "horizon": horizon}
-                    )[:8],
-                    16,
+        completed = [event for event in source if event.net_return is not None]
+        returns = [event.net_return for event in completed if event.net_return is not None]
+        wins = [value for value in returns if value > 0]
+        losses = [value for value in returns if value < 0]
+        by_date: dict[date, list[float]] = defaultdict(list)
+        for event in completed:
+            assert event.net_return is not None
+            by_date[event.signal_date].append(event.net_return)
+        lower, upper = _block_bootstrap_interval(
+            [mean(by_date[key]) for key in sorted(by_date)],
+            seed=int(stable_contract_hash({"candidate_id": candidate_id})[:8], 16),
+        )
+        peer_returns = [
+            event.peer_net_return
+            for event in completed
+            if event.peer_net_return is not None
+        ]
+        excess_returns = [
+            event.net_excess_return
+            for event in completed
+            if event.net_excess_return is not None
+        ]
+        rows.append(
+            {
+                "candidate_id": candidate_id,
+                "execution_policy": "T_signal_T1_confirm_T2_open_email_exit_next_open",
+                "event_count": len(source),
+                "closed_trade_count": len(completed),
+                "open_trade_count": sum(event.trade_status == "open" for event in source),
+                "signal_date_count": len({event.signal_date for event in source}),
+                "trade_status_counts": dict(sorted(Counter(event.trade_status for event in source).items())),
+                "mean_net_return": mean(returns) if returns else None,
+                "median_net_return": median(returns) if returns else None,
+                "win_rate": mean(value > 0 for value in returns) if returns else None,
+                "average_winner": mean(wins) if wins else None,
+                "average_loser": mean(losses) if losses else None,
+                "payoff_ratio": (
+                    mean(wins) / abs(mean(losses)) if wins and losses else None
                 ),
-            )
-            rows.append(
-                {
-                    "candidate_id": candidate_id,
-                    "horizon_sessions": horizon,
-                    "event_count": len(subset),
-                    "signal_date_count": len(by_date),
-                    "mean_net_return": mean(event.net_return for event in subset)
-                    if subset
-                    else None,
-                    "median_net_return": median(event.net_return for event in subset)
-                    if subset
-                    else None,
-                    "win_rate": mean(event.net_return > 0 for event in subset)
-                    if subset
-                    else None,
-                    "mean_peer_net_return": mean(
-                        event.peer_net_return for event in subset
+                "profit_factor": (
+                    sum(wins) / abs(sum(losses)) if wins and losses else None
+                ),
+                "mean_holding_sessions": mean(
+                    event.holding_sessions
+                    for event in completed
+                    if event.holding_sessions is not None
+                )
+                if completed
+                else None,
+                "mean_peer_net_return": mean(peer_returns) if peer_returns else None,
+                "mean_net_excess_return": mean(excess_returns) if excess_returns else None,
+                "mean_net_return_ci95_lower": lower,
+                "mean_net_return_ci95_upper": upper,
+                "event_series_max_drawdown": _event_series_drawdown(completed),
+                "entry_quality_counts": dict(
+                    sorted(
+                        Counter(
+                            event.entry_quality_state or "not_applicable"
+                            for event in source
+                        ).items()
                     )
-                    if subset
-                    else None,
-                    "mean_net_excess_return": mean(
-                        event.net_excess_return for event in subset
+                ),
+                "entry_quality_performance": _entry_quality_performance(source),
+                "next_session_confirmation_counts": dict(
+                    sorted(
+                        Counter(
+                            event.next_session_confirmation_state
+                            or "not_applicable"
+                            for event in source
+                        ).items()
                     )
-                    if subset
-                    else None,
-                    "mean_net_return_ci95_lower": lower,
-                    "mean_net_return_ci95_upper": upper,
-                    "event_series_max_drawdown": _event_series_drawdown(subset),
-                    "entry_quality_counts": dict(
-                        sorted(
-                            Counter(
-                                event.entry_quality_state or "not_applicable"
-                                for event in subset
-                            ).items()
-                        )
-                    ),
-                    "entry_quality_performance": _entry_quality_performance(subset),
-                    "next_session_confirmation_counts": dict(
-                        sorted(
-                            Counter(
-                                event.next_session_confirmation_state
-                                or "not_applicable"
-                                for event in subset
-                            ).items()
-                        )
-                    ),
-                    "confirmation_policy_performance": (
-                        _confirmation_policy_performance(subset)
-                    ),
-                }
-            )
+                ),
+            }
+        )
     return tuple(rows)
 
 
@@ -967,7 +977,6 @@ def stable_event_payloads(
                 item.signal_date,
                 item.candidate_id,
                 item.asset_code,
-                item.horizon_sessions,
             ),
         )
     )
