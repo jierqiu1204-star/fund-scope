@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import date
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
 
 from app.services.strategy_lab.etf_leader_tactics_historical_backtest import (
     HistoricalLeaderEvent,
@@ -9,8 +13,11 @@ from app.services.strategy_lab.etf_leader_tactics_historical_backtest import (
 from scripts.run_etf_leader_historical_backtest import (
     ARTIFACT_SCHEMA_VERSION,
     _init_store,
+    _initialize_source,
     _load_events,
+    _meta,
     _persist_date_events,
+    _set_meta,
 )
 
 
@@ -81,3 +88,79 @@ def test_checkpoint_round_trips_unique_lifecycle_event(tmp_path) -> None:
         store.close()
 
     assert loaded == (event,)
+
+
+@pytest.mark.asyncio
+async def test_source_uses_latest_published_full_scope_snapshot(tmp_path) -> None:
+    store = _init_store(tmp_path / "checkpoint.sqlite3")
+    run = SimpleNamespace(
+        id=149,
+        publication_state="published",
+        as_of_trade_date=date(2026, 8, 24),
+        ranking_contract_hash="ranking-hash",
+        input_snapshot_hash="input-hash",
+    )
+    session = SimpleNamespace(scalar=AsyncMock(side_effect=(run, 1441)))
+    try:
+        await _initialize_source(store, session)
+
+        assert _meta(store, "source_run_id") == "149"
+        assert _meta(store, "source_signal_date") == "2026-08-24"
+        assert _meta(store, "source_ranked_asset_count") == "1441"
+        assert _meta(store, "stage") == "load"
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_completed_checkpoint_rebases_to_newer_source(tmp_path) -> None:
+    store = _init_store(tmp_path / "checkpoint.sqlite3")
+    with store:
+        _set_meta(store, "source_run_id", 121)
+        _set_meta(store, "source_signal_date", "2026-07-31")
+        _set_meta(store, "stage", "complete")
+        store.execute(
+            "INSERT INTO assets VALUES(?,?,?,?,?,?,?)",
+            ("510300", "沪深300ETF", "宽基", "510300", 0.8, "available", None),
+        )
+        store.execute(
+            "INSERT INTO evaluated_dates VALUES(?,?,?)",
+            ("2026-07-29", 1, 1),
+        )
+    run = SimpleNamespace(
+        id=149,
+        publication_state="published",
+        as_of_trade_date=date(2026, 8, 24),
+        ranking_contract_hash="new-ranking-hash",
+        input_snapshot_hash="new-input-hash",
+    )
+    session = SimpleNamespace(scalar=AsyncMock(side_effect=(run, 1441)))
+    try:
+        await _initialize_source(store, session)
+
+        assert _meta(store, "source_run_id") == "149"
+        assert store.execute("SELECT count(*) FROM assets").fetchone()[0] == 0
+        assert store.execute("SELECT count(*) FROM evaluated_dates").fetchone()[0] == 0
+        assert _meta(store, "stage") == "load"
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_partial_checkpoint_keeps_frozen_source(tmp_path) -> None:
+    store = _init_store(tmp_path / "checkpoint.sqlite3")
+    session = SimpleNamespace(scalar=AsyncMock())
+    with store:
+        _set_meta(store, "source_run_id", 121)
+        _set_meta(store, "stage", "evaluate")
+        store.execute(
+            "INSERT INTO evaluated_dates VALUES(?,?,?)",
+            ("2026-07-29", 1, 1),
+        )
+    try:
+        await _initialize_source(store, session)
+
+        assert _meta(store, "source_run_id") == "121"
+        session.scalar.assert_not_awaited()
+    finally:
+        store.close()

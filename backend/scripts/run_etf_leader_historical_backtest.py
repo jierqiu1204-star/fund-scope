@@ -17,7 +17,6 @@ from sqlalchemy.engine import make_url
 from app.core.config import get_settings
 from app.core.db import DatabaseManager
 from app.models.entities import (
-    EtfFactorExperimentEvidence,
     EtfPriceHistory,
     ShortResearchSignalItem,
     ShortResearchSignalRun,
@@ -41,9 +40,6 @@ from app.services.strategy_lab.etf_leader_tactics_historical_backtest import (
     stable_event_payloads,
     summarize_historical_events,
 )
-from app.services.strategy_lab.etf_leader_tactics_historical_proxy import (
-    LEADER_HISTORICAL_PROXY_EXPERIMENT_FAMILY,
-)
 
 DEFAULT_ARTIFACT = Path(
     "/app/data/etf-leader-tactics-artifacts/historical-backtest-v1.sqlite3"
@@ -57,7 +53,7 @@ UNCLASSIFIED_PEER_GROUPS = {
     "未分类",
 }
 FORBIDDEN_PROVIDERS = {"sina", "efinance"}
-ARTIFACT_SCHEMA_VERSION = "leader_historical_backtest_checkpoint_v2"
+ARTIFACT_SCHEMA_VERSION = "leader_historical_backtest_checkpoint_v3"
 
 EVENTS_TABLE_SQL = """
     CREATE TABLE IF NOT EXISTS events (
@@ -219,38 +215,28 @@ def _set_meta(store: sqlite3.Connection, key: str, value: object) -> None:
 
 
 async def _initialize_source(store: sqlite3.Connection, session: Any) -> None:
-    if _meta(store, "source_run_id") is not None:
+    current_source_run_id = _meta(store, "source_run_id")
+    stage = _meta(store, "stage")
+    evaluated_count = int(
+        store.execute("SELECT count(*) FROM evaluated_dates").fetchone()[0]
+    )
+    if current_source_run_id is not None and not (
+        stage == "complete" or (stage == "evaluate" and evaluated_count == 0)
+    ):
         return
-    proxy_row = await session.scalar(
-        select(EtfFactorExperimentEvidence)
+    run = await session.scalar(
+        select(ShortResearchSignalRun)
         .where(
-            EtfFactorExperimentEvidence.experiment_family
-            == LEADER_HISTORICAL_PROXY_EXPERIMENT_FAMILY
+            ShortResearchSignalRun.publication_state == "published",
+            ShortResearchSignalRun.scope_kind.in_(("full", "all")),
+            ShortResearchSignalRun.price_basis == "total_return_adjusted",
         )
         .order_by(
-            EtfFactorExperimentEvidence.created_at.desc(),
-            EtfFactorExperimentEvidence.id.desc(),
+            ShortResearchSignalRun.as_of_trade_date.desc(),
+            ShortResearchSignalRun.id.desc(),
         )
         .limit(1)
     )
-    source_run_id = None
-    if proxy_row is not None:
-        source_run_id = _mapping(proxy_row.report_json).get("signal_run_id")
-    run = await session.get(ShortResearchSignalRun, int(source_run_id)) if source_run_id else None
-    if run is None:
-        run = await session.scalar(
-            select(ShortResearchSignalRun)
-            .where(
-                ShortResearchSignalRun.publication_state == "published",
-                ShortResearchSignalRun.scope_kind == "all",
-                ShortResearchSignalRun.price_basis == "total_return_adjusted",
-            )
-            .order_by(
-                ShortResearchSignalRun.as_of_trade_date.desc(),
-                ShortResearchSignalRun.id.desc(),
-            )
-            .limit(1)
-        )
     if (
         run is None
         or run.publication_state != "published"
@@ -259,6 +245,8 @@ async def _initialize_source(store: sqlite3.Connection, session: Any) -> None:
         or not run.input_snapshot_hash
     ):
         raise RuntimeError("sealed_source_run_unavailable")
+    if current_source_run_id == str(run.id):
+        return
     source_count = await session.scalar(
         select(func.count(ShortResearchSignalItem.id)).where(
             ShortResearchSignalItem.run_id == run.id,
@@ -267,6 +255,14 @@ async def _initialize_source(store: sqlite3.Connection, session: Any) -> None:
         )
     )
     with store:
+        if current_source_run_id is not None:
+            store.execute("DELETE FROM events")
+            store.execute("DELETE FROM evaluated_dates")
+            store.execute("DELETE FROM bars")
+            store.execute("DELETE FROM assets")
+            store.execute(
+                "DELETE FROM meta WHERE key NOT IN ('artifact_schema_version','contract_hash')"
+            )
         _set_meta(store, "source_run_id", run.id)
         _set_meta(store, "source_signal_date", run.as_of_trade_date.isoformat())
         _set_meta(store, "source_ranking_contract_hash", run.ranking_contract_hash)

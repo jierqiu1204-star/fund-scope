@@ -299,8 +299,9 @@ def test_breakout_proxy_uses_exact_adjusted_gates_and_equal_weight_score() -> No
     assert components["sector_trend_percentile"] == 1.0
     assert components["peer_return20_percentile"] == 1.0
     assert components["peer_turnover20_percentile"] == 1.0
-    assert components["entry_quality_state"] == "overextended"
-    assert "atr_extension_excessive" in components["entry_quality_reason_codes"]
+    assert components["entry_quality_state"] == "disciplined"
+    assert components["entry_quality_overextension_atr20"] > 1.5
+    assert components["entry_quality_reason_codes"] == ""
 
 
 def test_repair_proxy_uses_prior_leadership_drawdown_compression_and_symmetric_atr() -> None:

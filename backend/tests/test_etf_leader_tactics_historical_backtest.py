@@ -125,7 +125,7 @@ def test_unconfirmed_signal_does_not_create_a_trade() -> None:
     assert event.entry_date is None
     assert event.net_return is None
     assert event.entry_quality_state == "overextended"
-    assert "atr_extension_excessive" in event.entry_quality_reason_codes
+    assert "pivot_buy_zone_exceeded" in event.entry_quality_reason_codes
     assert event.next_session_confirmation_state == "overextended"
 
 

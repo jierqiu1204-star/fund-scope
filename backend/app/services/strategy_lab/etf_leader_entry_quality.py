@@ -6,9 +6,9 @@ import math
 from dataclasses import dataclass
 from typing import Literal
 
-ENTRY_QUALITY_CONTRACT_VERSION = "etf_leader_entry_quality_shadow_v2"
+ENTRY_QUALITY_CONTRACT_VERSION = "etf_leader_entry_quality_shadow_v3"
 MAX_PIVOT_EXTENSION_PCT = 0.05
-MAX_OVEREXTENSION_ATR20 = 1.50
+ATR_EXTENSION_DIAGNOSTIC_LEVEL = 1.50
 
 EntryQualityState = Literal[
     "unavailable",
@@ -54,6 +54,10 @@ class LeaderEntryQualityDiagnostic:
             "entry_quality_state": self.state,
             "entry_quality_pivot_extension_pct": self.pivot_extension_pct,
             "entry_quality_overextension_atr20": self.overextension_atr20,
+            "entry_quality_atr_extension_elevated": (
+                self.overextension_atr20 is not None
+                and self.overextension_atr20 > ATR_EXTENSION_DIAGNOSTIC_LEVEL
+            ),
             "entry_quality_volume_confirmed": self.volume_confirmed,
             "entry_quality_reason_codes": ";".join(self.reason_codes),
             "entry_status": entry_status,
@@ -76,7 +80,7 @@ class LeaderNextSessionConfirmation:
     overextension_atr20: float | None
     reason_codes: tuple[str, ...]
 
-    def component_payload(self) -> dict[str, str | float | None]:
+    def component_payload(self) -> dict[str, str | float | bool | None]:
         return {
             "next_session_confirmation_state": self.state,
             "next_session_confirmation_granularity": "daily_close_proxy",
@@ -87,6 +91,10 @@ class LeaderNextSessionConfirmation:
             "next_session_confirmation_pivot_extension_pct": self.pivot_extension_pct,
             "next_session_confirmation_overextension_atr20": (
                 self.overextension_atr20
+            ),
+            "next_session_confirmation_atr_extension_elevated": (
+                self.overextension_atr20 is not None
+                and self.overextension_atr20 > ATR_EXTENSION_DIAGNOSTIC_LEVEL
             ),
             "next_session_confirmation_reason_codes": ";".join(self.reason_codes),
         }
@@ -139,8 +147,6 @@ def assess_leader_breakout_entry_quality(
     else:
         if pivot_extension > MAX_PIVOT_EXTENSION_PCT:
             reasons.append("pivot_buy_zone_exceeded")
-        if overextension > MAX_OVEREXTENSION_ATR20:
-            reasons.append("atr_extension_excessive")
         if reasons:
             state = "overextended"
         elif not volume_confirmed:
@@ -263,12 +269,7 @@ def assess_leader_next_session_confirmation(
         reasons.append("confirmation_close_below_ma5")
     if pivot_extension > MAX_PIVOT_EXTENSION_PCT:
         reasons.append("confirmation_pivot_buy_zone_exceeded")
-    if overextension > MAX_OVEREXTENSION_ATR20:
-        reasons.append("confirmation_atr_extension_excessive")
-    if (
-        "confirmation_pivot_buy_zone_exceeded" in reasons
-        or "confirmation_atr_extension_excessive" in reasons
-    ):
+    if "confirmation_pivot_buy_zone_exceeded" in reasons:
         state: NextSessionConfirmationState = "overextended"
     elif reasons:
         state = "failed"
