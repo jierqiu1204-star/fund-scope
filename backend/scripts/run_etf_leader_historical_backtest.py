@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import calendar
 import json
 import math
 import sqlite3
@@ -9,6 +10,7 @@ import time
 from collections import Counter, defaultdict
 from datetime import date
 from pathlib import Path
+from statistics import mean, median
 from typing import Any
 
 from sqlalchemy import func, select
@@ -37,6 +39,7 @@ from app.services.strategy_lab.etf_leader_tactics_historical_backtest import (
     build_historical_backtest_evidence,
     eligible_historical_signal_dates,
     evaluate_historical_signal_date,
+    replay_historical_exit_policy,
     stable_event_payloads,
     summarize_historical_events,
 )
@@ -54,6 +57,8 @@ UNCLASSIFIED_PEER_GROUPS = {
 }
 FORBIDDEN_PROVIDERS = {"sina", "efinance"}
 ARTIFACT_SCHEMA_VERSION = "leader_historical_backtest_checkpoint_v3"
+TAKE_PROFIT_GRID = tuple(value / 100 for value in range(2, 9))
+COOLDOWN_SESSION_GRID = (0, 1, 2, 3, 5)
 
 EVENTS_TABLE_SQL = """
     CREATE TABLE IF NOT EXISTS events (
@@ -94,7 +99,249 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--page-size", type=int, default=120)
     parser.add_argument("--runtime-seconds", type=float, default=38.0)
     parser.add_argument("--code-version", required=True)
+    parser.add_argument("--exit-policy-sensitivity", action="store_true")
     return parser.parse_args()
+
+
+def _months_before(day: date, months: int) -> date:
+    month_index = day.year * 12 + day.month - 1 - months
+    year, zero_based_month = divmod(month_index, 12)
+    month = zero_based_month + 1
+    return date(year, month, min(day.day, calendar.monthrange(year, month)[1]))
+
+
+def _window_stats(
+    events: tuple[HistoricalLeaderEvent, ...], *, start: date, end: date
+) -> dict[str, Any]:
+    rows = tuple(
+        item
+        for item in events
+        if item.trade_status == "closed"
+        and item.entry_date is not None
+        and start <= item.entry_date <= end
+    )
+    aggregate = next(
+        item
+        for item in summarize_historical_events(rows)
+        if item["candidate_id"] == "all_leader_candidates"
+    )
+    by_date: dict[date, list[float]] = defaultdict(list)
+    for item in rows:
+        if item.net_return is not None:
+            by_date[item.signal_date].append(item.net_return)
+    equity = 1.0
+    for signal_date in sorted(by_date):
+        equity *= 1.0 + mean(by_date[signal_date])
+    return {
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "cohort_compounded_return": equity - 1.0,
+        **aggregate,
+    }
+
+
+def _fold_dates(
+    events: tuple[HistoricalLeaderEvent, ...], *, count: int = 3
+) -> tuple[tuple[date, ...], ...]:
+    dates = sorted(
+        {
+            item.signal_date
+            for item in events
+            if item.next_session_confirmation_state == "confirmed"
+        }
+    )
+    if len(dates) < count:
+        return ()
+    return tuple(
+        tuple(dates[index * len(dates) // count : (index + 1) * len(dates) // count])
+        for index in range(count)
+    )
+
+
+def _fold_stats(
+    events: tuple[HistoricalLeaderEvent, ...], signal_dates: tuple[date, ...]
+) -> dict[str, Any]:
+    allowed = set(signal_dates)
+    rows = tuple(
+        item
+        for item in events
+        if item.signal_date in allowed and item.net_return is not None
+    )
+    returns = [float(item.net_return) for item in rows if item.net_return is not None]
+    wins = [value for value in returns if value > 0]
+    losses = [value for value in returns if value < 0]
+    by_date: dict[date, list[float]] = defaultdict(list)
+    for item in rows:
+        assert item.net_return is not None
+        by_date[item.signal_date].append(item.net_return)
+    equity = 1.0
+    for signal_date in sorted(by_date):
+        equity *= 1.0 + mean(by_date[signal_date])
+    return {
+        "start": signal_dates[0].isoformat(),
+        "end": signal_dates[-1].isoformat(),
+        "closed_trade_count": len(rows),
+        "mean_net_return": mean(returns) if returns else None,
+        "win_rate": mean(value > 0 for value in returns) if returns else None,
+        "profit_factor": (
+            sum(wins) / abs(sum(losses)) if wins and losses else None
+        ),
+        "cohort_compounded_return": equity - 1.0,
+    }
+
+
+def _policy_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        not row["screen_eligible"],
+        -row["positive_fold_count"],
+        -row["median_fold_mean_return"],
+        -row["worst_fold_mean_return"],
+        abs(row["event_series_max_drawdown"]),
+        row["take_profit_return"],
+        row["cooldown_sessions"],
+    )
+
+
+def _policy_sensitivity(store: sqlite3.Connection) -> dict[str, Any]:
+    if _meta(store, "stage") != "complete":
+        raise RuntimeError("historical backtest artifact is not complete")
+    assets = _load_assets(store)
+    baseline = _load_events(store)
+    end = date.fromisoformat(str(_meta(store, "source_signal_date")))
+
+    folds = _fold_dates(baseline)
+
+    def result(
+        events: tuple[HistoricalLeaderEvent, ...], *, include_windows: bool = False
+    ) -> dict[str, Any]:
+        aggregate = next(
+            item
+            for item in summarize_historical_events(events)
+            if item["candidate_id"] == "all_leader_candidates"
+        )
+        fold_results = tuple(_fold_stats(events, dates) for dates in folds)
+        fold_means = [
+            float(item["mean_net_return"])
+            for item in fold_results
+            if item["mean_net_return"] is not None
+        ]
+        payload = {
+            "aggregate": aggregate,
+            "folds": fold_results,
+            "cooldown_suppressed_count": sum(
+                item.trade_status == "cooldown_suppressed" for item in events
+            ),
+            "take_profit_exit_count": sum(
+                item.exit_reason == "leader_tactics_take_profit" for item in events
+            ),
+        }
+        if include_windows:
+            payload["windows"] = {
+                f"{months}_month": _window_stats(
+                    events, start=_months_before(end, months), end=end
+                )
+                for months in (1, 3, 6, 12)
+            }
+        if len(fold_means) == len(folds) and fold_means:
+            payload["positive_fold_count"] = sum(value > 0 for value in fold_means)
+            payload["median_fold_mean_return"] = median(fold_means)
+            payload["worst_fold_mean_return"] = min(fold_means)
+        else:
+            payload["positive_fold_count"] = 0
+            payload["median_fold_mean_return"] = float("-inf")
+            payload["worst_fold_mean_return"] = float("-inf")
+        return payload
+
+    rows: list[dict[str, Any]] = []
+    replayed_by_key: dict[tuple[float, int], tuple[HistoricalLeaderEvent, ...]] = {}
+    for threshold in TAKE_PROFIT_GRID:
+        for cooldown in COOLDOWN_SESSION_GRID:
+            replayed = replay_historical_exit_policy(
+                assets,
+                baseline,
+                take_profit_return=threshold,
+                cooldown_sessions=cooldown,
+            )
+            replayed_by_key[(threshold, cooldown)] = replayed
+            metrics = result(replayed)
+            aggregate = metrics["aggregate"]
+            fold_counts = [item["closed_trade_count"] for item in metrics["folds"]]
+            rows.append(
+                {
+                    "take_profit_return": threshold,
+                    "cooldown_sessions": cooldown,
+                    "closed_trade_count": aggregate["closed_trade_count"],
+                    "mean_net_return": aggregate["mean_net_return"],
+                    "win_rate": aggregate["win_rate"],
+                    "profit_factor": aggregate["profit_factor"],
+                    "event_series_max_drawdown": aggregate[
+                        "event_series_max_drawdown"
+                    ],
+                    "cooldown_suppressed_count": metrics[
+                        "cooldown_suppressed_count"
+                    ],
+                    "take_profit_exit_count": metrics["take_profit_exit_count"],
+                    "folds": metrics["folds"],
+                    "positive_fold_count": metrics["positive_fold_count"],
+                    "median_fold_mean_return": metrics[
+                        "median_fold_mean_return"
+                    ],
+                    "worst_fold_mean_return": metrics["worst_fold_mean_return"],
+                    "screen_eligible": aggregate["closed_trade_count"] >= 20
+                    and len(fold_counts) == 3
+                    and min(fold_counts) >= 3,
+                }
+            )
+    leaderboard = sorted(rows, key=_policy_sort_key)
+    selected = leaderboard[0]
+    selected_key = (
+        float(selected["take_profit_return"]),
+        int(selected["cooldown_sessions"]),
+    )
+    cooldown_effect_identifiable = len(
+        {
+            (
+                row["cooldown_suppressed_count"],
+                row["closed_trade_count"],
+                row["mean_net_return"],
+            )
+            for row in rows
+        }
+    ) > len(TAKE_PROFIT_GRID)
+
+    return {
+        "status": "complete",
+        "source_signal_date": end.isoformat(),
+        "method": {
+            "kind": "three_contiguous_time_fold_robust_screen",
+            "ranking_order": [
+                "screen_eligible",
+                "positive_fold_count",
+                "median_fold_mean_return",
+                "worst_fold_mean_return",
+                "lower_full_sample_drawdown",
+            ],
+            "minimum_total_closed_trades": 20,
+            "minimum_closed_trades_per_fold": 3,
+            "untouched_holdout": False,
+            "promotion_allowed": False,
+        },
+        "search_space": {
+            "take_profit_returns": TAKE_PROFIT_GRID,
+            "cooldown_sessions": COOLDOWN_SESSION_GRID,
+            "variant_count": len(rows),
+        },
+        "baseline": result(baseline, include_windows=True),
+        "selected": {
+            **selected,
+            "details": result(
+                replayed_by_key[selected_key], include_windows=True
+            ),
+        },
+        "leaderboard": leaderboard[:10],
+        "cooldown_effect_identifiable": cooldown_effect_identifiable,
+        "production_mutation_allowed": False,
+    }
 
 
 def _require_server_database(database_url: str) -> None:
@@ -788,9 +1035,19 @@ async def _run(arguments: argparse.Namespace) -> None:
         raise ValueError("page size must be in [1, 200]")
     if not 5 <= arguments.runtime_seconds <= 42:
         raise ValueError("runtime seconds must be in [5, 42]")
+    store = _init_store(arguments.artifact)
+    if arguments.exit_policy_sensitivity:
+        try:
+            print(
+                json.dumps(
+                    _policy_sensitivity(store), ensure_ascii=False, sort_keys=True
+                )
+            )
+        finally:
+            store.close()
+        return
     database_url = get_settings().database_url
     _require_server_database(database_url)
-    store = _init_store(arguments.artifact)
     database = DatabaseManager(database_url)
     started = time.monotonic()
     try:

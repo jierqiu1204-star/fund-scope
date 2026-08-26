@@ -15,6 +15,10 @@ from app.models.entities import (
     TradableEtf,
     User,
 )
+from app.services.leader_tactics_exit_policy import (
+    LEADER_TACTICS_TAKE_PROFIT,
+    evaluate_leader_exit_thresholds,
+)
 from app.services.risk_alerts import (
     ALERT_LEADER_TACTICS_EXIT,
     LEADER_TACTICS_BREAKEVEN_EXIT,
@@ -172,6 +176,21 @@ def test_armed_breakeven_reason_wins_over_ma5_without_hard_stop() -> None:
         "initial_stop"
     ]
     assert result.reason_code == LEADER_TACTICS_BREAKEVEN_EXIT
+
+
+def test_optional_take_profit_triggers_on_close_at_or_above_target() -> None:
+    result = evaluate_leader_exit_thresholds(
+        entry_close=10.0,
+        initial_stop=9.0,
+        risk_unit=1.0,
+        previous_high=None,
+        visible_closes=(10.0, 10.5),
+        ma5=9.8,
+        take_profit_line=10.5,
+    )
+
+    assert result.reason_code == LEADER_TACTICS_TAKE_PROFIT
+    assert result.take_profit_line == 10.5
 
 
 def test_frozen_long_position_can_evaluate_after_entry_leaves_bounded_window() -> None:

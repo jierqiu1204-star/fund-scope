@@ -12,7 +12,7 @@ import math
 import random
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date
 from statistics import mean, median
 from typing import Any
@@ -148,6 +148,135 @@ class HistoricalLeaderEvent:
 
     def payload(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def replay_historical_exit_policy(
+    assets: Sequence[HistoricalLeaderAsset],
+    events: Sequence[HistoricalLeaderEvent],
+    *,
+    take_profit_return: float,
+    cooldown_sessions: int = 3,
+) -> tuple[HistoricalLeaderEvent, ...]:
+    """Replay a close-confirmed take-profit policy with a trading-session cooldown."""
+
+    if not math.isfinite(take_profit_return) or not 0 < take_profit_return < 1:
+        raise ValueError("take profit return must be in (0, 1)")
+    if not 0 <= cooldown_sessions <= 20:
+        raise ValueError("cooldown sessions must be in [0, 20]")
+    by_code = {asset.asset_code: asset for asset in assets}
+    calendar = sorted(
+        {bar.trade_date for asset in assets for bar in asset.bars}
+    )
+    calendar_index = {day: index for index, day in enumerate(calendar)}
+    last_exit_index: dict[str, int] = {}
+    open_until_index: dict[str, int] = {}
+    replayed: list[HistoricalLeaderEvent] = []
+
+    def suppressed(event: HistoricalLeaderEvent, status: str) -> HistoricalLeaderEvent:
+        return replace(
+            event,
+            trade_status=status,
+            entry_date=None,
+            entry_price=None,
+            exit_signal_date=None,
+            exit_date=None,
+            exit_price=None,
+            exit_reason=None,
+            holding_sessions=None,
+            gross_return=None,
+            net_return=None,
+            peer_net_return=None,
+            net_excess_return=None,
+        )
+
+    for event in sorted(
+        events, key=lambda item: (item.signal_date, item.candidate_id, item.asset_code)
+    ):
+        if (
+            event.next_session_confirmation_state != "confirmed"
+            or event.entry_date is None
+            or event.entry_price is None
+        ):
+            replayed.append(event)
+            continue
+        signal_index = calendar_index.get(event.signal_date)
+        if signal_index is None:
+            replayed.append(suppressed(event, "exit_policy_unavailable"))
+            continue
+        if open_until_index.get(event.asset_code, -1) > signal_index:
+            replayed.append(suppressed(event, "position_already_open"))
+            continue
+        previous_exit = last_exit_index.get(event.asset_code)
+        if previous_exit is not None and signal_index <= previous_exit + cooldown_sessions:
+            replayed.append(suppressed(event, "cooldown_suppressed"))
+            continue
+
+        asset = by_code.get(event.asset_code)
+        if asset is None:
+            replayed.append(suppressed(event, "exit_policy_unavailable"))
+            continue
+        index_by_date = {bar.trade_date: index for index, bar in enumerate(asset.bars)}
+        entry_index = index_by_date.get(event.entry_date)
+        signal_bar_index = index_by_date.get(event.signal_date)
+        if entry_index is None or signal_bar_index is None:
+            replayed.append(suppressed(event, "exit_policy_unavailable"))
+            continue
+        entry_bar = asset.bars[entry_index]
+        entry_atr20 = _atr(asset.bars[: entry_index + 1], 20)
+        frozen_risk = (
+            initial_leader_risk(
+                entry_close=entry_bar.adjusted_close,
+                entry_atr20=entry_atr20,
+                source_signal_low=asset.bars[signal_bar_index].adjusted_low,
+            )
+            if entry_atr20 is not None
+            else None
+        )
+        if frozen_risk is None:
+            replayed.append(suppressed(event, "exit_policy_unavailable"))
+            continue
+        initial_stop, risk_unit, _ = frozen_risk
+        updated = suppressed(event, "open")
+        updated = replace(updated, entry_date=event.entry_date, entry_price=event.entry_price)
+        for close_index in range(entry_index, len(asset.bars) - 1):
+            thresholds = evaluate_leader_exit_thresholds(
+                entry_close=entry_bar.adjusted_close,
+                initial_stop=initial_stop,
+                risk_unit=risk_unit,
+                previous_high=None,
+                visible_closes=tuple(
+                    bar.adjusted_close
+                    for bar in asset.bars[entry_index : close_index + 1]
+                ),
+                ma5=mean(
+                    bar.adjusted_close
+                    for bar in asset.bars[close_index - 4 : close_index + 1]
+                ),
+                take_profit_line=event.entry_price * (1.0 + take_profit_return),
+            )
+            if thresholds.reason_code is None:
+                continue
+            exit_bar = asset.bars[close_index + 1]
+            realized_return = exit_bar.adjusted_open / event.entry_price - 1.0
+            updated = replace(
+                updated,
+                trade_status="closed",
+                exit_signal_date=asset.bars[close_index].trade_date,
+                exit_date=exit_bar.trade_date,
+                exit_price=exit_bar.adjusted_open,
+                exit_reason=thresholds.reason_code,
+                holding_sessions=close_index + 1 - entry_index,
+                gross_return=realized_return,
+                net_return=realized_return,
+            )
+            exit_index = calendar_index[exit_bar.trade_date]
+            last_exit_index[event.asset_code] = exit_index
+            open_until_index[event.asset_code] = exit_index
+            break
+        if updated.trade_status == "open":
+            open_until_index[event.asset_code] = len(calendar)
+        replayed.append(updated)
+    return tuple(replayed)
 
 
 def _finite(value: object) -> float | None:

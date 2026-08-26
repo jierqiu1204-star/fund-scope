@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from datetime import date
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -12,11 +13,13 @@ from app.services.strategy_lab.etf_leader_tactics_historical_backtest import (
 )
 from scripts.run_etf_leader_historical_backtest import (
     ARTIFACT_SCHEMA_VERSION,
+    _fold_dates,
     _init_store,
     _initialize_source,
     _load_events,
     _meta,
     _persist_date_events,
+    _policy_sort_key,
     _set_meta,
 )
 
@@ -88,6 +91,75 @@ def test_checkpoint_round_trips_unique_lifecycle_event(tmp_path) -> None:
         store.close()
 
     assert loaded == (event,)
+
+
+def test_policy_screen_prefers_stable_folds_then_simpler_cooldown() -> None:
+    common = {
+        "screen_eligible": True,
+        "positive_fold_count": 2,
+        "median_fold_mean_return": 0.01,
+        "worst_fold_mean_return": -0.01,
+        "event_series_max_drawdown": -0.08,
+        "take_profit_return": 0.03,
+    }
+    rows = [
+        {**common, "cooldown_sessions": 3},
+        {**common, "cooldown_sessions": 0},
+        {
+            **common,
+            "cooldown_sessions": 1,
+            "positive_fold_count": 3,
+            "median_fold_mean_return": 0.005,
+        },
+    ]
+
+    ranked = sorted(rows, key=_policy_sort_key)
+
+    assert ranked[0]["cooldown_sessions"] == 1
+    assert ranked[1]["cooldown_sessions"] == 0
+
+
+def test_fold_dates_are_contiguous_and_use_confirmed_signals() -> None:
+    event = HistoricalLeaderEvent(
+        signal_date=date(2026, 1, 1),
+        candidate_id="leader_breakout_proxy_v1",
+        asset_code="510300",
+        name="沪深300ETF",
+        peer_group="宽基",
+        score=0.9,
+        feature_hash="a" * 64,
+        trade_status="closed",
+        confirmation_date=date(2026, 1, 2),
+        entry_date=date(2026, 1, 3),
+        entry_price=10.0,
+        exit_signal_date=date(2026, 1, 4),
+        exit_date=date(2026, 1, 5),
+        exit_price=10.5,
+        exit_reason="leader_tactics_ma5_exit",
+        holding_sessions=2,
+        gross_return=0.05,
+        net_return=0.05,
+        peer_net_return=0.01,
+        net_excess_return=0.04,
+        entry_quality_state="disciplined",
+        entry_quality_reason_codes=(),
+        next_session_confirmation_state="confirmed",
+        next_session_confirmation_reason_codes=(),
+    )
+    events = tuple(
+        replace(
+            event,
+            signal_date=date(2026, 1, day),
+            feature_hash=f"{day:064d}",
+        )
+        for day in range(1, 7)
+    )
+
+    assert _fold_dates(events) == (
+        (date(2026, 1, 1), date(2026, 1, 2)),
+        (date(2026, 1, 3), date(2026, 1, 4)),
+        (date(2026, 1, 5), date(2026, 1, 6)),
+    )
 
 
 @pytest.mark.asyncio

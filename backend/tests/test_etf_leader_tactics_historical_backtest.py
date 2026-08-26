@@ -16,10 +16,12 @@ from app.services.strategy_lab.etf_leader_tactics_historical_backtest import (
     ROUND_TRIP_COST_RATE,
     HistoricalLeaderAsset,
     HistoricalLeaderBar,
+    HistoricalLeaderEvent,
     LeaderHistoricalBacktestContractError,
     build_historical_backtest_evidence,
     eligible_historical_signal_dates,
     evaluate_historical_signal_date,
+    replay_historical_exit_policy,
     summarize_historical_events,
 )
 
@@ -221,6 +223,74 @@ def test_summary_reports_zero_cost_lifecycle_results() -> None:
     assert row["execution_policy"] == (
         "T_signal_T1_confirm_T2_open_email_exit_next_open"
     )
+
+
+def test_take_profit_replay_suppresses_next_three_trading_session_candidates() -> None:
+    start = date(2026, 1, 1)
+    bars = tuple(
+        HistoricalLeaderBar(
+            trade_date=start + timedelta(days=index),
+            adjusted_open=10.2 if index == 24 else 10.0,
+            adjusted_high=10.9 if index == 23 else 10.5,
+            adjusted_low=9.5,
+            adjusted_close=(10.1 if index == 22 else 10.4 if index >= 23 else 10.0),
+            volume=1_000_000.0,
+            turnover=10_000_000.0,
+        )
+        for index in range(40)
+    )
+    asset = HistoricalLeaderAsset(
+        asset_code="510300",
+        name="沪深300ETF",
+        peer_group="宽基",
+        clone_group="510300",
+        baseline_score=50.0,
+        bars=bars,
+    )
+
+    def event(signal_index: int) -> HistoricalLeaderEvent:
+        entry_index = signal_index + 2
+        return HistoricalLeaderEvent(
+            signal_date=bars[signal_index].trade_date,
+            candidate_id="leader_breakout_proxy_v1",
+            asset_code=asset.asset_code,
+            name=asset.name,
+            peer_group=asset.peer_group,
+            score=0.9,
+            feature_hash=f"{signal_index:064d}",
+            trade_status="closed",
+            confirmation_date=bars[signal_index + 1].trade_date,
+            entry_date=bars[entry_index].trade_date,
+            entry_price=bars[entry_index].adjusted_open,
+            exit_signal_date=None,
+            exit_date=None,
+            exit_price=None,
+            exit_reason=None,
+            holding_sessions=None,
+            gross_return=None,
+            net_return=None,
+            peer_net_return=None,
+            net_excess_return=None,
+            entry_quality_state="disciplined",
+            entry_quality_reason_codes=(),
+            next_session_confirmation_state="confirmed",
+            next_session_confirmation_reason_codes=(),
+        )
+
+    replayed = replay_historical_exit_policy(
+        (asset,),
+        tuple(event(index) for index in (20, 25, 26, 27, 28)),
+        take_profit_return=0.03,
+        cooldown_sessions=3,
+    )
+
+    assert replayed[0].exit_reason == "leader_tactics_take_profit"
+    assert [item.trade_status for item in replayed[1:4]] == [
+        "cooldown_suppressed",
+        "cooldown_suppressed",
+        "cooldown_suppressed",
+    ]
+    assert replayed[4].trade_status != "cooldown_suppressed"
 
 
 def _report() -> dict[str, object]:

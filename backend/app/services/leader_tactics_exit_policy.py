@@ -9,6 +9,7 @@ from typing import Final
 LEADER_TACTICS_HARD_STOP: Final = "leader_tactics_hard_stop"
 LEADER_TACTICS_BREAKEVEN_EXIT: Final = "leader_tactics_breakeven_exit"
 LEADER_TACTICS_MA5_EXIT: Final = "leader_tactics_ma5_exit"
+LEADER_TACTICS_TAKE_PROFIT: Final = "leader_tactics_take_profit"
 LEADER_TACTICS_ROUND_TRIP_COST_BPS: Final = 0.0
 
 
@@ -17,6 +18,7 @@ class LeaderExitThresholds:
     high_water: float
     armed: bool
     breakeven_line: float | None
+    take_profit_line: float | None
     effective_exit_line: float
     reason_code: str | None
 
@@ -53,6 +55,7 @@ def evaluate_leader_exit_thresholds(
     visible_closes: tuple[float, ...],
     ma5: float,
     previously_armed: bool = False,
+    take_profit_line: float | None = None,
 ) -> LeaderExitThresholds:
     """Evaluate one close using the frozen hard-stop, breakeven and MA5 rules."""
 
@@ -71,7 +74,16 @@ def evaluate_leader_exit_thresholds(
     )
     current = visible_closes[-1]
     reason_code = None
-    if current <= effective_line:
+    usable_take_profit = (
+        take_profit_line
+        if take_profit_line is not None
+        and math.isfinite(take_profit_line)
+        and take_profit_line > entry_close
+        else None
+    )
+    if usable_take_profit is not None and current >= usable_take_profit:
+        reason_code = LEADER_TACTICS_TAKE_PROFIT
+    elif current <= effective_line:
         if current <= initial_stop:
             reason_code = LEADER_TACTICS_HARD_STOP
         elif breakeven is not None and current <= breakeven:
@@ -82,6 +94,7 @@ def evaluate_leader_exit_thresholds(
         high_water=high_water,
         armed=armed,
         breakeven_line=breakeven,
+        take_profit_line=usable_take_profit,
         effective_exit_line=effective_line,
         reason_code=reason_code,
     )
