@@ -35,8 +35,11 @@ jobs:
           set -euo pipefail
 
           mkdir -p "$GITHUB_WORKSPACE"
+          auth_header=$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')
           if git -C "$GITHUB_WORKSPACE" cat-file -e "$GITHUB_SHA^{commit}" 2>/dev/null; then
-            git -C "$GITHUB_WORKSPACE" checkout --detach --force "$GITHUB_SHA"
+            timeout 55 git -C "$GITHUB_WORKSPACE" \
+              -c http.extraHeader="AUTHORIZATION: basic $auth_header" \
+              checkout --detach --force "$GITHUB_SHA"
             git -C "$GITHUB_WORKSPACE" clean -ffdx
           else
             if ! git -C "$GITHUB_WORKSPACE" rev-parse --git-dir >/dev/null 2>&1; then
@@ -52,7 +55,6 @@ jobs:
             git -C "$GITHUB_WORKSPACE" remote remove deploy-source 2>/dev/null || true
             git -C "$GITHUB_WORKSPACE" remote add deploy-source \
               "https://github.com/$GITHUB_REPOSITORY.git"
-            auth_header=$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')
             source_fetched=false
             for attempt in 1 2 3; do
               if timeout 55 git -C "$GITHUB_WORKSPACE" \
@@ -65,7 +67,9 @@ jobs:
                 "$attempt" >&2
             done
             test "$source_fetched" = true
-            timeout 55 git -C "$GITHUB_WORKSPACE" checkout --detach --force "$GITHUB_SHA"
+            timeout 55 git -C "$GITHUB_WORKSPACE" \
+              -c http.extraHeader="AUTHORIZATION: basic $auth_header" \
+              checkout --detach --force "$GITHUB_SHA"
             git -C "$GITHUB_WORKSPACE" clean -ffdx
           fi
 
