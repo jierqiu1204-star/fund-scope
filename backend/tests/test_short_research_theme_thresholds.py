@@ -106,6 +106,35 @@ def test_etf_theme_classifier_covers_audited_sector_universe(
     assert profile.classification_confidence == "high"
 
 
+@pytest.mark.parametrize(
+    ("name", "asset_class", "expected_bucket", "expected_group", "expected_theme"),
+    [
+        ("石油ETF", "other", "equity", "energy", "能源"),
+        ("稀有金属ETF", "other", "equity", "materials", "基础材料"),
+        ("粮食ETF", "other", "equity", "consumer", "农业消费"),
+        ("通用航空ETF", "other", "equity", "industrial", "高端制造"),
+        ("A500ETF", "other", "broad_base", "broad_base", "宽基"),
+        ("中证2000ETF", "other", "broad_base", "broad_base", "宽基"),
+        ("信创ETF", "other", "equity", "technology", "数字科技"),
+        ("招商快线ETF", "other", "money", "money", "货币"),
+        ("巴西ETF", "other", "cross_border", "cross_border", "跨境"),
+    ],
+)
+def test_etf_theme_classifier_covers_current_other_asset_names(
+    name: str,
+    asset_class: str,
+    expected_bucket: str,
+    expected_group: str,
+    expected_theme: str,
+) -> None:
+    profile = classify_etf_theme(code="599996", name=name, asset_class=asset_class)
+
+    assert profile.asset_bucket == expected_bucket
+    assert profile.theme_group == expected_group
+    assert profile.primary_theme == expected_theme
+    assert profile.classification_confidence == "high"
+
+
 def test_dynamic_thresholds_adapt_to_asset_bucket_and_volatility() -> None:
     high_vol = dynamic_threshold_context(
         asset_bucket="equity",

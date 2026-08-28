@@ -81,7 +81,7 @@ from app.services.workflows.short_research_data import (
 SHORT_RESEARCH_DAILY_ASSET_TYPES = [ASSET_TYPE_FUND, ASSET_TYPE_ETF]
 ETF_HISTORY_BACKFILL_ALLOWED_DAYS = (365, 730, 1095)
 ETF_CANONICAL_MIN_COVERAGE = 0.95
-ETF_TAXONOMY_FACT_RULE_VERSION = "etf_theme_taxonomy_fact_v1"
+ETF_TAXONOMY_FACT_RULE_VERSION = "etf_theme_taxonomy_fact_v2"
 
 
 def _count(value: Any, key: str) -> int:
@@ -387,7 +387,9 @@ async def etf_taxonomy_fact_ingestion_job(
     result = await run_identity_fact_ingestion_slice(
         session,
         request=IdentityFactIngestionRequest(
-            scope=f"etf_taxonomy_facts:{date.today().isoformat()}",
+            scope=(
+                f"etf_taxonomy_facts:{ETF_TAXONOMY_FACT_RULE_VERSION}:{date.today().isoformat()}"
+            ),
             target_page_size=20,
             estimated_seconds_per_etf=0.1,
         ),

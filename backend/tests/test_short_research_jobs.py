@@ -156,6 +156,8 @@ async def test_taxonomy_fact_ingestion_persists_one_bounded_pit_page(app) -> Non
     assert result["taxonomy_facts_inserted"] == 1
     assert fact is not None
     assert fact.primary_theme == "人工智能"
+    assert fact.rule_version == "etf_theme_taxonomy_fact_v2"
+    assert fact.provider_version == "etf_theme_taxonomy_fact_v2"
 
 
 @pytest.mark.asyncio
@@ -794,13 +796,13 @@ async def test_post_close_etf_observation_portfolio_job_refreshes_weights(monkey
                 "cash_weight": 0.0,
                 "weight_sum": 1.0,
                 "unavailable_reason": None,
-                    "constraint_summary": {
-                        "primary_count": 3,
-                        "satellite_count": 0,
-                        "defensive_count": 0,
-                        "watch_only_count": 2,
-                        "excluded_count": 1,
-                    },
+                "constraint_summary": {
+                    "primary_count": 3,
+                    "satellite_count": 0,
+                    "defensive_count": 0,
+                    "watch_only_count": 2,
+                    "excluded_count": 1,
+                },
             },
         )
 
