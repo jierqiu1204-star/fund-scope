@@ -26,6 +26,7 @@ from app.services.workflows.short_research_data import (
 
 ETF_DAILY_WORKFLOW_RUNNING = "running"
 ETF_DAILY_WORKFLOW_MIN_COVERAGE = 0.95
+ETF_DAILY_HISTORY_LOOKBACK_CALENDAR_DAYS = 300
 # Every production holder is bounded well below this window. Keep enough
 # headroom for a slow commit while allowing a restarted worker to recover
 # without blocking the remaining post-close catch-up window for half an hour.
@@ -198,7 +199,8 @@ async def run_daily_etf_research_workflow(
             return result
         sync = await sync_short_research_data_with_tracking_priority(
             session,
-            from_date=trade_date - timedelta(days=120),
+            from_date=trade_date
+            - timedelta(days=ETF_DAILY_HISTORY_LOOKBACK_CALENDAR_DAYS),
             to_date=trade_date,
             asset_type=ASSET_TYPE_ETF,
         )

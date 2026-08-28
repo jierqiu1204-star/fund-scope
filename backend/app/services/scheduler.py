@@ -33,6 +33,7 @@ from app.services.short_research.jobs import (
     daily_short_research_signals_job,
     etf_exit_hyperopt_job,
     etf_exit_signal_credibility_job,
+    etf_taxonomy_fact_ingestion_job,
     post_close_etf_adjusted_sync_job,
     post_close_etf_data_job,
     post_close_etf_label_outcome_review_job,
@@ -594,6 +595,22 @@ def register_default_jobs(
         hour=15,
         minute=8,
         id="daily_etf_taxonomy",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_tracked_job,
+        "cron",
+        args=[
+            db,
+            "etf_taxonomy_fact_ingestion",
+            etf_taxonomy_fact_ingestion_job,
+        ],
+        day_of_week="mon-fri",
+        hour="15-22",
+        minute="*/2",
+        id="etf_taxonomy_fact_ingestion",
+        max_instances=1,
+        coalesce=True,
         replace_existing=True,
     )
     scheduler.add_job(

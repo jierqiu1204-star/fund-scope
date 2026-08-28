@@ -616,3 +616,46 @@ async def test_etf_materialization_history_gate_stops_before_screen(monkeypatch)
 
     assert result["status"] == "waiting"
     assert result["unavailable_reason"] == "insufficient_etf_history_120_coverage"
+
+
+@pytest.mark.asyncio
+async def test_etf_materialization_pit_group_gate_stops_before_screen(monkeypatch) -> None:
+    snapshot = _etf_decision_snapshot()
+    bundle = SimpleNamespace(
+        inputs=tuple(object() for _ in range(10)),
+        universe_count=10,
+        adjusted_120_count=9,
+        adjusted_180_count=8,
+        pit_group_count=8,
+        provider_health=(("eastmoney", "healthy"),),
+        raw_decision_violations=0,
+        non_finite_violations=0,
+        readiness_dict=lambda *, threshold: {"threshold": threshold},
+    )
+
+    async def latest(*_args, **_kwargs):
+        return snapshot
+
+    async def existing(*_args, **_kwargs):
+        return None
+
+    async def read_inputs(*_args, **_kwargs):
+        return bundle
+
+    def unexpected_screen(*_args, **_kwargs):
+        raise AssertionError("screen must not run below the frozen PIT group gate")
+
+    monkeypatch.setattr(jobs, "latest_ready_etf_decision_data_snapshot", latest)
+    monkeypatch.setattr(jobs, "get_v2_materialized_manifest", existing)
+    monkeypatch.setattr(jobs, "available_memory_bytes", lambda: 2**30)
+    monkeypatch.setattr(jobs, "read_etf_v2_asset_inputs", read_inputs)
+    monkeypatch.setattr(jobs, "screen_dual_universe", unexpected_screen)
+
+    result = await jobs.dual_universe_leader_tactics_v2_etf_materialize_job(
+        object(),  # type: ignore[arg-type]
+        _settings(etf_enabled=True),
+        now=datetime(2026, 8, 5, 9, 10),
+    )
+
+    assert result["status"] == "waiting"
+    assert result["unavailable_reason"] == "insufficient_etf_pit_group_coverage"

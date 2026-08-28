@@ -140,7 +140,7 @@ def test_research_depth_profile_enforces_resource_bounds() -> None:
 
 
 @pytest.mark.asyncio
-async def test_research_depth_preflight_orders_materialized_depths_without_join(
+async def test_research_depth_preflight_requires_immutable_revisions(
     app,
 ) -> None:
     codes = ("510091", "510092", "510093", "510094")
@@ -183,12 +183,12 @@ async def test_research_depth_preflight_orders_materialized_depths_without_join(
             ),
         )
 
-    assert list(depths) == ["510092", "510094", "510093", "510091"]
+    assert list(depths) == ["510092", "510093", "510091", "510094"]
     assert depths == {
-        "510092": 1,
-        "510094": 1,
+        "510092": 0,
         "510093": 0,
         "510091": 0,
+        "510094": 0,
     }
 
 
@@ -261,6 +261,9 @@ async def test_research_depth_fetches_only_the_missing_required_span(app) -> Non
             rss_reader=lambda: 32 * 1024 * 1024,
         )
         row_count = await session.scalar(select(func.count()).select_from(EtfPriceHistory))
+        revision_count = await session.scalar(
+            select(func.count()).select_from(EtfAdjustedPriceRevision)
+        )
 
     assert calls == [(date(2026, 7, 1), date(2026, 7, 1), 1, (date(2026, 7, 1),))]
     assert result.status == "complete"
@@ -268,6 +271,7 @@ async def test_research_depth_fetches_only_the_missing_required_span(app) -> Non
     assert result.fetched_rows == 3
     assert result.excluded_rows == 2
     assert row_count == 3
+    assert revision_count == 3
 
 
 def test_research_rotation_never_moves_a_shallower_bucket_ahead() -> None:

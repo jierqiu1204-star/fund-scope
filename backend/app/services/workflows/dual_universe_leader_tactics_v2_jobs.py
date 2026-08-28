@@ -1151,11 +1151,16 @@ async def _materialize_etf(
     history_120_coverage = (
         bundle.adjusted_120_count / bundle.universe_count if bundle.universe_count else 0.0
     )
+    pit_group_coverage = (
+        bundle.pit_group_count / bundle.universe_count if bundle.universe_count else 0.0
+    )
     reasons: list[str] = []
     if bundle.universe_count <= 0:
         reasons.append("etf_authoritative_universe_unavailable")
     if history_120_coverage < ETF_COMPLETE_SCORE_COVERAGE:
         reasons.append("insufficient_etf_history_120_coverage")
+    if pit_group_coverage < ETF_COMPLETE_SCORE_COVERAGE:
+        reasons.append("insufficient_etf_pit_group_coverage")
     if not bundle.provider_health:
         reasons.append("provider_health_unavailable")
     if bundle.raw_decision_violations:

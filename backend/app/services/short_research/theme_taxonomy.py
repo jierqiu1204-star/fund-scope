@@ -219,6 +219,7 @@ async def refresh_etf_theme_profiles(session: AsyncSession) -> dict[str, Any]:
     rows = (await session.scalars(select(TradableEtf).order_by(TradableEtf.code.asc()))).all()
     inserted = 0
     updated = 0
+    unchanged = 0
     failed: list[dict[str, str]] = []
     classified = 0
     unknown = 0
@@ -258,15 +259,22 @@ async def refresh_etf_theme_profiles(session: AsyncSession) -> dict[str, Any]:
                 )
                 inserted += 1
             else:
-                row.asset_bucket = profile.asset_bucket
-                row.theme_group = profile.theme_group
-                row.primary_theme = profile.primary_theme
-                row.secondary_themes_json = list(profile.secondary_themes)
-                row.classification_source = profile.classification_source
-                row.classification_confidence = profile.classification_confidence
-                row.classification_reason = profile.classification_reason
-                row.updated_at = now
-                updated += 1
+                values = {
+                    "asset_bucket": profile.asset_bucket,
+                    "theme_group": profile.theme_group,
+                    "primary_theme": profile.primary_theme,
+                    "secondary_themes_json": list(profile.secondary_themes),
+                    "classification_source": profile.classification_source,
+                    "classification_confidence": profile.classification_confidence,
+                    "classification_reason": profile.classification_reason,
+                }
+                if any(getattr(row, key) != value for key, value in values.items()):
+                    for key, value in values.items():
+                        setattr(row, key, value)
+                    row.updated_at = now
+                    updated += 1
+                else:
+                    unchanged += 1
 
             merged_tags = _dedupe(
                 [
@@ -291,6 +299,7 @@ async def refresh_etf_theme_profiles(session: AsyncSession) -> dict[str, Any]:
         "low_confidence": low_confidence,
         "inserted": inserted,
         "updated": updated,
+        "unchanged": unchanged,
         "failed": len(failed),
         "failures": failed[:20],
         "latest_taxonomy_refresh": latest_refresh.isoformat() if isinstance(latest_refresh, datetime) else None,

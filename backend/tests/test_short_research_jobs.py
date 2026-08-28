@@ -5,8 +5,15 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from sqlalchemy import select
 
 from app.defaults.short_research import ASSET_TYPE_ETF, ASSET_TYPE_FUND
+from app.models.entities import (
+    EtfTaxonomyFact,
+    EtfThemeProfile,
+    EtfUniverseMembership,
+    TradableEtf,
+)
 from app.services.short_research import jobs as jobs_module
 
 
@@ -99,6 +106,56 @@ async def test_daily_etf_universe_job_reports_refresh_counts(monkeypatch) -> Non
     assert result["excluded"] == 1
     assert result["default_display"] == 2
     assert result["taxonomy"]["classified"] == 3
+
+
+@pytest.mark.asyncio
+async def test_taxonomy_fact_ingestion_persists_one_bounded_pit_page(app) -> None:
+    code = "515070"
+    async with app.state.db.session() as session:
+        session.add(
+            TradableEtf(
+                code=code,
+                name="人工智能ETF",
+                exchange="SH",
+                theme_tags_json=["人工智能"],
+                trading_rule_label="证券账户 T+1 ETF",
+                asset_class="sector",
+                is_short_term_eligible=True,
+                is_watchlist=True,
+            )
+        )
+        session.add(
+            EtfUniverseMembership(
+                etf_code=code,
+                effective_from=date.today(),
+                source="test",
+            )
+        )
+        session.add(
+            EtfThemeProfile(
+                etf_code=code,
+                asset_bucket="equity",
+                theme_group="technology",
+                primary_theme="人工智能",
+                secondary_themes_json=["AI"],
+                classification_source="domestic_keyword",
+                classification_confidence="high",
+                classification_reason="测试主题事实",
+                created_at=datetime(2026, 8, 28, 7, 0),
+                updated_at=datetime(2026, 8, 28, 7, 0),
+            )
+        )
+        await session.commit()
+
+        result = await jobs_module.etf_taxonomy_fact_ingestion_job(session)
+        fact = await session.scalar(
+            select(EtfTaxonomyFact).where(EtfTaxonomyFact.etf_code == code)
+        )
+
+    assert result["selected_count"] == 1
+    assert result["taxonomy_facts_inserted"] == 1
+    assert fact is not None
+    assert fact.primary_theme == "人工智能"
 
 
 @pytest.mark.asyncio

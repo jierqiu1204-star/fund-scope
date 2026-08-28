@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.entities import (
     EtfAdjustedHistoryAvailability,
+    EtfAdjustedPriceRevision,
     EtfPriceHistory,
     EtfSyncCursor,
     JobRun,
@@ -24,6 +25,7 @@ from app.models.entities import (
 )
 from app.services.market_data import etf_decision_adjusted_provider_versions
 from app.services.short_etf.data import (
+    _ADJUSTED_PRICE_MATERIAL_FIELDS,
     MAX_ADJUSTED_PRICE_PERSISTENCE_PAGE_ROWS,
     ProviderFetchResult,
     _research_price_fields,
@@ -536,6 +538,19 @@ def _accepted_adjusted_provider_filter() -> Any:
     )
 
 
+def _accepted_adjusted_revision_provider_filter() -> Any:
+    return or_(
+        *(
+            and_(
+                EtfAdjustedPriceRevision.data_provider == provider,
+                EtfAdjustedPriceRevision.provider_version == version,
+                EtfAdjustedPriceRevision.adjustment_version == version,
+            )
+            for provider, version in etf_decision_adjusted_provider_versions()
+        )
+    )
+
+
 async def _eligible_depths(
     session: AsyncSession,
     *,
@@ -559,8 +574,23 @@ async def _eligible_depths(
                 .limit(request.required_sessions)
             )
         )
-    depth_rows = (
-        await session.execute(
+    if request.selection_policy == RESEARCH_DEPTH_SELECTION_POLICY:
+        depth_statement = (
+            select(
+                EtfAdjustedPriceRevision.etf_code,
+                func.count(func.distinct(EtfAdjustedPriceRevision.trade_date)),
+            )
+            .where(
+                EtfAdjustedPriceRevision.etf_code.in_(request.eligible_codes),
+                EtfAdjustedPriceRevision.trade_date.in_(target_sessions),
+                EtfAdjustedPriceRevision.decision_eligible.is_(True),
+                EtfAdjustedPriceRevision.research_price_basis == request.price_basis,
+                _accepted_adjusted_revision_provider_filter(),
+            )
+            .group_by(EtfAdjustedPriceRevision.etf_code)
+        )
+    else:
+        depth_statement = (
             select(
                 EtfPriceHistory.etf_code,
                 func.count(func.distinct(EtfPriceHistory.trade_date)),
@@ -574,7 +604,7 @@ async def _eligible_depths(
             )
             .group_by(EtfPriceHistory.etf_code)
         )
-    ).all()
+    depth_rows = (await session.execute(depth_statement)).all()
     depths = {str(code): int(count or 0) for code, count in depth_rows}
     watchlist_rows = (
         await session.execute(
@@ -607,12 +637,12 @@ async def _missing_required_trade_dates(
         return ()
     existing_dates = set(
         await session.scalars(
-            select(EtfPriceHistory.trade_date).where(
-                EtfPriceHistory.etf_code == code,
-                EtfPriceHistory.trade_date.in_(request.required_trade_dates),
-                EtfPriceHistory.decision_eligible.is_(True),
-                EtfPriceHistory.research_price_basis == request.price_basis,
-                _accepted_adjusted_provider_filter(),
+            select(EtfAdjustedPriceRevision.trade_date).where(
+                EtfAdjustedPriceRevision.etf_code == code,
+                EtfAdjustedPriceRevision.trade_date.in_(request.required_trade_dates),
+                EtfAdjustedPriceRevision.decision_eligible.is_(True),
+                EtfAdjustedPriceRevision.research_price_basis == request.price_basis,
+                _accepted_adjusted_revision_provider_filter(),
             )
         )
     )
@@ -621,6 +651,61 @@ async def _missing_required_trade_dates(
         for trade_date in request.required_trade_dates
         if trade_date not in existing_dates
     )
+
+
+async def _backfill_revisions_from_projection(
+    session: AsyncSession,
+    *,
+    code: str,
+    request: BoundedHistorySyncRequest,
+) -> int:
+    """Promote trusted legacy projections without inventing a receipt timestamp."""
+
+    existing_revision_dates = select(EtfAdjustedPriceRevision.trade_date).where(
+        EtfAdjustedPriceRevision.etf_code == code,
+        EtfAdjustedPriceRevision.trade_date.in_(request.required_trade_dates),
+        EtfAdjustedPriceRevision.decision_eligible.is_(True),
+        EtfAdjustedPriceRevision.research_price_basis == request.price_basis,
+        _accepted_adjusted_revision_provider_filter(),
+    )
+    projections = list(
+        (
+            await session.scalars(
+                select(EtfPriceHistory)
+                .where(
+                    EtfPriceHistory.etf_code == code,
+                    EtfPriceHistory.trade_date.in_(request.required_trade_dates),
+                    EtfPriceHistory.trade_date.not_in(existing_revision_dates),
+                    EtfPriceHistory.decision_eligible.is_(True),
+                    EtfPriceHistory.research_price_basis == request.price_basis,
+                    EtfPriceHistory.source_timestamp.is_not(None),
+                    _accepted_adjusted_provider_filter(),
+                )
+                .order_by(EtfPriceHistory.trade_date.asc())
+                .limit(MAX_ADJUSTED_PRICE_PERSISTENCE_PAGE_ROWS)
+            )
+        ).all()
+    )
+    if not projections:
+        return 0
+    persisted = await persist_etf_price_history_page(
+        session,
+        etf_code=code,
+        rows=tuple(
+            (
+                row.trade_date,
+                {
+                    **{
+                        field: getattr(row, field)
+                        for field in _ADJUSTED_PRICE_MATERIAL_FIELDS
+                    },
+                    "source_timestamp": row.source_timestamp,
+                },
+            )
+            for row in projections
+        ),
+    )
+    return persisted.revision_rows
 
 
 async def _fetch_history_window(
@@ -1174,12 +1259,14 @@ async def _depth_is_complete(
 ) -> bool:
     if request.selection_policy == RESEARCH_DEPTH_SELECTION_POLICY:
         covered_count = await session.scalar(
-            select(func.count(func.distinct(EtfPriceHistory.trade_date))).where(
-                EtfPriceHistory.etf_code == code,
-                EtfPriceHistory.trade_date.in_(request.required_trade_dates),
-                EtfPriceHistory.decision_eligible.is_(True),
-                EtfPriceHistory.research_price_basis == request.price_basis,
-                _accepted_adjusted_provider_filter(),
+            select(
+                func.count(func.distinct(EtfAdjustedPriceRevision.trade_date))
+            ).where(
+                EtfAdjustedPriceRevision.etf_code == code,
+                EtfAdjustedPriceRevision.trade_date.in_(request.required_trade_dates),
+                EtfAdjustedPriceRevision.decision_eligible.is_(True),
+                EtfAdjustedPriceRevision.research_price_basis == request.price_basis,
+                _accepted_adjusted_revision_provider_filter(),
             )
         )
         return int(covered_count or 0) == request.required_sessions
@@ -1599,6 +1686,28 @@ async def run_bounded_history_sync_slice(
         )
         if request.selection_policy == RESEARCH_DEPTH_SELECTION_POLICY:
             try:
+                migrated_revisions = await _run_before(
+                    partial(
+                        _backfill_revisions_from_projection,
+                        session,
+                        code=code,
+                        request=request,
+                    ),
+                    deadline=hard_worker_deadline,
+                    timeout_message=(
+                        "history sync worker deadline exhausted migrating "
+                        "immutable revisions"
+                    ),
+                )
+                if migrated_revisions:
+                    await _run_before(
+                        session.commit,
+                        deadline=hard_worker_deadline,
+                        timeout_message=(
+                            "history sync worker deadline exhausted committing "
+                            "immutable revisions"
+                        ),
+                    )
                 requested_trade_dates = await _run_before(
                     partial(
                         _missing_required_trade_dates,

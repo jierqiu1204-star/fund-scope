@@ -350,16 +350,6 @@ async def run_post_publication_etf_research_history_slice(
         scope = DEEP_TELEMETRY_DEPTH_SCOPE
         contract_hash = _deep_telemetry_contract_hash()
 
-    if _lane_completion_gate_passed(selected_lane):
-        return {
-            "asset_type": ASSET_TYPE_ETF,
-            "status": "complete",
-            "reason": "research_depth_targets_satisfied",
-            "target_date": effective_date.isoformat(),
-            "publication_gates": compact_gates,
-            "lane": _compact_lane(selected_lane),
-        }
-
     required_sessions = int(selected_lane.get("required_sessions") or 0)
     try:
         required_trade_dates = tuple(

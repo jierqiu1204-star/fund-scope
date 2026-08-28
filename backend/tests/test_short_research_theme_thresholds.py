@@ -176,3 +176,5 @@ async def test_theme_refresh_is_idempotent(app) -> None:
     assert len(rows) == 1
     assert first["inserted"] >= 1
     assert second["inserted"] == 0
+    assert second["updated"] == 0
+    assert second["unchanged"] >= 1

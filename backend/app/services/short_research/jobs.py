@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
 from app.defaults.short_research import ASSET_TYPE_ETF, ASSET_TYPE_FUND
-from app.models.entities import EtfPriceHistory, JobRun
+from app.models.entities import EtfPriceHistory, EtfThemeProfile, JobRun
 from app.services.etf_exit_calibration import run_etf_exit_hyperopt
 from app.services.llm import LLMClient
 from app.services.market_data import ASIA_SHANGHAI, is_etf_exchange_trading_day
@@ -24,6 +24,12 @@ from app.services.short_research.coverage_policy import (
     ETF_SCORE_PUBLICATION_MIN_COVERAGE,
 )
 from app.services.short_research.etf_exit_credibility import run_etf_exit_credibility
+from app.services.short_research.etf_identity_facts import (
+    IdentityFactIngestionRequest,
+    IdentityFactProviderPage,
+    TaxonomyFactInput,
+    run_identity_fact_ingestion_slice,
+)
 from app.services.short_research.healthcheck import run_etf_strategy_healthcheck
 from app.services.short_research.history_readiness import (
     SCORE_WARMUP_SCOPE,
@@ -75,6 +81,7 @@ from app.services.workflows.short_research_data import (
 SHORT_RESEARCH_DAILY_ASSET_TYPES = [ASSET_TYPE_FUND, ASSET_TYPE_ETF]
 ETF_HISTORY_BACKFILL_ALLOWED_DAYS = (365, 730, 1095)
 ETF_CANONICAL_MIN_COVERAGE = 0.95
+ETF_TAXONOMY_FACT_RULE_VERSION = "etf_theme_taxonomy_fact_v1"
 
 
 def _count(value: Any, key: str) -> int:
@@ -326,6 +333,84 @@ async def daily_etf_universe_job(session: AsyncSession) -> dict[str, Any]:
 
 async def daily_etf_taxonomy_job(session: AsyncSession) -> dict[str, Any]:
     return await refresh_etf_theme_profiles(session)
+
+
+async def etf_taxonomy_fact_ingestion_job(
+    session: AsyncSession,
+) -> dict[str, Any]:
+    """Advance one bounded page from current taxonomy into immutable PIT facts."""
+
+    async def fetch_page(codes: tuple[str, ...]) -> IdentityFactProviderPage:
+        profiles = list(
+            (
+                await session.scalars(
+                    select(EtfThemeProfile).where(
+                        EtfThemeProfile.etf_code.in_(codes),
+                    )
+                )
+            ).all()
+        )
+        records = []
+        for profile in profiles:
+            raw_payload = {
+                "asset_bucket": profile.asset_bucket,
+                "theme_group": profile.theme_group,
+                "primary_theme": profile.primary_theme,
+                "secondary_themes": list(profile.secondary_themes_json or []),
+                "classification_source": profile.classification_source,
+                "classification_confidence": profile.classification_confidence,
+                "classification_reason": profile.classification_reason or "",
+            }
+            records.append(
+                TaxonomyFactInput(
+                    etf_code=profile.etf_code,
+                    external_source_id=(
+                        f"{ETF_TAXONOMY_FACT_RULE_VERSION}:"
+                        f"{profile.etf_code}:{profile.updated_at.isoformat()}"
+                    ),
+                    source=profile.classification_source,
+                    provider_version=ETF_TAXONOMY_FACT_RULE_VERSION,
+                    observed_at=profile.updated_at,
+                    confidence=profile.classification_confidence,
+                    rule_version=ETF_TAXONOMY_FACT_RULE_VERSION,
+                    asset_bucket=profile.asset_bucket,
+                    theme_group=profile.theme_group,
+                    primary_theme=profile.primary_theme,
+                    secondary_themes=list(profile.secondary_themes_json or []),
+                    classification_source=profile.classification_source,
+                    classification_reason=profile.classification_reason or "未提供分类说明",
+                    raw_payload=raw_payload,
+                )
+            )
+        return IdentityFactProviderPage(taxonomy_records=tuple(records))
+
+    result = await run_identity_fact_ingestion_slice(
+        session,
+        request=IdentityFactIngestionRequest(
+            scope=f"etf_taxonomy_facts:{date.today().isoformat()}",
+            target_page_size=20,
+            estimated_seconds_per_etf=0.1,
+        ),
+        fetch_page=fetch_page,
+    )
+    await session.commit()
+    persisted = result.persisted or None
+    return {
+        "status": result.status,
+        "stop_reason": result.stop_reason,
+        "selected_count": len(result.selected_codes),
+        "cursor_before": result.cursor_before,
+        "cursor_after": result.cursor_after,
+        "has_more": result.has_more,
+        "elapsed_seconds": result.elapsed_seconds,
+        "taxonomy_facts_inserted": (
+            persisted.taxonomy_facts_inserted if persisted is not None else 0
+        ),
+        "taxonomy_facts_existing": (
+            persisted.taxonomy_facts_existing if persisted is not None else 0
+        ),
+        "error_summary": result.error_summary,
+    }
 
 
 async def daily_short_research_fund_data_job(session: AsyncSession) -> dict[str, Any]:
