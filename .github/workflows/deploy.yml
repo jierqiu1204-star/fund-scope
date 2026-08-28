@@ -28,7 +28,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Prepare pushed source
-        timeout-minutes: 1
+        timeout-minutes: 4
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -60,10 +60,20 @@ jobs:
                 exit 1
                 ;;
             esac
-            curl --fail --silent --show-error \
-              --connect-timeout 10 --max-time 40 \
-              -H "Authorization: Bearer $GITHUB_TOKEN" \
-              "$download_url" -o "$archive"
+            archive_downloaded=false
+            for attempt in 1 2 3; do
+              if curl --fail --silent --show-error \
+                --connect-timeout 10 --max-time 55 \
+                --continue-at - \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                "$download_url" -o "$archive"; then
+                archive_downloaded=true
+                break
+              fi
+              printf 'Source archive download attempt %s failed; resuming partial download.\n' \
+                "$attempt" >&2
+            done
+            test "$archive_downloaded" = true
             tar -xzf "$archive" -C "$source_dir" --strip-components=1
             rsync -a --delete "$source_dir"/ "$GITHUB_WORKSPACE"/
           fi
