@@ -227,6 +227,11 @@ async def read_etf_v2_asset_inputs(
             rows_per_code=ETF_V2_MAXIMUM_HISTORY_SESSIONS,
             max_source_rows=len(page_codes) * ETF_V2_MAXIMUM_HISTORY_SESSIONS,
             decision_cutoff=decision_cutoff,
+            compatible_provider_versions=tuple(
+                pair
+                for pair in market_data.etf_decision_adjusted_provider_versions()
+                if pair[0] in {"eastmoney", "tickflow"}
+            ),
         )
         prices_by_code: dict[str, list[market_data.EtfAdjustedDailyFact]] = defaultdict(list)
         for fact in price_facts:

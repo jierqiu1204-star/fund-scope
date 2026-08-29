@@ -89,7 +89,11 @@ async def test_etf_v2_input_reader_pages_persisted_data_without_provider_calls(
         assert kwargs["cutoff"] == identity_cutoff
         return {"510001": taxonomy}
 
-    async def adjusted(*_args, etf_codes, **_kwargs):
+    async def adjusted(*_args, etf_codes, compatible_provider_versions, **_kwargs):
+        assert compatible_provider_versions == (
+            ("eastmoney", "eastmoney.push2his.kline.hfq_v1"),
+            ("tickflow", "tickflow.free.klines.backward_v1"),
+        )
         calls.append(etf_codes)
         return facts
 
