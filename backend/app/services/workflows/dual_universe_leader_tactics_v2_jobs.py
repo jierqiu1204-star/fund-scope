@@ -1139,6 +1139,7 @@ async def _materialize_etf(
         session,
         replay_date=snapshot.trade_date,
         decision_cutoff=snapshot.decision_cutoff,
+        identity_cutoff=local_as_of,
     )
     readiness = bundle.readiness_dict(threshold=ETF_COMPLETE_SCORE_COVERAGE)
     provider_health = snapshot.provider_health or bundle.provider_health

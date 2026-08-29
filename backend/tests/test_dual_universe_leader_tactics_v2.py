@@ -125,6 +125,50 @@ def test_missing_membership_hash_and_forbidden_raw_price_fail_closed() -> None:
     assert all(row.availability == "unavailable" for row in result.observations)
 
 
+def test_post_close_identity_cutoff_does_not_relax_market_data_cutoff() -> None:
+    item = _asset("510001")
+    identity_cutoff = item.source_cutoff + timedelta(hours=3)
+    membership = replace(
+        item.membership,
+        observed_at=item.source_cutoff + timedelta(hours=2),
+        fact_hash="",
+    )
+    membership = replace(
+        membership,
+        fact_hash=stable_contract_hash(membership.canonical_payload()),
+    )
+
+    accepted = screen_dual_universe(
+        (replace(item, membership=membership, identity_cutoff=identity_cutoff),)
+    )
+    rejected = screen_dual_universe((replace(item, membership=membership),))
+    late_bar = replace(item.bars[-1], observed_at=item.source_cutoff + timedelta(hours=1))
+    late_market_data = screen_dual_universe(
+        (
+            replace(
+                item,
+                bars=(*item.bars[:-1], late_bar),
+                membership=membership,
+                identity_cutoff=identity_cutoff,
+            ),
+        )
+    )
+
+    assert accepted.data_receipt_cutoff == identity_cutoff
+    assert all(
+        "membership_received_after_cutoff" not in row.exclusion_reasons
+        for row in accepted.observations
+    )
+    assert all(
+        "membership_received_after_cutoff" in row.exclusion_reasons
+        for row in rejected.observations
+    )
+    assert all(
+        "adjusted_bar_received_after_cutoff" in row.exclusion_reasons
+        for row in late_market_data.observations
+    )
+
+
 def test_common_gate_facts_keep_three_equal_core_components() -> None:
     items = tuple(_asset(f"51000{index}") for index in range(6))
     result = screen_dual_universe(items)

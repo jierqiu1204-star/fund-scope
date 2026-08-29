@@ -43,6 +43,7 @@ _T = TypeVar("_T")
 class V2EtfInputBundle:
     signal_date: date
     source_cutoff: datetime
+    identity_cutoff: datetime
     inputs: tuple[V2AssetInput, ...]
     universe_count: int
     adjusted_120_count: int
@@ -69,6 +70,7 @@ class V2EtfInputBundle:
             "schema_version": "leader_tactics_v2_etf_readiness_v1",
             "signal_date": self.signal_date.isoformat(),
             "data_cutoff": self.source_cutoff.isoformat(),
+            "identity_cutoff": self.identity_cutoff.isoformat(),
             "authoritative_universe": layer(self.universe_count),
             "adjusted_history_120": layer(self.adjusted_120_count),
             "adjusted_history_180": layer(self.adjusted_180_count),
@@ -176,12 +178,18 @@ async def read_etf_v2_asset_inputs(
     *,
     replay_date: date,
     decision_cutoff: datetime,
+    identity_cutoff: datetime | None = None,
     page_size: int = ETF_V2_INPUT_PAGE_SIZE,
 ) -> V2EtfInputBundle:
     """Load one complete ETF cross-section through bounded persisted-data pages."""
 
     if decision_cutoff.tzinfo is None or decision_cutoff.utcoffset() is None:
         raise ValueError("decision_cutoff must be timezone-aware")
+    identity_cutoff = identity_cutoff or decision_cutoff
+    if identity_cutoff.tzinfo is None or identity_cutoff.utcoffset() is None:
+        raise ValueError("identity_cutoff must be timezone-aware")
+    if identity_cutoff < decision_cutoff:
+        raise ValueError("identity_cutoff cannot precede decision_cutoff")
     if page_size < 1 or page_size > ETF_V2_INPUT_PAGE_SIZE:
         raise ValueError(f"page_size must be between 1 and {ETF_V2_INPUT_PAGE_SIZE}")
     seed = await load_point_in_time_etf_decision_inputs(
@@ -199,9 +207,10 @@ async def read_etf_v2_asset_inputs(
     taxonomy = await _taxonomy_by_code(
         session,
         codes=codes,
-        cutoff=decision_cutoff,
+        cutoff=identity_cutoff,
     )
     v2_cutoff = _utc_naive(decision_cutoff)
+    v2_identity_cutoff = _utc_naive(identity_cutoff)
     inputs: list[V2AssetInput] = []
     exclusions: Counter[str] = Counter()
     provider_counts: Counter[str] = Counter()
@@ -227,7 +236,7 @@ async def read_etf_v2_asset_inputs(
                 item,
                 taxonomy=taxonomy.get(item.asset_code),
                 signal_date=replay_date,
-                source_cutoff=v2_cutoff,
+                source_cutoff=v2_identity_cutoff,
             )
             if membership is None:
                 exclusions["missing_pit_theme_membership"] += 1
@@ -251,6 +260,7 @@ async def read_etf_v2_asset_inputs(
                         asset_name=asset_name,
                         signal_date=replay_date,
                         source_cutoff=v2_cutoff,
+                        identity_cutoff=v2_identity_cutoff,
                         bars=(),
                         membership=membership,
                         input_unavailable_reasons=(reason,),
@@ -265,6 +275,7 @@ async def read_etf_v2_asset_inputs(
                 series,
                 asset_name=asset_name,
                 source_cutoff=v2_cutoff,
+                identity_cutoff=v2_identity_cutoff,
                 membership=membership,
             )
             for reason in adapted.input_unavailable_reasons:
@@ -278,6 +289,7 @@ async def read_etf_v2_asset_inputs(
     return V2EtfInputBundle(
         signal_date=replay_date,
         source_cutoff=v2_cutoff,
+        identity_cutoff=v2_identity_cutoff,
         inputs=tuple(inputs),
         universe_count=len(metadata),
         adjusted_120_count=adjusted_120_count,

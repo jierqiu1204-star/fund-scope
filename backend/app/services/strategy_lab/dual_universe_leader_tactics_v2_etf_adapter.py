@@ -49,6 +49,7 @@ def etf_series_to_v2_asset(
     *,
     asset_name: str,
     source_cutoff: datetime,
+    identity_cutoff: datetime | None = None,
     membership: V2PITMembership | None,
 ) -> V2AssetInput:
     """Map a proven ETF replay series without invoking a provider.
@@ -104,6 +105,7 @@ def etf_series_to_v2_asset(
         asset_name=asset_name,
         signal_date=bars[-1].trade_date if bars else date.min,
         source_cutoff=source_cutoff,
+        identity_cutoff=identity_cutoff,
         bars=tuple(bars),
         membership=membership,
         input_unavailable_reasons=tuple(sorted(set(reasons))),

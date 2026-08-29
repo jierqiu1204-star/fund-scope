@@ -44,7 +44,8 @@ async def test_etf_v2_input_reader_pages_persisted_data_without_provider_calls(
     monkeypatch,
 ) -> None:
     signal_date = date(2026, 8, 4)
-    decision_cutoff = datetime(2026, 8, 4, 23, tzinfo=ZoneInfo("Asia/Shanghai"))
+    decision_cutoff = datetime(2026, 8, 4, 15, tzinfo=ZoneInfo("Asia/Shanghai"))
+    identity_cutoff = datetime(2026, 8, 4, 19, tzinfo=ZoneInfo("Asia/Shanghai"))
     metadata = _metadata(signal_date, decision_cutoff)
     facts = tuple(
         market_data.EtfAdjustedDailyFact(
@@ -61,13 +62,13 @@ async def test_etf_v2_input_reader_pages_persisted_data_without_provider_calls(
             research_price_basis="total_return_adjusted",
             data_provider="eastmoney",
             provider_version="eastmoney.push2his.kline.hfq_v1",
-            source_timestamp=datetime.combine(trade_date, datetime.min.time()).replace(hour=8),
+            source_timestamp=datetime.combine(trade_date, datetime.min.time()).replace(hour=6),
             adjustment_version="eastmoney.push2his.kline.hfq_v1",
             decision_eligible=True,
             decision_ineligibility_reason=None,
             revision_hash=f"revision-{index}",
-            first_seen_at=datetime.combine(trade_date, datetime.min.time()).replace(hour=8),
-            observed_at=datetime.combine(trade_date, datetime.min.time()).replace(hour=8),
+            first_seen_at=datetime.combine(trade_date, datetime.min.time()).replace(hour=6),
+            observed_at=datetime.combine(trade_date, datetime.min.time()).replace(hour=6),
         )
         for index, trade_date in enumerate(_sessions(signal_date, 180), 1)
     )
@@ -77,14 +78,15 @@ async def test_etf_v2_input_reader_pages_persisted_data_without_provider_calls(
         provider_version="taxonomy-v1",
         rule_version="rule-v1",
         fact_hash="d" * 64,
-        observed_at=datetime(2026, 8, 4, 14),
+        observed_at=datetime(2026, 8, 4, 10),
     )
     calls: list[tuple[str, ...]] = []
 
     async def seed(*_args, **_kwargs):
         return SimpleNamespace(authoritative_universe=(metadata,))
 
-    async def taxonomy_facts(*_args, **_kwargs):
+    async def taxonomy_facts(*_args, **kwargs):
+        assert kwargs["cutoff"] == identity_cutoff
         return {"510001": taxonomy}
 
     async def adjusted(*_args, etf_codes, **_kwargs):
@@ -103,6 +105,7 @@ async def test_etf_v2_input_reader_pages_persisted_data_without_provider_calls(
         object(),  # type: ignore[arg-type]
         replay_date=signal_date,
         decision_cutoff=decision_cutoff,
+        identity_cutoff=identity_cutoff,
         page_size=1,
     )
 
@@ -115,4 +118,7 @@ async def test_etf_v2_input_reader_pages_persisted_data_without_provider_calls(
     assert result.inputs[0].membership is not None
     assert result.inputs[0].membership.group_id == "theme:AI应用"
     assert result.inputs[0].source_cutoff.tzinfo is None
+    assert result.inputs[0].identity_cutoff == datetime(2026, 8, 4, 11)
+    assert result.source_cutoff == datetime(2026, 8, 4, 7)
+    assert result.identity_cutoff == datetime(2026, 8, 4, 11)
     assert result.provider_health == (("eastmoney", "healthy"),)

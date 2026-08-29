@@ -117,8 +117,8 @@ def test_etf_leader_materialization_retries_bounded_persisted_reads(app) -> None
     job = scheduler.get_job("dual_universe_leader_tactics_v2_materialize_etf")
     assert job is not None
     fields = {field.name: str(field) for field in job.trigger.fields}
-    assert fields["day_of_week"] == "tue-sat"
-    assert fields["hour"] == "9-10"
+    assert fields["day_of_week"] == "mon-sat"
+    assert fields["hour"] == "9-10,15-23"
     assert fields["minute"] == "10,30,50"
     assert job.max_instances == 1
     assert job.coalesce is True

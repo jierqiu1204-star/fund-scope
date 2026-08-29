@@ -502,8 +502,12 @@ async def test_etf_materialization_reads_persisted_pit_inputs_and_writes_manifes
         calls.append("existing")
         return None
 
-    async def read_inputs(*_args, **_kwargs):
+    async def read_inputs(*_args, **kwargs):
         calls.append("inputs")
+        assert kwargs["decision_cutoff"] == snapshot.decision_cutoff
+        assert kwargs["identity_cutoff"] == datetime.fromisoformat(
+            "2026-08-05T09:10:00+08:00"
+        )
         return bundle
 
     def screen(*_args, **_kwargs):

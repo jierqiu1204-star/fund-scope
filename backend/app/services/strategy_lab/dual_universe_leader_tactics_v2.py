@@ -689,6 +689,7 @@ class V2AssetInput:
     theme_memberships: tuple[V2PITMembership, ...] = ()
     alternative_memberships: tuple[V2PITMembership, ...] = ()
     rejected_contexts: tuple[tuple[str, str], ...] = ()
+    identity_cutoff: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -1002,7 +1003,7 @@ def _context_rejection_reason(
         return "membership_effective_after_signal"
     if membership.effective_to is not None and membership.effective_to < evaluation_date:
         return "membership_expired_before_signal"
-    if membership.observed_at > item.source_cutoff:
+    if membership.observed_at > (item.identity_cutoff or item.source_cutoff):
         return "membership_received_after_cutoff"
     if membership.snapshot_complete is False:
         return "partial_theme_capture"
@@ -1157,7 +1158,7 @@ def _membership_reasons(item: V2AssetInput) -> list[str]:
         reasons.append("membership_effective_after_signal")
     if membership.effective_to is not None and membership.effective_to < membership_date:
         reasons.append("membership_expired_before_signal")
-    if membership.observed_at > item.source_cutoff:
+    if membership.observed_at > (item.identity_cutoff or item.source_cutoff):
         reasons.append("membership_received_after_cutoff")
     if not membership.fact_hash:
         reasons.append("missing_membership_fact_hash")
@@ -2361,12 +2362,21 @@ def screen_dual_universe(
     universes = {item.universe for item in items}
     dates = {item.signal_date for item in items}
     cutoffs = {item.source_cutoff for item in items}
+    identity_cutoffs = {item.identity_cutoff or item.source_cutoff for item in items}
     modes = {item.decision_mode for item in items}
     membership_dates = {item.membership_evaluation_date or item.signal_date for item in items}
     next_eligible_dates = {item.next_eligible_date for item in items}
     if any(
         len(values) != 1
-        for values in (universes, dates, cutoffs, modes, membership_dates, next_eligible_dates)
+        for values in (
+            universes,
+            dates,
+            cutoffs,
+            identity_cutoffs,
+            modes,
+            membership_dates,
+            next_eligible_dates,
+        )
     ):
         raise V2ContractError(
             "screen inputs must share universe, signal date, cutoff and decision timing"
@@ -3085,10 +3095,11 @@ def screen_dual_universe(
         for reason in row.exclusion_reasons:
             exclusion_counts[reason] += 1
     input_hash = _incremental_input_hash(ordered)
+    data_receipt_cutoff = next(iter(identity_cutoffs))
     manifest = build_v2_manifest(
         universe=universe,
         decision_cutoff=next(iter(cutoffs)),
-        data_receipt_cutoff=next(iter(cutoffs)),
+        data_receipt_cutoff=data_receipt_cutoff,
         input_hash=input_hash,
         code_version=code_version,
         exclusions=tuple(sorted(exclusion_counts.items())),
@@ -3102,7 +3113,7 @@ def screen_dual_universe(
         manifest_hash=manifest.manifest_hash,
         input_hash=input_hash,
         exclusions=tuple(sorted(exclusion_counts.items())),
-        data_receipt_cutoff=next(iter(cutoffs)),
+        data_receipt_cutoff=data_receipt_cutoff,
         code_version=code_version,
         provider_health=provider_health,
     )

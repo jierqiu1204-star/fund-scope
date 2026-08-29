@@ -170,9 +170,9 @@ def test_v2_scheduler_registers_only_enabled_stages(
 
     etf_materialize = v2_jobs.get(scheduler_module.V2_ETF_MATERIALIZE_JOB_NAME)
     if etf_materialize is not None:
-        assert _trigger_field(etf_materialize, "day_of_week") == "tue-sat"
-        assert _trigger_field(etf_materialize, "hour") == "9"
-        assert _trigger_field(etf_materialize, "minute") == "10"
+        assert _trigger_field(etf_materialize, "day_of_week") == "mon-sat"
+        assert _trigger_field(etf_materialize, "hour") == "9-10,15-23"
+        assert _trigger_field(etf_materialize, "minute") == "10,30,50"
         assert _trigger_field(etf_materialize, "second") == "0"
 
     materialize = v2_jobs.get(scheduler_module.V2_MATERIALIZE_JOB_NAME)
