@@ -556,6 +556,7 @@ async def _eligible_depths(
     *,
     request: BoundedHistorySyncRequest,
 ) -> dict[str, int]:
+    projection_depths: dict[str, int] = {}
     if request.selection_policy == RESEARCH_DEPTH_SELECTION_POLICY:
         target_sessions = request.required_trade_dates
     else:
@@ -606,6 +607,27 @@ async def _eligible_depths(
         )
     depth_rows = (await session.execute(depth_statement)).all()
     depths = {str(code): int(count or 0) for code, count in depth_rows}
+    if request.selection_policy == RESEARCH_DEPTH_SELECTION_POLICY:
+        projection_rows = (
+            await session.execute(
+                select(
+                    EtfPriceHistory.etf_code,
+                    func.count(func.distinct(EtfPriceHistory.trade_date)),
+                )
+                .where(
+                    EtfPriceHistory.etf_code.in_(request.eligible_codes),
+                    EtfPriceHistory.trade_date.in_(target_sessions),
+                    EtfPriceHistory.decision_eligible.is_(True),
+                    EtfPriceHistory.research_price_basis == request.price_basis,
+                    EtfPriceHistory.source_timestamp.is_not(None),
+                    _accepted_adjusted_provider_filter(),
+                )
+                .group_by(EtfPriceHistory.etf_code)
+            )
+        ).all()
+        projection_depths = {
+            str(code): int(count or 0) for code, count in projection_rows
+        }
     watchlist_rows = (
         await session.execute(
             select(TradableEtf.code, TradableEtf.is_watchlist).where(
@@ -617,7 +639,10 @@ async def _eligible_depths(
     def order_key(item: tuple[str, bool]) -> tuple[int | bool | str, ...]:
         code, is_watchlist = item
         if request.selection_policy == RESEARCH_DEPTH_SELECTION_POLICY:
-            return (-depths.get(code, 0), not is_watchlist, code)
+            migration_ready = (
+                projection_depths.get(code, 0) >= request.required_sessions
+            )
+            return (not migration_ready, -depths.get(code, 0), not is_watchlist, code)
         return (not is_watchlist, depths.get(code, 0), code)
 
     ordered = sorted(

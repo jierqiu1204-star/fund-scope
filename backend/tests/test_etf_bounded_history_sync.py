@@ -193,6 +193,46 @@ async def test_research_depth_preflight_requires_immutable_revisions(
 
 
 @pytest.mark.asyncio
+async def test_research_depth_prioritizes_projection_only_migration(app) -> None:
+    codes = ("510096", "510097")
+    required_dates = (date(2026, 7, 1), date(2026, 7, 2), date(2026, 7, 3))
+    async with app.state.db.session() as session:
+        session.add_all([_etf(code) for code in codes])
+        for trade_date in required_dates:
+            session.add(
+                EtfPriceHistory(
+                    etf_code="510097",
+                    trade_date=trade_date,
+                    open=1.0,
+                    high=1.0,
+                    low=1.0,
+                    close=1.0,
+                    volume=1_000_000.0,
+                    turnover=100_000_000.0,
+                    pct_change=0.0,
+                    research_adjusted_value=1.0,
+                    research_price_basis="total_return_adjusted",
+                    data_provider="eastmoney",
+                    provider_version="eastmoney.push2his.kline.hfq_v1",
+                    source_timestamp=datetime(2026, 7, 3, 15, 0),
+                    adjustment_version="eastmoney.push2his.kline.hfq_v1",
+                    decision_eligible=True,
+                )
+            )
+        await session.commit()
+
+        depths = await bounded_history_sync._eligible_depths(
+            session,
+            request=_research_request(
+                eligible_codes=codes,
+                required_sessions=3,
+            ),
+        )
+
+    assert list(depths) == ["510097", "510096"]
+
+
+@pytest.mark.asyncio
 async def test_research_depth_fetches_only_the_missing_required_span(app) -> None:
     code = "510095"
     calls: list[tuple[date, date, int, tuple[date, ...]]] = []
