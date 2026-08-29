@@ -233,6 +233,57 @@ async def test_research_depth_prioritizes_projection_only_migration(app) -> None
 
 
 @pytest.mark.asyncio
+async def test_projection_migration_fills_the_bounded_required_window(app) -> None:
+    code = "510098"
+    required_dates = tuple(
+        date(2026, 5, 1) + timedelta(days=offset) for offset in range(45)
+    )
+    request = replace(
+        _research_request(eligible_codes=(code,), required_sessions=len(required_dates)),
+        required_trade_dates=required_dates,
+        from_date=required_dates[0],
+        to_date=required_dates[-1],
+    )
+    async with app.state.db.session() as session:
+        session.add(_etf(code))
+        session.add_all(
+            EtfPriceHistory(
+                etf_code=code,
+                trade_date=trade_date,
+                open=1.0,
+                high=1.0,
+                low=1.0,
+                close=1.0,
+                volume=1_000_000.0,
+                turnover=100_000_000.0,
+                pct_change=0.0,
+                research_adjusted_value=1.0,
+                research_price_basis="total_return_adjusted",
+                data_provider="eastmoney",
+                provider_version="eastmoney.push2his.kline.hfq_v1",
+                source_timestamp=datetime(2026, 7, 1, 15, 0),
+                adjustment_version="eastmoney.push2his.kline.hfq_v1",
+                decision_eligible=True,
+            )
+            for trade_date in required_dates
+        )
+        await session.commit()
+
+        migrated = await bounded_history_sync._backfill_revisions_from_projection(
+            session,
+            code=code,
+            request=request,
+        )
+        await session.commit()
+        revision_count = await session.scalar(
+            select(func.count()).select_from(EtfAdjustedPriceRevision)
+        )
+
+    assert migrated == len(required_dates)
+    assert revision_count == len(required_dates)
+
+
+@pytest.mark.asyncio
 async def test_research_depth_fetches_only_the_missing_required_span(app) -> None:
     code = "510095"
     calls: list[tuple[date, date, int, tuple[date, ...]]] = []

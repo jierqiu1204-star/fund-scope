@@ -707,30 +707,34 @@ async def _backfill_revisions_from_projection(
                     _accepted_adjusted_provider_filter(),
                 )
                 .order_by(EtfPriceHistory.trade_date.asc())
-                .limit(MAX_ADJUSTED_PRICE_PERSISTENCE_PAGE_ROWS)
             )
         ).all()
     )
     if not projections:
         return 0
-    persisted = await persist_etf_price_history_page(
-        session,
-        etf_code=code,
-        rows=tuple(
-            (
-                row.trade_date,
-                {
-                    **{
-                        field: getattr(row, field)
-                        for field in _ADJUSTED_PRICE_MATERIAL_FIELDS
+    revision_rows = 0
+    for offset in range(0, len(projections), MAX_ADJUSTED_PRICE_PERSISTENCE_PAGE_ROWS):
+        persisted = await persist_etf_price_history_page(
+            session,
+            etf_code=code,
+            rows=tuple(
+                (
+                    row.trade_date,
+                    {
+                        **{
+                            field: getattr(row, field)
+                            for field in _ADJUSTED_PRICE_MATERIAL_FIELDS
+                        },
+                        "source_timestamp": row.source_timestamp,
                     },
-                    "source_timestamp": row.source_timestamp,
-                },
-            )
-            for row in projections
-        ),
-    )
-    return persisted.revision_rows
+                )
+                for row in projections[
+                    offset : offset + MAX_ADJUSTED_PRICE_PERSISTENCE_PAGE_ROWS
+                ]
+            ),
+        )
+        revision_rows += persisted.revision_rows
+    return revision_rows
 
 
 async def _fetch_history_window(
