@@ -170,6 +170,26 @@ async def test_raw_only_and_sina_never_satisfy_publication_policy() -> None:
 
 
 @pytest.mark.asyncio
+async def test_empty_trading_session_is_short_history_not_provider_failure() -> None:
+    async def empty(*_args: object) -> list[dict[str, float | str]]:
+        return []
+
+    async with PublicationAdjustedHistoryFetcher(
+        attempt_timeout_seconds=0.1,
+        minimum_eligible_rows=1,
+        providers=(("tickflow", empty),),
+    ) as fetch:
+        result = await fetch("159521", date(2026, 7, 20), date(2026, 7, 20))
+
+    assert result.rows == []
+    assert result.provider_health is not None
+    health = result.provider_health["providers"]["tickflow"]
+    assert health["short_history_count"] == 1
+    assert health["consecutive_failures"] == 0
+    assert health["circuit_state"] == "closed"
+
+
+@pytest.mark.asyncio
 async def test_external_cancellation_leaves_no_provider_task() -> None:
     started = asyncio.Event()
     cancelled = False

@@ -237,7 +237,26 @@ class PublicationAdjustedHistoryFetcher:
                     to_date=to_date,
                 )
                 if not accepted_rows:
-                    raise ValueError("no_provenance_valid_adjusted_rows")
+                    if rows:
+                        raise ValueError("no_provenance_valid_adjusted_rows")
+                    health["consecutive_failures"] = 0
+                    health["latency_ms"] = round(
+                        (time.monotonic() - started) * 1000,
+                        3,
+                    )
+                    health["retry_after"] = None
+                    health["last_error"] = None
+                    health["short_history_count"] = (
+                        int(health["short_history_count"] or 0) + 1
+                    )
+                    if deepest_partial is None:
+                        deepest_partial = (0, provider, [], attempted_index)
+                    errors.append(
+                        f"{provider}:eligible_rows_below_minimum:"
+                        f"0<{minimum_eligible_rows}"
+                    )
+                    attempted_index += 1
+                    continue
             except asyncio.CancelledError:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
