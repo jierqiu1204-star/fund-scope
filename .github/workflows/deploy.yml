@@ -15,11 +15,11 @@ permissions:
 
 env:
   COMPOSE_FILE: ${{ vars.VPS_COMPOSE_FILE || 'docker-compose.yml' }}
-  BACKUP_KEEP_COUNT: ${{ vars.VPS_BACKUP_KEEP_COUNT || '3' }}
+  BACKUP_KEEP_COUNT: ${{ vars.VPS_BACKUP_KEEP_COUNT || '2' }}
   BACKUP_RETENTION_DAYS: ${{ vars.VPS_BACKUP_RETENTION_DAYS || '7' }}
   BACKUP_STALE_TMP_MINUTES: ${{ vars.VPS_BACKUP_STALE_TMP_MINUTES || '360' }}
   BACKUP_MIN_FREE_BYTES: ${{ vars.VPS_BACKUP_MIN_FREE_BYTES || '2147483648' }}
-  BACKUP_ESTIMATED_BYTES: ${{ vars.VPS_BACKUP_ESTIMATED_BYTES || '3221225472' }}
+  BACKUP_ESTIMATED_BYTES: ${{ vars.VPS_BACKUP_ESTIMATED_BYTES || '5368709120' }}
   BACKUP_COMPRESSION: ${{ vars.VPS_BACKUP_COMPRESSION || 'zstd:1' }}
 
 jobs:
@@ -277,4 +277,5 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           sudo docker image rm "$candidate_image" 2>/dev/null || true
           sudo docker image prune -f
+          sudo docker builder prune -af
           sudo docker compose -f "$COMPOSE_FILE" ps

@@ -159,10 +159,12 @@ def test_deploy_backs_up_before_replacing_source() -> None:
     assert "previous_schema_head" in workflow
     assert "previous_revision_count" in workflow
     assert "rollback-metadata" in workflow
-    assert "VPS_BACKUP_KEEP_COUNT || '3'" in workflow
+    assert "VPS_BACKUP_KEEP_COUNT || '2'" in workflow
     assert "VPS_BACKUP_MIN_FREE_BYTES || '2147483648'" in workflow
+    assert "VPS_BACKUP_ESTIMATED_BYTES || '5368709120'" in workflow
     assert "VPS_BACKUP_COMPRESSION || 'zstd:1'" in workflow
     assert 'BACKUP_COMPRESSION="$BACKUP_COMPRESSION"' in workflow
+    assert "docker builder prune -af" in workflow
 
 
 def test_deploy_checks_single_head_before_migration_and_health_afterward() -> None:

@@ -73,6 +73,7 @@ LIVE_RANKING_LIMIT_MAX = 200
 INTRADAY_CLEANUP_BATCH_SIZE = 2_000
 INTRADAY_CLEANUP_BATCH_SIZE_MAX = 5_000
 INTRADAY_CLEANUP_GROUP_SCAN_LIMIT = 64
+INTRADAY_CLEANUP_TRADE_DATE_SCAN_LIMIT = 2
 INTRADAY_CLEANUP_PROTECTED_ROW_ALLOWANCE = 1_000
 INTRADAY_CLEANUP_ADVISORY_LOCK_KEY = 2_026_081_001
 POSTGRES_DISTINCT_ON_MIN_CODES = 100
@@ -1207,25 +1208,41 @@ async def summarize_and_cleanup_intraday_quotes(
             EtfIntradayQuoteEvidenceRef.quote_id == EtfIntradayQuote.id
         )
     )
-    candidate_groups = (
-        await session.execute(
-            select(
-                EtfIntradayQuote.etf_code.label("etf_code"),
-                EtfIntradayQuote.trade_date.label("trade_date"),
-                func.count(EtfIntradayQuote.id).label("unprotected_count"),
-            )
+    # Keep each bounded slice on the oldest indexed trade dates. Grouping every
+    # expired row made the job slower as the table grew, so it could not catch up.
+    candidate_trade_dates = (
+        await session.scalars(
+            select(EtfIntradayQuote.trade_date)
+            .distinct()
             .where(
                 EtfIntradayQuote.trade_date < cutoff_date,
                 ~protected_ref_exists,
             )
-            .group_by(EtfIntradayQuote.etf_code, EtfIntradayQuote.trade_date)
-            .order_by(
-                EtfIntradayQuote.trade_date.asc(),
-                EtfIntradayQuote.etf_code.asc(),
-            )
-            .limit(INTRADAY_CLEANUP_GROUP_SCAN_LIMIT)
+            .order_by(EtfIntradayQuote.trade_date.asc())
+            .limit(INTRADAY_CLEANUP_TRADE_DATE_SCAN_LIMIT)
         )
     ).all()
+    candidate_groups = []
+    if candidate_trade_dates:
+        candidate_groups = (
+            await session.execute(
+                select(
+                    EtfIntradayQuote.etf_code.label("etf_code"),
+                    EtfIntradayQuote.trade_date.label("trade_date"),
+                    func.count(EtfIntradayQuote.id).label("unprotected_count"),
+                )
+                .where(
+                    EtfIntradayQuote.trade_date.in_(candidate_trade_dates),
+                    ~protected_ref_exists,
+                )
+                .group_by(EtfIntradayQuote.etf_code, EtfIntradayQuote.trade_date)
+                .order_by(
+                    EtfIntradayQuote.trade_date.asc(),
+                    EtfIntradayQuote.etf_code.asc(),
+                )
+                .limit(INTRADAY_CLEANUP_GROUP_SCAN_LIMIT)
+            )
+        ).all()
     if not candidate_groups:
         checkpoint = await session.get(EtfIntradayCleanupCheckpoint, 1)
         if checkpoint is None:

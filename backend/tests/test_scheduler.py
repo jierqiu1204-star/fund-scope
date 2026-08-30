@@ -227,7 +227,7 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     assert trigger_field(etf_exit_hyperopt, "hour") == "23"
     assert trigger_field(etf_exit_hyperopt, "minute") == "45"
     assert trigger_field(intraday_etf_cleanup, "hour") == "1-6"
-    assert trigger_field(intraday_etf_cleanup, "minute") == "20"
+    assert trigger_field(intraday_etf_cleanup, "minute") == "0,10,20,30,40,50"
     assert trigger_field(database_statistics, "hour") == "4"
     assert trigger_field(database_statistics, "minute") == "45"
     assert database_statistics.max_instances == 1

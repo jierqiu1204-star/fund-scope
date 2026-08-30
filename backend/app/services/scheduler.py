@@ -659,7 +659,7 @@ def register_default_jobs(
         args=[db, "intraday_etf_cleanup", intraday_etf_retention_job],
         day_of_week="mon-sun",
         hour="1-6",
-        minute=20,
+        minute="0,10,20,30,40,50",
         id="intraday_etf_cleanup",
         max_instances=1,
         coalesce=True,
