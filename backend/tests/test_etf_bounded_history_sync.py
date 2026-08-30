@@ -400,6 +400,27 @@ async def test_research_depth_short_history_is_cooled_down_without_losing_denomi
     request = _research_request(eligible_codes=(code,))
     async with app.state.db.session() as session:
         session.add(_etf(code))
+        for trade_date in request.required_trade_dates[:2]:
+            session.add(
+                EtfPriceHistory(
+                    etf_code=code,
+                    trade_date=trade_date,
+                    open=1.0,
+                    high=1.0,
+                    low=1.0,
+                    close=1.0,
+                    volume=1_000_000.0,
+                    turnover=100_000_000.0,
+                    pct_change=0.0,
+                    research_adjusted_value=1.0,
+                    research_price_basis="total_return_adjusted",
+                    data_provider="eastmoney",
+                    provider_version="eastmoney.push2his.kline.hfq_v1",
+                    source_timestamp=datetime(2026, 7, 2, 15, 0),
+                    adjustment_version="eastmoney.push2his.kline.hfq_v1",
+                    decision_eligible=True,
+                )
+            )
         await session.commit()
         first = await run_bounded_history_sync_slice(
             session,
@@ -491,8 +512,11 @@ async def test_research_depth_empty_missing_session_is_cooled_down(app) -> None:
     assert first.status == "partial"
     assert observation is not None
     assert observation.status == "source_history_shortfall"
-    assert observation.eligible_session_count == 0
+    assert observation.eligible_session_count == 2
     assert observation.retry_after is not None
+    assert observation.evidence_json["returned_eligible_sessions"] == 0
+    assert observation.evidence_json["requested_sessions"] == 3
+    assert observation.evidence_json["covered_required_sessions"] == 2
     assert second.stop_reason == "history_availability_cooldown"
     assert second.attempted_codes == ()
     assert calls == [code]
