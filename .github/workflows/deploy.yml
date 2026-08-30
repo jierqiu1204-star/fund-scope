@@ -37,7 +37,8 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE"
           rm -f "$GITHUB_WORKSPACE/.git/index.lock"
           auth_header=$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')
-          if git -C "$GITHUB_WORKSPACE" cat-file -e "$GITHUB_SHA^{commit}" 2>/dev/null; then
+          if timeout 10 env GIT_NO_LAZY_FETCH=1 git -C "$GITHUB_WORKSPACE" \
+            cat-file -e "$GITHUB_SHA^{commit}" 2>/dev/null; then
             timeout 55 git -C "$GITHUB_WORKSPACE" \
               -c http.extraHeader="AUTHORIZATION: basic $auth_header" \
               checkout --detach --force "$GITHUB_SHA"
