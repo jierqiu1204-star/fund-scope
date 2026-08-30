@@ -244,11 +244,9 @@ async def test_research_completion_waits_for_authoritative_listing_metadata(
 async def test_research_depth_skips_weekend_active_lease_and_invalid_universe(
     monkeypatch,
 ) -> None:
-    weekend = await coordinator.run_post_publication_etf_research_history_slice(
-        object(),  # type: ignore[arg-type]
-        target_date=date(2026, 7, 25),
+    assert coordinator._latest_completed_etf_session(date(2026, 7, 25)) == date(
+        2026, 7, 24
     )
-    assert weekend["reason"] == "not_etf_exchange_trading_day"
 
     async def active_lease(_session: object) -> object:
         return object()

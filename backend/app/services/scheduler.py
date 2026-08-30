@@ -774,7 +774,7 @@ def register_default_jobs(
             "post_publication_etf_research_history",
             post_publication_etf_research_history_job,
         ],
-        day_of_week="mon-fri",
+        day_of_week="mon-sun",
         hour=23,
         minute="0-28/2",
         id="post_publication_etf_research_history",

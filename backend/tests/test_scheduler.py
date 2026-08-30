@@ -208,7 +208,7 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     assert trigger_field(production_etf_pit_capture, "minute") == "*/2"
     assert production_etf_pit_capture.max_instances == 1
     assert production_etf_pit_capture.coalesce is True
-    assert trigger_field(research_history, "day_of_week") == "mon-fri"
+    assert trigger_field(research_history, "day_of_week") == "mon-sun"
     assert trigger_field(research_history, "hour") == "23"
     assert trigger_field(research_history, "minute") == "0-28/2"
     assert research_history.max_instances == 1

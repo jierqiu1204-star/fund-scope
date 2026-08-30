@@ -175,6 +175,15 @@ def _deep_telemetry_contract_hash() -> str:
     )
 
 
+def _latest_completed_etf_session(value: date) -> date | None:
+    candidate = value
+    for _ in range(15):
+        if is_etf_exchange_trading_day(candidate):
+            return candidate
+        candidate -= timedelta(days=1)
+    return None
+
+
 def _lane_completion_gate_passed(lane: Mapping[str, Any]) -> bool:
     explicit = lane.get("completion_gate_passed")
     if isinstance(explicit, bool):
@@ -291,13 +300,14 @@ async def run_post_publication_etf_research_history_slice(
     *,
     target_date: date | None = None,
 ) -> dict[str, Any]:
-    effective_date = target_date or datetime.now(ASIA_SHANGHAI).date()
-    if not is_etf_exchange_trading_day(effective_date):
+    requested_date = target_date or datetime.now(ASIA_SHANGHAI).date()
+    effective_date = _latest_completed_etf_session(requested_date)
+    if effective_date is None:
         return {
             "asset_type": ASSET_TYPE_ETF,
             "status": "skipped",
-            "reason": "not_etf_exchange_trading_day",
-            "target_date": effective_date.isoformat(),
+            "reason": "completed_etf_session_unavailable",
+            "target_date": requested_date.isoformat(),
         }
     active_lease = await _active_history_lease(session)
     if active_lease is not None:

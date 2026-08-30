@@ -111,6 +111,7 @@ from app.services.workflows.dual_universe_leader_tactics_v2 import (
     run_v2_capture_batch,
     run_v2_fact_capture_batch,
 )
+from app.services.workflows.etf_history_readiness import read_etf_history_readiness
 
 V2_CAPTURE_JOB_NAME = "dual_universe_leader_tactics_v2_capture"
 V2_FINE_THEME_CAPTURE_JOB_NAME = "dual_universe_leader_tactics_v2_capture_fine_themes"
@@ -176,6 +177,22 @@ def _latest_completed_trading_date(local_now: datetime) -> date | None:
             return candidate
         candidate -= timedelta(days=1)
     return None
+
+
+async def _etf_leader_seasoned_codes(
+    session: AsyncSession,
+    *,
+    signal_date: date,
+) -> tuple[str, ...]:
+    readiness = await read_etf_history_readiness(
+        session,
+        target_date=signal_date,
+        horizons=(1,),
+    )
+    return tuple(
+        str(code)
+        for code in (readiness.get("contract_depth") or {}).get("cohort_codes") or ()
+    )
 
 
 def _capture_manifest_hash(
@@ -1135,11 +1152,24 @@ async def _materialize_etf(
             "required_memory_bytes": V2_ETF_MIN_MATERIALIZATION_HEADROOM_BYTES,
             "research_only": True,
         }
+    seasoned_codes = await _etf_leader_seasoned_codes(
+        session,
+        signal_date=snapshot.trade_date,
+    )
+    if not seasoned_codes:
+        return {
+            "status": "waiting",
+            "job_status": "partial",
+            "signal_date": snapshot.trade_date.isoformat(),
+            "unavailable_reason": "etf_seasoned_history_cohort_unavailable",
+            "research_only": True,
+        }
     bundle = await read_etf_v2_asset_inputs(
         session,
         replay_date=snapshot.trade_date,
         decision_cutoff=snapshot.decision_cutoff,
         identity_cutoff=local_as_of,
+        eligible_codes=seasoned_codes,
     )
     readiness = bundle.readiness_dict(threshold=ETF_COMPLETE_SCORE_COVERAGE)
     provider_health = snapshot.provider_health or bundle.provider_health

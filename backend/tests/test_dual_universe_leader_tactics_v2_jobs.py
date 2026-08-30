@@ -12,6 +12,15 @@ from app.services.workflows import dual_universe_leader_tactics_v2_jobs as jobs
 from app.services.workflows.dual_universe_leader_tactics_v2 import AshareReadinessReport
 
 
+@pytest.fixture(autouse=True)
+def _seasoned_etf_cohort(monkeypatch):
+    async def readiness(*_args, **kwargs):
+        assert kwargs["horizons"] == (1,)
+        return {"contract_depth": {"cohort_codes": ["510001"]}}
+
+    monkeypatch.setattr(jobs, "read_etf_history_readiness", readiness)
+
+
 def _settings(*, enabled: bool = True, etf_enabled: bool = False) -> Settings:
     settings = Settings(_env_file=None)
     settings.etf_leader_tactics_v2_theme_graph_enabled = False
@@ -508,6 +517,7 @@ async def test_etf_materialization_reads_persisted_pit_inputs_and_writes_manifes
         assert kwargs["identity_cutoff"] == datetime.fromisoformat(
             "2026-08-05T09:10:00+08:00"
         )
+        assert kwargs["eligible_codes"] == ("510001",)
         return bundle
 
     def screen(*_args, **_kwargs):
@@ -543,6 +553,35 @@ async def test_etf_materialization_reads_persisted_pit_inputs_and_writes_manifes
     assert "source_signal_run_id" not in result["readiness"]["decision_data_snapshot"]
     assert result["notification_provenance"] == "none"
     assert result["execution_provenance"] == "none"
+
+
+@pytest.mark.asyncio
+async def test_etf_materialization_fails_closed_without_seasoned_cohort(monkeypatch) -> None:
+    async def latest(*_args, **_kwargs):
+        return _etf_decision_snapshot()
+
+    async def existing(*_args, **_kwargs):
+        return None
+
+    async def empty_readiness(*_args, **_kwargs):
+        return {"contract_depth": {"cohort_codes": []}}
+
+    async def unexpected(*_args, **_kwargs):
+        raise AssertionError("inputs must not load without a seasoned cohort")
+
+    monkeypatch.setattr(jobs, "latest_ready_etf_decision_data_snapshot", latest)
+    monkeypatch.setattr(jobs, "get_v2_materialized_manifest", existing)
+    monkeypatch.setattr(jobs, "available_memory_bytes", lambda: 2**30)
+    monkeypatch.setattr(jobs, "read_etf_history_readiness", empty_readiness)
+    monkeypatch.setattr(jobs, "read_etf_v2_asset_inputs", unexpected)
+
+    result = await jobs.dual_universe_leader_tactics_v2_etf_materialize_job(
+        object(),  # type: ignore[arg-type]
+        _settings(etf_enabled=True),
+        now=datetime(2026, 8, 5, 9, 10),
+    )
+
+    assert result["unavailable_reason"] == "etf_seasoned_history_cohort_unavailable"
 
 
 @pytest.mark.asyncio

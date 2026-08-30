@@ -21,11 +21,15 @@ def _sessions(end: date, count: int) -> tuple[date, ...]:
     return tuple(reversed(values))
 
 
-def _metadata(signal_date: date, cutoff: datetime) -> PointInTimeEtfMetadata:
+def _metadata(
+    signal_date: date,
+    cutoff: datetime,
+    code: str = "510001",
+) -> PointInTimeEtfMetadata:
     return PointInTimeEtfMetadata(
-        asset_code="510001",
+        asset_code=code,
         membership_source="authoritative",
-        membership_external_source_id="510001",
+        membership_external_source_id=code,
         membership_provider_version="v1",
         membership_evidence_hash="a" * 64,
         membership_raw_payload_hash="b" * 64,
@@ -83,7 +87,12 @@ async def test_etf_v2_input_reader_pages_persisted_data_without_provider_calls(
     calls: list[tuple[str, ...]] = []
 
     async def seed(*_args, **_kwargs):
-        return SimpleNamespace(authoritative_universe=(metadata,))
+        return SimpleNamespace(
+            authoritative_universe=(
+                metadata,
+                _metadata(signal_date, decision_cutoff, "510002"),
+            )
+        )
 
     async def taxonomy_facts(*_args, **kwargs):
         assert kwargs["cutoff"] == identity_cutoff
@@ -110,6 +119,7 @@ async def test_etf_v2_input_reader_pages_persisted_data_without_provider_calls(
         replay_date=signal_date,
         decision_cutoff=decision_cutoff,
         identity_cutoff=identity_cutoff,
+        eligible_codes=("510001",),
         page_size=1,
     )
 

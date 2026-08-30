@@ -179,6 +179,7 @@ async def read_etf_v2_asset_inputs(
     replay_date: date,
     decision_cutoff: datetime,
     identity_cutoff: datetime | None = None,
+    eligible_codes: tuple[str, ...] | None = None,
     page_size: int = ETF_V2_INPUT_PAGE_SIZE,
 ) -> V2EtfInputBundle:
     """Load one complete ETF cross-section through bounded persisted-data pages."""
@@ -200,7 +201,12 @@ async def read_etf_v2_asset_inputs(
         max_codes=MAX_CODES_PER_REPLAY_INPUT_PAGE,
         required_history_sessions=ETF_V2_MINIMUM_HISTORY_SESSIONS,
     )
-    metadata = tuple(seed.authoritative_universe)
+    eligible = set(eligible_codes) if eligible_codes is not None else None
+    metadata = tuple(
+        item
+        for item in seed.authoritative_universe
+        if eligible is None or item.asset_code in eligible
+    )
     if len(metadata) > ETF_V2_MAX_UNIVERSE_SIZE:
         raise ValueError("ETF V2 authoritative universe exceeds the bounded limit")
     codes = tuple(item.asset_code for item in metadata)
