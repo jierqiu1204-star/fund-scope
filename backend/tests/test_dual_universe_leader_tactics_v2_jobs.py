@@ -507,8 +507,9 @@ async def test_etf_materialization_reads_persisted_pit_inputs_and_writes_manifes
         calls.append("source")
         return snapshot
 
-    async def existing(*_args, **_kwargs):
+    async def existing(*_args, **kwargs):
         calls.append("existing")
+        assert kwargs["as_of"] == datetime(2026, 8, 5, 1, 10)
         return None
 
     async def read_inputs(*_args, **kwargs):

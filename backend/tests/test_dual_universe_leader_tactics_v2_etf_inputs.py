@@ -71,8 +71,10 @@ async def test_etf_v2_input_reader_pages_persisted_data_without_provider_calls(
             decision_eligible=True,
             decision_ineligibility_reason=None,
             revision_hash=f"revision-{index}",
-            first_seen_at=datetime.combine(trade_date, datetime.min.time()).replace(hour=6),
-            observed_at=datetime.combine(trade_date, datetime.min.time()).replace(hour=6),
+            # Trusted history arrived after the 15:00 decision snapshot but
+            # before the materialization receipt cutoff.
+            first_seen_at=datetime(2026, 8, 4, 9),
+            observed_at=datetime(2026, 8, 4, 9),
         )
         for index, trade_date in enumerate(_sessions(signal_date, 180), 1)
     )
@@ -98,7 +100,14 @@ async def test_etf_v2_input_reader_pages_persisted_data_without_provider_calls(
         assert kwargs["cutoff"] == identity_cutoff
         return {"510001": taxonomy}
 
-    async def adjusted(*_args, etf_codes, compatible_provider_versions, **_kwargs):
+    async def adjusted(
+        *_args,
+        etf_codes,
+        compatible_provider_versions,
+        decision_cutoff,
+        **_kwargs,
+    ):
+        assert decision_cutoff == identity_cutoff
         assert compatible_provider_versions == (
             ("eastmoney", "eastmoney.push2his.kline.hfq_v1"),
             ("tickflow", "tickflow.free.klines.backward_v1"),
