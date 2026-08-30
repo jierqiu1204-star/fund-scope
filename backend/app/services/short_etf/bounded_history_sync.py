@@ -983,6 +983,11 @@ def _eligible_provider_observation(
             (trade_date, provider_version, adjustment_version)
         )
     if not eligible_rows:
+        accepted_version = dict(etf_decision_adjusted_provider_versions()).get(
+            provider_result.provider
+        )
+        if not provider_result.rows and accepted_version:
+            return (), accepted_version, accepted_version
         return None
     dates = tuple(sorted({item[0] for item in eligible_rows}))
     return dates, eligible_rows[0][1], eligible_rows[0][2]

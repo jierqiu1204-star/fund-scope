@@ -409,7 +409,12 @@ async def test_research_depth_short_history_is_cooled_down_without_losing_denomi
         )
         observation = await session.get(
             EtfAdjustedHistoryAvailability,
-            (code, request.provider_policy_version, request.scope, request.required_calendar_hash),
+            (
+                code,
+                request.provider_policy_version,
+                request.scope,
+                request.required_calendar_hash,
+            ),
         )
         second = await run_bounded_history_sync_slice(
             session,
@@ -443,6 +448,54 @@ async def test_research_depth_short_history_is_cooled_down_without_losing_denomi
     assert second.attempted_codes == ()
     assert calls == [code, code]
     assert third.attempted_codes == (code,)
+
+
+@pytest.mark.asyncio
+async def test_research_depth_empty_missing_session_is_cooled_down(app) -> None:
+    code = "510099"
+    calls: list[str] = []
+
+    async def fetch(
+        current_code: str,
+        _from: date,
+        _to: date,
+    ) -> ProviderFetchResult:
+        calls.append(current_code)
+        return ProviderFetchResult(
+            rows=[],
+            provider="eastmoney",
+            fallback_used=False,
+        )
+
+    request = _research_request(eligible_codes=(code,))
+    async with app.state.db.session() as session:
+        session.add(_etf(code))
+        await session.commit()
+        first = await run_bounded_history_sync_slice(
+            session,
+            request=request,
+            fetcher=fetch,
+            rss_reader=lambda: 32 * 1024 * 1024,
+        )
+        observation = await session.get(
+            EtfAdjustedHistoryAvailability,
+            (code, request.provider_policy_version, request.scope, request.required_calendar_hash),
+        )
+        second = await run_bounded_history_sync_slice(
+            session,
+            request=request,
+            fetcher=fetch,
+            rss_reader=lambda: 32 * 1024 * 1024,
+        )
+
+    assert first.status == "partial"
+    assert observation is not None
+    assert observation.status == "source_history_shortfall"
+    assert observation.eligible_session_count == 0
+    assert observation.retry_after is not None
+    assert second.stop_reason == "history_availability_cooldown"
+    assert second.attempted_codes == ()
+    assert calls == [code]
 
 
 @pytest.mark.asyncio
