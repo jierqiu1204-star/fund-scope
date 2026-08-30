@@ -14,12 +14,8 @@ export const metadata: Metadata = {
 const primaryNavItems = [
   { href: "/short-term", label: "短线研究", primary: true },
   { href: "/short-term/evidence", label: "策略证据" },
-  ...(process.env.NEXT_PUBLIC_ETF_LEADER_TACTICS_V2_ENABLED === "true"
-    ? [{ href: "/short-term/leader-tactics", label: "Leader tactics V2" }]
-    : []),
-  ...(process.env.NEXT_PUBLIC_LATE_DAY_TURNAROUND_ENABLED === "true"
-    ? [{ href: "/short-term/late-day-turnaround", label: "尾盘转强" }]
-    : []),
+  { href: "/short-term/leader-tactics", label: "Leader tactics V2" },
+  { href: "/short-term/late-day-turnaround", label: "尾盘转强" },
   { href: "/admin/jobs", label: "数据任务" },
   { href: "/settings/notifications", label: "设置" }
 ];
@@ -28,7 +24,6 @@ const advancedNavItems = [
   { href: "/portfolio", label: "资产" },
   { href: "/transactions", label: "交易" },
   { href: "/valuation", label: "估值" },
-  { href: "/strategy-lab", label: "高级策略" },
   { href: "/news", label: "新闻" }
 ];
 

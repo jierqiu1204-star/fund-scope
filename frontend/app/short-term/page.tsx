@@ -24,7 +24,6 @@ import { useAuth } from "../auth-provider";
 import { api } from "@/lib/api";
 import { formatCurrency, formatDate, formatPercent } from "@/lib/format";
 import type {
-  EtfOptimizedAllocation,
   EtfRankingSnapshotMetadata,
   ShortResearchAsset,
   ShortResearchAssetDetail,
@@ -2565,17 +2564,6 @@ function ShortTermClient() {
       ).data
   });
 
-  const etfOptimizedAllocation = useQuery({
-    queryKey: ["short-research", "etf-optimized-allocation", "latest"],
-    enabled: assetType === "etf",
-    queryFn: async () =>
-      (
-        await api.get<EtfOptimizedAllocation | null>(
-          "/api/short-research/etf-optimized-allocation/latest"
-        )
-      ).data
-  });
-
   const selectedDetail = useQuery({
     queryKey: [
       "short-research",
@@ -2784,29 +2772,6 @@ function ShortTermClient() {
     }
   });
 
-  const runEtfOptimizedAllocation = useMutation({
-    mutationFn: async () =>
-      (
-        await api.post<EtfOptimizedAllocation>(
-          "/api/short-research/etf-optimized-allocation/run"
-        )
-      ).data,
-    onSuccess: async () => {
-      await Promise.all([
-        queryClient.invalidateQueries({
-          queryKey: ["short-research", "etf-optimized-allocation"]
-        }),
-        queryClient.invalidateQueries({
-          queryKey: ["short-research", "observation-portfolio"]
-        })
-      ]);
-    }
-  });
-
-  const optimizedAllocationData =
-    observationPortfolio.data?.optimized_allocation ??
-    etfOptimizedAllocation.data ??
-    null;
   const advisorSourceRunId =
     assetType === "etf"
       ? (etfLiveData?.snapshot?.snapshot_id ??
@@ -2838,8 +2803,7 @@ function ShortTermClient() {
   const isResearchTaskPending =
     syncData.isPending ||
     runSignals.isPending ||
-    runAdvisor.isPending ||
-    runEtfOptimizedAllocation.isPending;
+    runAdvisor.isPending;
 
   const resetEditTracking = () => {
     setEditingTrackingId(null);
@@ -7577,120 +7541,6 @@ function ShortTermClient() {
                     observationPortfolio.data?.evidence_summary
                   )}
                 </p>
-              </div>
-              <div className="mt-3 rounded-[10px] border border-ink/10 bg-white px-4 py-3">
-                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                  <div>
-                    <p className="text-sm font-semibold text-ink">
-                      优化组合对照
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    className="w-fit rounded-[6px] border border-ink bg-ink px-3 py-2 text-xs font-semibold text-white transition hover:bg-ink/85 disabled:opacity-60"
-                    disabled={isResearchTaskPending}
-                    onClick={() => runEtfOptimizedAllocation.mutate()}
-                  >
-                    {runEtfOptimizedAllocation.isPending
-                      ? "正在优化..."
-                      : "运行优化对照"}
-                  </button>
-                </div>
-                {runEtfOptimizedAllocation.isError ? (
-                  <p className="mt-3 rounded-[8px] border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
-                    {errorText(runEtfOptimizedAllocation.error)}
-                  </p>
-                ) : null}
-                {optimizedAllocationData?.methods.length ? (
-                  <div className="mt-3 grid gap-3 lg:grid-cols-3">
-                    {optimizedAllocationData.methods.map((method) => (
-                      <div
-                        key={method.method}
-                        className="rounded-[8px] border border-border bg-paper/40 p-3"
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <p className="text-sm font-semibold text-ink">
-                            {method.label}
-                          </p>
-                          <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-ink/55">
-                            {formatPercent(method.weight_sum * 100)}
-                          </span>
-                        </div>
-                        <p className="mt-2 text-xs leading-5 text-ink/55">
-                          {method.unavailable_reason ??
-                            (method.method === "black_litterman"
-                              ? "按市场先验、结构化标签 view、证据置信度和约束生成的 Black-Litterman 对照。"
-                              : "按历史波动、单只上限和主题集中度约束生成的数学权重对照。")}
-                        </p>
-                        {method.method === "black_litterman" ? (
-                          <div className="mt-3 grid gap-1 rounded-[8px] bg-white px-3 py-2 text-[11px] leading-5 text-ink/55">
-                            <p>
-                              先验来源：
-                              {String(
-                                method.summary.prior_source ?? "等待数据"
-                              )}
-                            </p>
-                            <p>
-                              结构化 view：
-                              {String(method.summary.view_count ?? 0)}{" "}
-                              个；平均置信度：
-                              {recordNumber(
-                                method.summary.confidence_summary,
-                                "avg"
-                              ) === null
-                                ? "暂无"
-                                : formatPercent(
-                                    (recordNumber(
-                                      method.summary.confidence_summary,
-                                      "avg"
-                                    ) ?? 0) * 100
-                                  )}
-                            </p>
-                            <p>
-                              约束：单只上限{" "}
-                              {formatPercent(
-                                Number(
-                                  method.summary.constraints
-                                    ?.single_weight_cap ?? 0.3
-                                ) * 100
-                              )}
-                              ； 主题上限{" "}
-                              {formatPercent(
-                                Number(
-                                  method.summary.constraints
-                                    ?.theme_exposure_cap ?? 0.6
-                                ) * 100
-                              )}
-                            </p>
-                            <p>
-                              排除资产：
-                              {String(method.summary.excluded_count ?? 0)}{" "}
-                              只；仅作研究对照，需要人工判断。
-                            </p>
-                          </div>
-                        ) : null}
-                        <div className="mt-3 space-y-2">
-                          {method.items.slice(0, 4).map((item) => (
-                            <div
-                              key={item.code}
-                              className="flex items-center justify-between gap-3 text-xs text-ink/60"
-                            >
-                              <span className="truncate">{item.name}</span>
-                              <span className="font-semibold text-ink">
-                                {formatPercent(item.target_weight * 100)}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="mt-3 rounded-[8px] border border-dashed border-ink/20 bg-paper px-3 py-3 text-xs leading-5 text-ink/55">
-                    {optimizedAllocationData?.unavailable_reason ??
-                      "暂无优化组合对照。候选数量、历史数据或主题分散度不足时不会硬凑数学权重。"}
-                  </p>
-                )}
               </div>
               <div className="mt-4 grid gap-3 md:grid-cols-4">
                 <div className="rounded-[10px] border border-ink/10 bg-white px-4 py-3">

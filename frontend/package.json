@@ -8,18 +8,8 @@
     "build:static": "node ./scripts/build-static.mjs",
     "start": "next start",
     "lint": "next lint",
-    "test:recommendations": "node ./scripts/check-recommendations-page.mjs",
-    "test:short-pagination": "node ./scripts/check-short-term-pagination.mjs",
-    "test:alert-actions": "node ./scripts/check-etf-alert-action-lifecycle.mjs",
-    "test:v3-display": "node ./scripts/check-etf-v3-score-display.mjs",
-    "test:dual-rankings": "node ./scripts/check-etf-dual-ranking-surfaces.mjs",
-    "test:catalyst-shadow": "node ./scripts/check-etf-catalyst-shadow.mjs",
-    "test:backtest-evidence": "node ./scripts/check-etf-backtest-evidence-dimensions.mjs",
-    "test:pit-evidence": "node ./scripts/check-etf-pit-evidence-surfaces.mjs",
-    "test:leader-tactics": "node ./scripts/check-etf-leader-tactics-shadow.mjs",
-    "test:leader-tactics-v2": "node ./scripts/check-leader-tactics-v2-pagination.mjs && node --experimental-strip-types --test ./scripts/leader-tactics-v2-interaction.test.mts",
+    "test:leader-tactics-v2": "node --experimental-strip-types --test ./scripts/leader-tactics-v2-interaction.test.mts",
     "test:leader-tracking-policy": "node --experimental-strip-types --test ./scripts/leader-tactics-tracking-policy.test.mts",
-    "test:late-day-turnaround": "node ./scripts/check-late-day-turnaround.mjs",
     "typecheck": "tsc --noEmit",
     "format": "prettier --check ."
   },
@@ -29,8 +19,7 @@
     "next": "^15.2.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "recharts": "^2.15.3",
-    "zod": "^3.24.3"
+    "recharts": "^2.15.3"
   },
   "devDependencies": {
     "@types/node": "^22.13.14",

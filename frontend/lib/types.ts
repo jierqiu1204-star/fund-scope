@@ -868,54 +868,6 @@ export type ShortResearchObservationPortfolioItem = {
   metrics?: Record<string, unknown>;
 };
 
-export type EtfOptimizedAllocationItem = {
-  method: string;
-  code: string;
-  name: string;
-  target_weight: number;
-  theme_group: string | null;
-  expected_return: number | null;
-  volatility: number | null;
-  data_date: string | null;
-  explanation: string | null;
-  metrics: Record<string, unknown>;
-};
-
-export type EtfOptimizedAllocationMethod = {
-  method: string;
-  label: string;
-  status: string;
-  weight_sum: number;
-  items: EtfOptimizedAllocationItem[];
-  summary: Record<string, unknown> & {
-    prior_source?: string | null;
-    view_count?: number | null;
-    confidence_summary?: Record<string, unknown> | null;
-    covariance?: Record<string, unknown> | null;
-    constraints?: Record<string, unknown> | null;
-    excluded_count?: number | null;
-    research_only?: boolean;
-    no_trade_instruction?: boolean;
-  };
-  unavailable_reason: string | null;
-};
-
-export type EtfOptimizedAllocation = {
-  id: number | null;
-  status: string;
-  as_of_date: string | null;
-  generated_at: string | null;
-  method_set: string;
-  evidence_contract_hash?: string | null;
-  data_window: Record<string, unknown>;
-  constraints: Record<string, unknown>;
-  summary: Record<string, unknown>;
-  unavailable_reason: string | null;
-  methods: EtfOptimizedAllocationMethod[];
-  research_only: boolean;
-  no_trade_instruction: boolean;
-};
-
 export type ShortResearchObservationPortfolio = {
   snapshot_id?: number | null;
   generated_at?: string | null;
@@ -950,7 +902,6 @@ export type ShortResearchObservationPortfolio = {
   allocation_contract?: Record<string, unknown>;
   evidence_status?: string;
   evidence_summary?: Record<string, unknown>;
-  optimized_allocation?: EtfOptimizedAllocation | null;
 };
 
 export type EtfStrategyHealthcheckItem = {

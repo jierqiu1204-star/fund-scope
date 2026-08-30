@@ -25,9 +25,6 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
     screen_dual_universe,
     validate_runtime_contract,
 )
-from app.services.strategy_lab.dual_universe_leader_tactics_v2_replay import (
-    build_v2_replay_selection,
-)
 
 
 def _membership(*, group: str = "theme-a", fact_hash: str | None = None) -> V2PITMembership:
@@ -310,14 +307,6 @@ def test_post_close_watchlist_accepts_current_membership_but_stays_out_of_replay
     assert facts["feature_trade_date"] == signal_item.signal_date.isoformat()
     assert facts["membership_evaluation_date"] == decision_date.isoformat()
     assert facts["historical_validation_eligible"] is False
-    with pytest.raises(ValueError, match="post_close_watchlist_not_historical_pit"):
-        build_v2_replay_selection(
-            watchlist_result,
-            formula_id=BREAKOUT_V2,
-            replay_run_key="must-not-enter-pit-replay",
-        )
-
-
 def test_post_close_lifecycle_ignores_bars_before_next_eligible_session() -> None:
     signal_date = date(2026, 8, 7)
     decision_date = date(2026, 8, 8)

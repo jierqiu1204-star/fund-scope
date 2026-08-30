@@ -22,7 +22,6 @@ import type {
   EtfEvidenceSurface,
   EtfLeaderTacticsEvidence,
   EtfExitHyperopt,
-  EtfOptimizedAllocation,
   EtfPortfolioBacktestDetail,
   EtfPortfolioBacktestLabelSummary,
   EtfPortfolioBacktestList,
@@ -1343,15 +1342,6 @@ export default function EtfEvidencePage() {
         )
       ).data
   });
-  const optimizedAllocation = useQuery({
-    queryKey: ["short-research", "etf-optimized-allocation", "latest"],
-    queryFn: async () =>
-      (
-        await api.get<EtfOptimizedAllocation | null>(
-          "/api/short-research/etf-optimized-allocation/latest"
-        )
-      ).data
-  });
   const exitHyperopt = useQuery({
     queryKey: ["short-research", "etf-exit-hyperopt", "latest"],
     queryFn: async () =>
@@ -1422,24 +1412,6 @@ export default function EtfEvidencePage() {
       });
     }
   });
-  const runOptimizedAllocation = useMutation({
-    mutationFn: async () =>
-      (
-        await api.post<EtfOptimizedAllocation>(
-          "/api/short-research/etf-optimized-allocation/run"
-        )
-      ).data,
-    onSuccess: async () => {
-      await Promise.all([
-        queryClient.invalidateQueries({
-          queryKey: ["short-research", "etf-optimized-allocation"]
-        }),
-        queryClient.invalidateQueries({
-          queryKey: ["short-research", "observation-portfolio"]
-        })
-      ]);
-    }
-  });
   const runExitHyperopt = useMutation({
     mutationFn: async () =>
       (await api.post<JobRun>("/api/admin/jobs/etf_exit_hyperopt/run?days=730"))
@@ -1475,10 +1447,6 @@ export default function EtfEvidencePage() {
     backtestExecutionModel(detail) === "intraday_alert_v1";
   const coverageEvidence = detail?.coverage_evidence;
   const timeLimitations = detail?.time_resolution_limitations;
-  const optimized =
-    observationPortfolio.data?.optimized_allocation ??
-    optimizedAllocation.data ??
-    null;
   const labelEvidenceRows = useMemo(
     () => buildLabelEvidenceRows(detail?.label_summaries ?? []),
     [detail?.label_summaries]
@@ -1554,7 +1522,6 @@ export default function EtfEvidencePage() {
         {[
           runBacktest,
           runHealthcheck,
-          runOptimizedAllocation,
           runExitHyperopt,
           runExitCredibility
         ].map((mutation, index) =>
@@ -2304,64 +2271,13 @@ export default function EtfEvidencePage() {
       </Panel>
 
       <Panel>
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-          <div>
-            <p className="text-sm font-semibold text-ink">组合配置证据</p>
-            <p className="mt-1 text-xs text-ink/55">
-              模式：{observationPortfolio.data?.portfolio_mode ?? "暂无"} ·
-              权重合计{" "}
-              {observationPortfolio.data
-                ? formatPercent(
-                    (observationPortfolio.data.weight_sum ?? 0) * 100
-                  )
-                : "暂无"}
-            </p>
-          </div>
-          <button
-            type="button"
-            className="w-fit rounded-[6px] bg-ink px-3 py-2 text-sm font-semibold text-white transition hover:bg-ink/85 disabled:opacity-60"
-            disabled={runOptimizedAllocation.isPending}
-            onClick={() => runOptimizedAllocation.mutate()}
-          >
-            {runOptimizedAllocation.isPending ? "正在优化..." : "运行优化对照"}
-          </button>
-        </div>
-        <div className="mt-4 grid gap-3 lg:grid-cols-3">
-          {optimized?.methods.length ? (
-            optimized.methods.map((method) => (
-              <div
-                key={method.method}
-                className="rounded-[8px] border border-border bg-paper/40 p-3"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <p className="text-sm font-semibold text-ink">
-                    {method.label}
-                  </p>
-                  <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-ink/55">
-                    {formatPercent(method.weight_sum * 100)}
-                  </span>
-                </div>
-                <div className="mt-3 space-y-2">
-                  {method.items.slice(0, 5).map((item) => (
-                    <div
-                      key={item.code}
-                      className="flex items-center justify-between gap-3 text-xs text-ink/60"
-                    >
-                      <span className="truncate">{item.name}</span>
-                      <span className="font-semibold text-ink">
-                        {formatPercent(item.target_weight * 100)}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ))
-          ) : (
-            <p className="rounded-[8px] border border-dashed border-border bg-paper px-3 py-4 text-sm text-ink/55 lg:col-span-3">
-              {optimized?.unavailable_reason ?? "暂无优化组合对照。"}
-            </p>
-          )}
-        </div>
+        <p className="text-sm font-semibold text-ink">组合配置证据</p>
+        <p className="mt-1 text-xs text-ink/55">
+          模式：{observationPortfolio.data?.portfolio_mode ?? "暂无"} · 权重合计{" "}
+          {observationPortfolio.data
+            ? formatPercent((observationPortfolio.data.weight_sum ?? 0) * 100)
+            : "暂无"}
+        </p>
       </Panel>
 
       {detail?.trades.length ? (

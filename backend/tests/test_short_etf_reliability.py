@@ -1,72 +1,19 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from app.models.entities import (
     EtfIntradayQuote,
     EtfPriceHistory,
-    ShortEtfPaperOrder,
-    ShortEtfReliabilityEvaluation,
-    ShortEtfSignalRun,
     TradableEtf,
 )
 from app.services.short_etf.data import (
     sync_etf_price_history,
     sync_etf_price_history_from_intraday_snapshot,
 )
-
-
-async def _seed_etf(
-    app,
-    code: str,
-    *,
-    name: str | None = None,
-    start: date = date(2026, 1, 1),
-    days: int = 90,
-    base: float = 1.0,
-    daily_step: float = 0.002,
-    turnover: float = 120_000_000,
-    final_surge: bool = False,
-) -> None:
-    async with app.state.db.session() as session:
-        if await session.scalar(select(TradableEtf).where(TradableEtf.code == code)) is None:
-            session.add(
-                TradableEtf(
-                    code=code,
-                    name=name or f"测试ETF{code}",
-                    exchange="SZ",
-                    theme_tags_json=["科技"],
-                    trading_rule_label="T+1股票ETF",
-                    asset_class="equity_etf",
-                    is_short_term_eligible=True,
-                    is_watchlist=True,
-                )
-            )
-        close = base
-        for offset in range(days):
-            trade_date = start + timedelta(days=offset)
-            step = daily_step
-            if final_surge and offset >= days - 5:
-                step = daily_step * 10
-            previous = close
-            close = close + step
-            session.add(
-                EtfPriceHistory(
-                    etf_code=code,
-                    trade_date=trade_date,
-                    open=previous,
-                    high=close * 1.02,
-                    low=previous * 0.98,
-                    close=close,
-                    volume=1_000_000,
-                    turnover=turnover,
-                    pct_change=(close / previous - 1) * 100 if previous else 0.0,
-                )
-            )
-        await session.commit()
 
 
 @pytest.mark.asyncio
@@ -480,63 +427,3 @@ async def test_short_etf_retry_failed_targets_only_failed_or_stale_etfs(client, 
     assert retry.json()["retried"] == 1
     assert retry.json()["inserted"] == 1
     assert attempts == ["159915", "159915"]
-
-
-@pytest.mark.asyncio
-async def test_short_etf_signals_expand_risk_labels_and_review_language(client, app) -> None:
-    await _seed_etf(app, "159915", days=90, daily_step=0.004, final_surge=True)
-
-    signal = await client.post("/api/short-etf/signals/run", json={"as_of_date": "2026-03-31"})
-
-    assert signal.status_code == 200
-    item = signal.json()["items"][0]
-    assert "连续大涨" in item["risk_flags"]
-    assert item["conclusion"] in {"高位观察", "谨慎", "不适合短线"}
-    assert not {"buy", "sell", "target_price", "expected_return"} & set(item)
-
-    review = await client.post(f"/api/short-etf/signals/{signal.json()['id']}/review")
-    assert review.status_code == 200
-    notes = review.json()["items"][0]["agent_notes"]
-    assert set(notes) == {"数据员", "趋势员", "风控员", "反方", "总结员"}
-    assert "不是购买建议" in notes["总结员"]
-    assert "目标价" not in str(review.json())
-
-
-@pytest.mark.asyncio
-async def test_short_etf_reliability_evaluation_is_separate_and_sample_aware(client, app) -> None:
-    await _seed_etf(app, "159915", days=90, daily_step=0.004)
-    await _seed_etf(app, "512480", days=90, daily_step=0.002)
-
-    async with app.state.db.session() as session:
-        signal_runs_before = await session.scalar(select(func.count(ShortEtfSignalRun.id)))
-        orders_before = await session.scalar(select(func.count(ShortEtfPaperOrder.id)))
-
-    response = await client.post(
-        "/api/short-etf/evaluations",
-        json={"start_date": "2026-01-01", "end_date": "2026-03-31", "fee_rate": 0.0005},
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["status"] == "success"
-    assert body["conclusion"] == "样本不足，继续观察"
-    assert "样本不足" in body["risk_flags"]
-    assert body["items"]
-    assert body["summary"]["fee_rate"] == 0.0005
-    assert body["summary"]["parameter_stability"] in {"稳定", "不稳定", "样本不足"}
-
-    async with app.state.db.session() as session:
-        signal_runs_after = await session.scalar(select(func.count(ShortEtfSignalRun.id)))
-        orders_after = await session.scalar(select(func.count(ShortEtfPaperOrder.id)))
-        evaluations = await session.scalar(select(func.count(ShortEtfReliabilityEvaluation.id)))
-
-    assert signal_runs_after == signal_runs_before
-    assert orders_after == orders_before
-    assert evaluations == 1
-
-    listing = await client.get("/api/short-etf/evaluations")
-    detail = await client.get(f"/api/short-etf/evaluations/{body['id']}")
-    assert listing.status_code == 200
-    assert listing.json()[0]["id"] == body["id"]
-    assert detail.status_code == 200
-    assert detail.json()["id"] == body["id"]

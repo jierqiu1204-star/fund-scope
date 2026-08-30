@@ -233,5 +233,3 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     assert database_statistics.max_instances == 1
     assert database_statistics.coalesce is True
     assert "daily_short_etf_data" not in job_ids
-    assert "daily_short_etf_signals" not in job_ids
-    assert "daily_short_etf_paper" not in job_ids

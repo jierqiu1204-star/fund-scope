@@ -12,10 +12,6 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2 import (
     derive_lifecycle,
     screen_dual_universe,
 )
-from app.services.strategy_lab.dual_universe_leader_tactics_v2_replay import (
-    evaluate_low_base_ashare_forward_outcomes,
-)
-from app.services.strategy_lab.etf_ranking_forward_outcomes import ForwardAdjustedClose
 
 
 def _membership() -> V2PITMembership:
@@ -381,33 +377,3 @@ def test_turning_watch_can_prepare_then_confirm_in_separate_sessions() -> None:
         "preparing",
         "confirmed",
     ]
-
-
-def test_low_base_forward_outcomes_include_twenty_sessions() -> None:
-    result = _screen(_asset("002437"))
-    start = result.signal_date
-    sessions = tuple(start + timedelta(days=index) for index in range(22))
-    closes = tuple(
-        ForwardAdjustedClose(
-            asset_code=code,
-            session_date=session,
-            adjusted_close=5.30 * (1.0 + 0.01 * index),
-            price_basis="total_return_adjusted",
-            decision_eligible=True,
-            provider="eastmoney",
-            adjustment_version="total-return-v1",
-            source_hash=f"source-{code}-{index}",
-        )
-        for code in ("002437", "600001", "600002", "600003", "600004", "600005")
-        for index, session in enumerate(sessions)
-    )
-
-    bundle = evaluate_low_base_ashare_forward_outcomes(
-        result=result,
-        replay_run_key="low-base-test",
-        trading_sessions=sessions,
-        adjusted_closes=closes,
-    )
-
-    assert bundle.horizons == (1, 3, 5, 10, 20)
-    assert {item.horizon_sessions for item in bundle.outcomes} == {1, 3, 5, 10, 20}
