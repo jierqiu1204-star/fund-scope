@@ -1126,7 +1126,7 @@ async def _materialize_etf(
     existing = await get_v2_materialized_manifest(
         session,
         universe="etf",
-        as_of=persisted_cutoff,
+        as_of=_utc_naive(local_as_of),
     )
     if (
         existing is not None

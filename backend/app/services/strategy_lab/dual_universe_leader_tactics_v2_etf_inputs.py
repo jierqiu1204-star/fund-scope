@@ -232,7 +232,10 @@ async def read_etf_v2_asset_inputs(
             replay_date=replay_date,
             rows_per_code=ETF_V2_MAXIMUM_HISTORY_SESSIONS,
             max_source_rows=len(page_codes) * ETF_V2_MAXIMUM_HISTORY_SESSIONS,
-            decision_cutoff=decision_cutoff,
+            # Live materialization may receive trustworthy history after the
+            # session-close decision snapshot.  The later cutoff is persisted
+            # as data_receipt_cutoff; replay callers keep both cutoffs equal.
+            decision_cutoff=identity_cutoff,
             compatible_provider_versions=tuple(
                 pair
                 for pair in market_data.etf_decision_adjusted_provider_versions()
@@ -256,7 +259,7 @@ async def read_etf_v2_asset_inputs(
             series = build_point_in_time_adjusted_series(
                 metadata=item,
                 rows=prices_by_code[item.asset_code],
-                decision_cutoff=decision_cutoff.astimezone(UTC),
+                decision_cutoff=identity_cutoff.astimezone(UTC),
                 minimum_history_sessions=ETF_V2_MINIMUM_HISTORY_SESSIONS,
                 maximum_history_sessions=ETF_V2_MAXIMUM_HISTORY_SESSIONS,
             )
