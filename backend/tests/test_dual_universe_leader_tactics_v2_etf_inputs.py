@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -41,6 +42,90 @@ def _metadata(
         eligible_from=date(2020, 1, 1),
         eligible_at=signal_date,
     )
+
+
+def _taxonomy(**overrides):
+    values = {
+        "theme_group": "technology",
+        "primary_theme": "人工智能",
+        "secondary_themes_json": [],
+        "classification_reason": "国内名称或标签命中“人工智能”。",
+        "classification_source": "domestic_keyword",
+        "confidence": "high",
+        "source": "fundscope.etf_taxonomy",
+        "provider_version": "taxonomy-v1",
+        "rule_version": "rule-v1",
+        "fact_hash": "d" * 64,
+        "observed_at": datetime(2026, 8, 4, 10),
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_etf_membership_prefers_verified_eastmoney_board_over_tracked_index() -> None:
+    signal_date = date(2026, 8, 4)
+    cutoff = datetime(2026, 8, 4, 19, tzinfo=ZoneInfo("Asia/Shanghai"))
+    metadata = replace(
+        _metadata(signal_date, cutoff),
+        tracked_underlying_id="CSI-RARE-EARTH",
+    )
+    taxonomy = _taxonomy(
+        theme_group="materials",
+        primary_theme="基础材料",
+        classification_reason="国内名称或标签命中“稀土”。",
+    )
+
+    membership = inputs._membership_for(
+        metadata,
+        taxonomy=taxonomy,
+        signal_date=signal_date,
+        source_cutoff=datetime(2026, 8, 4, 11),
+    )
+
+    assert membership is not None
+    assert membership.group_id == "eastmoney:concept:BK0578"
+    assert membership.theme == "稀土永磁"
+    assert membership.provider_theme_code == "BK0578"
+    assert membership.provider_theme_label == "稀土永磁"
+    assert membership.resolution_mode == "eastmoney_concept_etf_proxy"
+    assert membership.tracked_index == "CSI-RARE-EARTH"
+    assert membership.clone_group == "index:CSI-RARE-EARTH"
+
+
+def test_etf_membership_uses_pit_theme_before_tracked_index_fallback() -> None:
+    signal_date = date(2026, 8, 4)
+    cutoff = datetime(2026, 8, 4, 19, tzinfo=ZoneInfo("Asia/Shanghai"))
+    metadata = replace(
+        _metadata(signal_date, cutoff),
+        tracked_underlying_id="CSI-AI-APPLICATION",
+    )
+
+    membership = inputs._membership_for(
+        metadata,
+        taxonomy=_taxonomy(theme_group="AI应用"),
+        signal_date=signal_date,
+        source_cutoff=datetime(2026, 8, 4, 11),
+    )
+
+    assert membership is not None
+    assert membership.group_id == "theme:AI应用"
+    assert membership.tracked_index == "CSI-AI-APPLICATION"
+    assert membership.clone_group == "index:CSI-AI-APPLICATION"
+
+
+def test_etf_board_match_keeps_mlcc_distinct_from_passive_components() -> None:
+    mlcc = inputs._eastmoney_concept_for_etf(
+        _taxonomy(primary_theme="MLCC", classification_reason="名称命中 MLCC。")
+    )
+    passive = inputs._eastmoney_concept_for_etf(
+        _taxonomy(
+            primary_theme="被动元件",
+            classification_reason="名称命中被动元件概念。",
+        )
+    )
+
+    assert mlcc is not None and mlcc.provider_theme_code == "BK0890"
+    assert passive is not None and passive.provider_theme_code == "BK0976"
 
 
 @pytest.mark.asyncio

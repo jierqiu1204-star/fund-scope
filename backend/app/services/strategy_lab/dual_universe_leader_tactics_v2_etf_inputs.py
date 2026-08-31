@@ -23,6 +23,12 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_etf_adapter impor
     etf_membership_to_v2,
     etf_series_to_v2_asset,
 )
+from app.services.strategy_lab.dual_universe_leader_tactics_v2_theme_graph import (
+    THEME_REGISTRY_HASH,
+    ThemeDefinition,
+    ThemeRelationKind,
+    registered_theme_definitions,
+)
 from app.services.strategy_lab.etf_point_in_time_decision_data import (
     MAX_CODES_PER_REPLAY_INPUT_PAGE,
     PointInTimeEtfMetadata,
@@ -36,6 +42,7 @@ ETF_V2_MAXIMUM_HISTORY_SESSIONS = 180
 ETF_V2_INPUT_PAGE_SIZE = 64
 ETF_V2_IDENTITY_PAGE_SIZE = 256
 ETF_V2_MAX_UNIVERSE_SIZE = 2_000
+ETF_EASTMONEY_BOARD_POLICY_VERSION = "eastmoney_etf_board_proxy_v1"
 _T = TypeVar("_T")
 
 
@@ -111,6 +118,38 @@ async def _taxonomy_by_code(
     return facts
 
 
+def _eastmoney_concept_for_etf(
+    taxonomy: EtfTaxonomyFact | None,
+) -> ThemeDefinition | None:
+    """Resolve only verified Eastmoney concepts from the ETF's PIT taxonomy."""
+
+    if taxonomy is None:
+        return None
+    values = (
+        taxonomy.theme_group,
+        taxonomy.primary_theme,
+        *(getattr(taxonomy, "secondary_themes_json", None) or ()),
+        getattr(taxonomy, "classification_reason", None),
+    )
+    text = "".join("".join(str(value).split()) for value in values if value)
+    matches = [
+        (len(alias), -definition.priority, definition)
+        for definition in registered_theme_definitions(
+            relation_kind=ThemeRelationKind.PROVIDER_CONCEPT
+        )
+        for alias in {
+            definition.provider_theme_label or "",
+            *(
+                item
+                for item in definition.aliases
+                if item != definition.display_label
+            ),
+        }
+        if alias and "".join(alias.split()) in text
+    ]
+    return max(matches, default=(0, 0, None))[2]
+
+
 def _membership_for(
     metadata: PointInTimeEtfMetadata,
     *,
@@ -125,12 +164,15 @@ def _membership_for(
     usable_primary_theme = (
         primary_theme if primary_theme.lower() not in {"", "unknown", "未分类"} else ""
     )
-    if tracked_index:
-        group_id = f"index:{tracked_index}"
+    eastmoney_concept = _eastmoney_concept_for_etf(taxonomy)
+    if eastmoney_concept is not None:
+        group_id = f"eastmoney:concept:{eastmoney_concept.provider_theme_code}"
     elif usable_theme_group:
         group_id = f"theme:{usable_theme_group}"
     elif usable_primary_theme:
         group_id = f"theme:{usable_primary_theme}"
+    elif tracked_index:
+        group_id = f"index:{tracked_index}"
     else:
         return None
 
@@ -153,6 +195,8 @@ def _membership_for(
             "taxonomy_rule_version": (taxonomy.rule_version if taxonomy is not None else None),
             "underlying_provider_version": metadata.underlying_provider_version,
             "underlying_rule_version": metadata.underlying_rule_version,
+            "etf_board_policy_version": ETF_EASTMONEY_BOARD_POLICY_VERSION,
+            "eastmoney_theme_registry_hash": THEME_REGISTRY_HASH,
         }
     )
     draft = etf_membership_to_v2(
@@ -162,11 +206,33 @@ def _membership_for(
         observed_at=observed_at,
         taxonomy_version=taxonomy_version,
         fact_hash="",
-        theme=usable_primary_theme or None,
+        theme=(
+            eastmoney_concept.provider_theme_label
+            if eastmoney_concept is not None
+            else usable_primary_theme or None
+        ),
         sector=usable_theme_group or None,
         tracked_index=tracked_index,
         clone_group=(f"index:{tracked_index}" if tracked_index else metadata.asset_code),
     )
+    if eastmoney_concept is not None:
+        draft = replace(
+            draft,
+            hierarchy_level="fine_theme",
+            normalized_theme_key=eastmoney_concept.canonical_key,
+            resolution_mode="eastmoney_concept_etf_proxy",
+            relation_kind="etf_taxonomy_proxy",
+            registry_priority=eastmoney_concept.priority,
+            hierarchy_depth=2,
+            taxonomy="eastmoney.concept.current",
+            provider_theme_code=eastmoney_concept.provider_theme_code,
+            provider_theme_label=eastmoney_concept.provider_theme_label,
+            membership_reason="PIT ETF taxonomy matched a verified Eastmoney concept board",
+            source=(getattr(taxonomy, "source", None) if taxonomy is not None else None),
+            confidence=(
+                getattr(taxonomy, "confidence", None) if taxonomy is not None else None
+            ),
+        )
     return replace(
         draft,
         fact_hash=stable_contract_hash(draft.canonical_payload()),
@@ -323,6 +389,7 @@ async def read_etf_v2_asset_inputs(
 
 
 __all__ = [
+    "ETF_EASTMONEY_BOARD_POLICY_VERSION",
     "ETF_V2_INPUT_PAGE_SIZE",
     "ETF_V2_MAXIMUM_HISTORY_SESSIONS",
     "ETF_V2_MINIMUM_HISTORY_SESSIONS",

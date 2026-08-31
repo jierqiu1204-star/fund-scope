@@ -40,6 +40,7 @@ from app.services.strategy_lab.dual_universe_leader_tactics_v2_collector import 
     checkpoint_page,
 )
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_etf_inputs import (
+    ETF_EASTMONEY_BOARD_POLICY_VERSION,
     read_etf_v2_asset_inputs,
 )
 from app.services.strategy_lab.dual_universe_leader_tactics_v2_fine_themes import (
@@ -1114,14 +1115,15 @@ async def _materialize_etf(
             "decision_data_snapshot_id": snapshot.snapshot_id,
             "research_only": True,
         }
-    code_version = settings.etf_leader_tactics_v2_code_version.strip()
-    if not code_version:
+    base_code_version = settings.etf_leader_tactics_v2_code_version.strip()
+    if not base_code_version:
         return {
             "status": "failed",
             "job_status": "failed",
             "job_message": "leader_tactics_v2_code_version_missing",
             "research_only": True,
         }
+    code_version = f"{base_code_version}+{ETF_EASTMONEY_BOARD_POLICY_VERSION}"
     decision_cutoff = snapshot.decision_cutoff
     persisted_cutoff = _utc_naive(decision_cutoff)
     existing = await get_v2_materialized_manifest(
