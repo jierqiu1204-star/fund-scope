@@ -247,13 +247,14 @@ def _fine_theme_manifest_hash(
 ) -> str:
     return stable_contract_hash(
         {
-            "schema_version": "leader_tactics_v2_fine_theme_capture_v1",
+            "schema_version": "leader_tactics_v2_fine_theme_capture_v2",
             "signal_date": signal_date,
             "provider_labels": provider_labels,
             "provider": FINE_THEME_PROVIDER,
             "taxonomy_version": FINE_THEME_TAXONOMY_VERSION,
             "source_registry_hash": V2_SOURCE_REGISTRY.registry_hash,
             "formula_registry_hash": V2_FORMULA_REGISTRY_HASH,
+            "theme_registry_hash": THEME_REGISTRY_HASH,
             "code_version": code_version,
         }
     )
@@ -267,7 +268,7 @@ def _fine_theme_checkpoint_contract(*, manifest_hash: str) -> V2CheckpointContra
         adjustment_version="not_applicable",
         taxonomy_version=FINE_THEME_TAXONOMY_VERSION,
         cost_model=(("fee_bps_per_side", 5.0), ("slippage_bps_per_side", 5.0)),
-        state_policy="fine_theme_capture_only_v1",
+        state_policy="fine_theme_capture_only_v2",
     )
 
 

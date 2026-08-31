@@ -173,6 +173,12 @@ def test_registry_keeps_provider_concepts_distinct_from_disclosed_proxies() -> N
     assert liquid_cooling.provider_theme_label == "液冷服务器"
     assert theme_definitions_for_key("liquid_cooling") == (liquid_cooling,)
 
+    mlcc = resolve_theme_definitions(
+        "MLCC", relation_kind=ThemeRelationKind.PROVIDER_CONCEPT
+    )[0]
+    assert mlcc.provider_theme_code == "BK0890"
+    assert mlcc.provider_theme_label == "MLCC"
+
     provider = resolve_theme_definitions(
         "创新药", relation_kind=ThemeRelationKind.PROVIDER_CONCEPT
     )[0]

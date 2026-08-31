@@ -22,13 +22,14 @@ class RegisteredFineThemeSource:
     provider_symbol: str | None = None
 
 
-# Ordered and append-only: resumable callers may persist provider_label.
+# Deterministic order. Registry changes invalidate resumable capture manifests.
 REGISTERED_FINE_THEME_SOURCES = (
     RegisteredFineThemeSource("创新药", "innovation_drug", "创新药", "BK1106"),
-    RegisteredFineThemeSource("稀土", "rare_earth", "稀土/稀土永磁"),
-    RegisteredFineThemeSource("稀土永磁", "rare_earth", "稀土/稀土永磁"),
-    RegisteredFineThemeSource("被动元件概念", "passive_components", "被动元件/MLCC"),
-    RegisteredFineThemeSource("MLCC", "passive_components", "被动元件/MLCC"),
+    RegisteredFineThemeSource("稀土永磁", "rare_earth", "稀土/稀土永磁", "BK0578"),
+    RegisteredFineThemeSource(
+        "被动元件概念", "passive_components", "被动元件/MLCC", "BK0976"
+    ),
+    RegisteredFineThemeSource("MLCC", "passive_components", "被动元件/MLCC", "BK0890"),
     RegisteredFineThemeSource("液冷服务器", "liquid_cooling", "液冷", "BK1138"),
 )
 REGISTERED_FINE_THEME_KEYS = tuple(

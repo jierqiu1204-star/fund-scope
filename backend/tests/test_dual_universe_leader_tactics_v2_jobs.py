@@ -227,11 +227,10 @@ async def test_fine_theme_capture_uses_durable_checkpoint_path(monkeypatch) -> N
     )
 
     assert result["status"] == "complete"
-    assert result["completed_source_count"] == 6
+    assert result["completed_source_count"] == 5
     assert result["provider_health"]["status"] == "healthy"
     assert captured["provider_labels"] == [
         "创新药",
-        "稀土",
         "稀土永磁",
         "被动元件概念",
         "MLCC",
@@ -239,14 +238,13 @@ async def test_fine_theme_capture_uses_durable_checkpoint_path(monkeypatch) -> N
     ]
     assert captured["codes"] == (
         "创新药",
-        "稀土",
         "稀土永磁",
         "被动元件概念",
         "MLCC",
         "液冷服务器",
     )
     assert captured["initial_status"] == "paused"
-    assert captured["persisted"] == ["f" * 64] * 6
+    assert captured["persisted"] == ["f" * 64] * 5
     assert all(isinstance(item, str) for item in captured["content_hashes"])
 
 

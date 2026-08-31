@@ -33,7 +33,6 @@ def test_registered_theme_sources_have_stable_keys_and_labels() -> None:
     )
     assert fine_themes.REGISTERED_FINE_THEME_LABELS == (
         "创新药",
-        "稀土",
         "稀土永磁",
         "被动元件概念",
         "MLCC",
@@ -49,6 +48,16 @@ def test_registered_theme_sources_have_stable_keys_and_labels() -> None:
         ).provider_symbol
         == "BK1138"
     )
+    assert {
+        source.provider_label: source.provider_symbol
+        for source in fine_themes.registered_fine_theme_sources()
+    } == {
+        "创新药": "BK1106",
+        "稀土永磁": "BK0578",
+        "被动元件概念": "BK0976",
+        "MLCC": "BK0890",
+        "液冷服务器": "BK1138",
+    }
 
 
 def test_rare_earth_aliases_are_normalized_without_inferring_membership() -> None:
@@ -96,11 +105,11 @@ def test_concept_snapshot_fetches_one_registered_theme(monkeypatch, capsys) -> N
         "akshare",
         SimpleNamespace(stock_board_concept_cons_em=fetch),
     )
-    monkeypatch.setattr(sys, "argv", ["concept-snapshot", "稀土"])
+    monkeypatch.setattr(sys, "argv", ["concept-snapshot", "稀土永磁"])
 
     assert dual_universe_leader_tactics_v2_concept_snapshot.main() == 0
     captured = capsys.readouterr()
-    assert calls == ["稀土"]
+    assert calls == ["BK0578"]
     assert captured.out.count('"asset_code":"600111"') == 1
 
 
@@ -180,9 +189,9 @@ async def test_single_theme_failure_keeps_a_bounded_summary(monkeypatch) -> None
         return _CompletedProcess(returncode=1, stderr=b"HTTP 504 provider timeout")
 
     monkeypatch.setattr(fine_themes.asyncio, "create_subprocess_exec", spawn)
-    with pytest.raises(RuntimeError, match="稀土.*HTTP 504"):
+    with pytest.raises(RuntimeError, match="稀土永磁.*HTTP 504"):
         await fine_themes.load_registered_fine_theme_facts_for_source(
-            "稀土",
+            "稀土永磁",
             received_at=datetime(2026, 8, 14, 9, 0),
         )
 
@@ -195,9 +204,9 @@ async def test_single_theme_timeout_is_failed_closed(monkeypatch) -> None:
         return process
 
     monkeypatch.setattr(fine_themes.asyncio, "create_subprocess_exec", spawn)
-    with pytest.raises(RuntimeError, match="fine_theme_provider_timeout:稀土"):
+    with pytest.raises(RuntimeError, match="fine_theme_provider_timeout:稀土永磁"):
         await fine_themes.load_registered_fine_theme_facts_for_source(
-            "稀土",
+            "稀土永磁",
             received_at=datetime(2026, 8, 14, 9, 0),
         )
     assert process.killed is True
@@ -231,7 +240,6 @@ async def test_compatibility_loader_serially_aggregates_and_deduplicates(monkeyp
     )
     assert calls == [
         "创新药",
-        "稀土",
         "稀土永磁",
         "被动元件概念",
         "MLCC",
