@@ -22,7 +22,7 @@ from app.services.etf_research_evidence import stable_contract_hash
 from app.services.strategy_lab.dual_universe_leader_tactics_v2 import V2ContractError
 
 THEME_GRAPH_SCHEMA_VERSION = "ashare_multilayer_theme_graph_v1"
-THEME_REGISTRY_VERSION = "ashare_curated_theme_registry_v1"
+THEME_REGISTRY_VERSION = "ashare_curated_theme_registry_v2"
 MAX_THEME_GRAPH_BATCH_SIZE = 500
 MIN_AVAILABLE_THEME_PEERS = 5
 
@@ -259,6 +259,16 @@ THEME_DEFINITIONS = (
         aliases=("被动元件", "被动元件概念", "MLCC"),
         provider_theme_label="被动元件概念",
         priority=30,
+    ),
+    ThemeDefinition(
+        canonical_key="liquid_cooling",
+        display_label="液冷",
+        relation_kind=ThemeRelationKind.PROVIDER_CONCEPT,
+        source="eastmoney.concept.current",
+        aliases=("液冷", "液冷概念", "液冷服务器", "数据中心液冷"),
+        provider_theme_code="BK1138",
+        provider_theme_label="液冷服务器",
+        priority=40,
     ),
     ThemeDefinition(
         canonical_key="innovation_drug",

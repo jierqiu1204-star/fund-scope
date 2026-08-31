@@ -29,6 +29,7 @@ REGISTERED_FINE_THEME_SOURCES = (
     RegisteredFineThemeSource("稀土永磁", "rare_earth", "稀土/稀土永磁"),
     RegisteredFineThemeSource("被动元件概念", "passive_components", "被动元件/MLCC"),
     RegisteredFineThemeSource("MLCC", "passive_components", "被动元件/MLCC"),
+    RegisteredFineThemeSource("液冷服务器", "liquid_cooling", "液冷", "BK1138"),
 )
 REGISTERED_FINE_THEME_KEYS = tuple(
     dict.fromkeys(source.normalized_theme_key for source in REGISTERED_FINE_THEME_SOURCES)

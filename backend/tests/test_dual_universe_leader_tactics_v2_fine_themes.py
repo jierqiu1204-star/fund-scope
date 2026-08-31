@@ -29,6 +29,7 @@ def test_registered_theme_sources_have_stable_keys_and_labels() -> None:
         "innovation_drug",
         "rare_earth",
         "passive_components",
+        "liquid_cooling",
     )
     assert fine_themes.REGISTERED_FINE_THEME_LABELS == (
         "创新药",
@@ -36,10 +37,17 @@ def test_registered_theme_sources_have_stable_keys_and_labels() -> None:
         "稀土永磁",
         "被动元件概念",
         "MLCC",
+        "液冷服务器",
     )
     assert (
         tuple(source.provider_label for source in fine_themes.registered_fine_theme_sources())
         == fine_themes.REGISTERED_FINE_THEME_LABELS
+    )
+    assert (
+        fine_themes.resolve_registered_fine_theme_source(
+            "液冷服务器"
+        ).provider_symbol
+        == "BK1138"
     )
 
 
@@ -58,8 +66,11 @@ def test_rare_earth_aliases_are_normalized_without_inferring_membership() -> Non
         "passive_components",
         "被动元件/MLCC",
     )
-
-
+    assert normalize_fine_theme_label("液冷服务器") == ("liquid_cooling", "液冷")
+    assert normalize_fine_theme_label(" 数据中心液冷 ") == (
+        "liquid_cooling",
+        "液冷",
+    )
 def test_concept_snapshot_fetches_one_registered_theme(monkeypatch, capsys) -> None:
     @dataclass
     class _Column:
@@ -218,7 +229,14 @@ async def test_compatibility_loader_serially_aggregates_and_deduplicates(monkeyp
     facts = await fine_themes.load_registered_fine_theme_facts(
         received_at=datetime(2026, 8, 14, 9, 0),
     )
-    assert calls == ["创新药", "稀土", "稀土永磁", "被动元件概念", "MLCC"]
+    assert calls == [
+        "创新药",
+        "稀土",
+        "稀土永磁",
+        "被动元件概念",
+        "MLCC",
+        "液冷服务器",
+    ]
     assert len(facts) == 1
     assert facts[0].asset_code == "600111"
 
