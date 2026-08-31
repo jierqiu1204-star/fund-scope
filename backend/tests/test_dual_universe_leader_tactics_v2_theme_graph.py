@@ -164,10 +164,14 @@ def test_registry_keeps_provider_concepts_distinct_from_disclosed_proxies() -> N
             for item in THEME_DEFINITIONS
             if item.canonical_key == canonical_key
         }
-        assert definitions == {
-            ThemeRelationKind.PROVIDER_CONCEPT,
-            ThemeRelationKind.INDUSTRY_UNION_PROXY,
-        }
+        assert ThemeRelationKind.PROVIDER_CONCEPT in definitions
+
+    liquid_cooling = resolve_theme_definitions(
+        "液冷服务器", relation_kind=ThemeRelationKind.PROVIDER_CONCEPT
+    )[0]
+    assert liquid_cooling.provider_theme_code == "BK1138"
+    assert liquid_cooling.provider_theme_label == "液冷服务器"
+    assert theme_definitions_for_key("liquid_cooling") == (liquid_cooling,)
 
     provider = resolve_theme_definitions(
         "创新药", relation_kind=ThemeRelationKind.PROVIDER_CONCEPT

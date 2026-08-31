@@ -34,6 +34,7 @@ _FINE_THEME_REGISTRY_PRIORITY = {
     "innovation_drug": 10,
     "rare_earth": 20,
     "passive_components": 30,
+    "liquid_cooling": 40,
 }
 
 

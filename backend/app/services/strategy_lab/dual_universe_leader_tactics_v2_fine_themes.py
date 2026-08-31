@@ -41,6 +41,10 @@ _FINE_THEME_ALIASES = {
     "被动元件": ("passive_components", "被动元件/MLCC"),
     "被动元件概念": ("passive_components", "被动元件/MLCC"),
     "MLCC": ("passive_components", "被动元件/MLCC"),
+    "液冷": ("liquid_cooling", "液冷"),
+    "液冷概念": ("liquid_cooling", "液冷"),
+    "液冷服务器": ("liquid_cooling", "液冷"),
+    "数据中心液冷": ("liquid_cooling", "液冷"),
 }
 
 FINE_THEME_SUBPROCESS_TIMEOUT_SECONDS = 15.0
