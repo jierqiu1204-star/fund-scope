@@ -3236,7 +3236,7 @@ class TrackedPositionAlertAudit(Base):
     smtp_result: Mapped[str | None] = mapped_column(String(32), nullable=True)
     smtp_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     event_id: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
-    event_schema_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    event_schema_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
     alert_episode_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     alert_transition: Mapped[str | None] = mapped_column(String(32), nullable=True)
     action_decision_id: Mapped[int | None] = mapped_column(
