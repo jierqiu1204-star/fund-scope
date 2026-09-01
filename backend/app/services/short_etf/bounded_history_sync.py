@@ -1016,10 +1016,37 @@ async def _record_history_availability(
         requested_to=requested_to,
     )
     if observation is None:
-        return
-    eligible_dates, provider_version, adjustment_version = observation
-    now = _utcnow()
+        accepted_version = dict(etf_decision_adjusted_provider_versions()).get(
+            provider_result.provider
+        )
+        if not accepted_version:
+            return
+        eligible_dates = ()
+        provider_version = adjustment_version = accepted_version
+    else:
+        eligible_dates, provider_version, adjustment_version = observation
+    returned_eligible_session_count = len(eligible_dates)
     effective_required_dates = requested_trade_dates or request.required_trade_dates
+    if not eligible_dates:
+        effective_required_dates = request.required_trade_dates
+        eligible_dates = tuple(
+            await session.scalars(
+                select(EtfAdjustedPriceRevision.trade_date)
+                .where(
+                    EtfAdjustedPriceRevision.etf_code == code,
+                    EtfAdjustedPriceRevision.trade_date.in_(effective_required_dates),
+                    EtfAdjustedPriceRevision.decision_eligible.is_(True),
+                    EtfAdjustedPriceRevision.research_price_basis
+                    == request.price_basis,
+                    _accepted_adjusted_revision_provider_filter(),
+                )
+                .distinct()
+                .order_by(EtfAdjustedPriceRevision.trade_date.asc())
+            )
+        )
+        if not eligible_dates:
+            return
+    now = _utcnow()
     covered_required_sessions = len(
         set(eligible_dates).intersection(effective_required_dates)
     )
@@ -1063,7 +1090,7 @@ async def _record_history_availability(
         "evidence_json": {
             "inferred_listing_date": False,
             "requested_sessions": len(effective_required_dates),
-            "returned_eligible_sessions": len(eligible_dates),
+            "returned_eligible_sessions": returned_eligible_session_count,
             "covered_required_sessions": covered_required_sessions,
             "post_persist_depth_complete": depth_complete,
             "scope": request.scope,
