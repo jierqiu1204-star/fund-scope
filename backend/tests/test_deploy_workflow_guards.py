@@ -1,7 +1,12 @@
+import io
 import os
 import subprocess
+import tarfile
+import textwrap
 import time
 from pathlib import Path
+
+import pytest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
@@ -146,11 +151,77 @@ def test_manual_backup_uses_the_same_atomic_retention_contract() -> None:
     assert 'backup_prune_completed "${BACKUP_KEEP_COUNT}"' in script
 
 
+@pytest.mark.parametrize("archive_state", ["download_failed", "corrupt", "incomplete", "complete"])
+def test_deploy_source_archive_replaces_workspace_only_after_validation(
+    tmp_path: Path, archive_state: str
+) -> None:
+    workflow = _read_repository_file(".github/workflows/deploy.yml")
+    script = textwrap.dedent(
+        workflow.split("        run: |\n", 1)[1].split("\n      - name: Deploy on VPS", 1)[0]
+    )
+    archive = tmp_path / "fixture.tar.gz"
+    if archive_state == "corrupt":
+        archive.write_bytes(b"incomplete download")
+    else:
+        with tarfile.open(archive, "w:gz") as bundle:
+            files = ["frontend/package.json", "deploy/backup-compose.sh"]
+            if archive_state == "complete":
+                files.append("backend/Dockerfile")
+            for name in files:
+                entry = tarfile.TarInfo(f"source-commit/{name}")
+                entry.size = 6
+                bundle.addfile(entry, io.BytesIO(b"source"))
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    curl = commands / "curl"
+    curl.write_text(
+        '#!/bin/sh\ncase "$*" in *"/tarball/$GITHUB_SHA"*) ;; *) exit 65;; esac\n'
+        'test "$ARCHIVE_STATE" != download_failed || exit 22\n'
+        'while [ "$#" -gt 1 ]; do shift; done\ncp "$ARCHIVE_FIXTURE" "$1"\n',
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    old_source = workspace / "old-source"
+    old_source.write_text("previous checkout", encoding="utf-8")
+    (workspace / ".git").mkdir()
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={
+            **os.environ,
+            "PATH": f"{commands}{os.pathsep}{os.environ['PATH']}",
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_WORKSPACE": str(workspace),
+            "GITHUB_REPOSITORY": "fixture/fund-scope",
+            "GITHUB_SHA": "a" * 40,
+            "GITHUB_TOKEN": "fixture-token",
+            "ARCHIVE_FIXTURE": str(archive),
+            "ARCHIVE_STATE": archive_state,
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if archive_state == "complete":
+        assert result.returncode == 0, result.stderr
+        assert (workspace / "backend/Dockerfile").read_text() == "source"
+        assert not old_source.exists()
+        assert not (workspace / ".git").exists()
+    else:
+        assert result.returncode != 0
+        assert old_source.read_text() == "previous checkout"
+        assert (workspace / ".git").exists()
+    assert list(runner_temp.iterdir()) == []
+
+
 def test_deploy_backs_up_before_replacing_source() -> None:
     workflow = _read_repository_file(".github/workflows/deploy.yml")
 
     candidate_head = workflow.index("candidate_head_count")
-    backup = workflow.index("backup-compose.sh")
+    backup = workflow.index('sh "$GITHUB_WORKSPACE/deploy/backup-compose.sh"')
     source_replace = workflow.index('"$GITHUB_WORKSPACE"/ "$deploy_dir"/')
     assert candidate_head < backup < source_replace
     assert 'test -f "$deploy_dir/deploy/$COMPOSE_FILE"' in workflow

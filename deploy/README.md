@@ -42,8 +42,10 @@ GitHub Actions deploy on the VPS runner. Do not SSH to the server for routine
 code deployment after every change.
 
 The workflow runs on the `fundscope-vps` GitHub self-hosted runner installed on
-the VPS. It checks out the pushed commit, syncs it to `/srv/fundscope`, preserves
-server-local configuration files, then runs Compose from `/srv/fundscope/deploy`.
+the VPS. It downloads the exact commit's source archive from GitHub, validates
+and extracts it before replacing the runner workspace. It then syncs the source
+to `/srv/fundscope`, preserves server-local configuration files, and runs Compose
+from `/srv/fundscope/deploy`.
 The server checkout does not need to be a git repository.
 
 Server-local files preserved across each deploy:
