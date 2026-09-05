@@ -10,6 +10,8 @@ LEADER_TACTICS_HARD_STOP: Final = "leader_tactics_hard_stop"
 LEADER_TACTICS_BREAKEVEN_EXIT: Final = "leader_tactics_breakeven_exit"
 LEADER_TACTICS_MA5_EXIT: Final = "leader_tactics_ma5_exit"
 LEADER_TACTICS_TAKE_PROFIT: Final = "leader_tactics_take_profit"
+LEADER_TACTICS_INTRADAY_MA5_WATCH: Final = "leader_tactics_intraday_ma5_watch"
+LEADER_TACTICS_INTRADAY_BREAKEVEN_WATCH: Final = "leader_tactics_intraday_breakeven_watch"
 LEADER_TACTICS_ROUND_TRIP_COST_BPS: Final = 0.0
 
 
@@ -20,6 +22,16 @@ class LeaderExitThresholds:
     breakeven_line: float | None
     take_profit_line: float | None
     effective_exit_line: float
+    reason_code: str | None
+
+
+@dataclass(frozen=True)
+class LeaderIntradayThresholds:
+    adjusted_price: float
+    projected_ma5: float
+    high_water: float
+    armed: bool
+    breakeven_line: float | None
     reason_code: str | None
 
 
@@ -46,6 +58,54 @@ def initial_leader_risk(
     return initial_stop, risk_unit, source_signal_low is not None and usable_low is None
 
 
+def evaluate_leader_intraday_thresholds(
+    *,
+    adjusted_price: float,
+    previous_four_closes: tuple[float, ...],
+    entry_close: float,
+    initial_stop: float,
+    risk_unit: float,
+    previous_high: float,
+    previously_armed: bool = False,
+) -> LeaderIntradayThresholds:
+    """Evaluate a trusted intraday ETF quote against frozen adjusted thresholds."""
+
+    values = (
+        adjusted_price,
+        *previous_four_closes,
+        entry_close,
+        initial_stop,
+        risk_unit,
+        previous_high,
+    )
+    if (
+        len(previous_four_closes) != 4
+        or any(not math.isfinite(value) or value <= 0 for value in values)
+        or initial_stop >= entry_close
+    ):
+        raise ValueError("leader intraday thresholds require positive finite inputs")
+    projected_ma5 = math.fsum((*previous_four_closes, adjusted_price)) / 5.0
+    high_water = max(previous_high, adjusted_price)
+    armed = previously_armed or high_water >= entry_close + risk_unit
+    breakeven = entry_close if armed else None
+    if adjusted_price <= initial_stop:
+        reason_code = LEADER_TACTICS_HARD_STOP
+    elif breakeven is not None and adjusted_price <= breakeven:
+        reason_code = LEADER_TACTICS_INTRADAY_BREAKEVEN_WATCH
+    elif adjusted_price <= projected_ma5:
+        reason_code = LEADER_TACTICS_INTRADAY_MA5_WATCH
+    else:
+        reason_code = None
+    return LeaderIntradayThresholds(
+        adjusted_price=adjusted_price,
+        projected_ma5=projected_ma5,
+        high_water=high_water,
+        armed=armed,
+        breakeven_line=breakeven,
+        reason_code=reason_code,
+    )
+
+
 def evaluate_leader_exit_thresholds(
     *,
     entry_close: float,
@@ -59,14 +119,10 @@ def evaluate_leader_exit_thresholds(
 ) -> LeaderExitThresholds:
     """Evaluate one close using the frozen hard-stop, breakeven and MA5 rules."""
 
-    high_water = max(
-        visible_closes + ((previous_high,) if previous_high is not None else ())
-    )
+    high_water = max(visible_closes + ((previous_high,) if previous_high is not None else ()))
     armed = previously_armed or high_water >= entry_close + risk_unit
     breakeven = (
-        entry_close * (1.0 + LEADER_TACTICS_ROUND_TRIP_COST_BPS / 10_000.0)
-        if armed
-        else None
+        entry_close * (1.0 + LEADER_TACTICS_ROUND_TRIP_COST_BPS / 10_000.0) if armed else None
     )
     effective_line = max(
         initial_stop,

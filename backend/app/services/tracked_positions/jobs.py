@@ -9,7 +9,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings, get_settings
 from app.defaults.short_research import ASSET_TYPE_ETF
 from app.models.entities import TrackedPosition, User, utcnow
-from app.services.risk_alerts import LEADER_TACTICS_EXIT_POLICY_ID
 from app.services.tracked_positions.owner_risk import (
     materialize_owner_risk_contexts,
     owner_risk_contexts_for_read,
@@ -150,7 +149,6 @@ async def intraday_tracked_position_alerts_job(
             select(TrackedPosition).where(
                 TrackedPosition.asset_type == ASSET_TYPE_ETF,
                 TrackedPosition.status == ACTIVE_STATUS,
-                TrackedPosition.alert_policy_id != LEADER_TACTICS_EXIT_POLICY_ID,
             )
         )
     ).all()
@@ -207,9 +205,7 @@ async def intraday_tracked_position_alerts_job(
     turnover_by_code, quote_by_code = await batch_etf_liquidity_inputs(session, list(rows))
     for position in rows:
         await refresh_entry_if_waiting(session, position)
-        prepared = await prepare_alert_evaluation(
-            session, position, evaluation_mode="intraday"
-        )
+        prepared = await prepare_alert_evaluation(session, position, evaluation_mode="intraday")
         alert, status = await create_alert_if_needed(
             session,
             position,

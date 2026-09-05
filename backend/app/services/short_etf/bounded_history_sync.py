@@ -71,12 +71,16 @@ def plan_publication_readiness_candidates(
         key=lambda candidate: (
             1 if candidate.has_target_date else 0,
             -candidate.warmup_depth,
-            0 if candidate.priority else 1,
             candidate.code,
         ),
     )
-    codes = [candidate.code for candidate in ordered]
-    rotated_codes = _rotate_after(codes, rotation_anchor)
+    priority_codes = [candidate.code for candidate in ordered if candidate.priority]
+    regular_codes = [candidate.code for candidate in ordered if not candidate.priority]
+    if rotation_anchor in priority_codes:
+        priority_codes = _rotate_after(priority_codes, rotation_anchor)
+    else:
+        regular_codes = _rotate_after(regular_codes, rotation_anchor)
+    rotated_codes = [*priority_codes, *regular_codes]
     by_code = {candidate.code: candidate for candidate in ordered}
     return [by_code[code] for code in rotated_codes]
 

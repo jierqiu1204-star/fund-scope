@@ -35,6 +35,7 @@ ALERT_HARD_STOP = "hard_stop"
 ALERT_MA5_CLOSE_BREAK_EXIT = "ma5_close_break_exit"
 ALERT_LATE_DAY_T1_EXIT = "late_day_t1_exit"
 ALERT_LEADER_TACTICS_EXIT = "leader_tactics_exit"
+ALERT_LEADER_TACTICS_WATCH = "leader_tactics_watch"
 
 LEADER_TACTICS_EXIT_POLICY_ID = "leader_tactics_exit_v1"
 LEADER_TACTICS_EXIT_POLICY_VERSION = "leader_tactics_exit_v1"
@@ -67,6 +68,7 @@ EMAIL_ALERT_TYPES = {
     ALERT_MA5_CLOSE_BREAK_EXIT,
     ALERT_LATE_DAY_T1_EXIT,
     ALERT_LEADER_TACTICS_EXIT,
+    ALERT_LEADER_TACTICS_WATCH,
 }
 
 TAKE_PROFIT_WATCH_PCT = 3.0
@@ -352,9 +354,7 @@ def evaluate_long_profit_protection(
         )
 
     candidate_stop = max(0.0, high_water - allowed_giveback)
-    effective_stop = max(
-        value for value in (candidate_stop, previous_stop) if value is not None
-    )
+    effective_stop = max(value for value in (candidate_stop, previous_stop) if value is not None)
     distance = current - effective_stop
     return LongProfitProtectionDecision(
         state="triggered" if distance <= 0 else "armed",
@@ -892,6 +892,7 @@ class LeaderTacticsDailyBar:
     received_at: datetime | None
     decision_eligible: bool = True
     price_basis: str = LEADER_TACTICS_PRICE_BASIS
+    raw_close: float | None = None
 
 
 @dataclass(frozen=True)
@@ -1119,7 +1120,9 @@ def evaluate_leader_tactics_exit(
             )
         trade_dates.append(bar.trade_date)
         adjustment_versions.append(adjustment_version)
-    if tuple(sorted(trade_dates)) != tuple(trade_dates) or len(set(trade_dates)) != len(trade_dates):
+    if tuple(sorted(trade_dates)) != tuple(trade_dates) or len(set(trade_dates)) != len(
+        trade_dates
+    ):
         return _leader_decision(
             actionable=False,
             data_eligible=False,
@@ -1152,9 +1155,9 @@ def evaluate_leader_tactics_exit(
         if isinstance(persisted.get("adjustment_version"), str)
         else ""
     )
-    if any(item is not None for item in (entry_close, entry_atr20, initial_stop, risk_unit)) and not all(
+    if any(
         item is not None for item in (entry_close, entry_atr20, initial_stop, risk_unit)
-    ):
+    ) and not all(item is not None for item in (entry_close, entry_atr20, initial_stop, risk_unit)):
         return _leader_decision(
             actionable=False,
             data_eligible=False,
@@ -1257,10 +1260,7 @@ def evaluate_leader_tactics_exit(
         )
     ma5 = math.fsum(item for item in closes if item is not None) / 5.0
     previous_high = _leader_positive_finite(persisted.get("high_water_adjusted_close"))
-    visible_highs = [
-        _leader_positive_finite(bar.adjusted_close)
-        for bar in bars[entry_index:]
-    ]
+    visible_highs = [_leader_positive_finite(bar.adjusted_close) for bar in bars[entry_index:]]
     if any(item is None for item in visible_highs):
         return _leader_decision(
             actionable=False,
@@ -1302,7 +1302,11 @@ def evaluate_leader_tactics_exit(
         "current_adjusted_close": round(current, 8),
         "source_signal_low_ignored": bool(persisted.get("source_signal_low_ignored", False)),
         "exit_notification_sent": notification_sent,
-        "trigger_priority": [LEADER_TACTICS_HARD_STOP, LEADER_TACTICS_BREAKEVEN_EXIT, LEADER_TACTICS_MA5_EXIT],
+        "trigger_priority": [
+            LEADER_TACTICS_HARD_STOP,
+            LEADER_TACTICS_BREAKEVEN_EXIT,
+            LEADER_TACTICS_MA5_EXIT,
+        ],
     }
     state = {
         **base_state,

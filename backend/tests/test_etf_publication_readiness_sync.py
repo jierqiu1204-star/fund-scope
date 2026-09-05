@@ -38,7 +38,7 @@ def _request() -> BoundedHistorySyncRequest:
     )
 
 
-def test_publication_candidate_planner_prioritizes_daily_then_warmup_and_rotates() -> None:
+def test_publication_candidate_planner_reserves_priority_lane_then_rotates() -> None:
     candidates = (
         PublicationReadinessCandidate(
             code="510001",
@@ -69,8 +69,8 @@ def test_publication_candidate_planner_prioritizes_daily_then_warmup_and_rotates
     ordered = plan_publication_readiness_candidates(candidates)
     rotated = plan_publication_readiness_candidates(candidates, rotation_anchor="510003")
 
-    assert [item.code for item in ordered] == ["510001", "510003", "510004", "510002"]
-    assert [item.code for item in rotated] == ["510004", "510002", "510001", "510003"]
+    assert [item.code for item in ordered] == ["510003", "510002", "510001", "510004"]
+    assert [item.code for item in rotated] == ["510002", "510003", "510001", "510004"]
 
 
 def test_publication_request_freezes_identity_and_resource_profile() -> None:
@@ -214,7 +214,7 @@ async def test_publication_database_candidates_keep_daily_and_warmup_independent
     assert [
         candidate.code
         for candidate in plan_publication_readiness_candidates(candidates)
-    ] == [daily_gap, warmup_gap]
+    ] == [warmup_gap, daily_gap]
 
 
 @pytest.mark.asyncio

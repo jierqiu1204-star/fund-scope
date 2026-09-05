@@ -15,12 +15,18 @@ from app.models.entities import (
     TradableEtf,
     User,
 )
+from app.schemas.etf_quotes import TrackedEtfIntradaySnapshotOut
+from app.schemas.tracked_positions import TrackedPositionExitSignal
 from app.services.leader_tactics_exit_policy import (
+    LEADER_TACTICS_INTRADAY_BREAKEVEN_WATCH,
+    LEADER_TACTICS_INTRADAY_MA5_WATCH,
     LEADER_TACTICS_TAKE_PROFIT,
     evaluate_leader_exit_thresholds,
+    evaluate_leader_intraday_thresholds,
 )
 from app.services.risk_alerts import (
     ALERT_LEADER_TACTICS_EXIT,
+    ALERT_LEADER_TACTICS_WATCH,
     LEADER_TACTICS_BREAKEVEN_EXIT,
     LEADER_TACTICS_DATA_WAITING,
     LEADER_TACTICS_HARD_STOP,
@@ -31,11 +37,13 @@ from app.services.risk_alerts import (
     evaluate_leader_tactics_exit,
     map_exit_signal_to_position_action,
 )
+from app.services.tracked_positions import service as tracked_service
 from app.services.tracked_positions.alert_policy import (
     resolve_alert_policy_selection,
 )
 from app.services.tracked_positions.service import (
     AlertDecision,
+    PositionAnalysis,
     PreparedAlertEvaluation,
     _leader_entry_anchor_date,
     _mark_leader_exit_notification_sent,
@@ -162,7 +170,10 @@ def test_hard_stop_reason_wins_when_ma5_is_higher_than_the_hard_stop() -> None:
     result = evaluate_leader_tactics_exit(_evaluation(_bars(closes)))
 
     assert result.threshold_context["adjusted_ma5"] > result.threshold_context["initial_stop"]
-    assert result.threshold_context["current_adjusted_close"] < result.threshold_context["initial_stop"]
+    assert (
+        result.threshold_context["current_adjusted_close"]
+        < result.threshold_context["initial_stop"]
+    )
     assert result.reason_code == LEADER_TACTICS_HARD_STOP
 
 
@@ -172,9 +183,10 @@ def test_armed_breakeven_reason_wins_over_ma5_without_hard_stop() -> None:
     result = evaluate_leader_tactics_exit(_evaluation(_bars(closes)))
 
     assert result.threshold_context["armed"] is True
-    assert result.threshold_context["current_adjusted_close"] > result.threshold_context[
-        "initial_stop"
-    ]
+    assert (
+        result.threshold_context["current_adjusted_close"]
+        > result.threshold_context["initial_stop"]
+    )
     assert result.reason_code == LEADER_TACTICS_BREAKEVEN_EXIT
 
 
@@ -191,6 +203,36 @@ def test_optional_take_profit_triggers_on_close_at_or_above_target() -> None:
 
     assert result.reason_code == LEADER_TACTICS_TAKE_PROFIT
     assert result.take_profit_line == 10.5
+
+
+@pytest.mark.parametrize(
+    ("price", "previous_high", "armed", "expected"),
+    [
+        (7.9, 10.0, False, LEADER_TACTICS_HARD_STOP),
+        (9.8, 10.0, False, LEADER_TACTICS_INTRADAY_MA5_WATCH),
+        (9.9, 11.2, True, LEADER_TACTICS_INTRADAY_BREAKEVEN_WATCH),
+        (10.5, 10.5, False, None),
+    ],
+)
+def test_intraday_thresholds_split_hard_stop_from_close_confirmation(
+    price: float,
+    previous_high: float,
+    armed: bool,
+    expected: str | None,
+) -> None:
+    closes = (9.4, 9.4, 9.4, 9.4) if armed else (10.0, 10.0, 10.0, 10.0)
+
+    result = evaluate_leader_intraday_thresholds(
+        adjusted_price=price,
+        previous_four_closes=closes,
+        entry_close=10.0,
+        initial_stop=8.0,
+        risk_unit=1.0,
+        previous_high=previous_high,
+        previously_armed=armed,
+    )
+
+    assert result.reason_code == expected
 
 
 def test_frozen_long_position_can_evaluate_after_entry_leaves_bounded_window() -> None:
@@ -321,10 +363,10 @@ def test_notification_success_is_the_only_state_that_suppresses_future_retry() -
     assert state["exit_notification_alert_id"] == 42
 
 
-async def test_leader_policy_is_daily_close_only_for_intraday_evaluation() -> None:
+async def test_stock_leader_policy_fails_closed_without_intraday_source() -> None:
     position = TrackedPosition(
-        asset_type="etf",
-        asset_code="510300",
+        asset_type="stock",
+        asset_code="600000",
         alert_policy_id="leader_tactics_exit_v1",
     )
 
@@ -336,7 +378,91 @@ async def test_leader_policy_is_daily_close_only_for_intraday_evaluation() -> No
 
     assert prepared.decision is None
     assert prepared.analysis is None
-    assert prepared.data_reason_code == "leader_tactics_daily_close_only"
+    assert prepared.data_reason_code == "leader_tactics_stock_intraday_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_etf_leader_reader_uses_actual_evaluation_cutoff(monkeypatch) -> None:
+    cutoff = datetime(2026, 9, 1, 22, 0, tzinfo=UTC)
+    captured: dict[str, object] = {}
+
+    async def fake_facts(session, **kwargs):
+        captured.update(kwargs)
+        return ()
+
+    monkeypatch.setattr(
+        tracked_service,
+        "etf_adjusted_daily_facts_on_or_before",
+        fake_facts,
+    )
+    position = TrackedPosition(asset_type="etf", asset_code="510300")
+
+    await tracked_service._leader_daily_bars(
+        None,  # type: ignore[arg-type]
+        position,
+        as_of=cutoff.date(),
+        decision_cutoff=cutoff,
+    )
+
+    assert captured["decision_cutoff"] == cutoff
+
+
+@pytest.mark.asyncio
+async def test_etf_leader_intraday_watch_is_prepared_for_email(monkeypatch) -> None:
+    quote_time = datetime.now(UTC)
+    snapshot = TrackedEtfIntradaySnapshotOut(
+        current_price=1.0,
+        quote_time=quote_time,
+        trade_date=quote_time.date(),
+        price_source="intraday_quote",
+        reliability_level="single_fresh",
+        email_eligible=True,
+        decision_eligible=True,
+        bid_price=0.999,
+        ask_price=1.001,
+    )
+    analysis = PositionAnalysis(
+        chart=[],
+        exit_signal=TrackedPositionExitSignal(
+            alert_type=ALERT_LEADER_TACTICS_WATCH,
+            label="龙头策略日内风险预警",
+            level="watch",
+            action_class="soft_watch",
+            reasons=["盘中跌破动态复权 MA5，等待收盘确认。"],
+        ),
+        max_profit_pct=None,
+        profit_giveback_pct=None,
+        holding_days=1,
+        technical_metrics={"leader_tactics": {}},
+        intraday_snapshot=snapshot,
+        policy_state_update={},
+    )
+
+    async def fake_analysis(session, position):
+        return analysis
+
+    monkeypatch.setattr(
+        tracked_service,
+        "_leader_tactics_intraday_analysis",
+        fake_analysis,
+    )
+    position = TrackedPosition(
+        asset_type="etf",
+        asset_code="510300",
+        buy_date=quote_time.date(),
+        alert_policy_id="leader_tactics_exit_v1",
+        exit_state_json={},
+    )
+
+    prepared = await prepare_alert_evaluation(
+        None,  # type: ignore[arg-type]
+        position,
+        evaluation_mode="intraday",
+    )
+
+    assert prepared.decision is not None
+    assert prepared.decision.alert_type == ALERT_LEADER_TACTICS_WATCH
+    assert prepared.decision.alert_source == "intraday_quote"
 
 
 def test_leader_exit_maps_to_full_exit_for_etf_and_stock() -> None:
@@ -425,9 +551,7 @@ async def test_candidate_backed_leader_policy_requires_confirmed_manifest_eviden
                 "formula_id": "leader_breakout_proxy_v2",
                 "signal_date": "2026-08-14",
                 "asset_name": "候选股票",
-                "gate_facts_json": (
-                    '{"adjusted_low":9.8,"adjusted_atr20":0.35}'
-                ),
+                "gate_facts_json": ('{"adjusted_low":9.8,"adjusted_atr20":0.35}'),
                 "effective_state": "confirmed",
             }
 
@@ -493,12 +617,8 @@ async def test_stock_tracking_name_requires_authoritative_universe_snapshot(app)
                 """
             )
         )
-        session.add(
-            Stock(code="600000", exchange="SH", name="旧表名称", industry="银行")
-        )
-        session.add(
-            Stock(code="600001", exchange="SH", name="只有旧表", industry="银行")
-        )
+        session.add(Stock(code="600000", exchange="SH", name="旧表名称", industry="银行"))
+        session.add(Stock(code="600001", exchange="SH", name="只有旧表", industry="银行"))
         await session.commit()
 
         authoritative = await resolve_asset_name(session, "stock", "600000")
@@ -653,6 +773,4 @@ async def test_failed_smtp_retries_same_leader_alert_and_success_suppresses(
     assert third_status == "deduplicated"
     assert attempts == 2
     assert alert_count == 1
-    assert position.exit_state_json["leader_tactics_exit_v1"][
-        "exit_notification_sent"
-    ] is True
+    assert position.exit_state_json["leader_tactics_exit_v1"]["exit_notification_sent"] is True
