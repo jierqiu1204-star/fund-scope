@@ -8,6 +8,8 @@ from app.services.strategy_lab.etf_factor_experiment import (
     FactorExperimentContractError,
     HoldoutConsumption,
     consume_holdout_once,
+    holdout_consumption_artifact,
+    restore_holdout_consumption,
 )
 from app.services.strategy_lab.etf_factor_validation import (
     PromotionMetrics,
@@ -49,12 +51,26 @@ def test_walk_forward_is_chronological_purged_and_embargoed() -> None:
     assert split_role(sessions[70], manifest.split) == "validation"
     assert split_role(sessions[110], manifest.split) == "holdout"
     assert len(folds) == 5
+    assert folds[0].embargoed_dates == sessions[30:40]
+    assert folds[0].purged_dates == sessions[40:50]
+    assert folds[0].test_dates == sessions[50:60]
     for fold in folds:
         assert max(fold.train_dates) < min(fold.embargoed_dates)
         assert max(fold.embargoed_dates) < min(fold.purged_dates)
         assert max(fold.purged_dates) < min(fold.test_dates)
         assert len(fold.embargoed_dates) == 10
         assert len(fold.purged_dates) == 10
+        assert all(
+            sessions.index(train_date) + manifest.split.purge_horizon_sessions
+            < sessions.index(fold.test_dates[0])
+            for train_date in fold.train_dates
+        )
+
+    with pytest.raises(FactorExperimentContractError, match="purge horizon"):
+        replace(
+            manifest,
+            split=replace(manifest.split, purge_horizon_sessions=9),
+        ).validate()
 
 
 def test_block_bootstrap_and_holm_are_deterministic() -> None:
@@ -173,4 +189,11 @@ def test_holdout_freeze_and_single_consumption_reject_retries() -> None:
             frozen_non_holdout_evidence_hash="validation-evidence-v1",
             holdout_evidence_hash="outcome-driven-retry",
             consumed_at=datetime(2026, 7, 20),
+        )
+
+    artifact = holdout_consumption_artifact(consumed)
+    assert restore_holdout_consumption(artifact) == consumed
+    with pytest.raises(FactorExperimentContractError, match="hash"):
+        restore_holdout_consumption(
+            {**artifact, "holdout_evidence_hash": "attempted-overwrite"}
         )

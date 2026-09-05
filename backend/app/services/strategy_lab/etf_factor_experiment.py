@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime
 from typing import Any, Literal
@@ -134,6 +135,8 @@ class FactorExperimentManifest:
             raise FactorExperimentContractError("fee and slippage must both be non-zero")
         if self.split.embargo_sessions != REQUIRED_EMBARGO_SESSIONS:
             raise FactorExperimentContractError("embargo must be 10 sessions")
+        if self.split.purge_horizon_sessions != max(REQUIRED_HORIZONS):
+            raise FactorExperimentContractError("purge horizon must be 10 sessions")
         if not (
             self.split.development_start
             <= self.split.development_end
@@ -173,6 +176,10 @@ class HoldoutConsumption:
     consumed_at: datetime | None = None
     holdout_evidence_hash: str | None = None
 
+    @property
+    def consumption_hash(self) -> str:
+        return stable_contract_hash(asdict(self))
+
 
 def register_factor_experiment(
     manifest: FactorExperimentManifest,
@@ -208,3 +215,60 @@ def consume_holdout_once(
         consumed_at=consumed_at,
         holdout_evidence_hash=holdout_evidence_hash,
     )
+
+
+def holdout_consumption_artifact(
+    record: HoldoutConsumption,
+) -> dict[str, Any]:
+    """Return the small immutable receipt stored by the existing artifact store."""
+
+    return {
+        "schema_version": "factor_holdout_consumption_v1",
+        "manifest_hash": record.manifest_hash,
+        "frozen_non_holdout_evidence_hash": record.frozen_non_holdout_evidence_hash,
+        "consumed_at": (
+            record.consumed_at.isoformat() if record.consumed_at is not None else None
+        ),
+        "holdout_evidence_hash": record.holdout_evidence_hash,
+        "consumption_hash": record.consumption_hash,
+    }
+
+
+def restore_holdout_consumption(
+    payload: Mapping[str, Any],
+) -> HoldoutConsumption:
+    """Validate and restore a persisted receipt without reading holdout again."""
+
+    consumed_at_value = payload.get("consumed_at")
+    if consumed_at_value is not None and not isinstance(consumed_at_value, str):
+        raise FactorExperimentContractError("persisted holdout timestamp is invalid")
+    try:
+        consumed_at = (
+            datetime.fromisoformat(consumed_at_value)
+            if consumed_at_value is not None
+            else None
+        )
+    except ValueError as exc:
+        raise FactorExperimentContractError(
+            "persisted holdout timestamp is invalid"
+        ) from exc
+    record = HoldoutConsumption(
+        manifest_hash=str(payload.get("manifest_hash") or ""),
+        frozen_non_holdout_evidence_hash=str(
+            payload.get("frozen_non_holdout_evidence_hash") or ""
+        ),
+        consumed_at=consumed_at,
+        holdout_evidence_hash=(
+            str(payload["holdout_evidence_hash"])
+            if payload.get("holdout_evidence_hash") is not None
+            else None
+        ),
+    )
+    if (
+        payload.get("schema_version") != "factor_holdout_consumption_v1"
+        or payload.get("consumption_hash") != record.consumption_hash
+    ):
+        raise FactorExperimentContractError(
+            "persisted holdout consumption hash is invalid"
+        )
+    return record

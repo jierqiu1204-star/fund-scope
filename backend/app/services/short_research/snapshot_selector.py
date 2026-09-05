@@ -47,6 +47,52 @@ class CanonicalSnapshotSelection:
     run: ShortResearchSignalRun | None
 
 
+def published_validation_source_identity(run: ShortResearchSignalRun) -> dict[str, str]:
+    """Read a historical publication's identity without imposing today's freshness."""
+    if run.status != "success":
+        raise ValueError("unsuccessful_source_snapshot")
+    if run.scope_kind != "full":
+        raise ValueError("partial_or_legacy_scope")
+    if run.publication_state != "published":
+        raise ValueError("unpublished_snapshot")
+    versions = {
+        "daily_reconstructable_v1": ("research_score", DUAL_RANKING_RULE_VERSION),
+        "final_score_v3": ("ranking_score", "final_score_v3_rule_v2"),
+    }
+    if run.score_version not in versions:
+        raise ValueError("incompatible_score_version")
+    score_field, rule_version = versions[run.score_version]
+    if run.score_field != score_field:
+        raise ValueError("incompatible_score_field")
+    if run.rule_version != rule_version:
+        raise ValueError("incompatible_rule_version")
+    if run.price_basis != "total_return_adjusted":
+        raise ValueError("incompatible_price_basis")
+    for name in (
+        "ranking_contract_hash", "scope_hash", "universe_snapshot_hash",
+        "input_snapshot_hash", "data_cutoff", "as_of_trade_date", "idempotency_key",
+    ):
+        if not getattr(run, name):
+            raise ValueError(f"missing_{name}")
+    contract_hash = str(run.ranking_contract_hash)
+    if len(contract_hash) != 64 or any(char not in "0123456789abcdefABCDEF" for char in contract_hash):
+        raise ValueError("invalid_ranking_contract_hash")
+    if (run.config_json or {}).get("asset_type") not in {None, "etf"}:
+        raise ValueError("non_etf_source_snapshot")
+    metadata = snapshot_metadata(run)
+    if metadata["snapshot_state"] != "complete":
+        raise ValueError(str(metadata["unavailable_reason"] or "incomplete_source_snapshot"))
+    return {
+        "ranking_source_kind": "production_published",
+        "ranking_contract_id": run.score_version,
+        "ranking_contract_hash": str(run.ranking_contract_hash),
+        "score_version": run.score_version,
+        "score_field": score_field,
+        "rule_version": rule_version,
+        "price_basis": run.price_basis,
+    }
+
+
 class SnapshotMetadata(TypedDict):
     snapshot_id: int | None
     score_version: str | None

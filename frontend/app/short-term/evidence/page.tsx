@@ -388,7 +388,7 @@ function labelEvidenceConclusion(row: LabelEvidenceRow) {
 
 const ETF_EVIDENCE_SURFACES = [
   ["production_ranking", "正式 V3 榜单"],
-  ["research_replay", "历史 research replay"],
+  ["research_replay", "榜单研究证据"],
   ["policy_shadow", "Policy shadow"],
   ["live_notification", "真实邮件结果"],
   ["provider_delivery", "服务商送达"],
@@ -474,6 +474,22 @@ function EtfEvidenceSurfaceCard({
       <p className="mt-3 text-lg font-semibold text-ink">
         {evidenceMetricText(surface)}
       </p>
+      {surface.exploratory_metrics.length ? (
+        <div className="mt-3 space-y-1 rounded-[8px] bg-paper px-3 py-2 text-xs text-ink/60">
+          <p className="font-semibold">探索性诊断 · 不作为已验证赢家</p>
+          {surface.exploratory_metrics.slice(0, 3).map((metric, index) => (
+            <p key={`${String(metric.label ?? "diagnostic")}-${index}`}>
+              {String(metric.label ?? "候选诊断")}：
+              {typeof metric.value === "number" && Number.isFinite(metric.value)
+                ? formatPercent(metric.value * 100)
+                : "暂无"}
+              {typeof metric.sample_count === "number"
+                ? ` · 样本 ${metric.sample_count}`
+                : ""}
+            </p>
+          ))}
+        </div>
+      ) : null}
       <p className="mt-2 break-words text-xs leading-5 text-ink/55">
         {evidenceCoverageText(surface)}
       </p>
@@ -1519,20 +1535,16 @@ export default function EtfEvidencePage() {
             </button>
           </div>
         </div>
-        {[
-          runBacktest,
-          runHealthcheck,
-          runExitHyperopt,
-          runExitCredibility
-        ].map((mutation, index) =>
-          mutation.isError ? (
-            <p
-              key={index}
-              className="mt-3 rounded-[8px] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700"
-            >
-              {errorText(mutation.error)}
-            </p>
-          ) : null
+        {[runBacktest, runHealthcheck, runExitHyperopt, runExitCredibility].map(
+          (mutation, index) =>
+            mutation.isError ? (
+              <p
+                key={index}
+                className="mt-3 rounded-[8px] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700"
+              >
+                {errorText(mutation.error)}
+              </p>
+            ) : null
         )}
       </Panel>
 

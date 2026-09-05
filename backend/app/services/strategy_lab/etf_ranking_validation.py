@@ -20,6 +20,11 @@ from .etf_ranking_candidates import (
     FrozenRankingCandidateRegistry,
     freeze_ranking_candidate_registry,
 )
+from .etf_ranking_forward_outcomes import (
+    CONTINUOUS_RANKING_EXECUTION_MODEL,
+    RANKING_PORTFOLIO_BASE_COST_POLICY,
+    RankingPortfolioLedger,
+)
 
 PRODUCTION_SCORE_VERSION = "final_score_v3"
 PRODUCTION_SCORE_FIELD = "ranking_score"
@@ -27,6 +32,11 @@ RESEARCH_SCORE_VERSION = "daily_reconstructable_v1"
 RESEARCH_SCORE_FIELD = "research_score"
 PRODUCTION_RULE_VERSION = "final_score_v3_rule_v2"
 RESEARCH_RULE_VERSION = "daily_reconstructable_v1_rule_v1"
+CURRENT_PRODUCTION_RULE_VERSION = "dual_ranking_surfaces_v1"
+PRODUCTION_SOURCE_SCORE_CONTRACTS = {
+    PRODUCTION_SCORE_VERSION: (PRODUCTION_SCORE_FIELD, PRODUCTION_RULE_VERSION),
+    RESEARCH_SCORE_VERSION: (RESEARCH_SCORE_FIELD, CURRENT_PRODUCTION_RULE_VERSION),
+}
 TOTAL_RETURN_ADJUSTED = "total_return_adjusted"
 
 
@@ -168,15 +178,19 @@ class RankingValidationSourceEvent:
                 raise RankingValidationContractError(
                     "production source must be full scope"
                 )
-            if self.score_version != PRODUCTION_SCORE_VERSION:
+            expected_score_contract = PRODUCTION_SOURCE_SCORE_CONTRACTS.get(
+                self.score_version
+            )
+            if expected_score_contract is None:
                 raise RankingValidationContractError(
-                    "production source requires final_score_v3"
+                    "production source requires final_score_v3 or daily_reconstructable_v1"
                 )
-            if self.score_field != PRODUCTION_SCORE_FIELD:
+            expected_score_field, expected_rule_version = expected_score_contract
+            if self.score_field != expected_score_field:
                 raise RankingValidationContractError(
-                    "production source requires ranking_score"
+                    f"production source requires {expected_score_field}"
                 )
-            if self.rule_version != PRODUCTION_RULE_VERSION:
+            if self.rule_version != expected_rule_version:
                 raise RankingValidationContractError(
                     "production source requires the registered rule version"
                 )
@@ -531,6 +545,18 @@ FROZEN_VALIDATION_HORIZONS = (1, 3, 5, 10)
 PRIMARY_TOP_N = 10
 PRIMARY_HORIZON_SESSIONS = 5
 PRIMARY_ENDPOINT_NAME = "top10_five_session_paired_net_excess"
+CONTINUOUS_FIVE_SESSION_ENDPOINT_CONTRACT_HASH = stable_contract_hash(
+    {
+        "contract_id": "ranking_continuous_top10_five_session_paired_endpoint_v1",
+        "execution_model": CONTINUOUS_RANKING_EXECUTION_MODEL,
+        "window": "t_plus_1_pre_rebalance_to_t_plus_6_pre_rebalance",
+        "included_trade_cost_sessions": "t_plus_1_through_t_plus_5",
+        "end_boundary_rebalance": "excluded",
+        "artificial_liquidation": False,
+        "gross_account": "same_targets_zero_cost_companion",
+        "cost_contract_hash": RANKING_PORTFOLIO_BASE_COST_POLICY.contract_hash,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -671,6 +697,14 @@ class RankingPairedReturnSample:
     cost_contract_hash: str
     exclusion_reason: str | None
     sample_hash: str
+    execution_model: str | None = None
+    endpoint_contract_hash: str | None = None
+    continuous_cost_contract_hash: str | None = None
+    candidate_actual_cost: float | None = None
+    baseline_actual_cost: float | None = None
+    window_cost_sessions: tuple[date, ...] = ()
+    candidate_ledger_hash: str | None = None
+    baseline_ledger_hash: str | None = None
 
     def __post_init__(self) -> None:
         _require_hash("paired sample source event hash", self.source_event_hash)
@@ -706,8 +740,7 @@ class RankingPairedReturnSample:
                 "paired sample cost contract is incompatible"
             )
         if (
-            not self.selected_ranked_asset_codes
-            or len(self.selected_ranked_asset_codes) > self.top_n
+            len(self.selected_ranked_asset_codes) > self.top_n
             or len(self.selected_ranked_asset_codes)
             != len(set(self.selected_ranked_asset_codes))
         ):
@@ -748,6 +781,58 @@ class RankingPairedReturnSample:
                 raise RankingValidationContractError(
                     "incomplete paired sample requires a stable reason"
                 )
+        continuous_fields = (
+            self.endpoint_contract_hash,
+            self.continuous_cost_contract_hash,
+            self.candidate_actual_cost,
+            self.baseline_actual_cost,
+            self.candidate_ledger_hash,
+            self.baseline_ledger_hash,
+        )
+        if self.execution_model == CONTINUOUS_RANKING_EXECUTION_MODEL:
+            if (
+                self.endpoint_contract_hash
+                != CONTINUOUS_FIVE_SESSION_ENDPOINT_CONTRACT_HASH
+                or self.continuous_cost_contract_hash
+                != RANKING_PORTFOLIO_BASE_COST_POLICY.contract_hash
+                or self.top_n != PRIMARY_TOP_N
+                or self.horizon_sessions != PRIMARY_HORIZON_SESSIONS
+            ):
+                raise RankingValidationContractError(
+                    "continuous paired sample contract is incompatible"
+                )
+            for value in (self.candidate_ledger_hash, self.baseline_ledger_hash):
+                _require_hash("continuous paired sample ledger hash", value)
+            if self.status == "completed":
+                if len(self.window_cost_sessions) != 5:
+                    raise RankingValidationContractError(
+                        "continuous paired sample requires five cost sessions"
+                    )
+                for value in (
+                    self.candidate_actual_cost,
+                    self.baseline_actual_cost,
+                ):
+                    if (
+                        value is None
+                        or isinstance(value, bool)
+                        or not math.isfinite(value)
+                        or value < 0.0
+                    ):
+                        raise RankingValidationContractError(
+                            "continuous paired sample actual costs are invalid"
+                        )
+            elif (
+                self.candidate_actual_cost is not None
+                or self.baseline_actual_cost is not None
+                or self.window_cost_sessions
+            ):
+                raise RankingValidationContractError(
+                    "incomplete continuous paired sample cannot carry costs"
+                )
+        elif any(value is not None for value in continuous_fields) or self.window_cost_sessions:
+            raise RankingValidationContractError(
+                "legacy paired sample cannot carry continuous-account fields"
+            )
 
 
 def _paired_sample_payload(
@@ -755,7 +840,28 @@ def _paired_sample_payload(
 ) -> dict[str, object]:
     payload = asdict(sample)
     payload.pop("sample_hash")
+    if sample.execution_model is None:
+        for field in (
+            "execution_model",
+            "endpoint_contract_hash",
+            "continuous_cost_contract_hash",
+            "candidate_actual_cost",
+            "baseline_actual_cost",
+            "window_cost_sessions",
+            "candidate_ledger_hash",
+            "baseline_ledger_hash",
+        ):
+            payload.pop(field)
     return payload
+
+
+def _paired_sample_hash_is_valid(sample: RankingPairedReturnSample) -> bool:
+    expected = {stable_contract_hash(_paired_sample_payload(sample))}
+    if sample.execution_model is None:
+        expanded = asdict(sample)
+        expanded.pop("sample_hash")
+        expected.add(stable_contract_hash(expanded))
+    return sample.sample_hash in expected
 
 
 @dataclass(frozen=True)
@@ -794,12 +900,16 @@ class RankingEndpointResult:
     slippage_bps_per_side: int
     round_trip_cost_bps: int
     cost_contract_hash: str
-    candidate_maximum_drawdown: float
-    baseline_maximum_drawdown: float
+    candidate_maximum_drawdown: float | None
+    baseline_maximum_drawdown: float | None
     maximum_drawdown_gate_passed: bool
     sample_gate_passed: bool
     accepted_sample_hashes: tuple[str, ...]
     result_hash: str
+    execution_model: str | None = None
+    endpoint_contract_identity_hash: str | None = None
+    mean_candidate_actual_cost: float | None = None
+    mean_baseline_actual_cost: float | None = None
 
     @property
     def evidence_status(self) -> str:
@@ -887,6 +997,163 @@ def _endpoint_name(top_n: int, horizon_sessions: int) -> str:
     )
 
 
+def build_continuous_five_session_paired_sample(
+    *,
+    source_event_hash: str,
+    candidate_id: str,
+    candidate_manifest_hash: str,
+    signal_date: date,
+    selected_ranked_asset_codes: Iterable[str],
+    candidate_ledger: RankingPortfolioLedger,
+    baseline_ledger: RankingPortfolioLedger,
+    trading_sessions: Sequence[date],
+) -> RankingPairedReturnSample:
+    """Extract the primary T+1-pre to T+6-pre sample from two ledgers."""
+
+    calendar = tuple(trading_sessions)
+    if calendar != tuple(sorted(set(calendar))):
+        raise RankingValidationContractError(
+            "trading sessions must be unique and chronological"
+        )
+    try:
+        signal_index = calendar.index(signal_date)
+    except ValueError as exc:
+        raise RankingValidationContractError(
+            "paired sample signal date is outside the trading calendar"
+        ) from exc
+    selected = tuple(selected_ranked_asset_codes)
+    if len(selected) != len(set(selected)):
+        raise RankingValidationContractError(
+            "paired sample selected ranking contains duplicates"
+        )
+    common = {
+        "source_event_hash": source_event_hash,
+        "candidate_id": candidate_id,
+        "candidate_manifest_hash": candidate_manifest_hash,
+        "signal_date": signal_date,
+        "top_n": PRIMARY_TOP_N,
+        "horizon_sessions": PRIMARY_HORIZON_SESSIONS,
+        "selected_ranked_asset_codes": selected,
+        "fee_bps_per_side": RANKING_FEE_BPS_PER_SIDE,
+        "slippage_bps_per_side": RANKING_SLIPPAGE_BPS_PER_SIDE,
+        "round_trip_cost_bps": 2
+        * (RANKING_FEE_BPS_PER_SIDE + RANKING_SLIPPAGE_BPS_PER_SIDE),
+        "cost_contract_hash": RANKING_COST_CONTRACT_HASH,
+        "execution_model": CONTINUOUS_RANKING_EXECUTION_MODEL,
+        "endpoint_contract_hash": CONTINUOUS_FIVE_SESSION_ENDPOINT_CONTRACT_HASH,
+        "continuous_cost_contract_hash": RANKING_PORTFOLIO_BASE_COST_POLICY.contract_hash,
+        "candidate_ledger_hash": candidate_ledger.ledger_hash,
+        "baseline_ledger_hash": baseline_ledger.ledger_hash,
+        "sample_hash": "pending",
+    }
+    if signal_index + 6 >= len(calendar):
+        draft = RankingPairedReturnSample(
+            **common,
+            entry_session=(
+                calendar[signal_index + 1]
+                if signal_index + 1 < len(calendar)
+                else None
+            ),
+            exit_session=None,
+            status="pending",
+            candidate_gross_return=None,
+            candidate_net_return=None,
+            baseline_gross_return=None,
+            baseline_net_return=None,
+            candidate_actual_cost=None,
+            baseline_actual_cost=None,
+            exclusion_reason="future_window_pending",
+        )
+        return replace(
+            draft,
+            sample_hash=stable_contract_hash(_paired_sample_payload(draft)),
+        )
+    if any(
+        ledger.execution_model != CONTINUOUS_RANKING_EXECUTION_MODEL
+        or ledger.cost_scenario != "base"
+        or ledger.cost_contract_hash != RANKING_PORTFOLIO_BASE_COST_POLICY.contract_hash
+        or ledger.initial_capital <= 0.0
+        for ledger in (candidate_ledger, baseline_ledger)
+    ) or not math.isclose(
+        candidate_ledger.initial_capital,
+        baseline_ledger.initial_capital,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ) or candidate_ledger.market_data_hash != baseline_ledger.market_data_hash:
+        raise RankingValidationContractError(
+            "paired ledgers must use the same frozen base execution contract"
+        )
+    entry_session = calendar[signal_index + 1]
+    exit_session = calendar[signal_index + 6]
+    cost_sessions = calendar[signal_index + 1 : signal_index + 6]
+    candidate_by_date = {item.session_date: item for item in candidate_ledger.points}
+    baseline_by_date = {item.session_date: item for item in baseline_ledger.points}
+    required_dates = (entry_session, *cost_sessions[1:], exit_session)
+    if any(
+        session not in candidate_by_date or session not in baseline_by_date
+        for session in required_dates
+    ):
+        draft = RankingPairedReturnSample(
+            **common,
+            entry_session=entry_session,
+            exit_session=exit_session,
+            status="excluded",
+            candidate_gross_return=None,
+            candidate_net_return=None,
+            baseline_gross_return=None,
+            baseline_net_return=None,
+            candidate_actual_cost=None,
+            baseline_actual_cost=None,
+            exclusion_reason="missing_continuous_account_valuation",
+        )
+        return replace(
+            draft,
+            sample_hash=stable_contract_hash(_paired_sample_payload(draft)),
+        )
+    candidate_start = candidate_by_date[entry_session]
+    candidate_end = candidate_by_date[exit_session]
+    baseline_start = baseline_by_date[entry_session]
+    baseline_end = baseline_by_date[exit_session]
+    draft = RankingPairedReturnSample(
+        **common,
+        entry_session=entry_session,
+        exit_session=exit_session,
+        status="completed",
+        candidate_gross_return=(
+            candidate_end.pre_rebalance_gross_value
+            / candidate_start.pre_rebalance_gross_value
+            - 1.0
+        ),
+        candidate_net_return=(
+            candidate_end.pre_rebalance_net_value
+            / candidate_start.pre_rebalance_net_value
+            - 1.0
+        ),
+        baseline_gross_return=(
+            baseline_end.pre_rebalance_gross_value
+            / baseline_start.pre_rebalance_gross_value
+            - 1.0
+        ),
+        baseline_net_return=(
+            baseline_end.pre_rebalance_net_value
+            / baseline_start.pre_rebalance_net_value
+            - 1.0
+        ),
+        candidate_actual_cost=sum(
+            candidate_by_date[session].transaction_cost for session in cost_sessions
+        ),
+        baseline_actual_cost=sum(
+            baseline_by_date[session].transaction_cost for session in cost_sessions
+        ),
+        window_cost_sessions=cost_sessions,
+        exclusion_reason=None,
+    )
+    return replace(
+        draft,
+        sample_hash=stable_contract_hash(_paired_sample_payload(draft)),
+    )
+
+
 def evaluate_ranking_endpoint(
     *,
     source_cohort: RankingValidationSourceCohort,
@@ -897,6 +1164,8 @@ def evaluate_ranking_endpoint(
     horizon_sessions: int,
     samples: Iterable[RankingPairedReturnSample],
     trading_sessions: Sequence[date],
+    candidate_ledger: RankingPortfolioLedger | None = None,
+    baseline_ledger: RankingPortfolioLedger | None = None,
 ) -> RankingEndpointResult:
     """Evaluate one predeclared candidate/cell without post-hoc relabeling."""
 
@@ -946,7 +1215,7 @@ def evaluate_ranking_endpoint(
     seen_dates: set[date] = set()
     completed: list[RankingPairedReturnSample] = []
     for sample in values:
-        if sample.sample_hash != stable_contract_hash(_paired_sample_payload(sample)):
+        if not _paired_sample_hash_is_valid(sample):
             raise RankingValidationContractError(
                 "paired sample immutable hash is invalid"
             )
@@ -992,11 +1261,27 @@ def evaluate_ranking_endpoint(
                 raise RankingValidationContractError(
                     "paired sample does not use T+1/full-session execution"
                 )
+            if (
+                sample.execution_model == CONTINUOUS_RANKING_EXECUTION_MODEL
+                and sample.window_cost_sessions
+                != calendar[signal_index + 1 : exit_index]
+            ):
+                raise RankingValidationContractError(
+                    "continuous paired sample cost window is invalid"
+                )
             completed.append(sample)
     completed.sort(key=lambda item: item.signal_date)
     if not completed:
         raise RankingValidationContractError(
             "endpoint requires at least one completed paired outcome"
+        )
+    execution_identities = {
+        (sample.execution_model, sample.endpoint_contract_hash)
+        for sample in completed
+    }
+    if len(execution_identities) != 1:
+        raise RankingValidationContractError(
+            "paired endpoint cannot mix execution contract identities"
         )
     accepted: list[RankingPairedReturnSample] = []
     overlapping_dates: list[date] = []
@@ -1059,6 +1344,23 @@ def evaluate_ranking_endpoint(
     )
     candidate_drawdown = _maximum_drawdown(candidate_net)
     baseline_drawdown = _maximum_drawdown(baseline_net)
+    if accepted[0].execution_model == CONTINUOUS_RANKING_EXECUTION_MODEL:
+        candidate_drawdown = baseline_drawdown = None
+        if candidate_ledger is not None and baseline_ledger is not None:
+            if any(
+                sample.candidate_ledger_hash != candidate_ledger.ledger_hash
+                or sample.baseline_ledger_hash != baseline_ledger.ledger_hash
+                for sample in accepted
+            ):
+                raise RankingValidationContractError("endpoint ledger identity mismatch")
+            if (
+                candidate_ledger.status == baseline_ledger.status == "completed"
+                and candidate_ledger.market_data_hash == baseline_ledger.market_data_hash
+                and tuple(point.session_date for point in candidate_ledger.points)
+                == tuple(point.session_date for point in baseline_ledger.points)
+            ):
+                candidate_drawdown = candidate_ledger.net_maximum_drawdown
+                baseline_drawdown = baseline_ledger.net_maximum_drawdown
     coverage_denominator = len(source_cohort.events)
     coverage_numerator = len(completed)
     coverage_ratio = coverage_numerator / coverage_denominator
@@ -1116,16 +1418,38 @@ def evaluate_ranking_endpoint(
         candidate_maximum_drawdown=candidate_drawdown,
         baseline_maximum_drawdown=baseline_drawdown,
         maximum_drawdown_gate_passed=(
-            candidate_drawdown
+            candidate_drawdown is not None
+            and baseline_drawdown is not None
+            and candidate_drawdown
             <= baseline_drawdown
             + contract.maximum_drawdown_noninferiority_tolerance
         ),
         sample_gate_passed=sample_gate_passed,
         accepted_sample_hashes=tuple(item.sample_hash for item in accepted),
         result_hash="pending",
+        execution_model=accepted[0].execution_model,
+        endpoint_contract_identity_hash=accepted[0].endpoint_contract_hash,
+        mean_candidate_actual_cost=(
+            fmean(float(item.candidate_actual_cost) for item in accepted)
+            if accepted[0].execution_model == CONTINUOUS_RANKING_EXECUTION_MODEL
+            else None
+        ),
+        mean_baseline_actual_cost=(
+            fmean(float(item.baseline_actual_cost) for item in accepted)
+            if accepted[0].execution_model == CONTINUOUS_RANKING_EXECUTION_MODEL
+            else None
+        ),
     )
     result_payload = asdict(draft)
     result_payload.pop("result_hash")
+    if draft.execution_model is None:
+        for field in (
+            "execution_model",
+            "endpoint_contract_identity_hash",
+            "mean_candidate_actual_cost",
+            "mean_baseline_actual_cost",
+        ):
+            result_payload.pop(field)
     return replace(
         draft,
         result_hash=stable_contract_hash(result_payload),

@@ -27,6 +27,7 @@ from app.models.entities import (
 from app.services.etf_research_evidence import stable_contract_hash
 from app.services.strategy_lab.etf_factor_evidence import persist_factor_evidence
 from app.services.strategy_lab.etf_leader_tactics_historical_backtest import (
+    HISTORICAL_BACKTEST_CONTRACT,
     HISTORICAL_BACKTEST_CONTRACT_HASH,
     LEADER_HISTORICAL_BACKTEST_EVIDENCE_MODE,
     LEADER_HISTORICAL_BACKTEST_EXPERIMENT_FAMILY,
@@ -45,7 +46,7 @@ from app.services.strategy_lab.etf_leader_tactics_historical_backtest import (
 )
 
 DEFAULT_ARTIFACT = Path(
-    "/app/data/etf-leader-tactics-artifacts/historical-backtest-v1.sqlite3"
+    "/app/data/etf-leader-tactics-artifacts/historical-lifecycle-v2.sqlite3"
 )
 UNCLASSIFIED_PEER_GROUPS = {
     "unknown",
@@ -56,7 +57,7 @@ UNCLASSIFIED_PEER_GROUPS = {
     "未分类",
 }
 FORBIDDEN_PROVIDERS = {"sina", "efinance"}
-ARTIFACT_SCHEMA_VERSION = "leader_historical_backtest_checkpoint_v3"
+ARTIFACT_SCHEMA_VERSION = "leader_historical_backtest_checkpoint_v4"
 TAKE_PROFIT_GRID = tuple(value / 100 for value in range(2, 9))
 COOLDOWN_SESSION_GRID = (0, 1, 2, 3, 5)
 
@@ -379,6 +380,15 @@ def _finite(value: object) -> float | None:
 def _init_store(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     store = sqlite3.connect(path)
+    tables = {row[0] for row in store.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if tables:
+        identity = dict(store.execute("SELECT key,value FROM meta")) if "meta" in tables else {}
+        if (
+            identity.get("artifact_schema_version") != ARTIFACT_SCHEMA_VERSION
+            or identity.get("contract_hash") != HISTORICAL_BACKTEST_CONTRACT_HASH
+        ):
+            store.close()
+            raise ValueError("legacy checkpoint preserved; use a new artifact path for this contract")
     store.execute("PRAGMA journal_mode=WAL")
     store.execute("PRAGMA synchronous=NORMAL")
     store.execute(
@@ -425,19 +435,6 @@ def _init_store(path: Path) -> sqlite3.Connection:
     store.execute(
         "CREATE INDEX IF NOT EXISTS ix_leader_backtest_bars_code_date ON bars(asset_code, trade_date)"
     )
-    existing = store.execute(
-        "SELECT value FROM meta WHERE key='artifact_schema_version'"
-    ).fetchone()
-    if existing is not None and existing[0] != ARTIFACT_SCHEMA_VERSION:
-        with store:
-            store.execute("DROP TABLE events")
-            store.execute(EVENTS_TABLE_SQL)
-            store.execute("DELETE FROM evaluated_dates")
-            _set_meta(
-                store,
-                "stage",
-                "evaluate" if _meta(store, "load_complete") == "true" else "load",
-            )
     with store:
         store.execute(
             "INSERT OR REPLACE INTO meta(key,value) VALUES('artifact_schema_version',?)",
@@ -782,6 +779,12 @@ def _persist_date_events(
                 for event in events
             ],
         )
+        for event in events:
+            _set_meta(
+                store,
+                f"event_context:{event.signal_date}:{event.candidate_id}:{event.asset_code}",
+                json.dumps(event.research_context, sort_keys=True, allow_nan=False),
+            )
         store.execute(
             """
             INSERT OR REPLACE INTO evaluated_dates(signal_date,event_count,candidate_count)
@@ -856,6 +859,9 @@ def _load_events(store: sqlite3.Connection) -> tuple[HistoricalLeaderEvent, ...]
             entry_quality_reason_codes=tuple(json.loads(str(row[21]))),
             next_session_confirmation_state=str(row[22]) if row[22] else None,
             next_session_confirmation_reason_codes=tuple(json.loads(str(row[23]))),
+            research_context=json.loads(_meta(
+                store, f"event_context:{row[0]}:{row[1]}:{row[2]}"
+            ) or "null"),
         )
         for row in store.execute(
             """
@@ -939,6 +945,13 @@ def _build_report(store: sqlite3.Connection, events: tuple[HistoricalLeaderEvent
         "status": "insufficient_data",
         "unavailable_reason": LEADER_HISTORICAL_BACKTEST_NOT_PIT,
         "contract_hash": HISTORICAL_BACKTEST_CONTRACT_HASH,
+        "execution_contract_hash": HISTORICAL_BACKTEST_CONTRACT["execution_contract_hash"],
+        "risk_contract_hash": HISTORICAL_BACKTEST_CONTRACT["risk_contract_hash"],
+        "cost_contract_hash": HISTORICAL_BACKTEST_CONTRACT["cost_contract_hash"],
+        "costs": {
+            key: HISTORICAL_BACKTEST_CONTRACT[key]
+            for key in ("one_way_fee_bps", "one_way_slippage_bps", "cost_application")
+        },
         "source_signal_run_id": int(_meta(store, "source_run_id") or 0),
         "source_signal_date": _meta(store, "source_signal_date"),
         "source_ranking_contract_hash": _meta(
@@ -950,7 +963,7 @@ def _build_report(store: sqlite3.Connection, events: tuple[HistoricalLeaderEvent
         "price_basis": "total_return_adjusted",
         "signal_timing": "signal_at_T_close_confirm_at_T_plus_1_close",
         "entry_timing": "enter_at_T_plus_2_adjusted_open",
-        "exit_signal_timing": "evaluate_email_exit_policy_at_each_daily_close",
+        "exit_signal_timing": HISTORICAL_BACKTEST_CONTRACT["exit_signal_timing"],
         "exit_execution_timing": "exit_at_next_session_adjusted_open",
         "first_signal_date": dates[0].isoformat() if dates else None,
         "last_signal_date": dates[-1].isoformat() if dates else None,
@@ -991,6 +1004,7 @@ def _build_report(store: sqlite3.Connection, events: tuple[HistoricalLeaderEvent
             "historical sector technical scores are unavailable and use a frozen neutral-50 date-local proxy",
             "overlapping event-series returns are not a capital-constrained portfolio equity curve",
             "historical proxy results cannot count toward PIT promotion gates",
+            "research uses adjusted-open entry and per-side fees/slippage; live email entry and zero-cost breakeven rules remain unchanged",
             "research only; no ranking, position, alert, email, or execution mutation",
         ],
         "research_only": True,

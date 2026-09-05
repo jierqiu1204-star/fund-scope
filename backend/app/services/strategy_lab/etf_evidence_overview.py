@@ -222,6 +222,35 @@ def _research_surface(
         else "available"
     )
     primary = report.get("primary_metric")
+    primary_diagnostics = report.get("primary_diagnostics")
+    candidate_results = (
+        dict(primary_diagnostics.get("candidate_results") or {})
+        if isinstance(primary_diagnostics, dict)
+        else {}
+    )
+    candidate_metrics = []
+    for candidate_id, candidate_payload in sorted(candidate_results.items()):
+        if not isinstance(candidate_payload, dict):
+            continue
+        endpoint = candidate_payload.get("endpoint")
+        if not isinstance(endpoint, dict):
+            continue
+        candidate_metrics.append(
+            {
+                "label": str(candidate_id),
+                "value": endpoint.get("mean_paired_net_excess"),
+                "sample_count": len(endpoint.get("independent_dates") or []),
+                "confidence_interval": endpoint.get(
+                    "bootstrap_confidence_interval"
+                ),
+                "coverage_ratio": endpoint.get("coverage_ratio"),
+                "average_turnover": endpoint.get("average_turnover"),
+                "candidate_maximum_drawdown": endpoint.get(
+                    "candidate_maximum_drawdown"
+                ),
+                "diagnostic": True,
+            }
+        )
     return _surface(
         status=status,
         unavailable_reason=(
@@ -229,7 +258,9 @@ def _research_surface(
             if status == "insufficient_data"
             else None
         ),
-        ranking_source_kind="research_replay",
+        ranking_source_kind=str(
+            report.get("ranking_source_kind") or "research_replay"
+        ),
         policy_mode="policy_shadow",
         data_cutoff=report.get("data_cutoff"),
         manifest_hash=evidence.manifest_hash,
@@ -244,7 +275,9 @@ def _research_surface(
             for key, value in dict(report.get("exclusion_counts") or {}).items()
         },
         primary_metric=dict(primary) if isinstance(primary, dict) else None,
-        exploratory_metrics=list(report.get("exploratory_metrics") or []),
+        exploratory_metrics=(
+            candidate_metrics + list(report.get("exploratory_metrics") or [])
+        ),
         costs=dict(evidence.costs_json or {}),
         limitations=list(evidence.limitations_json or []),
     )

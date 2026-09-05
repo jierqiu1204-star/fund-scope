@@ -12,10 +12,17 @@ from app.services.strategy_lab.etf_ranking_candidates import (
 )
 from app.services.strategy_lab.etf_ranking_forward_outcomes import (
     FORWARD_HORIZONS,
+    PURE_MOMENTUM_CONTROL_CONTRACT_HASH,
+    RANKING_PORTFOLIO_BASE_COST_POLICY,
+    RANKING_PORTFOLIO_STRESS_COST_POLICY,
     ForwardAdjustedClose,
     ForwardExecutionCostEvidence,
     ForwardOutcomeContractError,
+    RankingPortfolioTarget,
+    calculate_continuous_ranking_portfolio,
     calculate_ranking_forward_outcomes,
+    freeze_ranking_portfolio_target,
+    select_positive_momentum_top10,
 )
 from app.services.tracked_positions.lifecycle import stable_contract_hash
 
@@ -327,3 +334,136 @@ def test_forward_outcome_hashes_are_input_order_invariant() -> None:
 
     assert first == second
     assert all(item.outcome_hash for item in first.outcomes)
+
+
+def test_positive_momentum_control_is_deterministic_and_keeps_empty_slots_cash() -> None:
+    sessions = _sessions(21)
+    closes = (
+        _close("A", sessions[0], 100.0),
+        _close("A", sessions[20], 120.0),
+        _close("B", sessions[0], 100.0),
+        _close("B", sessions[20], 120.0),
+        _close("C", sessions[0], 100.0),
+        _close("C", sessions[20], 110.0),
+        _close("D", sessions[0], 100.0),
+        _close("D", sessions[20], 90.0),
+    )
+
+    selection = select_positive_momentum_top10(
+        signal_date=sessions[20],
+        eligible_asset_codes=("D", "C", "B", "A", "E"),
+        trading_sessions=sessions,
+        adjusted_closes=tuple(reversed(closes)),
+    )
+
+    assert selection.selected_asset_codes == ("A", "B", "C")
+    assert selection.target_weights == (("A", 0.1), ("B", 0.1), ("C", 0.1))
+    assert selection.cash_target_weight == pytest.approx(0.7)
+    assert selection.requested_asset_count == 5
+    assert selection.priced_asset_count == 4
+    assert selection.coverage_ratio == pytest.approx(0.8)
+    assert selection.contract_hash == PURE_MOMENTUM_CONTROL_CONTRACT_HASH
+    assert ("D", "non_positive_20_session_momentum") in selection.exclusions
+    assert ("E", "missing_adjusted_momentum_price") in selection.exclusions
+
+
+def _portfolio_closes(
+    sessions: tuple[date, ...],
+    values: dict[str, tuple[float, ...]],
+) -> tuple[ForwardAdjustedClose, ...]:
+    return tuple(
+        _close(code, session, values[code][index])
+        for code in sorted(values)
+        for index, session in enumerate(sessions)
+    )
+
+
+def _target(
+    signal_date: date,
+    weights: dict[str, float],
+) -> RankingPortfolioTarget:
+    return freeze_ranking_portfolio_target(
+        signal_date=signal_date,
+        target_weights=weights,
+        source_hash=_hash(f"target:{signal_date}:{sorted(weights.items())}"),
+    )
+
+
+def test_continuous_ledger_rebalances_actual_drift_and_charges_actual_trades() -> None:
+    sessions = _sessions(3)
+    closes = _portfolio_closes(
+        sessions,
+        {"A": (1.0, 1.0, 2.0), "B": (1.0, 1.0, 0.5)},
+    )
+    ledger = calculate_continuous_ranking_portfolio(
+        trading_sessions=sessions,
+        adjusted_closes=closes,
+        targets=(
+            _target(sessions[0], {"A": 0.5, "B": 0.5}),
+            _target(sessions[1], {"A": 0.5, "B": 0.5}),
+        ),
+    )
+
+    first_rebalance = ledger.points[1]
+    drift_rebalance = ledger.points[2]
+    assert first_rebalance.transaction_cost > 0.0
+    assert drift_rebalance.net_trade_notional > 0.0
+    assert drift_rebalance.transaction_cost > 0.0
+    assert drift_rebalance.pre_rebalance_net_value > drift_rebalance.post_rebalance_net_value
+    assert ledger.gross_return != ledger.net_return
+    assert all(point.net_cash >= 0.0 for point in ledger.points)
+
+
+def test_retained_position_has_no_fictitious_repeat_cost() -> None:
+    sessions = _sessions(8)
+    closes = _portfolio_closes(
+        sessions,
+        {"A": tuple(100.0 + index for index in range(len(sessions)))},
+    )
+    ledger = calculate_continuous_ranking_portfolio(
+        trading_sessions=sessions,
+        adjusted_closes=closes,
+        targets=tuple(
+            _target(signal_date, {"A": 1.0}) for signal_date in sessions[:-1]
+        ),
+    )
+
+    assert ledger.points[1].transaction_cost > 0.0
+    assert all(point.transaction_cost == 0.0 for point in ledger.points[2:])
+    assert ledger.order_count == 1
+
+
+def test_cost_stress_is_diagnostic_and_missing_valuation_stops_the_curve() -> None:
+    sessions = _sessions(3)
+    complete_closes = _portfolio_closes(
+        sessions,
+        {"A": (100.0, 100.0, 101.0)},
+    )
+    target = _target(sessions[0], {"A": 1.0})
+    base = calculate_continuous_ranking_portfolio(
+        trading_sessions=sessions,
+        adjusted_closes=complete_closes,
+        targets=(target,),
+        cost_policy=RANKING_PORTFOLIO_BASE_COST_POLICY,
+    )
+    stress = calculate_continuous_ranking_portfolio(
+        trading_sessions=sessions,
+        adjusted_closes=complete_closes,
+        targets=(target,),
+        cost_policy=RANKING_PORTFOLIO_STRESS_COST_POLICY,
+    )
+    missing = calculate_continuous_ranking_portfolio(
+        trading_sessions=sessions,
+        adjusted_closes=complete_closes[:-1],
+        targets=(target,),
+    )
+
+    assert base.fee_bps_per_side == stress.fee_bps_per_side == 5
+    assert base.slippage_bps_per_side == 5
+    assert stress.slippage_bps_per_side == 10
+    assert stress.total_transaction_cost > base.total_transaction_cost
+    assert stress.net_return < base.net_return
+    assert missing.status == "unavailable"
+    assert missing.net_return is None
+    assert missing.unavailable_intervals[0].start_session == sessions[2]
+    assert missing.unavailable_intervals[0].asset_codes == ("A",)

@@ -11,7 +11,7 @@ from statistics import mean, median, pstdev
 from time import perf_counter
 from typing import Any, Literal, cast
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.defaults.short_research import (
@@ -54,10 +54,14 @@ from app.services.etf_research_evidence import (
 from app.services.jobs import sync_fund_nav_history
 from app.services.market_data import (
     ASIA_SHANGHAI,
+    EtfAdjustedDailyFact,
+    ExchangeCalendarUnavailableError,
     etf_adjusted_daily_facts_on_or_before,
     etf_adjusted_price_provenance_issue,
     etf_decision_adjusted_provider_versions,
     etf_quotes_at_decision_cutoff,
+    is_etf_exchange_trading_day,
+    next_etf_exchange_trading_day,
 )
 from app.services.portfolio_allocation import (
     PORTFOLIO_CORRELATION_CLUSTER_CAP,
@@ -98,6 +102,10 @@ from app.services.portfolio_risk_shadow import (
     select_independent_market_risk_pool,
 )
 from app.services.short_etf.data import sync_etf_price_history
+from app.services.short_research.coverage_policy import (
+    ETF_COMPLETE_SCORE_COVERAGE,
+    ETF_DAILY_DECISION_MIN_COVERAGE,
+)
 from app.services.short_research.daily_reconstructable import (
     AdjustedOhlcvBar,
     AdjustmentProvenance,
@@ -150,6 +158,7 @@ from app.services.short_research.ranking_surfaces import (
 from app.services.short_research.sector_trends import build_sector_trend_payloads
 from app.services.short_research.snapshot_selector import (
     CanonicalSnapshotSelection,
+    published_validation_source_identity,
     required_etf_snapshot_trade_date,
     resolve_current_canonical_etf_snapshot,
     resolve_current_etf_ranking_surface_snapshot,
@@ -1801,6 +1810,8 @@ _LABEL_VALIDATION_WINDOWS = (1, 3, 5, 10)
 _LABEL_VALIDATION_MAX_ASSETS = 120
 _LABEL_VALIDATION_MIN_SAMPLES = 10
 _LABEL_VALIDATION_RULE_VERSION = "label_validation_v1"
+_LABEL_VALIDATION_EXECUTION_MODEL = "signal_adjusted_close_full_horizon_v1"
+_LABEL_VALIDATION_SOURCE_LIMIT = 512
 VALIDATION_MODE_FORWARD_LIVE = "forward_live"
 VALIDATION_MODE_HISTORICAL_REPLAY = "historical_replay"
 VALIDATION_MODE_SCORE_BUCKET_REPLAY = "score_bucket_replay"
@@ -1815,8 +1826,6 @@ _SCORE_BUCKET_DEFAULT_DAYS = 180
 _SCORE_BUCKET_DEFAULT_TOP_N = (5, 10, 20, 50)
 _SCORE_BUCKET_SCORE_BASIS = "opportunity"
 _SCORE_BUCKET_BASELINE = "all_scored"
-_SCORE_BUCKET_SCORE_VERSION = "final_score_v3"
-_SCORE_BUCKET_SCORE_FIELD = "ranking_score"
 _SCORE_BUCKET_PRICE_BASIS = "total_return_adjusted"
 _SCORE_BUCKET_EXECUTION_MODEL = "t_plus_1_adjusted_close_full_horizon_v2"
 _SCORE_BUCKET_FEE_BPS_PER_SIDE = 5
@@ -1915,22 +1924,6 @@ async def _etf_price_rows_until(
         query = query.where(EtfPriceHistory.trade_date <= to_date)
     rows = await session.scalars(query.order_by(EtfPriceHistory.trade_date.asc()))
     return list(rows.all())
-
-
-async def _etf_price_rows_from(
-    session: AsyncSession,
-    code: str,
-    signal_date: date,
-) -> list[EtfPriceHistory]:
-    return list(
-        (
-            await session.scalars(
-                select(EtfPriceHistory)
-                .where(EtfPriceHistory.etf_code == code, EtfPriceHistory.trade_date >= signal_date)
-                .order_by(EtfPriceHistory.trade_date.asc())
-            )
-        ).all()
-    )
 
 
 async def _etf_price_rows_by_code_from(
@@ -2047,103 +2040,308 @@ def _score_bucket_outcome_payload(
     }
 
 
+async def _historical_label_sources(
+    session: AsyncSession,
+    outcome_cutoff: datetime,
+) -> tuple[list[ShortResearchSignalRun], list[dict[str, Any]]]:
+    # ponytail: scan at most eight pages for 512 eligible publications; expose
+    # exhaustion explicitly if invalid retained history needs a larger backfill.
+    base = select(ShortResearchSignalRun).where(
+        ShortResearchSignalRun.as_of_date <= outcome_cutoff.astimezone(ASIA_SHANGHAI).date(),
+        select(ShortResearchSignalItem.id).where(
+            ShortResearchSignalItem.run_id == ShortResearchSignalRun.id,
+            ShortResearchSignalItem.asset_type == ASSET_TYPE_ETF,
+        ).exists(),
+    ).order_by(ShortResearchSignalRun.as_of_date.desc(), ShortResearchSignalRun.id.desc())
+    qualified = and_(
+        ShortResearchSignalRun.status == RUN_STATUS_SUCCESS,
+        ShortResearchSignalRun.publication_state == "published",
+        ShortResearchSignalRun.scope_kind == "full",
+        ShortResearchSignalRun.score_version.in_(("daily_reconstructable_v1", "final_score_v3")),
+        ShortResearchSignalRun.ranking_contract_hash.is_not(None),
+        ShortResearchSignalRun.scope_hash.is_not(None),
+        ShortResearchSignalRun.universe_snapshot_hash.is_not(None),
+        ShortResearchSignalRun.input_snapshot_hash.is_not(None),
+        ShortResearchSignalRun.data_cutoff.is_not(None),
+        ShortResearchSignalRun.as_of_trade_date.is_not(None),
+        ShortResearchSignalRun.idempotency_key.is_not(None),
+        ShortResearchSignalRun.expected_item_count > 0,
+        ShortResearchSignalRun.decision_data_coverage_ratio >= ETF_DAILY_DECISION_MIN_COVERAGE,
+        ShortResearchSignalRun.coverage_ratio >= ETF_COMPLETE_SCORE_COVERAGE,
+    )
+    sources: list[ShortResearchSignalRun] = []
+    exclusions: list[dict[str, Any]] = []
+
+    async def accept_page(rows: list[ShortResearchSignalRun]) -> None:
+        mixed_ids = set((await session.scalars(
+            select(ShortResearchSignalItem.run_id).where(
+                ShortResearchSignalItem.run_id.in_([row.id for row in rows]),
+                ShortResearchSignalItem.asset_type != ASSET_TYPE_ETF,
+            ).distinct()
+        )).all()) if rows else set()
+        for row in rows:
+            try:
+                published_validation_source_identity(row)
+                if row.id in mixed_ids:
+                    raise ValueError("non_etf_source_snapshot")
+                published = row.published_at
+                if published is not None:
+                    published = published.replace(tzinfo=UTC) if published.tzinfo is None else published
+                    if published > outcome_cutoff:
+                        raise ValueError("source_publication_after_outcome_cutoff")
+                assert row.data_cutoff is not None
+                signal_cutoff = row.data_cutoff
+                if signal_cutoff.tzinfo is None:
+                    signal_cutoff = signal_cutoff.replace(tzinfo=ASIA_SHANGHAI)
+                if signal_cutoff > outcome_cutoff:
+                    raise ValueError("signal_cutoff_after_outcome_cutoff")
+            except ValueError as exc:
+                exclusions.append({"source_signal_run_id": row.id, "reason": str(exc)})
+                continue
+            sources.append(row)
+            if len(sources) == _LABEL_VALIDATION_SOURCE_LIMIT:
+                break
+
+    diagnostics = list((await session.scalars(
+        base.where(~func.coalesce(qualified, False)).limit(20)
+    )).all())
+    await accept_page(diagnostics)
+    cursor: tuple[date, int] | None = None
+    for _ in range(8):
+        page_query = base.where(qualified)
+        if cursor is not None:
+            page_query = page_query.where(or_(
+                ShortResearchSignalRun.as_of_date < cursor[0],
+                and_(ShortResearchSignalRun.as_of_date == cursor[0],
+                     ShortResearchSignalRun.id < cursor[1]),
+            ))
+        page = list((await session.scalars(
+            page_query.limit(_LABEL_VALIDATION_SOURCE_LIMIT)
+        )).all())
+        await accept_page(page)
+        if len(sources) == _LABEL_VALIDATION_SOURCE_LIMIT or len(page) < _LABEL_VALIDATION_SOURCE_LIMIT:
+            break
+        cursor = (page[-1].as_of_date, page[-1].id)
+    else:
+        exclusions.append({"reason": "source_scan_limit_reached",
+                           "scan_limit": 8 * _LABEL_VALIDATION_SOURCE_LIMIT})
+    return sources, exclusions
+
+
+def _label_outcome_dates(signal_date: date) -> tuple[date, ...]:
+    days = [signal_date]
+    if not is_etf_exchange_trading_day(signal_date):
+        return tuple(days)
+    cursor = signal_date
+    while len(days) <= max(_LABEL_VALIDATION_WINDOWS):
+        try:
+            cursor = next_etf_exchange_trading_day(cursor)
+        except ExchangeCalendarUnavailableError:
+            break
+        days.append(cursor)
+    return tuple(days)
+
+
+def _stored_label_outcome_payload(
+    *,
+    signal_fact: EtfAdjustedDailyFact | None,
+    future_facts: dict[date, EtfAdjustedDailyFact],
+    required_dates: tuple[date, ...],
+    signal_cutoff: datetime,
+    outcome_cutoff: datetime,
+) -> tuple[str, dict[str, Any]]:
+    exit_date = required_dates[-1]
+    close_at = datetime.combine(exit_date, datetime.min.time()).replace(
+        hour=15, tzinfo=ASIA_SHANGHAI
+    )
+    if outcome_cutoff < close_at:
+        return "pending", {"exclusion_reason": "future_window_not_elapsed"}
+    facts = [signal_fact, *(future_facts.get(day) for day in required_dates[1:])]
+    for index, fact in enumerate(facts):
+        if fact is None or fact.trade_date != required_dates[index]:
+            reason = ("missing_signal_price" if index == 0 else
+                      "missing_horizon_exit_price" if index == len(facts) - 1 else
+                      "missing_window_price")
+            return "excluded", {"exclusion_reason": reason}
+        issue = etf_adjusted_price_provenance_issue(
+            adjusted_value=fact.adjusted_close, price_basis=fact.research_price_basis,
+            data_provider=fact.data_provider, provider_version=fact.provider_version,
+            source_timestamp=fact.source_timestamp, adjustment_version=fact.adjustment_version,
+            data_cutoff=signal_cutoff if index == 0 else outcome_cutoff,
+        )
+        if fact.decision_eligible is not True or issue is not None:
+            return "excluded", {"exclusion_reason": issue or "decision_ineligible_price"}
+    values = [float(fact.adjusted_close) for fact in facts if fact is not None]
+    path_returns = [value / values[0] - 1 for value in values[1:]]
+    return "completed", {
+        "signal_price": values[0], "future_price": values[-1],
+        "future_date": exit_date.isoformat(), "forward_return": path_returns[-1],
+        "adverse_drawdown": min(path_returns), "favorable_excursion": max(path_returns),
+        "outcome_input_hash": canonical_hash([
+            {"date": fact.trade_date.isoformat(), "revision_hash": fact.revision_hash,
+             "adjusted_close": fact.adjusted_close}
+            for fact in facts if fact is not None
+        ]),
+    }
+
+
 async def review_etf_label_outcomes(
     session: AsyncSession,
     *,
     source_run: ShortResearchSignalRun | None = None,
+    source_runs: list[ShortResearchSignalRun] | None = None,
     max_signal_items: int = 2000,
+    outcome_cutoff: datetime | None = None,
+    max_elapsed_seconds: float = 50.0,
 ) -> dict[str, Any]:
+    if max_signal_items < 1 or max_elapsed_seconds <= 0:
+        raise ValueError("label validation page limits must be positive")
+    cutoff = outcome_cutoff or datetime.now(UTC)
+    cutoff = cutoff.replace(tzinfo=UTC) if cutoff.tzinfo is None else cutoff.astimezone(UTC)
+    started = perf_counter()
+    exclusions: list[dict[str, Any]] = []
+    sources = source_runs
+    if source_run is not None:
+        sources = [source_run]
+    if sources is None:
+        sources, exclusions = await _historical_label_sources(session, cutoff)
+    identities = {run.id: published_validation_source_identity(run) for run in sources}
+    # Last-attempt ordering rotates missing data behind untouched due work across invocations.
+    old_identity = EtfLabelOutcome.metrics_json["source_identity"]
+    incompatible = or_(
+        EtfLabelOutcome.rule_version != _LABEL_VALIDATION_RULE_VERSION,
+        and_(old_identity.as_string().is_not(None), or_(*(
+            func.coalesce(old_identity[key].as_string(), "") != expected
+            for key, expected in (
+                ("execution_model", _LABEL_VALIDATION_EXECUTION_MODEL),
+                ("ranking_contract_hash", ShortResearchSignalRun.ranking_contract_hash),
+                ("ranking_contract_id", ShortResearchSignalRun.score_version),
+                ("score_version", ShortResearchSignalRun.score_version),
+                ("score_field", ShortResearchSignalRun.score_field),
+                ("rule_version", ShortResearchSignalRun.rule_version),
+                ("price_basis", ShortResearchSignalRun.price_basis),
+                ("ranking_source_kind", "production_published"),
+            )
+        ))),
+    )
+    progress = select(
+        EtfLabelOutcome.signal_item_id.label("item_id"),
+        func.max(EtfLabelOutcome.updated_at).label("last_reviewed"),
+        func.sum(case((or_(EtfLabelOutcome.status == "completed", incompatible), 1), else_=0))
+        .label("completed"),
+    ).join(ShortResearchSignalRun, ShortResearchSignalRun.id == EtfLabelOutcome.signal_run_id
+    ).group_by(EtfLabelOutcome.signal_item_id).subquery()
     stmt = (
         select(ShortResearchSignalItem, ShortResearchSignalRun)
         .join(ShortResearchSignalRun, ShortResearchSignalRun.id == ShortResearchSignalItem.run_id)
-        .where(ShortResearchSignalItem.asset_type == ASSET_TYPE_ETF)
-        .order_by(
-            ShortResearchSignalRun.as_of_date.desc(),
-            ShortResearchSignalRun.id.desc(),
-            ShortResearchSignalItem.rank.asc(),
-        )
-        .limit(max_signal_items)
+        .outerjoin(progress, progress.c.item_id == ShortResearchSignalItem.id)
+        .where(
+            ShortResearchSignalItem.asset_type == ASSET_TYPE_ETF,
+            ShortResearchSignalItem.run_id.in_(identities),
+            func.coalesce(progress.c.completed, 0) < len(_LABEL_VALIDATION_WINDOWS),
+        ).order_by(
+            func.coalesce(progress.c.last_reviewed, ShortResearchSignalRun.started_at).asc(),
+            ShortResearchSignalRun.as_of_date.asc(), ShortResearchSignalItem.id.asc(),
+        ).limit(max_signal_items)
     )
-    if source_run is not None:
-        stmt = stmt.where(ShortResearchSignalItem.run_id == source_run.id)
     rows = (await session.execute(stmt)).all()
-    processed = 0
-    completed = 0
-    pending = 0
-    excluded = 0
-    now = utcnow()
+    existing_by_key = {(row.signal_item_id, row.horizon_days): row for row in
+        (await session.scalars(select(EtfLabelOutcome).where(
+            EtfLabelOutcome.signal_item_id.in_([item.id for item, _run in rows]),
+        ))).all()} if rows else {}
+    price_cache: dict[int, tuple[dict[str, EtfAdjustedDailyFact],
+                                dict[str, dict[date, EtfAdjustedDailyFact]]]] = {}
+    counts = {"processed_signal_items": 0, "completed_outcomes": 0,
+              "pending_outcomes": 0, "excluded_outcomes": 0}
+    last_item_id: int | None = None
     for signal_item, signal_run in rows:
-        processed += 1
-        eligible, exclusion_reason = _signal_item_decision_eligible(signal_item)
-        price_rows = (
-            []
-            if not eligible
-            else await _etf_price_rows_from(session, signal_item.asset_code, signal_run.as_of_date)
-        )
-        for horizon in _LABEL_VALIDATION_WINDOWS:
-            existing = await session.scalar(
-                select(EtfLabelOutcome).where(
-                    EtfLabelOutcome.signal_item_id == signal_item.id,
-                    EtfLabelOutcome.horizon_days == horizon,
-                )
+        if perf_counter() - started >= max_elapsed_seconds:
+            break
+        signal_date = signal_run.as_of_trade_date
+        assert signal_date is not None and signal_run.data_cutoff is not None
+        signal_cutoff = signal_run.data_cutoff
+        if signal_cutoff.tzinfo is None:
+            signal_cutoff = signal_cutoff.replace(tzinfo=ASIA_SHANGHAI)
+        required_dates = _label_outcome_dates(signal_date)
+        if signal_run.id not in price_cache:
+            codes = tuple(item.asset_code for item, run in rows if run.id == signal_run.id)
+            signal_facts = await etf_adjusted_daily_facts_on_or_before(
+                session, etf_codes=codes, replay_date=signal_date, rows_per_code=1,
+                max_source_rows=len(codes), decision_cutoff=signal_cutoff,
             )
+            source_row_limit = (required_dates[-1] - signal_date).days + 1
+            future_facts = await etf_adjusted_daily_facts_on_or_before(
+                session, etf_codes=codes,
+                replay_date=min(required_dates[-1], cutoff.astimezone(ASIA_SHANGHAI).date()),
+                rows_per_code=source_row_limit, max_source_rows=len(codes) * source_row_limit,
+                decision_cutoff=cutoff,
+            )
+            by_code: dict[str, dict[date, EtfAdjustedDailyFact]] = {}
+            for fact in future_facts:
+                by_code.setdefault(fact.etf_code, {})[fact.trade_date] = fact
+            price_cache[signal_run.id] = ({fact.etf_code: fact for fact in signal_facts}, by_code)
+        signal_prices, future_prices = price_cache[signal_run.id]
+        counts["processed_signal_items"] += 1
+        last_item_id = signal_item.id
+        eligible, exclusion_reason = _signal_item_decision_eligible(signal_item)
+        if (signal_item.score_eligible is not True or signal_item.ranking_score is None
+                or not math.isfinite(signal_item.ranking_score)):
+            eligible, exclusion_reason = False, "score_ineligible_signal"
+        for horizon in _LABEL_VALIDATION_WINDOWS:
+            existing = existing_by_key.get((signal_item.id, horizon))
             if existing is not None and existing.status == "completed":
-                completed += 1
+                counts["completed_outcomes"] += 1
+                continue
+            identity = {**identities[signal_run.id],
+                        "execution_model": _LABEL_VALIDATION_EXECUTION_MODEL}
+            old_identity = (existing.metrics_json or {}).get("source_identity") if existing else None
+            if existing is not None and (
+                existing.rule_version != _LABEL_VALIDATION_RULE_VERSION
+                or (old_identity is not None and old_identity != identity)
+            ):
+                counts["excluded_outcomes"] += 1
                 continue
             if not eligible:
-                status = "excluded"
-                payload: dict[str, Any] = {
-                    "exclusion_reason": exclusion_reason or "unreliable_signal"
-                }
-            elif not price_rows:
-                status = "pending"
-                payload = {"exclusion_reason": "missing_signal_price"}
+                status, payload = "excluded", {"exclusion_reason": exclusion_reason}
+            elif len(required_dates) <= horizon:
+                status, payload = "excluded", {"exclusion_reason": "exchange_calendar_unavailable"}
             else:
-                status, payload = _completed_outcome_payload(price_rows, horizon)
-            if status == "completed":
-                completed += 1
-            elif status == "pending":
-                pending += 1
-            else:
-                excluded += 1
+                status, payload = _stored_label_outcome_payload(
+                    signal_fact=signal_prices.get(signal_item.asset_code),
+                    future_facts=future_prices.get(signal_item.asset_code, {}),
+                    required_dates=required_dates[:horizon + 1],
+                    signal_cutoff=signal_cutoff, outcome_cutoff=cutoff,
+                )
+            counts[f"{status}_outcomes"] += 1
             target = existing or EtfLabelOutcome(
-                signal_item_id=signal_item.id,
-                signal_run_id=signal_item.run_id,
-                asset_type=signal_item.asset_type,
-                asset_code=signal_item.asset_code,
-                label=signal_item.conclusion,
-                entry_timing_label=_outcome_entry_timing(signal_item),
-                rule_version=_LABEL_VALIDATION_RULE_VERSION,
-                signal_date=signal_run.as_of_date,
+                signal_item_id=signal_item.id, signal_run_id=signal_run.id,
+                asset_type=signal_item.asset_type, asset_code=signal_item.asset_code,
+                label=signal_item.conclusion, entry_timing_label=_outcome_entry_timing(signal_item),
+                rule_version=_LABEL_VALIDATION_RULE_VERSION, signal_date=signal_date,
                 horizon_days=horizon,
-                created_at=now,
             )
-            target.signal_price = payload.get("signal_price")
-            target.forward_return = payload.get("forward_return")
-            target.adverse_drawdown = payload.get("adverse_drawdown")
-            target.favorable_excursion = payload.get("favorable_excursion")
+            for name in ("signal_price", "forward_return", "adverse_drawdown", "favorable_excursion"):
+                setattr(target, name, payload.get(name))
             target.status = status
             target.exclusion_reason = payload.get("exclusion_reason")
             target.metrics_json = {
-                "future_price": payload.get("future_price"),
-                "future_date": payload.get("future_date"),
-                "stored_signal_context": True,
-                "signal_rule_version": (signal_run.config_json or {}).get("rule_version")
-                or "short_research_signal_v1",
-                "signal_date": signal_run.as_of_date.isoformat(),
-                "data_reliability": (signal_item.metrics_json or {}).get(
-                    "data_reliability", "verified"
-                ),
+                "future_price": payload.get("future_price"), "future_date": payload.get("future_date"),
+                "stored_signal_context": True, "signal_rule_version": signal_run.rule_version,
+                "signal_date": signal_date.isoformat(), "source_signal_run_id": signal_run.id,
+                "source_identity": identity, "source_scope_hash": signal_run.scope_hash,
+                "source_input_snapshot_hash": signal_run.input_snapshot_hash,
+                "source_universe_snapshot_hash": signal_run.universe_snapshot_hash,
+                "signal_cutoff": signal_cutoff.isoformat(), "outcome_cutoff": cutoff.isoformat(),
+                "outcome_input_hash": payload.get("outcome_input_hash"),
+                "data_reliability": (signal_item.metrics_json or {}).get("data_reliability", "verified"),
             }
-            target.updated_at = now
+            target.updated_at = utcnow()
             session.add(target)
     await session.flush()
-    return {
-        "processed_signal_items": processed,
-        "completed_outcomes": completed,
-        "pending_outcomes": pending,
-        "excluded_outcomes": excluded,
-    }
+    return {**counts, "excluded_source_snapshots": exclusions,
+            "outcome_cutoff": cutoff.isoformat(), "last_signal_item_id": last_item_id,
+            "page_exhausted": counts["processed_signal_items"] == len(rows),
+            "source_retention_limit": _LABEL_VALIDATION_SOURCE_LIMIT}
 
 
 def _summarize_outcome_rows(rows: list[EtfLabelOutcome], total_rows: int) -> dict[str, Any]:
@@ -2152,6 +2350,12 @@ def _summarize_outcome_rows(rows: list[EtfLabelOutcome], total_rows: int) -> dic
     ]
     excluded_count = sum(1 for item in rows if item.status == "excluded")
     pending_count = sum(1 for item in rows if item.status == "pending")
+    exclusion_reasons: dict[str, int] = {}
+    for item in rows:
+        if item.exclusion_reason:
+            exclusion_reasons[item.exclusion_reason] = (
+                exclusion_reasons.get(item.exclusion_reason, 0) + 1
+            )
     if not completed_rows:
         return {
             "sample_count": 0,
@@ -2166,6 +2370,7 @@ def _summarize_outcome_rows(rows: list[EtfLabelOutcome], total_rows: int) -> dic
             "confidence": "insufficient",
             "confidence_label": "样本不足",
             "insufficient_sample": True,
+            "exclusion_reasons": exclusion_reasons,
         }
     returns = [float(item.forward_return or 0.0) for item in completed_rows]
     drawdowns = [float(item.adverse_drawdown or 0.0) for item in completed_rows]
@@ -2176,12 +2381,6 @@ def _summarize_outcome_rows(rows: list[EtfLabelOutcome], total_rows: int) -> dic
     confidence = _validation_confidence(
         len(completed_rows), recent_median=recent_median, all_median=all_median
     )
-    exclusion_reasons: dict[str, int] = {}
-    for item in rows:
-        if item.exclusion_reason:
-            exclusion_reasons[item.exclusion_reason] = (
-                exclusion_reasons.get(item.exclusion_reason, 0) + 1
-            )
     return {
         "sample_count": len(completed_rows),
         "excluded_count": excluded_count,
@@ -2200,24 +2399,52 @@ def _summarize_outcome_rows(rows: list[EtfLabelOutcome], total_rows: int) -> dic
     }
 
 
+def _label_outcome_visible_at(row: EtfLabelOutcome, outcome_cutoff: datetime) -> bool:
+    raw_cutoff = (row.metrics_json or {}).get("outcome_cutoff")
+    if not raw_cutoff:
+        return not (row.metrics_json or {}).get("source_identity")
+    try:
+        recorded_cutoff = datetime.fromisoformat(str(raw_cutoff))
+    except ValueError:
+        return False
+    if recorded_cutoff.tzinfo is None:
+        recorded_cutoff = recorded_cutoff.replace(tzinfo=UTC)
+    return recorded_cutoff <= outcome_cutoff
+
+
 async def _label_outcome_summary(
     session: AsyncSession,
     as_of_date: date,
     *,
     source_signal_run_id: int | None = None,
+    source_signal_run_ids: list[int] | None = None,
+    source_identity: dict[str, str] | None = None,
+    outcome_cutoff: datetime | None = None,
 ) -> dict[str, Any]:
     filters = [EtfLabelOutcome.asset_type == ASSET_TYPE_ETF]
     if source_signal_run_id is not None:
         filters.append(EtfLabelOutcome.signal_run_id == source_signal_run_id)
+    if source_signal_run_ids is not None:
+        filters.append(EtfLabelOutcome.signal_run_id.in_(source_signal_run_ids))
     rows = list(
         (
             await session.scalars(
                 select(EtfLabelOutcome)
                 .where(*filters)
                 .order_by(EtfLabelOutcome.signal_date.desc(), EtfLabelOutcome.id.desc())
+                .limit(50_001)
             )
         ).all()
     )
+    # ponytail: a bounded recent-outcome summary; expand via aggregation if retention grows.
+    summary_truncated = len(rows) > 50_000
+    rows = rows[:50_000]
+    if outcome_cutoff is not None:
+        rows = [row for row in rows if _label_outcome_visible_at(row, outcome_cutoff)]
+    legacy_count = sum(not (row.metrics_json or {}).get("source_identity") for row in rows)
+    if source_identity is not None:
+        rows = [row for row in rows
+                if (row.metrics_json or {}).get("source_identity") == source_identity]
     grouped: dict[tuple[str, str], dict[int, list[EtfLabelOutcome]]] = {}
     contract_groups: dict[str, int] = {}
     for row in rows:
@@ -2243,6 +2470,19 @@ async def _label_outcome_summary(
             )
             for window in _LABEL_VALIDATION_WINDOWS
         }
+        for window in _LABEL_VALIDATION_WINDOWS:
+            dates = sorted({row.signal_date for row in windows.get(window, [])
+                            if row.status == "completed"})
+            independent_dates: list[date] = []
+            next_date = date.min
+            for signal_date in dates:
+                if signal_date > next_date:
+                    outcome_dates = _label_outcome_dates(signal_date)
+                    if len(outcome_dates) <= window:
+                        continue
+                    independent_dates.append(signal_date)
+                    next_date = outcome_dates[window]
+            window_summary[str(window)]["independent_date_count"] = len(independent_dates)
         groups.append(
             {
                 "label": label,
@@ -2257,6 +2497,15 @@ async def _label_outcome_summary(
         "asset_type": ASSET_TYPE_ETF,
         "rule_version": _LABEL_VALIDATION_RULE_VERSION,
         "outcome_source": "stored_signal_items",
+        "source_identity": source_identity,
+        "source_date_start": min((row.signal_date.isoformat() for row in rows), default=None),
+        "source_date_end": max((row.signal_date.isoformat() for row in rows), default=None),
+        "completed_outcomes": sum(row.status == "completed" for row in rows),
+        "pending_outcomes": sum(row.status == "pending" for row in rows),
+        "excluded_outcomes": sum(row.status == "excluded" for row in rows),
+        "legacy_outcomes": legacy_count,
+        "summary_outcome_limit": 50_000,
+        "summary_truncated": summary_truncated,
         "asset_count": len({row.asset_code for row in rows}),
         "evaluated_asset_count": len({row.asset_code for row in rows if row.status == "completed"}),
         "windows": list(_LABEL_VALIDATION_WINDOWS),
@@ -2966,40 +3215,19 @@ async def _latest_etf_signal_runs_by_date(
     session: AsyncSession,
     *,
     from_date: date,
+    score_version: str = "daily_reconstructable_v1",
 ) -> list[ShortResearchSignalRun]:
-    etf_run_ids = (
-        select(ShortResearchSignalItem.run_id)
-        .where(ShortResearchSignalItem.asset_type == ASSET_TYPE_ETF)
-        .distinct()
-    )
-    rows = (
-        await session.scalars(
-            select(ShortResearchSignalRun)
-            .where(
-                ShortResearchSignalRun.status == RUN_STATUS_SUCCESS,
-                ShortResearchSignalRun.publication_state == "published",
-                ShortResearchSignalRun.scope_kind == "full",
-                ShortResearchSignalRun.score_version == _SCORE_BUCKET_SCORE_VERSION,
-                ShortResearchSignalRun.score_field == _SCORE_BUCKET_SCORE_FIELD,
-                ShortResearchSignalRun.price_basis == _SCORE_BUCKET_PRICE_BASIS,
-                ShortResearchSignalRun.ranking_contract_hash.is_not(None),
-                ShortResearchSignalRun.universe_snapshot_hash.is_not(None),
-                ShortResearchSignalRun.input_snapshot_hash.is_not(None),
-                ShortResearchSignalRun.rule_version.is_not(None),
-                ShortResearchSignalRun.as_of_trade_date >= from_date,
-                ShortResearchSignalRun.id.in_(etf_run_ids),
-            )
-            .order_by(
-                ShortResearchSignalRun.as_of_trade_date.desc(),
-                ShortResearchSignalRun.published_at.desc(),
-                ShortResearchSignalRun.id.desc(),
-            )
-        )
-    ).all()
+    sources, _exclusions = await _historical_label_sources(session, datetime.now(UTC))
     by_date: dict[date, ShortResearchSignalRun] = {}
-    for run in rows:
-        assert run.as_of_trade_date is not None
-        by_date.setdefault(run.as_of_trade_date, run)
+    selected_identity: dict[str, str] | None = None
+    for run in sources:
+        if run.score_version != score_version or run.as_of_trade_date < from_date:
+            continue
+        identity = published_validation_source_identity(run)
+        if selected_identity is None:
+            selected_identity = identity
+        if identity == selected_identity:
+            by_date.setdefault(run.as_of_trade_date, run)
     return list(by_date.values())
 
 
@@ -3008,6 +3236,7 @@ async def _score_bucket_source_snapshot_exclusions(
     *,
     from_date: date,
     accepted_run_ids: set[int],
+    source_identity: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     etf_run_ids = (
         select(ShortResearchSignalItem.run_id)
@@ -3028,28 +3257,14 @@ async def _score_bucket_source_snapshot_exclusions(
     exclusions: list[dict[str, Any]] = []
     for run in rows:
         reason: str | None = None
-        if run.scope_kind != "full":
-            reason = "partial_or_legacy_scope"
-        elif run.publication_state != "published":
-            reason = "unpublished_snapshot"
-        elif run.score_version != _SCORE_BUCKET_SCORE_VERSION:
-            reason = "incompatible_score_version"
-        elif run.score_field != _SCORE_BUCKET_SCORE_FIELD:
-            reason = "incompatible_score_field"
-        elif run.price_basis != _SCORE_BUCKET_PRICE_BASIS:
-            reason = "incompatible_price_basis"
-        elif run.ranking_contract_hash is None:
-            reason = "missing_ranking_contract_hash"
-        elif run.universe_snapshot_hash is None:
-            reason = "missing_universe_snapshot_hash"
-        elif run.input_snapshot_hash is None:
-            reason = "missing_input_snapshot_hash"
-        elif run.rule_version is None:
-            reason = "missing_rule_version"
-        elif run.as_of_trade_date is None:
-            reason = "missing_as_of_trade_date"
-        elif run.id not in accepted_run_ids:
-            reason = "superseded_source_snapshot"
+        try:
+            identity = published_validation_source_identity(run)
+            if source_identity is not None and identity != source_identity:
+                reason = "incompatible_source_contract"
+            elif run.id not in accepted_run_ids:
+                reason = "superseded_or_incomplete_source_snapshot"
+        except ValueError as exc:
+            reason = str(exc)
         if reason is not None:
             exclusions.append(
                 {
@@ -3065,6 +3280,7 @@ async def _score_bucket_signal_items(
     session: AsyncSession,
     run: ShortResearchSignalRun,
 ) -> tuple[list[tuple[ShortResearchSignalItem, float]], list[dict[str, str]]]:
+    published_validation_source_identity(run)
     rows = (
         await session.scalars(
             select(ShortResearchSignalItem)
@@ -3092,9 +3308,9 @@ async def _score_bucket_signal_items(
         seen_codes.add(item.asset_code)
         score = item.ranking_score
         if score is None:
-            breakdown = (item.score_breakdown_json or {}).get(_SCORE_BUCKET_SCORE_VERSION)
+            breakdown = (item.score_breakdown_json or {}).get(str(run.score_version))
             declared_score = (
-                breakdown.get(_SCORE_BUCKET_SCORE_FIELD) if isinstance(breakdown, Mapping) else None
+                breakdown.get(str(run.score_field)) if isinstance(breakdown, Mapping) else None
             )
             reason = (
                 "non_finite_ranking_score"
@@ -3201,9 +3417,9 @@ async def _calculate_etf_score_bucket_validation(
         "validation_mode": VALIDATION_MODE_SCORE_BUCKET_REPLAY,
         "days": days,
         "score_basis": score_basis,
-        "score_field": _SCORE_BUCKET_SCORE_FIELD,
-        "score_version": _SCORE_BUCKET_SCORE_VERSION,
-        "score_meaning": "综合排名最终分",
+        "score_field": "research_score",
+        "score_version": "daily_reconstructable_v1",
+        "score_meaning": "研究分",
         "top_n": requested_top_n,
         "windows": horizons,
         "baseline": _SCORE_BUCKET_BASELINE,
@@ -3249,6 +3465,27 @@ async def _calculate_etf_score_bucket_validation(
             from_date=date.today() - timedelta(days=days),
         )
     )
+    source_identity = None
+    if source_runs:
+        try:
+            source_identity = published_validation_source_identity(source_runs[0])
+            if any(published_validation_source_identity(source) != source_identity
+                   for source in source_runs):
+                raise ValueError("mixed_source_contracts")
+        except ValueError as exc:
+            run.status = RUN_STATUS_FAILED
+            run.finished_at = utcnow()
+            run.error_message = str(exc)
+            run.summary_json = {**config, "status": RUN_STATUS_FAILED,
+                                "unavailable_reason": str(exc), "groups": []}
+            await session.flush()
+            return run
+        config.update({"source_identity": source_identity,
+                       "score_version": source_identity["score_version"],
+                       "score_field": source_identity["score_field"],
+                       "score_meaning": "研究分" if source_identity["score_field"] == "research_score"
+                       else "综合排名最终分"})
+        run.config_json = dict(config)
     source_from_date = (
         min(source_run.as_of_trade_date or source_run.as_of_date for source_run in source_runs)
         if source_runs
@@ -3258,6 +3495,7 @@ async def _calculate_etf_score_bucket_validation(
         session,
         from_date=source_from_date,
         accepted_run_ids={source_run.id for source_run in source_runs},
+        source_identity=source_identity,
     )
     if not source_runs:
         run.status = RUN_STATUS_FAILED
@@ -3616,19 +3854,31 @@ async def latest_signal_validation_run(
 
 async def _recent_outcome_examples(
     session: AsyncSession,
+    validation_run: EtfSignalValidationRun,
 ) -> dict[tuple[str, str], list[dict[str, Any]]]:
+    identity = (validation_run.config_json or {}).get("source_identity")
+    source_ids = [row["source_signal_run_id"] for row in
+                  (validation_run.config_json or {}).get("source_manifest", [])]
+    source_ids = source_ids or [validation_run.source_signal_run_id]
     rows = list(
         (
             await session.scalars(
                 select(EtfLabelOutcome)
-                .where(EtfLabelOutcome.status == "completed", EtfLabelOutcome.horizon_days == 5)
+                .where(EtfLabelOutcome.status == "completed", EtfLabelOutcome.horizon_days == 5,
+                       EtfLabelOutcome.signal_run_id.in_(source_ids))
                 .order_by(EtfLabelOutcome.signal_date.desc(), EtfLabelOutcome.id.desc())
                 .limit(200)
             )
         ).all()
     )
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    cutoff_text = (validation_run.config_json or {}).get("outcome_cutoff")
+    cutoff = datetime.fromisoformat(str(cutoff_text)) if cutoff_text else None
     for row in rows:
+        if (row.metrics_json or {}).get("source_identity") != identity:
+            continue
+        if cutoff is not None and not _label_outcome_visible_at(row, cutoff):
+            continue
         key = (row.label, row.entry_timing_label)
         bucket = grouped.setdefault(key, [])
         if len(bucket) >= 5:
@@ -3789,7 +4039,7 @@ async def latest_validation_evidence_by_label(
     forward_run = await latest_signal_validation_run(
         session, validation_mode=VALIDATION_MODE_FORWARD_LIVE
     )
-    examples_by_label = await _recent_outcome_examples(session) if forward_run is not None else {}
+    examples_by_label = await _recent_outcome_examples(session, forward_run) if forward_run else {}
     historical = await _validation_evidence_for_run(session, historical_run)
     forward = await _validation_evidence_for_run(
         session, forward_run, examples_by_label=examples_by_label
@@ -3797,7 +4047,7 @@ async def latest_validation_evidence_by_label(
     keys = set(historical) | set(forward)
     merged: dict[tuple[str, str], dict[str, Any]] = {}
     for key in keys:
-        primary = dict(historical.get(key) or forward.get(key) or {})
+        primary = dict(forward.get(key) or historical.get(key) or {})
         tracks: dict[str, Any] = {}
         if key in historical:
             tracks[VALIDATION_MODE_HISTORICAL_REPLAY] = historical[key]
@@ -3865,49 +4115,98 @@ async def latest_score_bucket_validation_summary(session: AsyncSession) -> dict[
     return summary
 
 
-async def run_etf_signal_validation(session: AsyncSession) -> EtfSignalValidationRun:
+async def run_etf_signal_validation(
+    session: AsyncSession,
+    *,
+    outcome_cutoff: datetime | None = None,
+    max_signal_items: int = 2000,
+) -> EtfSignalValidationRun:
     started_at = utcnow()
-    source_run = await latest_signal_run(session, asset_type=ASSET_TYPE_ETF)
+    cutoff = outcome_cutoff or datetime.now(UTC)
+    cutoff = cutoff.replace(tzinfo=UTC) if cutoff.tzinfo is None else cutoff.astimezone(UTC)
+    sources, exclusions = await _historical_label_sources(session, cutoff)
+    source_run = next((row for row in sources if row.score_version == "daily_reconstructable_v1"),
+                      sources[0] if sources else None)
+    local_cutoff = cutoff.astimezone(ASIA_SHANGHAI)
+    required_date: date | None = local_cutoff.date()
+    if local_cutoff.hour < 15:
+        required_date -= timedelta(days=1)
+    while not is_etf_exchange_trading_day(required_date):
+        try:
+            next_etf_exchange_trading_day(required_date)
+        except ExchangeCalendarUnavailableError:
+            required_date = None
+            break
+        required_date -= timedelta(days=1)
+    current_state = "ready" if any(
+        row.as_of_trade_date == required_date and row.score_version == "daily_reconstructable_v1"
+        for row in sources
+    ) else "unavailable"
     if source_run is None:
         run = EtfSignalValidationRun(
-            status=RUN_STATUS_FAILED,
-            started_at=started_at,
-            finished_at=utcnow(),
-            as_of_date=date.today(),
-            asset_type=ASSET_TYPE_ETF,
-            validation_mode=VALIDATION_MODE_FORWARD_LIVE,
-            rule_version=_LABEL_VALIDATION_RULE_VERSION,
+            status=RUN_STATUS_FAILED, started_at=started_at, finished_at=utcnow(),
+            as_of_date=cutoff.astimezone(ASIA_SHANGHAI).date(), asset_type=ASSET_TYPE_ETF,
+            validation_mode=VALIDATION_MODE_FORWARD_LIVE, rule_version=_LABEL_VALIDATION_RULE_VERSION,
             config_json={"windows": list(_LABEL_VALIDATION_WINDOWS)},
-            summary_json={},
-            error_message="暂无 ETF 短线排序快照，无法做标签有效性验证。",
+            summary_json={"current_publication_state": current_state,
+                          "excluded_source_snapshots": exclusions,
+                          "unavailable_reason": "no_compatible_historical_published_cohort",
+                          "outcome_cutoff": cutoff.isoformat()},
+            error_message="暂无契约完整的历史 ETF 已发布快照，无法做标签有效性验证。",
         )
         session.add(run)
         await session.commit()
         await session.refresh(run)
         return run
-    outcome_status = await review_etf_label_outcomes(session, source_run=source_run)
-    summary = await _label_outcome_summary(
-        session,
-        source_run.as_of_date,
-        source_signal_run_id=source_run.id,
+    outcome_status = await review_etf_label_outcomes(
+        session, source_runs=sources, outcome_cutoff=cutoff, max_signal_items=max_signal_items,
     )
-    summary.update(outcome_status)
+    grouped_sources: dict[str, tuple[dict[str, str], list[ShortResearchSignalRun]]] = {}
+    for source in sources:
+        identity = {**published_validation_source_identity(source),
+                    "execution_model": _LABEL_VALIDATION_EXECUTION_MODEL}
+        key = canonical_hash(identity)
+        grouped_sources.setdefault(key, (identity, []))[1].append(source)
+    primary_identity = {**published_validation_source_identity(source_run),
+                        "execution_model": _LABEL_VALIDATION_EXECUTION_MODEL}
+    evidence_groups = []
+    for identity, compatible_sources in grouped_sources.values():
+        group = await _label_outcome_summary(
+            session, source_run.as_of_date,
+            source_signal_run_ids=[row.id for row in compatible_sources], source_identity=identity,
+            outcome_cutoff=cutoff,
+        )
+        group["source_signal_run_ids"] = [row.id for row in compatible_sources]
+        evidence_groups.append(group)
+    summary = dict(next(group for group in evidence_groups
+                        if group["source_identity"] == primary_identity))
+    summary.update({"maturity_progress": outcome_status, "evidence_groups": evidence_groups,
+                    "current_publication_state": current_state,
+                    "excluded_source_snapshots": exclusions, "outcome_cutoff": cutoff.isoformat()})
+    manifest = [{"source_signal_run_id": row.id, "signal_date": row.as_of_trade_date.isoformat(),
+                 "ranking_contract_hash": row.ranking_contract_hash,
+                 "input_snapshot_hash": row.input_snapshot_hash,
+                 "universe_snapshot_hash": row.universe_snapshot_hash,
+                 "signal_cutoff": row.data_cutoff.isoformat()}
+                for row in grouped_sources[canonical_hash(primary_identity)][1]]
     run = EtfSignalValidationRun(
-        status=RUN_STATUS_SUCCESS,
-        started_at=started_at,
-        finished_at=utcnow(),
-        as_of_date=source_run.as_of_date,
-        source_signal_run_id=source_run.id,
-        asset_type=ASSET_TYPE_ETF,
-        validation_mode=VALIDATION_MODE_FORWARD_LIVE,
-        rule_version=_LABEL_VALIDATION_RULE_VERSION,
-        config_json={
-            "windows": list(_LABEL_VALIDATION_WINDOWS),
-            "max_signal_items": 2000,
-            "min_sample_count": _LABEL_VALIDATION_MIN_SAMPLES,
-            "validation_mode": VALIDATION_MODE_FORWARD_LIVE,
-            "outcome_source": "stored_signal_items",
-        },
+        status=RUN_STATUS_SUCCESS, started_at=started_at, finished_at=utcnow(),
+        as_of_date=source_run.as_of_date, source_signal_run_id=source_run.id,
+        asset_type=ASSET_TYPE_ETF, validation_mode=VALIDATION_MODE_FORWARD_LIVE,
+        rule_version=_LABEL_VALIDATION_RULE_VERSION, ranking_source_kind="production_published",
+        source_manifest_hash=canonical_hash(manifest), source_event_count=len(manifest),
+        source_ranking_contract_hash=source_run.ranking_contract_hash,
+        source_score_version=source_run.score_version, source_score_field=source_run.score_field,
+        source_rule_version=source_run.rule_version, price_basis=source_run.price_basis,
+        source_scope_kind=source_run.scope_kind, source_scope_hash=source_run.scope_hash,
+        source_universe_snapshot_hash=source_run.universe_snapshot_hash,
+        source_input_snapshot_hash=source_run.input_snapshot_hash,
+        execution_model=_LABEL_VALIDATION_EXECUTION_MODEL, data_cutoff=source_run.data_cutoff,
+        config_json={"windows": list(_LABEL_VALIDATION_WINDOWS), "max_signal_items": max_signal_items,
+                     "min_sample_count": _LABEL_VALIDATION_MIN_SAMPLES,
+                     "validation_mode": VALIDATION_MODE_FORWARD_LIVE,
+                     "outcome_source": "stored_signal_items", "source_manifest": manifest,
+                     "source_identity": primary_identity, "outcome_cutoff": cutoff.isoformat()},
         summary_json=summary,
     )
     session.add(run)

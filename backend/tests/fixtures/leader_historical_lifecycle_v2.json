@@ -1,0 +1,366 @@
+{
+  "fixture_kind": "deterministic_synthetic_regression_not_market_evidence",
+  "input_definition": "test_etf_leader_tactics_historical_backtest._confirmed_universe",
+  "input_hash": "5eb2b7f4f90bbc383c84458a93b22c2ff66605c062885444c745673a27b38024",
+  "signal_date": "2025-06-29",
+  "legacy_contract_hash": "6ee07128b3f28fa553ec438822e2d0ab57810548c753ed10f59735bf9aeb3e5a",
+  "legacy_contract": {
+    "schema_version": "etf_leader_tactics_historical_backtest_evidence_v1",
+    "candidate_registry_hash": "aa8c2c167e64e9ee03cd1dc78dd2a4bb45c97654c2366b4bfe24565c60c91546",
+    "candidate_ids": [
+      "leader_breakout_proxy_v1",
+      "former_leader_repair_proxy_v1"
+    ],
+    "membership_mode": "sealed_source_snapshot_current_vintage_proxy",
+    "price_basis": "total_return_adjusted",
+    "signal_timing": "signal_at_T_close_confirm_at_T_plus_1_close",
+    "entry_timing": "enter_at_T_plus_2_adjusted_open",
+    "exit_signal_timing": "evaluate_email_exit_policy_at_each_daily_close",
+    "exit_execution_timing": "exit_at_next_session_adjusted_open",
+    "one_way_fee_bps": 0,
+    "one_way_slippage_bps": 0,
+    "sector_proxy_version": "sector_trend_historical_neutral_technical_v1",
+    "peer_benchmark": "same_signal_date_equal_weight_current_vintage_peer_group",
+    "clone_policy": "highest_average_turnover20_then_asset_code",
+    "entry_quality_diagnostic": "etf_leader_entry_quality_shadow_v3",
+    "next_session_confirmation": "daily_close_proxy",
+    "round_trip_cost_bps": 0.0,
+    "production_mutation_allowed": false
+  },
+  "legacy_events": [
+    {
+      "signal_date": "2025-06-29",
+      "candidate_id": "leader_breakout_proxy_v1",
+      "asset_code": "04",
+      "name": "ETF-04",
+      "peer_group": "强势",
+      "score": 1.0,
+      "feature_hash": "6d5b8146b9c67135c8005029bd6135b1bf57bdf19fb9a1f0c93fa57521de45ef",
+      "trade_status": "closed",
+      "confirmation_date": "2025-06-30",
+      "entry_date": "2025-07-01",
+      "entry_price": 16.134,
+      "exit_signal_date": "2025-07-01",
+      "exit_date": "2025-07-02",
+      "exit_price": 16.168000000000003,
+      "exit_reason": "leader_tactics_ma5_exit",
+      "holding_sessions": 1,
+      "gross_return": 0.002107350935911967,
+      "net_return": 0.002107350935911967,
+      "peer_net_return": 0.0020279907547930075,
+      "net_excess_return": 7.936018111895935e-05,
+      "entry_quality_state": "disciplined",
+      "entry_quality_reason_codes": [],
+      "next_session_confirmation_state": "confirmed",
+      "next_session_confirmation_reason_codes": []
+    }
+  ],
+  "legacy_aggregates": [
+    {
+      "candidate_id": "all_leader_candidates",
+      "execution_policy": "T_signal_T1_confirm_T2_open_email_exit_next_open",
+      "event_count": 1,
+      "closed_trade_count": 1,
+      "open_trade_count": 0,
+      "signal_date_count": 1,
+      "trade_status_counts": {
+        "closed": 1
+      },
+      "mean_net_return": 0.002107350935911967,
+      "median_net_return": 0.002107350935911967,
+      "win_rate": 1,
+      "average_winner": 0.002107350935911967,
+      "average_loser": null,
+      "payoff_ratio": null,
+      "profit_factor": null,
+      "mean_holding_sessions": 1,
+      "mean_peer_net_return": 0.0020279907547930075,
+      "mean_net_excess_return": 7.936018111895935e-05,
+      "mean_net_return_ci95_lower": null,
+      "mean_net_return_ci95_upper": null,
+      "event_series_max_drawdown": 0.0,
+      "entry_quality_counts": {
+        "disciplined": 1
+      },
+      "entry_quality_performance": {
+        "disciplined": {
+          "event_count": 1,
+          "closed_trade_count": 1,
+          "signal_date_count": 1,
+          "mean_net_return": 0.002107350935911967,
+          "win_rate": 1,
+          "mean_net_excess_return": 7.936018111895935e-05
+        }
+      },
+      "next_session_confirmation_counts": {
+        "confirmed": 1
+      }
+    },
+    {
+      "candidate_id": "leader_breakout_proxy_v1",
+      "execution_policy": "T_signal_T1_confirm_T2_open_email_exit_next_open",
+      "event_count": 1,
+      "closed_trade_count": 1,
+      "open_trade_count": 0,
+      "signal_date_count": 1,
+      "trade_status_counts": {
+        "closed": 1
+      },
+      "mean_net_return": 0.002107350935911967,
+      "median_net_return": 0.002107350935911967,
+      "win_rate": 1,
+      "average_winner": 0.002107350935911967,
+      "average_loser": null,
+      "payoff_ratio": null,
+      "profit_factor": null,
+      "mean_holding_sessions": 1,
+      "mean_peer_net_return": 0.0020279907547930075,
+      "mean_net_excess_return": 7.936018111895935e-05,
+      "mean_net_return_ci95_lower": null,
+      "mean_net_return_ci95_upper": null,
+      "event_series_max_drawdown": 0.0,
+      "entry_quality_counts": {
+        "disciplined": 1
+      },
+      "entry_quality_performance": {
+        "disciplined": {
+          "event_count": 1,
+          "closed_trade_count": 1,
+          "signal_date_count": 1,
+          "mean_net_return": 0.002107350935911967,
+          "win_rate": 1,
+          "mean_net_excess_return": 7.936018111895935e-05
+        }
+      },
+      "next_session_confirmation_counts": {
+        "confirmed": 1
+      }
+    },
+    {
+      "candidate_id": "former_leader_repair_proxy_v1",
+      "execution_policy": "T_signal_T1_confirm_T2_open_email_exit_next_open",
+      "event_count": 0,
+      "closed_trade_count": 0,
+      "open_trade_count": 0,
+      "signal_date_count": 0,
+      "trade_status_counts": {},
+      "mean_net_return": null,
+      "median_net_return": null,
+      "win_rate": null,
+      "average_winner": null,
+      "average_loser": null,
+      "payoff_ratio": null,
+      "profit_factor": null,
+      "mean_holding_sessions": null,
+      "mean_peer_net_return": null,
+      "mean_net_excess_return": null,
+      "mean_net_return_ci95_lower": null,
+      "mean_net_return_ci95_upper": null,
+      "event_series_max_drawdown": null,
+      "entry_quality_counts": {},
+      "entry_quality_performance": {},
+      "next_session_confirmation_counts": {}
+    }
+  ],
+  "current_contract_hash": "28dd4a1bf6c92930289b97645b3ff1da2709734b90226fb5f0c990ab13b5dab4",
+  "current_events": [
+    {
+      "signal_date": "2025-06-29",
+      "candidate_id": "leader_breakout_proxy_v1",
+      "asset_code": "04",
+      "name": "ETF-04",
+      "peer_group": "强势",
+      "score": 1.0,
+      "feature_hash": "c1d991b66f9306a15b1d6783e1236de495b6896b3f347ea47de63b5bb0a7bc8d",
+      "trade_status": "closed",
+      "confirmation_date": "2025-06-30",
+      "entry_date": "2025-07-01",
+      "entry_price": 16.134,
+      "exit_signal_date": "2025-07-01",
+      "exit_date": "2025-07-02",
+      "exit_price": 16.168000000000003,
+      "exit_reason": "leader_tactics_ma5_exit",
+      "holding_sessions": 1,
+      "gross_return": 0.002107350935911967,
+      "net_return": 0.00010513894658248368,
+      "peer_net_return": 2.5937327224578867e-05,
+      "net_excess_return": 7.920161935790482e-05,
+      "entry_quality_state": "disciplined",
+      "entry_quality_reason_codes": [],
+      "next_session_confirmation_state": "confirmed",
+      "next_session_confirmation_reason_codes": [],
+      "research_context": {
+        "contract_hash": "28dd4a1bf6c92930289b97645b3ff1da2709734b90226fb5f0c990ab13b5dab4",
+        "execution_contract_hash": "5c59b19ba613f4e5623e8cd68550470414b871c642f7ab4e2516fe303bc571c8",
+        "risk_contract_hash": "cdea73ee008ef3e622a3ddc9bf845ddf960709092df7d09f2eda6af084c14247",
+        "cost_contract_hash": "0dd57559b5c2db7c02893d540c2c01af934701845d7cb1977ef201de595772f9",
+        "entry_price": 16.134,
+        "entry_cash_cost_per_unit": 16.1501380335,
+        "entry_date": "2025-07-01",
+        "signal_low": 16.2,
+        "signal_low_date": "2025-06-29",
+        "atr20": 1.3323999999999991,
+        "atr_as_of_date": "2025-06-30",
+        "one_way_fee_bps": 5,
+        "one_way_slippage_bps": 5,
+        "initial_stop": 13.469200000000003,
+        "risk_unit": 2.664799999999998,
+        "signal_low_ignored": true,
+        "unavailable_reason": null
+      }
+    }
+  ],
+  "current_aggregates": [
+    {
+      "candidate_id": "all_leader_candidates",
+      "execution_policy": "T_signal_T1_confirm_T2_open_causal_risk_next_open_v2",
+      "contract_hash": "28dd4a1bf6c92930289b97645b3ff1da2709734b90226fb5f0c990ab13b5dab4",
+      "execution_contract_hash": "5c59b19ba613f4e5623e8cd68550470414b871c642f7ab4e2516fe303bc571c8",
+      "risk_contract_hash": "cdea73ee008ef3e622a3ddc9bf845ddf960709092df7d09f2eda6af084c14247",
+      "cost_contract_hash": "0dd57559b5c2db7c02893d540c2c01af934701845d7cb1977ef201de595772f9",
+      "one_way_fee_bps": 5,
+      "one_way_slippage_bps": 5,
+      "event_count": 1,
+      "closed_trade_count": 1,
+      "open_trade_count": 0,
+      "signal_date_count": 1,
+      "trade_status_counts": {
+        "closed": 1
+      },
+      "mean_net_return": 0.00010513894658248368,
+      "mean_gross_return": 0.002107350935911967,
+      "mean_cost_drag": 0.002002211989329483,
+      "median_net_return": 0.00010513894658248368,
+      "win_rate": 1,
+      "average_winner": 0.00010513894658248368,
+      "average_loser": null,
+      "payoff_ratio": null,
+      "profit_factor": null,
+      "mean_holding_sessions": 1,
+      "mean_peer_net_return": 2.5937327224578867e-05,
+      "mean_net_excess_return": 7.920161935790482e-05,
+      "mean_net_return_ci95_lower": null,
+      "mean_net_return_ci95_upper": null,
+      "event_series_max_drawdown": 0.0,
+      "entry_quality_counts": {
+        "disciplined": 1
+      },
+      "entry_quality_performance": {
+        "disciplined": {
+          "event_count": 1,
+          "closed_trade_count": 1,
+          "signal_date_count": 1,
+          "mean_net_return": 0.00010513894658248368,
+          "win_rate": 1,
+          "mean_net_excess_return": 7.920161935790482e-05
+        }
+      },
+      "next_session_confirmation_counts": {
+        "confirmed": 1
+      }
+    },
+    {
+      "candidate_id": "leader_breakout_proxy_v1",
+      "execution_policy": "T_signal_T1_confirm_T2_open_causal_risk_next_open_v2",
+      "contract_hash": "28dd4a1bf6c92930289b97645b3ff1da2709734b90226fb5f0c990ab13b5dab4",
+      "execution_contract_hash": "5c59b19ba613f4e5623e8cd68550470414b871c642f7ab4e2516fe303bc571c8",
+      "risk_contract_hash": "cdea73ee008ef3e622a3ddc9bf845ddf960709092df7d09f2eda6af084c14247",
+      "cost_contract_hash": "0dd57559b5c2db7c02893d540c2c01af934701845d7cb1977ef201de595772f9",
+      "one_way_fee_bps": 5,
+      "one_way_slippage_bps": 5,
+      "event_count": 1,
+      "closed_trade_count": 1,
+      "open_trade_count": 0,
+      "signal_date_count": 1,
+      "trade_status_counts": {
+        "closed": 1
+      },
+      "mean_net_return": 0.00010513894658248368,
+      "mean_gross_return": 0.002107350935911967,
+      "mean_cost_drag": 0.002002211989329483,
+      "median_net_return": 0.00010513894658248368,
+      "win_rate": 1,
+      "average_winner": 0.00010513894658248368,
+      "average_loser": null,
+      "payoff_ratio": null,
+      "profit_factor": null,
+      "mean_holding_sessions": 1,
+      "mean_peer_net_return": 2.5937327224578867e-05,
+      "mean_net_excess_return": 7.920161935790482e-05,
+      "mean_net_return_ci95_lower": null,
+      "mean_net_return_ci95_upper": null,
+      "event_series_max_drawdown": 0.0,
+      "entry_quality_counts": {
+        "disciplined": 1
+      },
+      "entry_quality_performance": {
+        "disciplined": {
+          "event_count": 1,
+          "closed_trade_count": 1,
+          "signal_date_count": 1,
+          "mean_net_return": 0.00010513894658248368,
+          "win_rate": 1,
+          "mean_net_excess_return": 7.920161935790482e-05
+        }
+      },
+      "next_session_confirmation_counts": {
+        "confirmed": 1
+      }
+    },
+    {
+      "candidate_id": "former_leader_repair_proxy_v1",
+      "execution_policy": "T_signal_T1_confirm_T2_open_causal_risk_next_open_v2",
+      "contract_hash": "28dd4a1bf6c92930289b97645b3ff1da2709734b90226fb5f0c990ab13b5dab4",
+      "execution_contract_hash": "5c59b19ba613f4e5623e8cd68550470414b871c642f7ab4e2516fe303bc571c8",
+      "risk_contract_hash": "cdea73ee008ef3e622a3ddc9bf845ddf960709092df7d09f2eda6af084c14247",
+      "cost_contract_hash": "0dd57559b5c2db7c02893d540c2c01af934701845d7cb1977ef201de595772f9",
+      "one_way_fee_bps": 5,
+      "one_way_slippage_bps": 5,
+      "event_count": 0,
+      "closed_trade_count": 0,
+      "open_trade_count": 0,
+      "signal_date_count": 0,
+      "trade_status_counts": {},
+      "mean_net_return": null,
+      "mean_gross_return": null,
+      "mean_cost_drag": null,
+      "median_net_return": null,
+      "win_rate": null,
+      "average_winner": null,
+      "average_loser": null,
+      "payoff_ratio": null,
+      "profit_factor": null,
+      "mean_holding_sessions": null,
+      "mean_peer_net_return": null,
+      "mean_net_excess_return": null,
+      "mean_net_return_ci95_lower": null,
+      "mean_net_return_ci95_upper": null,
+      "event_series_max_drawdown": null,
+      "entry_quality_counts": {},
+      "entry_quality_performance": {},
+      "next_session_confirmation_counts": {}
+    }
+  ],
+  "limitations": [
+    "Synthetic deterministic unit input, not sealed market history or strategy performance evidence.",
+    "Current-vintage peer membership and taxonomy are not point-in-time.",
+    "Former-leader repair has zero selected events in this fixture; no repair alpha conclusion is available.",
+    "Drawdown is overlapping event-series drawdown, not capital-constrained portfolio drawdown.",
+    "PIT promotion credit is zero. Live email risk and breakeven settings were not changed."
+  ],
+  "promotion_gate_credit": {
+    "eligible_pit_sessions": 0,
+    "independent_primary_dates": 0,
+    "walk_forward_folds": 0
+  },
+  "fixture_hash": "3bcbf53292f365ea51d6461a2823cf6b5e5bc1104542817c92a4c8d5c54e6c48",
+  "legacy_risk_inputs": {
+    "entry_anchor": 16.154,
+    "atr20": 1.3171999999999993,
+    "atr_as_of_date": "2025-07-01",
+    "signal_low": 16.2,
+    "initial_stop": 13.5196,
+    "risk_unit": 2.6343999999999994,
+    "signal_low_ignored": true
+  }
+}

@@ -1,29 +1,56 @@
 from __future__ import annotations
 
-from dataclasses import replace
+import json
+from dataclasses import asdict, replace
 from datetime import date, timedelta
+from pathlib import Path
 
 import pytest
 
 from app.services.etf_research_evidence import stable_contract_hash
+from app.services.market_data import next_etf_exchange_trading_day
 from app.services.strategy_lab.etf_leader_tactics_historical_backtest import (
+    HISTORICAL_BACKTEST_CONTRACT,
     HISTORICAL_BACKTEST_CONTRACT_HASH,
+    HISTORICAL_EXECUTION_POLICY,
     LEADER_HISTORICAL_BACKTEST_EVIDENCE_MODE,
     LEADER_HISTORICAL_BACKTEST_EXPERIMENT_FAMILY,
     LEADER_HISTORICAL_BACKTEST_NOT_PIT,
     LEADER_HISTORICAL_BACKTEST_REPORT_KIND,
     LEADER_HISTORICAL_BACKTEST_SCHEMA_VERSION,
+    LEGACY_HISTORICAL_BACKTEST_CONTRACT_HASH,
     ROUND_TRIP_COST_RATE,
     HistoricalLeaderAsset,
     HistoricalLeaderBar,
     HistoricalLeaderEvent,
     LeaderHistoricalBacktestContractError,
+    _entry_risk_context,
     build_historical_backtest_evidence,
     eligible_historical_signal_dates,
-    evaluate_historical_signal_date,
-    replay_historical_exit_policy,
     summarize_historical_events,
 )
+from app.services.strategy_lab.etf_leader_tactics_historical_backtest import (
+    evaluate_historical_signal_date as _evaluate_historical_signal_date,
+)
+from app.services.strategy_lab.etf_leader_tactics_historical_backtest import (
+    replay_historical_exit_policy as _replay_historical_exit_policy,
+)
+
+
+def evaluate_historical_signal_date(assets, signal_date):
+    # The sealed 2025 fixture deliberately has one bar per calendar day.
+    return _evaluate_historical_signal_date(
+        assets, signal_date,
+        trading_sessions=tuple(sorted({bar.trade_date for asset in assets for bar in asset.bars})),
+    )
+
+
+def replay_historical_exit_policy(assets, events, **kwargs):
+    return _replay_historical_exit_policy(
+        assets, events,
+        trading_sessions=tuple(sorted({bar.trade_date for asset in assets for bar in asset.bars})),
+        **kwargs,
+    )
 
 
 def _asset(
@@ -151,8 +178,11 @@ def test_confirmed_signal_enters_t2_open_and_exits_after_close_signal() -> None:
     assert event.exit_signal_date is not None
     assert event.exit_date is not None
     assert event.exit_date > event.exit_signal_date
-    assert event.gross_return == event.net_return
-    assert ROUND_TRIP_COST_RATE == 0
+    assert event.gross_return > event.net_return
+    assert event.net_return == pytest.approx(
+        event.exit_price * 0.9995 ** 2 / (event.entry_price * 1.0005 ** 2) - 1
+    )
+    assert ROUND_TRIP_COST_RATE == 0.002
     row = next(
         item
         for item in summarize_historical_events(events)
@@ -160,6 +190,42 @@ def test_confirmed_signal_enters_t2_open_and_exits_after_close_signal() -> None:
     )
     assert row["next_session_confirmation_counts"]["confirmed"] == 1
     assert row["closed_trade_count"] == 1
+
+
+@pytest.mark.parametrize(("missing_index", "expected_status"), [
+    (180, "confirmation_price_missing"),
+    (181, "entry_price_missing"),
+    (182, "lifecycle_price_missing"),
+])
+def test_missing_exchange_session_never_uses_a_later_bar(missing_index, expected_status):
+    days = [date(2026, 1, 5)]
+    for _ in range(204):
+        days.append(next_etf_exchange_trading_day(days[-1]))
+    assets = tuple(replace(asset, bars=tuple(
+        replace(bar, trade_date=days[index]) for index, bar in enumerate(asset.bars)
+    )) for asset in _confirmed_universe())
+    original = _evaluate_historical_signal_date(assets, days[179])[0]
+    assert original.trade_status == "closed"
+    changed = tuple(replace(asset, bars=tuple(
+        bar for index, bar in enumerate(asset.bars)
+        if asset.asset_code != "04" or index != missing_index
+    )) for asset in assets)
+    result = _evaluate_historical_signal_date(changed, days[179])[0]
+    assert result.trade_status == expected_status
+    assert result.net_return is None
+    assert result.exit_date is None
+    if missing_index == 182:
+        replayed = _replay_historical_exit_policy(changed, (original,), take_profit_return=0.99)[0]
+        assert replayed.trade_status == expected_status
+        assert replayed.net_return is None
+
+
+def test_unsupported_exchange_calendar_does_not_claim_a_historical_trade():
+    assets = _confirmed_universe()
+    result = _evaluate_historical_signal_date(assets, assets[4].bars[179].trade_date)[0]
+    assert result.trade_status == "exchange_calendar_unavailable"
+    assert result.entry_date is None
+    assert result.net_return is None
 
 
 def test_future_prices_cannot_change_signal_identity_but_change_outcome() -> None:
@@ -206,7 +272,7 @@ def test_asset_page_merge_order_cannot_change_results() -> None:
     assert canonical == reversed_pages
 
 
-def test_summary_reports_zero_cost_lifecycle_results() -> None:
+def test_summary_reports_research_cost_lifecycle_results() -> None:
     events = evaluate_historical_signal_date(_confirmed_universe(), date(2025, 6, 29))
     summary = summarize_historical_events(events)
 
@@ -220,9 +286,91 @@ def test_summary_reports_zero_cost_lifecycle_results() -> None:
     assert row["mean_net_return"] is not None
     assert row["mean_net_excess_return"] is not None
     assert row["event_series_max_drawdown"] is not None
-    assert row["execution_policy"] == (
-        "T_signal_T1_confirm_T2_open_email_exit_next_open"
+    assert row["execution_policy"] == HISTORICAL_EXECUTION_POLICY
+    assert row["mean_gross_return"] > row["mean_net_return"]
+    assert row["mean_cost_drag"] > 0
+
+
+@pytest.mark.parametrize("field", ["adjusted_close", "adjusted_high", "adjusted_low"])
+def test_entry_session_ohlc_cannot_change_frozen_risk_or_cost_anchor(field) -> None:
+    assets = _confirmed_universe()
+    original = evaluate_historical_signal_date(assets, assets[4].bars[179].trade_date)[0]
+    target = assets[4]
+    bars = list(target.bars)
+    value = getattr(bars[181], field)
+    bars[181] = replace(bars[181], **{field: value - 0.01 if field == "adjusted_low" else value + 0.01})
+    changed_assets = (*assets[:4], replace(target, bars=tuple(bars)), *assets[5:])
+    changed = evaluate_historical_signal_date(changed_assets, original.signal_date)[0]
+    replayed = replay_historical_exit_policy(changed_assets, (original,), take_profit_return=0.99)[0]
+
+    assert original.research_context == changed.research_context == replayed.research_context
+    context = original.research_context
+    assert context["entry_price"] == original.entry_price
+    assert context["signal_low"] == target.bars[179].adjusted_low
+    assert context["signal_low_date"] == target.bars[179].trade_date.isoformat()
+    assert context["atr_as_of_date"] == target.bars[180].trade_date.isoformat()
+    assert context["entry_cash_cost_per_unit"] == pytest.approx(original.entry_price * 1.0005 ** 2)
+    assert context["initial_stop"] == pytest.approx(original.entry_price - 2 * context["atr20"])
+    assert replayed.peer_net_return == pytest.approx(changed.peer_net_return)
+    assert replayed.net_excess_return == pytest.approx(replayed.net_return - replayed.peer_net_return)
+
+
+def test_missing_or_nonpositive_risk_is_not_fabricated() -> None:
+    asset = _confirmed_universe()[4]
+    missing = _entry_risk_context(asset, 17, 19, asset.bars[19].adjusted_open)
+    assert missing["unavailable_reason"] == "entry_risk_inputs_unavailable"
+    assert "risk_unit" not in missing
+    bars = tuple(
+        replace(bar, adjusted_high=100.0, adjusted_low=bar.adjusted_low if index == 179 else 0.01)
+        for index, bar in enumerate(asset.bars)
     )
+    invalid = _entry_risk_context(replace(asset, bars=bars), 179, 181, asset.bars[181].adjusted_open)
+    assert invalid["unavailable_reason"] == "entry_risk_nonpositive"
+    assert "initial_stop" not in invalid
+    event = evaluate_historical_signal_date(_confirmed_universe(), asset.bars[179].trade_date)[0]
+    unavailable = replay_historical_exit_policy(
+        (replace(asset, bars=asset.bars[170:]),), (event,), take_profit_return=0.99
+    )[0]
+    assert unavailable.trade_status == "entry_risk_unavailable"
+    assert unavailable.net_return is None
+    assert unavailable.entry_price is None
+    assert unavailable.research_context["unavailable_reason"] == "entry_risk_inputs_unavailable"
+
+
+def test_old_completed_events_cannot_be_relabelled_as_current_summary() -> None:
+    event = evaluate_historical_signal_date(_confirmed_universe(), date(2025, 6, 29))[0]
+    old = replace(event, research_context=None, net_return=event.gross_return)
+    with pytest.raises(LeaderHistoricalBacktestContractError, match="risk/cost identity"):
+        summarize_historical_events((old,))
+    report = _report()
+    report["sample_events"] = [asdict(old)]
+    report["manifest_hash"] = stable_contract_hash({key: value for key, value in report.items() if key != "manifest_hash"})
+    with pytest.raises(LeaderHistoricalBacktestContractError, match="risk/cost identity"):
+        build_historical_backtest_evidence(report, code_version="test")
+
+
+def test_sealed_synthetic_fixture_preserves_old_results_and_reproduces_new_results() -> None:
+    fixture = json.loads((Path(__file__).parent / "fixtures/leader_historical_lifecycle_v2.json").read_text())
+    assert fixture["fixture_hash"] == stable_contract_hash({
+        key: value for key, value in fixture.items() if key != "fixture_hash"
+    })
+    assets = _confirmed_universe()
+    assert fixture["input_hash"] == stable_contract_hash([asdict(asset) for asset in assets])
+    assert fixture["legacy_contract_hash"] == LEGACY_HISTORICAL_BACKTEST_CONTRACT_HASH
+    assert stable_contract_hash(fixture["legacy_contract"]) == fixture["legacy_contract_hash"]
+    assert fixture["legacy_contract_hash"] != HISTORICAL_BACKTEST_CONTRACT_HASH
+    assert fixture["current_contract_hash"] == HISTORICAL_BACKTEST_CONTRACT_HASH
+    events = evaluate_historical_signal_date(assets, date.fromisoformat(fixture["signal_date"]))
+    assert json.loads(json.dumps([asdict(event) for event in events], default=str)) == fixture["current_events"]
+    assert list(summarize_historical_events(events)) == fixture["current_aggregates"]
+    old, new = fixture["legacy_events"][0], fixture["current_events"][0]
+    assert old["entry_price"] == new["entry_price"]
+    assert old["gross_return"] == new["gross_return"]
+    assert old["net_return"] > new["net_return"]
+    assert fixture["legacy_risk_inputs"]["atr_as_of_date"] != new["research_context"]["atr_as_of_date"]
+    assert fixture["current_aggregates"][2]["event_count"] == 0
+    assert fixture["current_aggregates"][2]["mean_net_return"] is None
+    assert not any(fixture["promotion_gate_credit"].values())
 
 
 def test_take_profit_replay_suppresses_next_three_trading_session_candidates() -> None:
@@ -302,6 +450,9 @@ def _report() -> dict[str, object]:
         "status": "insufficient_data",
         "unavailable_reason": LEADER_HISTORICAL_BACKTEST_NOT_PIT,
         "contract_hash": HISTORICAL_BACKTEST_CONTRACT_HASH,
+        **{key: HISTORICAL_BACKTEST_CONTRACT[key] for key in (
+            "execution_contract_hash", "risk_contract_hash", "cost_contract_hash"
+        )},
         "source_ranking_contract_hash": "a" * 64,
         "membership_mode": "sealed_source_snapshot_current_vintage_proxy",
         "price_basis": "total_return_adjusted",

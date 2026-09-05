@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime
 from typing import Any, Literal
@@ -48,6 +48,144 @@ FORWARD_COST_PROVENANCE_CONTRACT_HASH = stable_contract_hash(
         },
         "no_intraday_reconstruction": True,
     }
+)
+
+PURE_MOMENTUM_CONTROL_ID = "positive_adjusted_return_20_session_top10"
+PURE_MOMENTUM_LOOKBACK_SESSIONS = 20
+PURE_MOMENTUM_TARGET_WEIGHT = 0.10
+PURE_MOMENTUM_CONTROL_CONTRACT_HASH = stable_contract_hash(
+    {
+        "contract_id": "positive_adjusted_return_20_session_top10_v1",
+        "lookback_sessions": PURE_MOMENTUM_LOOKBACK_SESSIONS,
+        "eligibility": "positive_return_and_caller_declared_common_support",
+        "ordering": ("adjusted_return_desc", "asset_code_asc"),
+        "top_n": 10,
+        "target_weight_per_asset": PURE_MOMENTUM_TARGET_WEIGHT,
+        "unfilled_weight": "cash",
+        "promotion_candidate": False,
+    }
+)
+CONTINUOUS_RANKING_EXECUTION_MODEL = (
+    "t_plus_one_adjusted_close_continuous_cash_share_v1"
+)
+
+
+@dataclass(frozen=True)
+class PureMomentumControlSelection:
+    signal_date: date
+    selected_asset_codes: tuple[str, ...]
+    momentum_returns: tuple[tuple[str, float], ...]
+    target_weights: tuple[tuple[str, float], ...]
+    cash_target_weight: float
+    requested_asset_count: int
+    priced_asset_count: int
+    positive_asset_count: int
+    coverage_ratio: float
+    exclusions: tuple[tuple[str, str], ...]
+    contract_hash: str
+    input_hash: str
+    selection_hash: str
+
+
+@dataclass(frozen=True)
+class RankingPortfolioTarget:
+    signal_date: date
+    target_weights: tuple[tuple[str, float], ...]
+    source_hash: str
+    target_hash: str
+
+
+@dataclass(frozen=True)
+class RankingPortfolioCostPolicy:
+    scenario: Literal["base", "stress"]
+    fee_bps_per_side: float
+    slippage_bps_per_side: float
+    provenance: str
+    contract_hash: str
+
+
+@dataclass(frozen=True)
+class RankingPortfolioPoint:
+    session_date: date
+    pre_rebalance_net_value: float
+    post_rebalance_net_value: float
+    pre_rebalance_gross_value: float
+    post_rebalance_gross_value: float
+    net_cash: float
+    gross_cash: float
+    net_holdings: tuple[tuple[str, float], ...]
+    gross_holdings: tuple[tuple[str, float], ...]
+    target_hash: str | None
+    net_trade_notional: float
+    gross_trade_notional: float
+    transaction_cost: float
+    order_count: int
+
+
+@dataclass(frozen=True)
+class RankingPortfolioUnavailableInterval:
+    start_session: date
+    end_session: date
+    asset_codes: tuple[str, ...]
+    reason: str
+
+
+@dataclass(frozen=True)
+class RankingPortfolioLedger:
+    status: Literal["completed", "unavailable"]
+    execution_model: str
+    cost_scenario: str
+    cost_contract_hash: str
+    cost_provenance: str
+    fee_bps_per_side: float
+    slippage_bps_per_side: float
+    initial_capital: float
+    points: tuple[RankingPortfolioPoint, ...]
+    net_return: float | None
+    gross_return: float | None
+    net_maximum_drawdown: float | None
+    gross_maximum_drawdown: float | None
+    turnover: float
+    total_transaction_cost: float
+    rebalance_count: int
+    order_count: int
+    final_net_cash: float | None
+    final_gross_cash: float | None
+    unavailable_intervals: tuple[RankingPortfolioUnavailableInterval, ...]
+    market_data_hash: str
+    input_hash: str
+    ledger_hash: str
+
+
+def _portfolio_cost_policy(
+    scenario: Literal["base", "stress"],
+    *,
+    slippage_bps_per_side: float,
+) -> RankingPortfolioCostPolicy:
+    payload = {
+        "contract_id": f"ranking_continuous_actual_trade_cost_{scenario}_v1",
+        "fee_bps_per_side": float(RANKING_FEE_BPS_PER_SIDE),
+        "slippage_bps_per_side": slippage_bps_per_side,
+        "application": "actual_trade_notional_each_side",
+        "source_cost_contract_hash": RANKING_COST_CONTRACT_HASH,
+        "parameter_selection_allowed": False,
+    }
+    return RankingPortfolioCostPolicy(
+        scenario=scenario,
+        fee_bps_per_side=float(RANKING_FEE_BPS_PER_SIDE),
+        slippage_bps_per_side=slippage_bps_per_side,
+        provenance="frozen_research_cost_policy",
+        contract_hash=stable_contract_hash(payload),
+    )
+
+
+RANKING_PORTFOLIO_BASE_COST_POLICY = _portfolio_cost_policy(
+    "base",
+    slippage_bps_per_side=float(RANKING_SLIPPAGE_BPS_PER_SIDE),
+)
+RANKING_PORTFOLIO_STRESS_COST_POLICY = _portfolio_cost_policy(
+    "stress",
+    slippage_bps_per_side=10.0,
 )
 
 
@@ -282,6 +420,427 @@ def _index_adjusted_closes(
         sorted(by_key.values(), key=lambda row: (row.asset_code, row.session_date))
     )
     return by_key, ordered
+
+
+def select_positive_momentum_top10(
+    *,
+    signal_date: date,
+    eligible_asset_codes: Iterable[str],
+    trading_sessions: Sequence[date],
+    adjusted_closes: Iterable[ForwardAdjustedClose],
+) -> PureMomentumControlSelection:
+    """Build the frozen 20-session positive-momentum diagnostic control."""
+
+    sessions = _validate_sessions(trading_sessions, signal_date=signal_date)
+    codes = tuple(eligible_asset_codes)
+    if (
+        len(codes) != len(set(codes))
+        or any(not isinstance(code, str) or not code.strip() for code in codes)
+    ):
+        raise ForwardOutcomeContractError(
+            "momentum-control eligible assets must be unique non-empty codes"
+        )
+    closes, ordered_closes = _index_adjusted_closes(
+        adjusted_closes,
+        trading_sessions=sessions,
+    )
+    signal_index = sessions.index(signal_date)
+    lookback_date = (
+        sessions[signal_index - PURE_MOMENTUM_LOOKBACK_SESSIONS]
+        if signal_index >= PURE_MOMENTUM_LOOKBACK_SESSIONS
+        else None
+    )
+    momentum: list[tuple[str, float]] = []
+    exclusions: list[tuple[str, str]] = []
+    priced_count = 0
+    for code in sorted(codes):
+        if lookback_date is None:
+            exclusions.append((code, "insufficient_20_session_history"))
+            continue
+        start = closes.get((code, lookback_date))
+        end = closes.get((code, signal_date))
+        if start is None or end is None:
+            exclusions.append((code, "missing_adjusted_momentum_price"))
+            continue
+        priced_count += 1
+        value = end.adjusted_close / start.adjusted_close - 1.0
+        if value <= 0.0:
+            exclusions.append((code, "non_positive_20_session_momentum"))
+            continue
+        momentum.append((code, value))
+    momentum.sort(key=lambda item: (-item[1], item[0]))
+    selected = tuple(code for code, _value in momentum[:10])
+    input_hash = stable_contract_hash(
+        {
+            "contract_hash": PURE_MOMENTUM_CONTROL_CONTRACT_HASH,
+            "signal_date": signal_date,
+            "lookback_date": lookback_date,
+            "eligible_asset_codes": tuple(sorted(codes)),
+            "trading_sessions": sessions,
+            "adjusted_closes": tuple(asdict(row) for row in ordered_closes),
+        }
+    )
+    draft = PureMomentumControlSelection(
+        signal_date=signal_date,
+        selected_asset_codes=selected,
+        momentum_returns=tuple(momentum),
+        target_weights=tuple(
+            (code, PURE_MOMENTUM_TARGET_WEIGHT) for code in selected
+        ),
+        cash_target_weight=1.0 - len(selected) * PURE_MOMENTUM_TARGET_WEIGHT,
+        requested_asset_count=len(codes),
+        priced_asset_count=priced_count,
+        positive_asset_count=len(momentum),
+        coverage_ratio=priced_count / len(codes) if codes else 0.0,
+        exclusions=tuple(sorted(exclusions)),
+        contract_hash=PURE_MOMENTUM_CONTROL_CONTRACT_HASH,
+        input_hash=input_hash,
+        selection_hash="pending",
+    )
+    payload = asdict(draft)
+    payload.pop("selection_hash")
+    return replace(draft, selection_hash=stable_contract_hash(payload))
+
+
+def freeze_ranking_portfolio_target(
+    *,
+    signal_date: date,
+    target_weights: Mapping[str, float] | Iterable[tuple[str, float]],
+    source_hash: str,
+) -> RankingPortfolioTarget:
+    """Freeze one signal-date target without inventing weights for empty slots."""
+
+    items = tuple(
+        target_weights.items()
+        if isinstance(target_weights, Mapping)
+        else target_weights
+    )
+    if len(items) != len({code for code, _weight in items}):
+        raise ForwardOutcomeContractError("portfolio target contains duplicate assets")
+    normalized: list[tuple[str, float]] = []
+    for code, weight in items:
+        if not isinstance(code, str) or not code.strip():
+            raise ForwardOutcomeContractError("portfolio target asset code is required")
+        if (
+            isinstance(weight, bool)
+            or not math.isfinite(float(weight))
+            or float(weight) < 0.0
+        ):
+            raise ForwardOutcomeContractError(
+                "portfolio target weights must be finite and non-negative"
+            )
+        if float(weight) > 0.0:
+            normalized.append((code, float(weight)))
+    normalized.sort()
+    if sum(weight for _code, weight in normalized) > 1.0 + 1e-12:
+        raise ForwardOutcomeContractError("portfolio target weights exceed capital")
+    if len(source_hash) != 64:
+        raise ForwardOutcomeContractError("portfolio target source hash is required")
+    payload = {
+        "schema_version": "ranking_continuous_portfolio_target_v1",
+        "signal_date": signal_date,
+        "target_weights": tuple(normalized),
+        "source_hash": source_hash,
+    }
+    return RankingPortfolioTarget(
+        signal_date=signal_date,
+        target_weights=tuple(normalized),
+        source_hash=source_hash,
+        target_hash=stable_contract_hash(payload),
+    )
+
+
+def _account_value(
+    cash: float,
+    holdings: Mapping[str, float],
+    prices: Mapping[str, float],
+) -> float:
+    return cash + sum(quantity * prices[code] for code, quantity in holdings.items())
+
+
+def _rebalance_account(
+    *,
+    cash: float,
+    holdings: Mapping[str, float],
+    prices: Mapping[str, float],
+    target_weights: Mapping[str, float],
+    cost_rate: float,
+) -> tuple[float, dict[str, float], float, float, int]:
+    """Sell first, then cash-limit buys; charge only executed notional."""
+
+    next_holdings = dict(holdings)
+    pre_value = _account_value(cash, next_holdings, prices)
+    target_values = {
+        code: pre_value * weight for code, weight in target_weights.items()
+    }
+    traded = 0.0
+    costs = 0.0
+    orders = 0
+    for code in sorted(next_holdings):
+        current_value = next_holdings[code] * prices[code]
+        sell_notional = current_value - target_values.get(code, 0.0)
+        if sell_notional <= 1e-15:
+            continue
+        next_holdings[code] -= sell_notional / prices[code]
+        cash += sell_notional * (1.0 - cost_rate)
+        traded += sell_notional
+        costs += sell_notional * cost_rate
+        orders += 1
+    buy_needs = {
+        code: max(
+            0.0,
+            target_value - next_holdings.get(code, 0.0) * prices[code],
+        )
+        for code, target_value in target_values.items()
+    }
+    total_buy_need = sum(buy_needs.values())
+    affordable = cash / (1.0 + cost_rate) if cost_rate >= 0.0 else cash
+    buy_scale = min(1.0, affordable / total_buy_need) if total_buy_need else 0.0
+    for code in sorted(buy_needs):
+        buy_notional = buy_needs[code] * buy_scale
+        if buy_notional <= 1e-15:
+            continue
+        next_holdings[code] = (
+            next_holdings.get(code, 0.0) + buy_notional / prices[code]
+        )
+        cash -= buy_notional * (1.0 + cost_rate)
+        traded += buy_notional
+        costs += buy_notional * cost_rate
+        orders += 1
+    next_holdings = {
+        code: quantity
+        for code, quantity in next_holdings.items()
+        if quantity > 1e-15
+    }
+    if cash < -1e-12:
+        raise ForwardOutcomeContractError("portfolio rebalance overdraws cash")
+    return max(cash, 0.0), next_holdings, traded, costs, orders
+
+
+def _capital_maximum_drawdown(values: Sequence[float]) -> float:
+    peak = values[0]
+    maximum = 0.0
+    for value in values:
+        peak = max(peak, value)
+        maximum = max(maximum, (peak - value) / peak)
+    return maximum
+
+
+def calculate_continuous_ranking_portfolio(
+    *,
+    trading_sessions: Sequence[date],
+    adjusted_closes: Iterable[ForwardAdjustedClose],
+    targets: Iterable[RankingPortfolioTarget],
+    cost_policy: RankingPortfolioCostPolicy = RANKING_PORTFOLIO_BASE_COST_POLICY,
+    initial_capital: float = 1.0,
+    required_signal_dates: Iterable[date] = (),
+) -> RankingPortfolioLedger:
+    """Run one deterministic cash/share account and its zero-cost companion."""
+
+    sessions = tuple(trading_sessions)
+    if (
+        not sessions
+        or sessions != tuple(sorted(set(sessions)))
+        or isinstance(initial_capital, bool)
+        or not math.isfinite(initial_capital)
+        or initial_capital <= 0.0
+    ):
+        raise ForwardOutcomeContractError(
+            "continuous portfolio requires ordered sessions and positive capital"
+        )
+    if cost_policy not in {
+        RANKING_PORTFOLIO_BASE_COST_POLICY,
+        RANKING_PORTFOLIO_STRESS_COST_POLICY,
+    }:
+        raise ForwardOutcomeContractError("continuous portfolio cost policy is not frozen")
+    closes, ordered_closes = _index_adjusted_closes(
+        adjusted_closes,
+        trading_sessions=sessions,
+    )
+    target_values = tuple(targets)
+    if len(target_values) != len({item.signal_date for item in target_values}):
+        raise ForwardOutcomeContractError("duplicate portfolio target signal date")
+    execution_targets: dict[date, RankingPortfolioTarget] = {}
+    required_dates = tuple(sorted(set(required_signal_dates)))
+    if any(item not in sessions for item in required_dates):
+        raise ForwardOutcomeContractError("required signal date is outside the calendar")
+    missing_execution_dates = {
+        sessions[sessions.index(item) + 1]
+        for item in required_dates
+        if item not in {target.signal_date for target in target_values}
+        and sessions.index(item) + 1 < len(sessions)
+    }
+    for target in target_values:
+        canonical = freeze_ranking_portfolio_target(
+            signal_date=target.signal_date,
+            target_weights=target.target_weights,
+            source_hash=target.source_hash,
+        )
+        if canonical != target:
+            raise ForwardOutcomeContractError("portfolio target hash is invalid")
+        try:
+            signal_index = sessions.index(target.signal_date)
+        except ValueError as exc:
+            raise ForwardOutcomeContractError(
+                "portfolio target signal date is outside the trading calendar"
+            ) from exc
+        if signal_index + 1 < len(sessions):
+            execution_targets[sessions[signal_index + 1]] = target
+    market_data_hash = stable_contract_hash(
+        {
+            "trading_sessions": sessions,
+            "adjusted_closes": tuple(asdict(row) for row in ordered_closes),
+        }
+    )
+    input_hash = stable_contract_hash(
+        {
+            "execution_model": CONTINUOUS_RANKING_EXECUTION_MODEL,
+            "market_data_hash": market_data_hash,
+            "targets": tuple(
+                asdict(item) for item in sorted(target_values, key=lambda item: item.signal_date)
+            ),
+            "cost_policy": asdict(cost_policy),
+            "initial_capital": initial_capital,
+            "required_signal_dates": required_dates,
+        }
+    )
+    net_cash = gross_cash = float(initial_capital)
+    net_holdings: dict[str, float] = {}
+    gross_holdings: dict[str, float] = {}
+    points: list[RankingPortfolioPoint] = []
+    total_turnover = 0.0
+    total_cost = 0.0
+    total_orders = 0
+    rebalances = 0
+    unavailable: list[RankingPortfolioUnavailableInterval] = []
+    cost_rate = (
+        cost_policy.fee_bps_per_side + cost_policy.slippage_bps_per_side
+    ) / _BPS_DENOMINATOR
+    for session_date in sessions:
+        target = execution_targets.get(session_date)
+        needed_codes = set(net_holdings) | set(gross_holdings)
+        if target is not None:
+            needed_codes.update(code for code, _weight in target.target_weights)
+        missing = tuple(
+            sorted(code for code in needed_codes if (code, session_date) not in closes)
+        )
+        if missing:
+            unavailable.append(
+                RankingPortfolioUnavailableInterval(
+                    start_session=session_date,
+                    end_session=sessions[-1],
+                    asset_codes=missing,
+                    reason="missing_decision_eligible_adjusted_valuation",
+                )
+            )
+            break
+        prices = {
+            code: closes[(code, session_date)].adjusted_close for code in needed_codes
+        }
+        pre_net = _account_value(net_cash, net_holdings, prices)
+        pre_gross = _account_value(gross_cash, gross_holdings, prices)
+        net_trade = gross_trade = transaction_cost = 0.0
+        order_count = 0
+        if target is not None:
+            weights = dict(target.target_weights)
+            net_cash, net_holdings, net_trade, transaction_cost, order_count = (
+                _rebalance_account(
+                    cash=net_cash,
+                    holdings=net_holdings,
+                    prices=prices,
+                    target_weights=weights,
+                    cost_rate=cost_rate,
+                )
+            )
+            gross_cash, gross_holdings, gross_trade, _ignored_cost, _ignored_orders = (
+                _rebalance_account(
+                    cash=gross_cash,
+                    holdings=gross_holdings,
+                    prices=prices,
+                    target_weights=weights,
+                    cost_rate=0.0,
+                )
+            )
+            total_turnover += net_trade
+            total_cost += transaction_cost
+            total_orders += order_count
+            rebalances += 1
+        post_net = _account_value(net_cash, net_holdings, prices)
+        post_gross = _account_value(gross_cash, gross_holdings, prices)
+        points.append(
+            RankingPortfolioPoint(
+                session_date=session_date,
+                pre_rebalance_net_value=pre_net,
+                post_rebalance_net_value=post_net,
+                pre_rebalance_gross_value=pre_gross,
+                post_rebalance_gross_value=post_gross,
+                net_cash=net_cash,
+                gross_cash=gross_cash,
+                net_holdings=tuple(sorted(net_holdings.items())),
+                gross_holdings=tuple(sorted(gross_holdings.items())),
+                target_hash=target.target_hash if target is not None else None,
+                net_trade_notional=net_trade,
+                gross_trade_notional=gross_trade,
+                transaction_cost=transaction_cost,
+                order_count=order_count,
+            )
+        )
+        if session_date in missing_execution_dates:
+            # The pre-trade value remains observable at this boundary, but the
+            # account cannot invent a hold decision for a missing daily signal.
+            unavailable.append(
+                RankingPortfolioUnavailableInterval(
+                    start_session=session_date,
+                    end_session=sessions[-1],
+                    asset_codes=(),
+                    reason="missing_daily_ranking_target",
+                )
+            )
+            break
+    complete = not unavailable
+    net_path = [initial_capital]
+    gross_path = [initial_capital]
+    for point in points:
+        net_path.extend(
+            (point.pre_rebalance_net_value, point.post_rebalance_net_value)
+        )
+        gross_path.extend(
+            (point.pre_rebalance_gross_value, point.post_rebalance_gross_value)
+        )
+    final_net = points[-1].post_rebalance_net_value if points else initial_capital
+    final_gross = points[-1].post_rebalance_gross_value if points else initial_capital
+    draft = RankingPortfolioLedger(
+        status="completed" if complete else "unavailable",
+        execution_model=CONTINUOUS_RANKING_EXECUTION_MODEL,
+        cost_scenario=cost_policy.scenario,
+        cost_contract_hash=cost_policy.contract_hash,
+        cost_provenance=cost_policy.provenance,
+        fee_bps_per_side=cost_policy.fee_bps_per_side,
+        slippage_bps_per_side=cost_policy.slippage_bps_per_side,
+        initial_capital=initial_capital,
+        points=tuple(points),
+        net_return=final_net / initial_capital - 1.0 if complete else None,
+        gross_return=final_gross / initial_capital - 1.0 if complete else None,
+        net_maximum_drawdown=(
+            _capital_maximum_drawdown(net_path) if complete else None
+        ),
+        gross_maximum_drawdown=(
+            _capital_maximum_drawdown(gross_path) if complete else None
+        ),
+        turnover=total_turnover / initial_capital,
+        total_transaction_cost=total_cost,
+        rebalance_count=rebalances,
+        order_count=total_orders,
+        final_net_cash=net_cash if complete else None,
+        final_gross_cash=gross_cash if complete else None,
+        unavailable_intervals=tuple(unavailable),
+        market_data_hash=market_data_hash,
+        input_hash=input_hash,
+        ledger_hash="pending",
+    )
+    payload = asdict(draft)
+    payload.pop("ledger_hash")
+    return replace(draft, ledger_hash=stable_contract_hash(payload))
 
 
 def _outcome_payload(outcome: RankingForwardOutcome) -> dict[str, Any]:

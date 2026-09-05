@@ -120,10 +120,11 @@ async def _seed_entry_timing_etf(
         for offset, close in enumerate(closes):
             previous = closes[offset - 1] if offset > 0 else close
             turnover = turnovers[offset] if turnovers is not None else 120_000_000
+            trade_date = start + timedelta(days=offset)
             session.add(
                 EtfPriceHistory(
                     etf_code=code,
-                    trade_date=start + timedelta(days=offset),
+                    trade_date=trade_date,
                     open=close * 0.995,
                     high=close * 1.01,
                     low=close * 0.99,
@@ -131,6 +132,14 @@ async def _seed_entry_timing_etf(
                     volume=2_000_000,
                     turnover=turnover,
                     pct_change=0.0 if offset == 0 else (close / previous - 1.0) * 100,
+                    raw_price_basis="raw_close",
+                    research_adjusted_value=close,
+                    research_price_basis="total_return_adjusted",
+                    data_provider="eastmoney",
+                    provider_version="eastmoney.push2his.kline.hfq_v1",
+                    source_timestamp=datetime.combine(trade_date, time(7, 0)),
+                    adjustment_version="eastmoney.push2his.kline.hfq_v1",
+                    decision_eligible=True,
                 )
             )
         await session.commit()
@@ -876,10 +885,10 @@ async def _seed_score_bucket_signal_runs(app) -> dict[str, Any]:
             scope_hash="b" * 64,
             universe_snapshot_hash="c" * 64,
             input_snapshot_hash="d" * 64,
-            score_version="final_score_v3",
-            rule_version="final_score_v3_rule_v2",
+            score_version="daily_reconstructable_v1",
+            rule_version="dual_ranking_surfaces_v1",
             ranking_contract_hash="a" * 64,
-            score_field="ranking_score",
+            score_field="research_score",
             data_cutoff=datetime(2026, 7, 3, 15, 0),
             as_of_trade_date=signal_date,
             price_basis="total_return_adjusted",
@@ -893,36 +902,37 @@ async def _seed_score_bucket_signal_runs(app) -> dict[str, Any]:
                 "asset_type": "etf",
                 "language": "research_only",
                 "scope_kind": "full",
-                "score_version": "final_score_v3",
+                "score_version": "daily_reconstructable_v1",
                 "ranking_contract_hash": "a" * 64,
-                "score_field": "ranking_score",
+                "score_field": "research_score",
                 "price_basis": "total_return_adjusted",
             },
-            summary_json={"item_count": len(available_codes), "score_version": "final_score_v3"},
+            summary_json={"item_count": len(available_codes), "score_version": "daily_reconstructable_v1",
+                          "readiness_policy_version": ETF_READINESS_POLICY_VERSION},
         )
         partial_run = ShortResearchSignalRun(
             status="success",
             as_of_date=signal_date,
             scope_kind="theme",
-            score_version="final_score_v3",
+            score_version="daily_reconstructable_v1",
             ranking_contract_hash="current-contract",
-            score_field="ranking_score",
+            score_field="research_score",
             as_of_trade_date=signal_date,
             price_basis="total_return_adjusted",
             config_json={
                 "asset_type": "etf",
                 "scope_kind": "theme",
-                "score_version": "final_score_v3",
+                "score_version": "daily_reconstructable_v1",
                 "ranking_contract_hash": "current-contract",
-                "score_field": "ranking_score",
+                "score_field": "research_score",
             },
-            summary_json={"item_count": 1, "score_version": "final_score_v3"},
+            summary_json={"item_count": 1, "score_version": "daily_reconstructable_v1"},
         )
         mismatched_contract_run = ShortResearchSignalRun(
             status="success",
             as_of_date=signal_date,
             scope_kind="full",
-            score_version="final_score_v3",
+            score_version="daily_reconstructable_v1",
             ranking_contract_hash="other-contract",
             score_field="total_score",
             as_of_trade_date=signal_date,
@@ -930,11 +940,11 @@ async def _seed_score_bucket_signal_runs(app) -> dict[str, Any]:
             config_json={
                 "asset_type": "etf",
                 "scope_kind": "full",
-                "score_version": "final_score_v3",
+                "score_version": "daily_reconstructable_v1",
                 "ranking_contract_hash": "other-contract",
-                "score_field": "ranking_score",
+                "score_field": "research_score",
             },
-            summary_json={"item_count": 1, "score_version": "final_score_v3"},
+            summary_json={"item_count": 1, "score_version": "daily_reconstructable_v1"},
         )
         session.add_all([old_run, latest_run, partial_run, mismatched_contract_run])
         await session.flush()
@@ -971,8 +981,8 @@ async def _seed_score_bucket_signal_runs(app) -> dict[str, Any]:
                     global_rank=index,
                     conclusion="短线观察",
                     score_breakdown_json={
-                        "final_score_v3": {
-                            "score_version": "final_score_v3",
+                        "daily_reconstructable_v1": {
+                            "score_version": "daily_reconstructable_v1",
                             "ranking_score": float(score),
                             "score_eligible": True,
                         }
@@ -999,8 +1009,8 @@ async def _seed_score_bucket_signal_runs(app) -> dict[str, Any]:
                     score_eligible=True,
                     conclusion="短线观察",
                     score_breakdown_json={
-                        "final_score_v3": {
-                            "score_version": "final_score_v3",
+                        "daily_reconstructable_v1": {
+                            "score_version": "daily_reconstructable_v1",
                             "ranking_score": 100,
                             "score_eligible": True,
                         }
@@ -1019,8 +1029,8 @@ async def _seed_score_bucket_signal_runs(app) -> dict[str, Any]:
                     score_eligible=True,
                     conclusion="短线观察",
                     score_breakdown_json={
-                        "final_score_v3": {
-                            "score_version": "final_score_v3",
+                        "daily_reconstructable_v1": {
+                            "score_version": "daily_reconstructable_v1",
                             "ranking_score": 100,
                             "score_eligible": True,
                         }
@@ -1316,11 +1326,11 @@ async def _seed_observation_price_series(
                     research_price_basis="total_return_adjusted",
                     data_provider="eastmoney",
                     provider_version="eastmoney.push2his.kline.hfq_v1",
-                    source_timestamp=datetime.combine(trade_date, time(14, 40)),
+                    source_timestamp=datetime.combine(trade_date, time(7, 0)),
                     adjustment_version="eastmoney.push2his.kline.hfq_v1",
                     decision_eligible=True,
-                    first_seen_at=datetime.combine(trade_date, time(14, 45)),
-                    observed_at=datetime.combine(trade_date, time(14, 45)),
+                    first_seen_at=datetime.combine(trade_date, time(7, 0)),
+                    observed_at=datetime.combine(trade_date, time(7, 0)),
                     payload_hash=f"series-payload-{code}-{trade_date.isoformat()}",
                     revision_hash=f"series-revision-{code}-{trade_date.isoformat()}",
                 )
@@ -1774,7 +1784,7 @@ async def test_etf_signal_validation_run_records_forward_outcomes(client, app, m
     assert body["status"] == "success"
     assert body["source_ranking_snapshot"]["snapshot_id"] == body["source_signal_run_id"]
     assert body["source_ranking_snapshot"]["freshness_status"] == "ready"
-    assert body["summary"]["evaluated_asset_count"] == 1
+    assert body["summary"]["evaluated_asset_count"] == 1, body["summary"]
     items = body["items"]
     assert {item["horizon_days"] for item in items} >= {1, 3, 5, 10}
     assert any(item["sample_count"] > 0 and item["median_return"] is not None for item in items)
@@ -1869,6 +1879,16 @@ async def test_etf_label_historical_replay_uses_only_past_data(client, app) -> N
                         volume=2_000_000,
                         turnover=180_000_000,
                         pct_change=0.0 if offset == 0 else (close / previous - 1.0) * 100,
+                        raw_price_basis="raw_close",
+                        research_adjusted_value=close,
+                        research_price_basis="total_return_adjusted",
+                        data_provider="eastmoney",
+                        provider_version="eastmoney.push2his.kline.hfq_v1",
+                        source_timestamp=datetime.combine(
+                            start + timedelta(days=offset), time(7, 0)
+                        ),
+                        adjustment_version="eastmoney.push2his.kline.hfq_v1",
+                        decision_eligible=True,
                     )
                 )
         await session.commit()
@@ -2006,7 +2026,7 @@ async def test_score_bucket_validation_requires_current_full_ranking_contract(cl
     assert body["source_events"][0]["source_date"] == "2026-07-03"
     assert body["validation_mode"] == "score_bucket_replay"
     assert body["rule_version"] == "score_bucket_replay_v2"
-    assert summary["score_field"] == "ranking_score"
+    assert summary["score_field"] == "research_score"
     assert summary["top_n"] == [5, 10, 20, 50]
     assert summary["baseline"] == "all_scored"
     assert summary["execution_model"] == "t_plus_1_adjusted_close_full_horizon_v2"
@@ -2085,9 +2105,9 @@ async def test_score_bucket_validation_requires_current_full_ranking_contract(cl
             "scope_hash": "b" * 64,
             "universe_snapshot_hash": "c" * 64,
             "input_snapshot_hash": "d" * 64,
-            "score_field": "ranking_score",
-            "score_version": "final_score_v3",
-            "rule_version": "final_score_v3_rule_v2",
+            "score_field": "research_score",
+            "score_version": "daily_reconstructable_v1",
+            "rule_version": "dual_ranking_surfaces_v1",
             "price_basis": "total_return_adjusted",
             "reliability_policy": "decision_eligible_total_return_adjusted",
         }
@@ -2158,6 +2178,8 @@ async def test_score_bucket_validation_skips_overlapping_signal_windows(client, 
             as_of_trade_date=date(2026, 7, 4),
             price_basis=source_run.price_basis,
             expected_item_count=source_run.expected_item_count,
+            decision_data_item_count=source_run.decision_data_item_count,
+            decision_data_coverage_ratio=source_run.decision_data_coverage_ratio,
             eligible_item_count=source_run.eligible_item_count,
             coverage_ratio=source_run.coverage_ratio,
             publication_state=None,

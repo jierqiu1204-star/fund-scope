@@ -9,17 +9,14 @@ from datetime import date
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.entities import EtfPriceHistory, ShortResearchSignalRun
+from app.models.entities import EtfPriceHistory, ShortResearchSignalItem, ShortResearchSignalRun
 from app.services.short_research.coverage_policy import (
     ETF_COMPLETE_SCORE_COVERAGE,
     ETF_DAILY_DECISION_MIN_COVERAGE,
 )
-from app.services.short_research.snapshot_selector import snapshot_metadata
+from app.services.short_research.snapshot_selector import published_validation_source_identity
 
 from .etf_ranking_validation import (
-    PRODUCTION_RULE_VERSION,
-    PRODUCTION_SCORE_FIELD,
-    PRODUCTION_SCORE_VERSION,
     TOTAL_RETURN_ADJUSTED,
 )
 
@@ -194,6 +191,8 @@ async def plan_production_validation_sources(
     required_dates: int = 20,
     retention_cap_sessions: int = 300,
     expansion_page_sessions: int = 40,
+    score_version: str = "daily_reconstructable_v1",
+    ranking_contract_hash: str | None = None,
 ) -> ProductionValidationSourcePlan:
     raw_sessions = list(
         (
@@ -215,11 +214,13 @@ async def plan_production_validation_sources(
     if not sessions:
         raise ValueError("missing_adjusted_trading_sessions")
     source_runs_by_date: dict[date, ShortResearchSignalRun] = {}
+    selected_identity: dict[str, str] | None = None
 
     async def load_compatible_source_dates(
         start_date: date,
         end_date: date,
     ) -> tuple[date, ...]:
+        nonlocal selected_identity
         rows = list(
             (
                 await session.scalars(
@@ -229,9 +230,7 @@ async def plan_production_validation_sources(
                         ShortResearchSignalRun.publication_state == "published",
                         ShortResearchSignalRun.scope_kind == "full",
                         ShortResearchSignalRun.score_version
-                        == PRODUCTION_SCORE_VERSION,
-                        ShortResearchSignalRun.score_field == PRODUCTION_SCORE_FIELD,
-                        ShortResearchSignalRun.rule_version == PRODUCTION_RULE_VERSION,
+                        == score_version,
                         ShortResearchSignalRun.price_basis == TOTAL_RETURN_ADJUSTED,
                         ShortResearchSignalRun.ranking_contract_hash.is_not(None),
                         ShortResearchSignalRun.scope_hash.is_not(None),
@@ -246,6 +245,14 @@ async def plan_production_validation_sources(
                         >= ETF_COMPLETE_SCORE_COVERAGE,
                         ShortResearchSignalRun.as_of_trade_date >= start_date,
                         ShortResearchSignalRun.as_of_trade_date <= end_date,
+                        select(ShortResearchSignalItem.id).where(
+                            ShortResearchSignalItem.run_id == ShortResearchSignalRun.id,
+                            ShortResearchSignalItem.asset_type == "etf",
+                        ).exists(),
+                        ~select(ShortResearchSignalItem.id).where(
+                            ShortResearchSignalItem.run_id == ShortResearchSignalRun.id,
+                            ShortResearchSignalItem.asset_type != "etf",
+                        ).exists(),
                     )
                     .order_by(
                         ShortResearchSignalRun.as_of_trade_date.desc(),
@@ -257,7 +264,15 @@ async def plan_production_validation_sources(
         )
         dates: list[date] = []
         for source_run in rows:
-            if snapshot_metadata(source_run)["snapshot_state"] != "complete":
+            try:
+                identity = published_validation_source_identity(source_run)
+            except ValueError:
+                continue
+            if ranking_contract_hash and identity["ranking_contract_hash"] != ranking_contract_hash:
+                continue
+            if selected_identity is None:
+                selected_identity = identity
+            if identity != selected_identity:
                 continue
             source_date = source_run.as_of_trade_date
             if source_date is None or source_date in source_runs_by_date:

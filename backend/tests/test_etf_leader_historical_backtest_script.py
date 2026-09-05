@@ -24,14 +24,17 @@ from scripts.run_etf_leader_historical_backtest import (
 )
 
 
-def test_old_checkpoint_keeps_market_data_but_rebuilds_events(tmp_path) -> None:
+@pytest.mark.parametrize("version", ["leader_historical_backtest_checkpoint_v1", ARTIFACT_SCHEMA_VERSION])
+def test_old_checkpoint_is_preserved_without_relabeling(tmp_path, version) -> None:
     path = tmp_path / "checkpoint.sqlite3"
     store = sqlite3.connect(path)
     store.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     store.execute(
-        "INSERT INTO meta(key,value) VALUES('artifact_schema_version','leader_historical_backtest_checkpoint_v1')"
+        "INSERT INTO meta(key,value) VALUES('artifact_schema_version',?)", (version,)
     )
+    store.execute("INSERT INTO meta(key,value) VALUES('contract_hash',?)", ("b" * 64,))
     store.execute("CREATE TABLE events (legacy TEXT)")
+    store.execute("INSERT INTO events VALUES('old-result')")
     store.execute(
         "CREATE TABLE evaluated_dates (signal_date TEXT PRIMARY KEY, event_count INTEGER, candidate_count INTEGER)"
     )
@@ -39,9 +42,13 @@ def test_old_checkpoint_keeps_market_data_but_rebuilds_events(tmp_path) -> None:
     store.commit()
     store.close()
 
-    migrated = _init_store(path)
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="legacy checkpoint preserved"):
+        _init_store(path)
+    assert path.read_bytes() == before
+    migrated = sqlite3.connect(path)
     try:
-        version = migrated.execute(
+        stored_version = migrated.execute(
             "SELECT value FROM meta WHERE key='artifact_schema_version'"
         ).fetchone()[0]
         columns = {
@@ -51,9 +58,9 @@ def test_old_checkpoint_keeps_market_data_but_rebuilds_events(tmp_path) -> None:
     finally:
         migrated.close()
 
-    assert version == ARTIFACT_SCHEMA_VERSION
-    assert {"trade_status", "exit_signal_date", "exit_reason"} <= columns
-    assert evaluated == 0
+    assert stored_version == version
+    assert columns == {"legacy"}
+    assert evaluated == 1
 
 
 def test_checkpoint_round_trips_unique_lifecycle_event(tmp_path) -> None:
@@ -83,6 +90,7 @@ def test_checkpoint_round_trips_unique_lifecycle_event(tmp_path) -> None:
         entry_quality_reason_codes=(),
         next_session_confirmation_state="confirmed",
         next_session_confirmation_reason_codes=(),
+        research_context={"entry_price": 10.0, "atr_as_of_date": "2026-08-02", "cost_contract_hash": "c" * 64},
     )
     try:
         _persist_date_events(store, event.signal_date, (event,))

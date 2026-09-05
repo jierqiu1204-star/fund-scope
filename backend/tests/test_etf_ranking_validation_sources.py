@@ -185,8 +185,21 @@ def test_research_source_requires_complete_replay_identity() -> None:
         replace(event, source_status="success")
 
 
-def test_production_source_requires_exact_published_full_scope_v3() -> None:
+def test_production_source_requires_registered_published_full_scope_contract() -> None:
     event = _event(RankingSourceKind.PRODUCTION_PUBLISHED, date(2026, 4, 1))
+
+    current = freeze_ranking_validation_source_event(
+        replace(
+            event,
+            score_version="daily_reconstructable_v1",
+            score_field="research_score",
+            rule_version="dual_ranking_surfaces_v1",
+        )
+    )
+    assert freeze_ranking_validation_source_cohort(
+        ranking_source_kind=RankingSourceKind.PRODUCTION_PUBLISHED,
+        events=(current,),
+    ).score_version == "daily_reconstructable_v1"
 
     for changes, message in (
         ({"source_signal_run_id": None}, "source run id"),

@@ -12,10 +12,18 @@ from app.services.strategy_lab.etf_ranking_candidates import (
     RANKING_COST_CONTRACT_HASH,
     freeze_ranking_candidate_registry,
 )
+from app.services.strategy_lab.etf_ranking_forward_outcomes import (
+    CONTINUOUS_RANKING_EXECUTION_MODEL,
+    ForwardAdjustedClose,
+    calculate_continuous_ranking_portfolio,
+    freeze_ranking_portfolio_target,
+)
 from app.services.strategy_lab.etf_ranking_validation import (
+    CONTINUOUS_FIVE_SESSION_ENDPOINT_CONTRACT_HASH,
     RankingPairedReturnSample,
     RankingValidationContractError,
     RankingValidationSourceEvent,
+    build_continuous_five_session_paired_sample,
     evaluate_ranking_endpoint,
     freeze_ranking_endpoint_contract,
     freeze_ranking_validation_source_cohort,
@@ -316,3 +324,110 @@ def test_endpoint_rejects_dynamic_cells_costs_and_source_mixing() -> None:
             samples=(_sample(event=production, sessions=sessions),),
             trading_sessions=sessions,
         )
+
+
+def test_continuous_primary_sample_uses_pre_rebalance_boundaries_and_costs_once() -> None:
+    sessions, events, cohort, registry, contract = _fixture((0, 7, 14))
+
+    def close(code: str, session: date, price: float) -> ForwardAdjustedClose:
+        return ForwardAdjustedClose(
+            asset_code=code,
+            session_date=session,
+            adjusted_close=price,
+            price_basis="total_return_adjusted",
+            decision_eligible=True,
+            provider="fixture",
+            adjustment_version="fixture-v1",
+            source_hash=_hash(f"close:{code}:{session}:{price}"),
+        )
+
+    closes = tuple(
+        close(code, session, 100.0 + index * (1 if code == "A" else 0.5))
+        for code in ("A", "B")
+        for index, session in enumerate(sessions)
+    )
+
+    def targets(prefer_a: bool):
+        return tuple(
+            freeze_ranking_portfolio_target(
+                signal_date=session,
+                target_weights={"A" if (index % 2 == 0) == prefer_a else "B": 1.0},
+                source_hash=_hash(f"target:{prefer_a}:{session}"),
+            )
+            for index, session in enumerate(sessions[:-1])
+        )
+
+    candidate_ledger = calculate_continuous_ranking_portfolio(
+        trading_sessions=sessions,
+        adjusted_closes=closes,
+        targets=targets(True),
+    )
+    baseline_ledger = calculate_continuous_ranking_portfolio(
+        trading_sessions=sessions,
+        adjusted_closes=closes,
+        targets=targets(False),
+    )
+    candidate = registry.by_id[CANDIDATE_DAILY_CORE_TOP10]
+    sample = build_continuous_five_session_paired_sample(
+        source_event_hash=events[0].source_event_hash,
+        candidate_id=candidate.candidate_id,
+        candidate_manifest_hash=candidate.manifest_hash,
+        signal_date=events[0].signal_date,
+        selected_ranked_asset_codes=("A",),
+        candidate_ledger=candidate_ledger,
+        baseline_ledger=baseline_ledger,
+        trading_sessions=sessions,
+    )
+
+    by_date = {point.session_date: point for point in candidate_ledger.points}
+    assert sample.entry_session == sessions[1]
+    assert sample.exit_session == sessions[6]
+    assert sample.window_cost_sessions == sessions[1:6]
+    assert sample.candidate_actual_cost == pytest.approx(
+        sum(by_date[session].transaction_cost for session in sessions[1:6])
+    )
+    assert by_date[sessions[6]].transaction_cost > 0.0
+    assert sample.candidate_actual_cost < candidate_ledger.total_transaction_cost
+    assert sample.execution_model == CONTINUOUS_RANKING_EXECUTION_MODEL
+    assert (
+        sample.endpoint_contract_hash
+        == CONTINUOUS_FIVE_SESSION_ENDPOINT_CONTRACT_HASH
+    )
+
+    result = evaluate_ranking_endpoint(
+        source_cohort=cohort,
+        candidate_registry=registry,
+        contract=contract,
+        candidate_id=candidate.candidate_id,
+        top_n=10,
+        horizon_sessions=5,
+        samples=(
+            sample,
+            build_continuous_five_session_paired_sample(
+                source_event_hash=events[1].source_event_hash,
+                candidate_id=candidate.candidate_id,
+                candidate_manifest_hash=candidate.manifest_hash,
+                signal_date=events[1].signal_date,
+                selected_ranked_asset_codes=("A",),
+                candidate_ledger=candidate_ledger,
+                baseline_ledger=baseline_ledger,
+                trading_sessions=sessions,
+            ),
+            build_continuous_five_session_paired_sample(
+                source_event_hash=events[2].source_event_hash,
+                candidate_id=candidate.candidate_id,
+                candidate_manifest_hash=candidate.manifest_hash,
+                signal_date=events[2].signal_date,
+                selected_ranked_asset_codes=("A",),
+                candidate_ledger=candidate_ledger,
+                baseline_ledger=baseline_ledger,
+                trading_sessions=sessions,
+            ),
+        ),
+        trading_sessions=sessions,
+    )
+    assert result.execution_model == CONTINUOUS_RANKING_EXECUTION_MODEL
+    assert (
+        result.endpoint_contract_identity_hash
+        == CONTINUOUS_FIVE_SESSION_ENDPOINT_CONTRACT_HASH
+    )

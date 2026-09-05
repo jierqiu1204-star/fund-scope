@@ -20,7 +20,13 @@ from app.models.entities import (
 )
 from app.schemas.etf_quotes import EtfIntradayQuoteOut, IntradayEtfWatchRunOut
 from app.services.intraday_etf import service as intraday_quotes
-from app.services.intraday_etf.exchange_calendar import is_trading_day
+from app.services.intraday_etf.exchange_calendar import (
+    ExchangeCalendarUnavailableError as ExchangeCalendarUnavailableError,
+)
+from app.services.intraday_etf.exchange_calendar import (
+    is_trading_day,
+    next_trading_day,
+)
 
 EtfQuoteRow = EtfIntradayLatestQuote | EtfIntradayQuote
 ASIA_SHANGHAI = intraday_quotes.ASIA_SHANGHAI
@@ -137,6 +143,13 @@ class EtfAdjustedSourceWatermark:
 
 def is_etf_exchange_trading_day(value: date) -> bool:
     return is_trading_day(value)
+
+
+def next_etf_exchange_trading_day(value: date) -> date:
+    # Check the source year too: December in an unknown year must not jump into
+    # the next year's supported calendar and masquerade as a known horizon.
+    next_trading_day(date(value.year, 1, 1))
+    return next_trading_day(value)
 
 
 def _utc_naive(value: datetime) -> datetime:

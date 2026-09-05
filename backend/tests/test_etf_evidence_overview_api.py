@@ -147,6 +147,7 @@ async def test_latest_etf_evidence_does_not_present_shadow_as_live_delivery(
                 },
                 report_json={
                     "schema_version": "etf_point_in_time_research_evidence_v1",
+                    "ranking_source_kind": "production_published",
                     "data_cutoff": "2026-07-24T15:00:00",
                     "coverage": {
                         "eligible_point_in_time_sessions": 61,
@@ -158,6 +159,38 @@ async def test_latest_etf_evidence_does_not_present_shadow_as_live_delivery(
                         "sample_count": 12,
                         "confidence_interval": [-0.002, 0.004],
                         "primary": True,
+                    },
+                    "exploratory_metrics": [
+                        {
+                            "label": "top5_3_session_paired_net_excess",
+                            "value": 0.002,
+                            "sample_count": 12,
+                            "primary": False,
+                        }
+                    ],
+                    "primary_diagnostics": {
+                        "candidate_results": {
+                            "daily_core_top10": {
+                                "endpoint": {
+                                    "mean_paired_net_excess": 0.0,
+                                    "independent_dates": ["2026-07-01"],
+                                    "bootstrap_confidence_interval": [0.0, 0.0],
+                                    "coverage_ratio": 1.0,
+                                    "average_turnover": 0.2,
+                                    "candidate_maximum_drawdown": 0.01,
+                                }
+                            },
+                            "daily_core_top10_hysteresis": {
+                                "endpoint": {
+                                    "mean_paired_net_excess": 0.001,
+                                    "independent_dates": ["2026-07-01"],
+                                    "bootstrap_confidence_interval": [-0.002, 0.004],
+                                    "coverage_ratio": 1.0,
+                                    "average_turnover": 0.1,
+                                    "candidate_maximum_drawdown": 0.009,
+                                }
+                            },
+                        }
                     },
                     "policy_shadow": {
                         "status": "insufficient_data",
@@ -177,6 +210,21 @@ async def test_latest_etf_evidence_does_not_present_shadow_as_live_delivery(
     assert response.status_code == 200
     surfaces = response.json()["surfaces"]
     assert surfaces["research_replay"]["status"] == "insufficient_data"
+    assert surfaces["research_replay"]["ranking_source_kind"] == (
+        "production_published"
+    )
+    assert [
+        item["label"]
+        for item in surfaces["research_replay"]["exploratory_metrics"]
+    ] == [
+        "daily_core_top10",
+        "daily_core_top10_hysteresis",
+        "top5_3_session_paired_net_excess",
+    ]
+    diagnostics = surfaces["research_replay"]["exploratory_metrics"]
+    assert diagnostics[0]["diagnostic"] is True
+    assert diagnostics[1]["confidence_interval"] == [-0.002, 0.004]
+    assert diagnostics[2]["primary"] is False
     assert surfaces["policy_shadow"]["notification_provenance"] == "shadow_eligible"
     assert surfaces["policy_shadow"]["execution_provenance"] == "simulated_execution"
     assert surfaces["live_notification"]["status"] == "unavailable"

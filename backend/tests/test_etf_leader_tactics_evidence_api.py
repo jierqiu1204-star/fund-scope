@@ -27,12 +27,14 @@ from app.services.strategy_lab.etf_leader_tactics_evidence_view import (
     LEADER_REGISTRY_MISSING,
 )
 from app.services.strategy_lab.etf_leader_tactics_historical_backtest import (
+    HISTORICAL_BACKTEST_CONTRACT,
     HISTORICAL_BACKTEST_CONTRACT_HASH,
     LEADER_HISTORICAL_BACKTEST_EVIDENCE_MODE,
     LEADER_HISTORICAL_BACKTEST_EXPERIMENT_FAMILY,
     LEADER_HISTORICAL_BACKTEST_NOT_PIT,
     LEADER_HISTORICAL_BACKTEST_REPORT_KIND,
     LEADER_HISTORICAL_BACKTEST_SCHEMA_VERSION,
+    LEGACY_HISTORICAL_BACKTEST_CONTRACT_HASH,
 )
 from app.services.strategy_lab.etf_leader_tactics_historical_proxy import (
     LEADER_HISTORICAL_PROXY_EVIDENCE_MODE,
@@ -350,9 +352,11 @@ async def test_historical_proxy_is_visible_without_pit_gate_credit(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("contract_hash", [HISTORICAL_BACKTEST_CONTRACT_HASH, LEGACY_HISTORICAL_BACKTEST_CONTRACT_HASH, _hash("legacy-fixed-horizon")])
 async def test_historical_backtest_is_visible_without_pit_gate_credit(
     app,
     client,
+    contract_hash,
 ) -> None:
     app.state.settings.etf_leader_tactics_evidence_api_enabled = True
     manifest_hash = _hash("historical-backtest-manifest")
@@ -363,7 +367,10 @@ async def test_historical_backtest_is_visible_without_pit_gate_credit(
         "manifest_hash": manifest_hash,
         "status": "insufficient_data",
         "unavailable_reason": LEADER_HISTORICAL_BACKTEST_NOT_PIT,
-        "contract_hash": HISTORICAL_BACKTEST_CONTRACT_HASH,
+        "contract_hash": contract_hash,
+        **({key: HISTORICAL_BACKTEST_CONTRACT[key] for key in (
+            "execution_contract_hash", "risk_contract_hash", "cost_contract_hash"
+        )} if contract_hash == HISTORICAL_BACKTEST_CONTRACT_HASH else {}),
         "ranking_source_kind": "research_replay",
         "evidence_mode": LEADER_HISTORICAL_BACKTEST_EVIDENCE_MODE,
         "membership_mode": "sealed_source_snapshot_current_vintage_proxy",
@@ -413,7 +420,13 @@ async def test_historical_backtest_is_visible_without_pit_gate_credit(
     payload = (await client.get(ENDPOINT)).json()
 
     backtest = payload["historical_backtest"]
-    assert backtest["status"] == "complete"
+    legacy = contract_hash != HISTORICAL_BACKTEST_CONTRACT_HASH
+    assert backtest["status"] == ("incompatible" if legacy else "complete")
+    assert backtest["contract_hash"] == contract_hash
+    assert backtest["aggregates"] == report["aggregates"]
+    if legacy:
+        assert backtest["unavailable_reason"] == "leader_historical_backtest_legacy_contract"
+        assert "legacy" in backtest["limitations"][-1]
     assert backtest["aggregates"][0]["mean_net_return"] == pytest.approx(0.01)
     assert backtest["promotion_gate_credit"] == {
         "eligible_pit_sessions": 0,

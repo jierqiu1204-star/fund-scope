@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import random
+from bisect import bisect_right
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
@@ -22,6 +23,10 @@ from app.services.leader_tactics_exit_policy import (
     LEADER_TACTICS_ROUND_TRIP_COST_BPS,
     evaluate_leader_exit_thresholds,
     initial_leader_risk,
+)
+from app.services.market_data import (
+    ExchangeCalendarUnavailableError,
+    next_etf_exchange_trading_day,
 )
 from app.services.strategy_lab.etf_factor_evidence import (
     FactorEvidencePayload,
@@ -40,6 +45,11 @@ from app.services.strategy_lab.etf_leader_tactics_shadow import (
     LEADER_HYPOTHESIS_REGISTRY,
     MINIMUM_PEER_COUNT,
     REPAIR_HISTORY_SESSIONS,
+)
+from app.services.strategy_lab.etf_ranking_candidates import (
+    RANKING_COST_CONTRACT_HASH,
+    RANKING_FEE_BPS_PER_SIDE,
+    RANKING_SLIPPAGE_BPS_PER_SIDE,
 )
 
 LEADER_HISTORICAL_BACKTEST_EXPERIMENT_FAMILY = (
@@ -62,9 +72,27 @@ LEADER_HISTORICAL_BACKTEST_NOT_PIT = (
     "historical_backtest_membership_not_point_in_time"
 )
 
-ONE_WAY_FEE_BPS = 0
-ONE_WAY_SLIPPAGE_BPS = 0
+ONE_WAY_FEE_BPS = RANKING_FEE_BPS_PER_SIDE
+ONE_WAY_SLIPPAGE_BPS = RANKING_SLIPPAGE_BPS_PER_SIDE
 ROUND_TRIP_COST_RATE = 2 * (ONE_WAY_FEE_BPS + ONE_WAY_SLIPPAGE_BPS) / 10_000
+HISTORICAL_EXECUTION_POLICY = "T_signal_T1_confirm_T2_open_causal_risk_next_open_v2"
+HISTORICAL_EXECUTION_CONTRACT_HASH = stable_contract_hash({
+    "execution_policy": HISTORICAL_EXECUTION_POLICY,
+    "price_basis": "total_return_adjusted",
+    "signal": "T_close",
+    "confirmation": "T_plus_1_close",
+    "entry": "T_plus_2_open",
+    "exit": "daily_close_signal_next_available_open",
+})
+HISTORICAL_RISK_CONTRACT = {
+    "contract_id": "leader_historical_entry_risk_v2",
+    "entry_anchor": "actual_T_plus_2_adjusted_open",
+    "source_signal_low": "T_adjusted_low",
+    "atr20": "completed_bars_strictly_before_entry",
+    "risk_rule": "initial_leader_risk",
+    "missing_or_nonpositive_risk": "exclude_with_reason",
+}
+HISTORICAL_RISK_CONTRACT_HASH = stable_contract_hash(HISTORICAL_RISK_CONTRACT)
 HISTORICAL_SECTOR_PROXY_VERSION = "sector_trend_historical_neutral_technical_v1"
 HISTORICAL_BACKTEST_CONTRACT = {
     "schema_version": LEADER_HISTORICAL_BACKTEST_SCHEMA_VERSION,
@@ -89,6 +117,23 @@ HISTORICAL_BACKTEST_CONTRACT = {
     "round_trip_cost_bps": LEADER_TACTICS_ROUND_TRIP_COST_BPS,
     "production_mutation_allowed": False,
 }
+# Keep the old zero-cost lifecycle identity frozen; its reports are still readable.
+LEGACY_HISTORICAL_BACKTEST_CONTRACT_HASH = stable_contract_hash({
+    **HISTORICAL_BACKTEST_CONTRACT,
+    "one_way_fee_bps": 0,
+    "one_way_slippage_bps": 0,
+    "round_trip_cost_bps": 0.0,
+})
+HISTORICAL_BACKTEST_CONTRACT.update({
+    "execution_policy": HISTORICAL_EXECUTION_POLICY,
+    "execution_contract_hash": HISTORICAL_EXECUTION_CONTRACT_HASH,
+    "risk_contract_hash": HISTORICAL_RISK_CONTRACT_HASH,
+    "cost_contract_hash": RANKING_COST_CONTRACT_HASH,
+    "exit_signal_timing": "evaluate_shared_exit_thresholds_at_each_daily_close",
+    "cost_application": "multiplicative_each_side",
+    "round_trip_cost_bps": ROUND_TRIP_COST_RATE * 10_000,
+    "exit_rule_round_trip_cost_bps": LEADER_TACTICS_ROUND_TRIP_COST_BPS,
+})
 HISTORICAL_BACKTEST_CONTRACT_HASH = stable_contract_hash(
     HISTORICAL_BACKTEST_CONTRACT
 )
@@ -145,6 +190,7 @@ class HistoricalLeaderEvent:
     entry_quality_reason_codes: tuple[str, ...]
     next_session_confirmation_state: str | None
     next_session_confirmation_reason_codes: tuple[str, ...]
+    research_context: dict[str, Any] | None = None
 
     def payload(self) -> dict[str, Any]:
         return asdict(self)
@@ -156,6 +202,7 @@ def replay_historical_exit_policy(
     *,
     take_profit_return: float,
     cooldown_sessions: int = 3,
+    trading_sessions: Sequence[date] | None = None,
 ) -> tuple[HistoricalLeaderEvent, ...]:
     """Replay a close-confirmed take-profit policy with a trading-session cooldown."""
 
@@ -163,6 +210,8 @@ def replay_historical_exit_policy(
         raise ValueError("take profit return must be in (0, 1)")
     if not 0 <= cooldown_sessions <= 20:
         raise ValueError("cooldown sessions must be in [0, 20]")
+    if trading_sessions is not None and tuple(trading_sessions) != tuple(sorted(set(trading_sessions))):
+        raise ValueError("sealed trading sessions must be ordered and unique")
     by_code = {asset.asset_code: asset for asset in assets}
     calendar = sorted(
         {bar.trade_date for asset in assets for bar in asset.bars}
@@ -187,6 +236,7 @@ def replay_historical_exit_policy(
             net_return=None,
             peer_net_return=None,
             net_excess_return=None,
+            research_context=None,
         )
 
     for event in sorted(
@@ -221,28 +271,40 @@ def replay_historical_exit_policy(
         if entry_index is None or signal_bar_index is None:
             replayed.append(suppressed(event, "exit_policy_unavailable"))
             continue
-        entry_bar = asset.bars[entry_index]
-        entry_atr20 = _atr(asset.bars[: entry_index + 1], 20)
-        frozen_risk = (
-            initial_leader_risk(
-                entry_close=entry_bar.adjusted_close,
-                entry_atr20=entry_atr20,
-                source_signal_low=asset.bars[signal_bar_index].adjusted_low,
-            )
-            if entry_atr20 is not None
-            else None
-        )
-        if frozen_risk is None:
-            replayed.append(suppressed(event, "exit_policy_unavailable"))
+        try:
+            expected_confirmation = _next_lifecycle_session(event.signal_date, trading_sessions)
+            expected_entry = _next_lifecycle_session(expected_confirmation, trading_sessions)
+        except ExchangeCalendarUnavailableError:
+            replayed.append(suppressed(event, "exchange_calendar_unavailable"))
             continue
-        initial_stop, risk_unit, _ = frozen_risk
+        if expected_confirmation not in index_by_date:
+            replayed.append(suppressed(event, "confirmation_price_missing"))
+            continue
+        if event.entry_date != expected_entry:
+            replayed.append(suppressed(event, "entry_price_missing"))
+            continue
+        context = _entry_risk_context(
+            asset, signal_bar_index, entry_index, event.entry_price
+        )
+        if context["unavailable_reason"] is not None:
+            replayed.append(replace(
+                suppressed(event, "entry_risk_unavailable"), research_context=context
+            ))
+            continue
         updated = suppressed(event, "open")
-        updated = replace(updated, entry_date=event.entry_date, entry_price=event.entry_price)
+        updated = replace(
+            updated, entry_date=event.entry_date, entry_price=event.entry_price,
+            research_context=context,
+        )
         for close_index in range(entry_index, len(asset.bars) - 1):
+            missing_reason = _lifecycle_gap_reason(asset.bars, close_index, trading_sessions)
+            if missing_reason:
+                updated = replace(updated, trade_status=missing_reason)
+                break
             thresholds = evaluate_leader_exit_thresholds(
-                entry_close=entry_bar.adjusted_close,
-                initial_stop=initial_stop,
-                risk_unit=risk_unit,
+                entry_close=event.entry_price,
+                initial_stop=context["initial_stop"],
+                risk_unit=context["risk_unit"],
                 previous_high=None,
                 visible_closes=tuple(
                     bar.adjusted_close
@@ -258,6 +320,10 @@ def replay_historical_exit_policy(
                 continue
             exit_bar = asset.bars[close_index + 1]
             realized_return = exit_bar.adjusted_open / event.entry_price - 1.0
+            net_return = _net_return(event.entry_price, exit_bar.adjusted_open)
+            peer_return = _peer_net_return(
+                assets, asset.peer_group, event.entry_date, exit_bar.trade_date
+            )
             updated = replace(
                 updated,
                 trade_status="closed",
@@ -267,16 +333,38 @@ def replay_historical_exit_policy(
                 exit_reason=thresholds.reason_code,
                 holding_sessions=close_index + 1 - entry_index,
                 gross_return=realized_return,
-                net_return=realized_return,
+                net_return=net_return,
+                peer_net_return=peer_return,
+                net_excess_return=net_return - peer_return if peer_return is not None else None,
             )
             exit_index = calendar_index[exit_bar.trade_date]
             last_exit_index[event.asset_code] = exit_index
             open_until_index[event.asset_code] = exit_index
             break
-        if updated.trade_status == "open":
+        if updated.trade_status in {"open", "lifecycle_price_missing", "exchange_calendar_unavailable"}:
             open_until_index[event.asset_code] = len(calendar)
         replayed.append(updated)
     return tuple(replayed)
+
+
+def _next_lifecycle_session(value: date, trading_sessions: Sequence[date] | None) -> date:
+    if trading_sessions is None:
+        return next_etf_exchange_trading_day(value)
+    # Explicit sealed calendars keep synthetic regression inputs reproducible.
+    index = bisect_right(trading_sessions, value)
+    if index == 0 or trading_sessions[index - 1] != value or index == len(trading_sessions):
+        raise ExchangeCalendarUnavailableError(f"no sealed next session after {value}")
+    return trading_sessions[index]
+
+
+def _lifecycle_gap_reason(
+    bars: Sequence[HistoricalLeaderBar], index: int, trading_sessions: Sequence[date] | None,
+) -> str | None:
+    try:
+        expected = _next_lifecycle_session(bars[index].trade_date, trading_sessions)
+    except ExchangeCalendarUnavailableError:
+        return "exchange_calendar_unavailable"
+    return "lifecycle_price_missing" if bars[index + 1].trade_date != expected else None
 
 
 def _finite(value: object) -> float | None:
@@ -327,6 +415,75 @@ def _atr(bars: Sequence[HistoricalLeaderBar], sessions: int) -> float | None:
     ]
     result = mean(values)
     return result if math.isfinite(result) and result > 0 else None
+
+
+def _entry_risk_context(
+    asset: HistoricalLeaderAsset, signal_index: int, entry_index: int, entry_price: float
+) -> dict[str, Any]:
+    """Freeze only information available when the adjusted entry open is observed."""
+    signal_bar = asset.bars[signal_index]
+    atr20 = _atr(asset.bars[:entry_index], 20)
+    context: dict[str, Any] = {
+        "contract_hash": HISTORICAL_BACKTEST_CONTRACT_HASH,
+        "execution_contract_hash": HISTORICAL_EXECUTION_CONTRACT_HASH,
+        "risk_contract_hash": HISTORICAL_RISK_CONTRACT_HASH,
+        "cost_contract_hash": RANKING_COST_CONTRACT_HASH,
+        "entry_price": entry_price,
+        "entry_cash_cost_per_unit": entry_price * (1 + ONE_WAY_FEE_BPS / 10_000)
+        * (1 + ONE_WAY_SLIPPAGE_BPS / 10_000),
+        "entry_date": asset.bars[entry_index].trade_date.isoformat(),
+        "signal_low": signal_bar.adjusted_low,
+        "signal_low_date": signal_bar.trade_date.isoformat(),
+        "atr20": atr20,
+        "atr_as_of_date": asset.bars[entry_index - 1].trade_date.isoformat()
+        if entry_index > 0 else None,
+        "one_way_fee_bps": ONE_WAY_FEE_BPS,
+        "one_way_slippage_bps": ONE_WAY_SLIPPAGE_BPS,
+    }
+    if (
+        not 0 <= signal_index < entry_index
+        or _finite(entry_price) is None or entry_price <= 0
+        or _finite(signal_bar.adjusted_low) is None or signal_bar.adjusted_low <= 0
+        or atr20 is None
+    ):
+        return {**context, "unavailable_reason": "entry_risk_inputs_unavailable"}
+    risk = initial_leader_risk(
+        entry_close=entry_price,
+        entry_atr20=atr20,
+        source_signal_low=signal_bar.adjusted_low,
+    )
+    if risk is None or risk[0] <= 0:
+        return {**context, "unavailable_reason": "entry_risk_nonpositive"}
+    return {
+        **context,
+        "initial_stop": risk[0],
+        "risk_unit": risk[1],
+        "signal_low_ignored": risk[2],
+        "unavailable_reason": None,
+    }
+
+
+def _net_return(entry_price: float, exit_price: float) -> float:
+    fee = ONE_WAY_FEE_BPS / 10_000
+    slippage = ONE_WAY_SLIPPAGE_BPS / 10_000
+    return exit_price * (1 - slippage) * (1 - fee) / (
+        entry_price * (1 + slippage) * (1 + fee)
+    ) - 1.0
+
+
+def _peer_net_return(
+    assets: Iterable[HistoricalLeaderAsset], peer_group: str,
+    entry_date: date, exit_date: date,
+) -> float | None:
+    returns = []
+    for peer in assets:
+        if peer.peer_group != peer_group:
+            continue
+        by_date = {bar.trade_date: bar for bar in peer.bars}
+        entry, exit_bar = by_date.get(entry_date), by_date.get(exit_date)
+        if entry is not None and exit_bar is not None:
+            returns.append(_net_return(entry.adjusted_open, exit_bar.adjusted_open))
+    return mean(returns) if returns else None
 
 
 def _validate_assets(assets: Sequence[HistoricalLeaderAsset]) -> None:
@@ -662,11 +819,14 @@ def _select_candidates(
 
 
 def evaluate_historical_signal_date(
-    assets: Sequence[HistoricalLeaderAsset], signal_date: date
+    assets: Sequence[HistoricalLeaderAsset], signal_date: date,
+    *, trading_sessions: Sequence[date] | None = None,
 ) -> tuple[HistoricalLeaderEvent, ...]:
     """Replay the sole execution path without using post-T prices for selection."""
 
     _validate_assets(assets)
+    if trading_sessions is not None and tuple(trading_sessions) != tuple(sorted(set(trading_sessions))):
+        raise ValueError("sealed trading sessions must be ordered and unique")
     features, by_code, indices = _feature_rows(assets, signal_date)
     selected = _select_candidates(features, by_code)
     events: list[HistoricalLeaderEvent] = []
@@ -687,7 +847,17 @@ def evaluate_historical_signal_date(
         entry_quality_state = candidate["components"].get("entry_quality_state")
         confirmation = None
         confirmation_date = None
-        if index + 1 < len(asset.bars):
+        calendar_reason = None
+        try:
+            expected_confirmation = _next_lifecycle_session(signal_date, trading_sessions)
+            expected_entry = _next_lifecycle_session(expected_confirmation, trading_sessions)
+        except ExchangeCalendarUnavailableError:
+            calendar_reason = "exchange_calendar_unavailable"
+            expected_confirmation = expected_entry = None
+        if (index + 1 < len(asset.bars) and expected_confirmation is not None
+                and asset.bars[index + 1].trade_date != expected_confirmation):
+            calendar_reason = "confirmation_price_missing"
+        if index + 1 < len(asset.bars) and calendar_reason is None:
             confirmation_bars = asset.bars[: index + 2]
             confirmation_bar = confirmation_bars[-1]
             confirmation_date = confirmation_bar.trade_date
@@ -713,6 +883,8 @@ def evaluate_historical_signal_date(
             if confirmation is not None and confirmation.state != "confirmed"
             else "confirmation_pending"
         )
+        if calendar_reason is not None:
+            trade_status = calendar_reason
         entry_date = None
         entry_price = None
         exit_signal_date = None
@@ -722,33 +894,34 @@ def evaluate_historical_signal_date(
         holding_sessions = None
         gross_return = None
         peer_return = None
+        context = None
         if confirmation is not None and confirmation.state == "confirmed":
             entry_index = index + 2
             if entry_index >= len(asset.bars):
                 trade_status = "entry_pending"
+            elif asset.bars[entry_index].trade_date != expected_entry:
+                trade_status = "entry_price_missing"
             else:
                 entry_bar = asset.bars[entry_index]
                 entry_date = entry_bar.trade_date
                 entry_price = entry_bar.adjusted_open
-                entry_atr20 = _atr(asset.bars[: entry_index + 1], 20)
-                frozen_risk = (
-                    initial_leader_risk(
-                        entry_close=entry_bar.adjusted_close,
-                        entry_atr20=entry_atr20,
-                        source_signal_low=asset.bars[index].adjusted_low,
-                    )
-                    if entry_atr20 is not None
-                    else None
+                context = _entry_risk_context(
+                    asset, index, entry_index, entry_price
                 )
-                if frozen_risk is None:
-                    trade_status = "exit_policy_unavailable"
+                if context["unavailable_reason"] is not None:
+                    trade_status = "entry_risk_unavailable"
                 else:
-                    initial_stop, risk_unit, _ = frozen_risk
                     for close_index in range(entry_index, len(asset.bars) - 1):
+                        missing_reason = _lifecycle_gap_reason(
+                            asset.bars, close_index, trading_sessions
+                        )
+                        if missing_reason:
+                            trade_status = missing_reason
+                            break
                         thresholds = evaluate_leader_exit_thresholds(
-                            entry_close=entry_bar.adjusted_close,
-                            initial_stop=initial_stop,
-                            risk_unit=risk_unit,
+                            entry_close=entry_price,
+                            initial_stop=context["initial_stop"],
+                            risk_unit=context["risk_unit"],
                             previous_high=None,
                             visible_closes=tuple(
                                 bar.adjusted_close
@@ -773,27 +946,17 @@ def evaluate_historical_signal_date(
                         holding_sessions = close_index + 1 - entry_index
                         gross_return = exit_price / entry_price - 1.0
                         trade_status = "closed"
-                        peer_values = []
-                        for peer in by_code.values():
-                            if peer.peer_group != asset.peer_group:
-                                continue
-                            peer_by_date = {
-                                bar.trade_date: bar for bar in peer.bars
-                            }
-                            peer_entry = peer_by_date.get(entry_date)
-                            peer_exit = peer_by_date.get(exit_date)
-                            if peer_entry is not None and peer_exit is not None:
-                                peer_values.append(
-                                    peer_exit.adjusted_open
-                                    / peer_entry.adjusted_open
-                                    - 1.0
-                                )
-                        peer_return = mean(peer_values) if peer_values else None
+                        peer_return = _peer_net_return(
+                            by_code.values(), asset.peer_group, entry_date, exit_date
+                        )
                         break
                     else:
                         trade_status = "open"
 
-        net_return = gross_return
+        net_return = (
+            _net_return(entry_price, exit_price)
+            if entry_price is not None and exit_price is not None else None
+        )
         events.append(
             HistoricalLeaderEvent(
                 signal_date=signal_date,
@@ -839,6 +1002,7 @@ def evaluate_historical_signal_date(
                 next_session_confirmation_reason_codes=(
                     confirmation.reason_codes if confirmation is not None else ()
                 ),
+                research_context=context,
             )
         )
     return tuple(events)
@@ -915,6 +1079,16 @@ def _entry_quality_performance(
 def summarize_historical_events(
     events: Sequence[HistoricalLeaderEvent],
 ) -> tuple[dict[str, Any], ...]:
+    if any(
+        event.net_return is not None and (
+            event.gross_return is None
+            or not event.research_context
+            or event.research_context.get("contract_hash") != HISTORICAL_BACKTEST_CONTRACT_HASH
+        ) for event in events
+    ):
+        raise LeaderHistoricalBacktestContractError(
+            "completed event lacks current historical risk/cost identity"
+        )
     rows: list[dict[str, Any]] = []
     candidate_ids = (
         "all_leader_candidates",
@@ -952,13 +1126,27 @@ def summarize_historical_events(
         rows.append(
             {
                 "candidate_id": candidate_id,
-                "execution_policy": "T_signal_T1_confirm_T2_open_email_exit_next_open",
+                "execution_policy": HISTORICAL_EXECUTION_POLICY,
+                "contract_hash": HISTORICAL_BACKTEST_CONTRACT_HASH,
+                "execution_contract_hash": HISTORICAL_EXECUTION_CONTRACT_HASH,
+                "risk_contract_hash": HISTORICAL_RISK_CONTRACT_HASH,
+                "cost_contract_hash": RANKING_COST_CONTRACT_HASH,
+                "one_way_fee_bps": ONE_WAY_FEE_BPS,
+                "one_way_slippage_bps": ONE_WAY_SLIPPAGE_BPS,
                 "event_count": len(source),
                 "closed_trade_count": len(completed),
                 "open_trade_count": sum(event.trade_status == "open" for event in source),
                 "signal_date_count": len({event.signal_date for event in source}),
                 "trade_status_counts": dict(sorted(Counter(event.trade_status for event in source).items())),
                 "mean_net_return": mean(returns) if returns else None,
+                "mean_gross_return": mean(
+                    event.gross_return for event in completed
+                    if event.gross_return is not None
+                ) if completed else None,
+                "mean_cost_drag": mean(
+                    event.gross_return - event.net_return for event in completed
+                    if event.gross_return is not None and event.net_return is not None
+                ) if completed else None,
                 "median_net_return": median(returns) if returns else None,
                 "win_rate": mean(value > 0 for value in returns) if returns else None,
                 "average_winner": mean(wins) if wins else None,
@@ -1019,6 +1207,9 @@ def build_historical_backtest_evidence(
         "status": "insufficient_data",
         "unavailable_reason": LEADER_HISTORICAL_BACKTEST_NOT_PIT,
         "contract_hash": HISTORICAL_BACKTEST_CONTRACT_HASH,
+        "execution_contract_hash": HISTORICAL_EXECUTION_CONTRACT_HASH,
+        "risk_contract_hash": HISTORICAL_RISK_CONTRACT_HASH,
+        "cost_contract_hash": RANKING_COST_CONTRACT_HASH,
         "research_only": True,
         "production_mutation_allowed": False,
     }
@@ -1046,6 +1237,15 @@ def build_historical_backtest_evidence(
     limitations = tuple(str(item) for item in report.get("limitations", ()))
     aggregates = tuple(report.get("aggregates", ()))
     samples = tuple(dict(item) for item in report.get("sample_events", ()))
+    if any(
+        item.get("net_return") is not None and (
+            not isinstance(item.get("research_context"), Mapping)
+            or item["research_context"].get("contract_hash") != HISTORICAL_BACKTEST_CONTRACT_HASH
+        ) for item in samples
+    ):
+        raise LeaderHistoricalBacktestContractError(
+            "completed sample lacks current historical risk/cost identity"
+        )
     return FactorEvidencePayload(
         manifest_hash=manifest_hash,
         ranking_contract_hash=str(report["source_ranking_contract_hash"]),
@@ -1075,6 +1275,7 @@ def build_historical_backtest_evidence(
             "current_vintage_membership_bias": True,
         },
         costs={
+            "contract_hash": RANKING_COST_CONTRACT_HASH,
             "one_way_fee_bps": ONE_WAY_FEE_BPS,
             "one_way_slippage_bps": ONE_WAY_SLIPPAGE_BPS,
             "round_trip_cost_rate": ROUND_TRIP_COST_RATE,

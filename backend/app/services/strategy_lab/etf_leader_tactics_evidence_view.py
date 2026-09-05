@@ -21,6 +21,7 @@ from app.services.strategy_lab.etf_leader_tactics_evidence import (
     latest_leader_observation_evidence,
 )
 from app.services.strategy_lab.etf_leader_tactics_historical_backtest import (
+    HISTORICAL_BACKTEST_CONTRACT,
     HISTORICAL_BACKTEST_CONTRACT_HASH,
     LEADER_HISTORICAL_BACKTEST_EVIDENCE_MODE,
     LEADER_HISTORICAL_BACKTEST_EXPERIMENT_FAMILY,
@@ -355,6 +356,8 @@ def _historical_backtest_projection(row: Any | None) -> dict[str, Any]:
     report = _mapping(row.report_json)
     promotion_gate_credit = _mapping(report.get("promotion_gate_credit"))
     aggregates = _sequence(report.get("aggregates"))
+    contract_hash = report.get("contract_hash")
+    legacy = contract_hash != HISTORICAL_BACKTEST_CONTRACT_HASH
     compatible = (
         row.experiment_family == LEADER_HISTORICAL_BACKTEST_EXPERIMENT_FAMILY
         and row.hypothesis_registry_hash
@@ -368,7 +371,13 @@ def _historical_backtest_projection(row: Any | None) -> dict[str, Any]:
         and report.get("manifest_hash") == row.manifest_hash
         and report.get("status") == "insufficient_data"
         and report.get("unavailable_reason") == LEADER_HISTORICAL_BACKTEST_NOT_PIT
-        and report.get("contract_hash") == HISTORICAL_BACKTEST_CONTRACT_HASH
+        and isinstance(contract_hash, str)
+        and len(contract_hash) == 64
+        and all(character in "0123456789abcdef" for character in contract_hash)
+        and (legacy or all(
+            report.get(key) == HISTORICAL_BACKTEST_CONTRACT[key]
+            for key in ("execution_contract_hash", "risk_contract_hash", "cost_contract_hash")
+        ))
         and report.get("ranking_source_kind") == "research_replay"
         and report.get("evidence_mode") == LEADER_HISTORICAL_BACKTEST_EVIDENCE_MODE
         and report.get("membership_mode")
@@ -392,7 +401,10 @@ def _historical_backtest_projection(row: Any | None) -> dict[str, Any]:
         return view
     return {
         **_base_historical_backtest(LEADER_HISTORICAL_BACKTEST_NOT_PIT),
-        "status": "complete",
+        "status": "incompatible" if legacy else "complete",
+        "unavailable_reason": "leader_historical_backtest_legacy_contract"
+        if legacy else LEADER_HISTORICAL_BACKTEST_NOT_PIT,
+        "contract_hash": contract_hash,
         "generated_at": row.created_at,
         "manifest_hash": row.manifest_hash,
         "source_signal_run_id": report.get("source_signal_run_id"),
@@ -403,7 +415,11 @@ def _historical_backtest_projection(row: Any | None) -> dict[str, Any]:
         "exclusion_counts": _mapping(report.get("exclusion_counts")),
         "aggregates": aggregates,
         "promotion_gate_credit": promotion_gate_credit,
-        "limitations": _sequence(report.get("limitations")),
+        "limitations": [
+            *_sequence(report.get("limitations")),
+            *(["legacy historical result; original execution/risk/cost identity is not current evidence"]
+              if legacy else []),
+        ],
     }
 
 

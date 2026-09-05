@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -30,6 +31,7 @@ from app.services.strategy_lab.etf_ranking_candidates import (
     freeze_ranking_candidate_registry,
 )
 from app.services.strategy_lab.etf_ranking_validation import RankingEndpointResult
+from app.services.tracked_positions.lifecycle import stable_contract_json
 
 OPERATIONAL_RESEARCH_EVIDENCE_SCHEMA = "etf_point_in_time_research_evidence_v1"
 
@@ -145,6 +147,7 @@ async def persist_factor_evidence(
                 "experiment identity already has different immutable evidence"
             )
         return existing
+    json_payload = json.loads(stable_contract_json(payload.canonical_payload()))
     evidence = EtfFactorExperimentEvidence(
         manifest_hash=payload.manifest_hash,
         ranking_contract_hash=payload.ranking_contract_hash,
@@ -152,15 +155,15 @@ async def persist_factor_evidence(
         experiment_family=payload.experiment_family,
         hypothesis_registry_hash=payload.hypothesis_registry_hash,
         evidence_hash=payload.evidence_hash,
-        samples_json=list(payload.samples),
-        aggregates_json=payload.aggregates,
-        exclusions_json=list(payload.exclusions),
-        intervals_json=payload.intervals,
-        split_reports_json=payload.split_reports,
-        costs_json=payload.costs,
-        limitations_json=list(payload.limitations),
+        samples_json=json_payload["samples"],
+        aggregates_json=json_payload["aggregates"],
+        exclusions_json=json_payload["exclusions"],
+        intervals_json=json_payload["intervals"],
+        split_reports_json=json_payload["split_reports"],
+        costs_json=json_payload["costs"],
+        limitations_json=json_payload["limitations"],
         promotion_state=str(_promotion_payload(payload.promotion)["state"]),
-        report_json=payload.report,
+        report_json=json_payload["report"],
     )
     session.add(evidence)
     await session.commit()
@@ -350,7 +353,7 @@ def build_operational_factor_evidence(
         "replay_run_key": manifest.replay_run_key,
         "data_cutoff": data_cutoff.isoformat(),
         "manifest_hash": manifest.manifest_hash,
-        "ranking_source_kind": "research_replay",
+        "ranking_source_kind": str(primary_result.ranking_source_kind),
         "policy_mode": "policy_shadow",
         "coverage": dict(coverage),
         "exclusion_counts": dict(exclusion_counts),
