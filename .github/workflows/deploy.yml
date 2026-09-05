@@ -195,7 +195,7 @@ jobs:
             | sudo tee "$rollback_metadata" > /dev/null
 
           cd "$GITHUB_WORKSPACE"
-          rsync -a --delete \
+          sudo rsync -a --delete \
             --exclude '.git/' \
             --exclude '.env' \
             --exclude '.deploy-version' \
