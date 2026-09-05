@@ -288,6 +288,9 @@ def test_holdout_requires_gates_authorization_and_claim_before_result_read(tmp_p
                   frozen_non_holdout_evidence_hash=evidence_hash, consumed_at=datetime(2026, 1, 2))
     assert workflow._read_authorized_ranking_holdout(**common, non_holdout_gates=replace(gates, eligible_point_in_time_sessions=1))["reason"] == "non_holdout_gates_not_passed"
     assert workflow._read_authorized_ranking_holdout(**common, non_holdout_gates=gates)["reason"] == "frozen_holdout_authorization_missing"
+    assert workflow._read_authorized_ranking_holdout(
+        **{**common, "consumed_at": datetime(2025, 12, 31, 0, 0)}, non_holdout_gates=gates,
+    )["reason"] == "holdout_window_not_mature"
     dates = [(date(2024, 1, 2) + timedelta(days=14 * index)).isoformat() for index in range(40)]
     sessions, events, cohort, registry, contract = _fixture()
     base_endpoint = evaluate_ranking_endpoint(
@@ -327,7 +330,7 @@ def test_holdout_requires_gates_authorization_and_claim_before_result_read(tmp_p
             assert "holdout_consumption" in reads
         return original_read(**kwargs)
     monkeypatch.setattr(store, "read_research_artifact_page", checked_read)
-    monkeypatch.setattr(workflow, "_exchange_sessions_between", lambda start, **kwargs: tuple(start + timedelta(days=offset) for offset in range(10)))
+    monkeypatch.setattr(workflow, "_exchange_sessions_between", lambda start, **kwargs: tuple(start + timedelta(days=offset) for offset in range((kwargs["through_date"] - start).days + 1)))
     first = workflow._read_authorized_ranking_holdout(**common, non_holdout_gates=gates)
     assert first["status"] == "consumed" and first["passed"] is True
     restarted = workflow._read_authorized_ranking_holdout(**{**common, "manifest": replace(manifest, replay_run_key="next-daily-source")}, non_holdout_gates=gates)
@@ -352,3 +355,35 @@ def test_holdout_requires_gates_authorization_and_claim_before_result_read(tmp_p
         workflow._read_authorized_ranking_holdout(
             **{**common, "manifest": next_manifest, "plan": next_plan}, non_holdout_gates=gates,
         )
+    import copy
+    for failure in ("passed_only", "wrong_hash", "wrong_cost", "overlapping_dates", "before_close"):
+        invalid_result = copy.deepcopy(result)
+        if failure == "passed_only":
+            invalid_result.pop("endpoint_result")
+            invalid_result["passed"] = True
+        elif failure == "before_close":
+            invalid_result["outcome_data_cutoff"] = "2025-12-31T00:00:00+00:00"
+        else:
+            invalid_endpoint = invalid_result["endpoint_result"]
+            if failure == "wrong_hash":
+                invalid_endpoint["result_hash"] = _hash("wrong")
+            else:
+                if failure == "wrong_cost":
+                    invalid_endpoint["fee_bps_per_side"] = 0
+                else:
+                    invalid_endpoint["independent_dates"] = [(date(2024, 1, 2) + timedelta(days=index)).isoformat() for index in range(40)]
+                invalid_endpoint.pop("result_hash")
+                invalid_endpoint["result_hash"] = _hash(invalid_endpoint)
+        invalid_store = ReplayArtifactStore(tmp_path / f"invalid-{failure}.sqlite3")
+        invalid_store.write_research_artifacts(
+            run_id=workflow._ranking_protocol_key(manifest), phase="holdout_authorization",
+            artifacts=(("frozen-approval", {"authorization": asdict(authorization), "expected_holdout_evidence_hash": _hash(invalid_result)}),),
+        )
+        invalid_store.write_research_artifacts(
+            run_id=workflow._ranking_protocol_key(manifest), phase="holdout_result",
+            artifacts=(("frozen-result", invalid_result),),
+        )
+        with pytest.raises(ValueError):
+            workflow._read_authorized_ranking_holdout(
+                **{**common, "artifact_store": invalid_store}, non_holdout_gates=gates,
+            )

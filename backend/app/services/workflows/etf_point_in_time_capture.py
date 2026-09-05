@@ -1868,6 +1868,14 @@ def _read_authorized_ranking_holdout(
     if gate_result.state.value != "promotion_eligible":
         return {"status": "not_consumed", "reason": "non_holdout_gates_not_passed",
                 "failed_gates": gate_result.failed_gates}
+    split = _plan_split(plan)
+    consumed_cutoff = (consumed_at.replace(tzinfo=UTC) if consumed_at.tzinfo is None
+                       else consumed_at.astimezone(UTC))
+    holdout_close = datetime.combine(split.holdout_end, datetime.min.time()).replace(
+        hour=15, tzinfo=_SHANGHAI,
+    ).astimezone(UTC)
+    if consumed_cutoff < holdout_close:
+        return {"status": "not_consumed", "reason": "holdout_window_not_mature"}
     protocol_key = _ranking_protocol_key(manifest)
     approvals = artifact_store.read_research_artifact_page(
         run_id=protocol_key, phase="holdout_authorization", max_rows=2, max_seconds=5.0,
