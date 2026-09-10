@@ -1,0 +1,22 @@
+{
+  "module_sha256": "b7f58512342b069f2aa3deaa3b2424b899a11241533d96013e0bca1ef7a5754a",
+  "exit_code": 0,
+  "mode": "in_memory_corrected_job_production_acceptance",
+  "result": {
+    "status": "partial",
+    "job_status": "partial",
+    "selected_count": 6,
+    "cursor_before": "159038",
+    "cursor_after": "159045",
+    "underlying_facts_inserted": 6,
+    "provider_failure_count": 0,
+    "provider_failures": [],
+    "persisted_job": {
+      "id": 43587,
+      "status": "partial",
+      "error_message": null,
+      "has_details": true
+    },
+    "coverage_json_serializable": true
+  }
+}

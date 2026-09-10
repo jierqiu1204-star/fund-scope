@@ -1,0 +1,28 @@
+........................................................................ [100%]
+=============================== warnings summary ===============================
+tests/test_etf_research_history_sync.py: 82 warnings
+tests/test_scheduler.py: 238 warnings
+tests/test_etf_data_pipeline_repair_acceptance.py: 1806 warnings
+tests/test_etf_bounded_history_sync.py: 1923 warnings
+  /Users/churchill/Projects/fund-scope/worktree-0811/backend/app/models/entities.py:35: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+tests/test_etf_data_pipeline_repair_acceptance.py: 9 warnings
+tests/test_etf_bounded_history_sync.py: 224 warnings
+  /Users/churchill/Projects/fund-scope/worktree-0811/backend/app/services/short_etf/bounded_history_sync.py:314: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+tests/test_etf_bounded_history_sync.py::test_research_depth_short_history_is_cooled_down_without_losing_denominator
+  /Users/churchill/Projects/fund-scope/worktree-0811/backend/tests/test_etf_bounded_history_sync.py:621: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    observation.retry_after = datetime.utcnow() - timedelta(seconds=1)
+
+tests/test_etf_bounded_history_sync.py::test_history_lease_is_global_across_lane_scopes
+  /Users/churchill/Projects/fund-scope/worktree-0811/backend/tests/test_etf_bounded_history_sync.py:875: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    started_at=datetime.utcnow(),
+
+tests/test_etf_bounded_history_sync.py::test_sync_rejects_overlapping_worker_lease
+  /Users/churchill/Projects/fund-scope/worktree-0811/backend/tests/test_etf_bounded_history_sync.py:1227: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    started_at=datetime.utcnow(),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+72 passed, 4285 warnings in 9.93s

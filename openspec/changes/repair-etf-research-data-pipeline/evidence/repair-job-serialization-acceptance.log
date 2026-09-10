@@ -1,0 +1,26 @@
+......................................................................   [100%]
+=============================== warnings summary ===============================
+tests/test_etf_data_pipeline_repair_acceptance.py: 1916 warnings
+tests/test_etf_tracked_underlying.py: 389 warnings
+tests/test_short_research_jobs.py: 45 warnings
+tests/test_job_runner.py: 332 warnings
+  /Users/churchill/Projects/fund-scope/worktree-0811/backend/app/models/entities.py:35: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+tests/test_etf_data_pipeline_repair_acceptance.py::test_partial_new_source_preserves_127_rows_without_claiming_180_complete
+tests/test_etf_data_pipeline_repair_acceptance.py::test_partial_new_source_preserves_127_rows_without_claiming_180_complete
+tests/test_etf_data_pipeline_repair_acceptance.py::test_partial_new_source_preserves_127_rows_without_claiming_180_complete
+tests/test_etf_data_pipeline_repair_acceptance.py::test_partial_new_source_preserves_127_rows_without_claiming_180_complete
+tests/test_etf_data_pipeline_repair_acceptance.py::test_partial_new_source_preserves_127_rows_without_claiming_180_complete
+tests/test_etf_data_pipeline_repair_acceptance.py::test_partial_new_source_preserves_127_rows_without_claiming_180_complete
+tests/test_etf_data_pipeline_repair_acceptance.py::test_partial_new_source_preserves_127_rows_without_claiming_180_complete
+tests/test_etf_data_pipeline_repair_acceptance.py::test_partial_new_source_preserves_127_rows_without_claiming_180_complete
+tests/test_etf_data_pipeline_repair_acceptance.py::test_partial_new_source_preserves_127_rows_without_claiming_180_complete
+  /Users/churchill/Projects/fund-scope/worktree-0811/backend/app/services/short_etf/bounded_history_sync.py:314: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+tests/test_job_runner.py::test_run_job_recovers_failed_flush_before_recording_failure
+  <sys>:0: SAWarning: New instance <JobRun at 0x1114ae3c0> with identity key (<class 'app.models.entities.JobRun'>, (1,), None) conflicts with persistent instance <JobRun at 0x1130cc410>
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+70 passed, 2692 warnings in 5.55s

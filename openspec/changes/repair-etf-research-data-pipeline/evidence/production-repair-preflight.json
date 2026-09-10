@@ -1,0 +1,39 @@
+{
+  "mode": "preflight",
+  "exit_code": 0,
+  "result": {
+    "exit_code": null,
+    "status": "blocked",
+    "mode": "preflight",
+    "research_only": true,
+    "report_markdown": "# ETF 龙头突破与中期动量路线预检\n\n状态：**等待数据**\n区间：2026-09-09 至 2026-09-09，交易日历 hash：`6b32a5b6054ed86dc5dc229f09efe2ee1c3d3ad48e2c2cefc40ebe8f412d94e8`\n\n## 时点资格与历史覆盖\n\n| 日期 | 资格分母 | 去克隆分母 | 127 根合格分子 | 结论 |\n| --- | ---: | ---: | ---: | --- |\n| 2026-09-09 | 1518 | 0 | 0 | 历史不足，阻断信号筛选 |\n\n## V2 按日证据\n\n| 日期 | manifest | observation | transition | 结论 |\n| --- | --- | ---: | ---: | --- |\n| 2026-09-09 | `暂无` | 0 | 0 | v2_manifest_missing_for_date |\n\n## 研究存储\n\n路径：`/app/data/etf-pit-artifacts/production-pit-research.sqlite3`；本比较命名空间尚无封存结果；共享研究 store 仍有其他内容\n\n## 阻断原因\n\n- 2026-09-09:127根合格分子0/去克隆分母0，至少需要10只\n- 2026-09-09:clone映射缺失1518只\n- 2026-09-09:v2_manifest_missing_for_date\n- 本比较命名空间尚无封存结果；共享研究 store 仍有其他内容\n",
+    "preflight": {
+      "calendar_hash": "6b32a5b6054ed86dc5dc229f09efe2ee1c3d3ad48e2c2cefc40ebe8f412d94e8",
+      "elapsed_seconds": 20.37717169499956,
+      "end_date": "2026-09-09",
+      "ready": false,
+      "reasons": [
+        "2026-09-09:127根合格分子0/去克隆分母0，至少需要10只",
+        "2026-09-09:clone映射缺失1518只",
+        "2026-09-09:v2_manifest_missing_for_date",
+        "本比较命名空间尚无封存结果；共享研究 store 仍有其他内容"
+      ],
+      "research_store": {
+        "exists": true,
+        "invalid_artifact_count": 0,
+        "nonempty": false,
+        "path": "/app/data/etf-pit-artifacts/production-pit-research.sqlite3",
+        "ready": false,
+        "reason": "本比较命名空间尚无封存结果；共享研究 store 仍有其他内容",
+        "requested_artifact_count": 0,
+        "requested_checkpoint_count": 0,
+        "schema_compatible": true,
+        "sqlite_readable": true
+      },
+      "schema_version": "etf_strategy_route_comparison_inputs_v1",
+      "snapshot_count": 1,
+      "start_date": "2026-09-09",
+      "truncated": false
+    }
+  }
+}

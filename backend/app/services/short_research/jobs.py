@@ -4,6 +4,7 @@ import asyncio
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -100,6 +101,12 @@ ETF_TRACKED_UNDERLYING_SWEEP_LANE = "identity_facts"
 
 def _underlying_sweep_marker(kind: str, sweep_date: date) -> str:
     return f"{kind}:{sweep_date.isoformat()}"
+
+
+def _identity_fact_coverage_payload(coverage: Any) -> dict[str, Any]:
+    """Encode coverage timestamps before the result is stored in JobRun JSON."""
+
+    return jsonable_encoder(coverage.as_dict())
 
 
 def _count(value: Any, key: str) -> int:
@@ -499,8 +506,7 @@ async def _run_etf_tracked_underlying_ingestion_job(
     retry_marker = _underlying_sweep_marker("retry", sweep_date)
     if cursor is not None and cursor.last_lane == done_marker:
         coverage = await identity_fact_coverage_at_cutoff(session, cutoff=utcnow())
-        coverage_payload = coverage.as_dict()
-        coverage_payload["cutoff"] = coverage.cutoff.isoformat()
+        coverage_payload = _identity_fact_coverage_payload(coverage)
         await session.commit()
         return {
             "status": "complete",
@@ -565,8 +571,7 @@ async def _run_etf_tracked_underlying_ingestion_job(
     )
     persisted = result.persisted
     coverage = await identity_fact_coverage_at_cutoff(session, cutoff=utcnow())
-    coverage_payload = coverage.as_dict()
-    coverage_payload["cutoff"] = coverage.cutoff.isoformat()
+    coverage_payload = _identity_fact_coverage_payload(coverage)
     provider_failures = tuple(provider_page.provider_errors if provider_page else ())
     provider_records = tuple(provider_page.underlying_records if provider_page else ())
     status = result.status

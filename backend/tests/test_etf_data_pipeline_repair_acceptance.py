@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 from test_etf_pit_replay_input_loader import (
     CUTOFF,
     T,
@@ -13,9 +15,12 @@ from test_etf_pit_replay_input_loader import (
     _membership,
 )
 
-from app.models.entities import EtfAdjustedPriceRevision
+from app.models.entities import EtfAdjustedPriceRevision, EtfUniverseMembership, JobRun
+from app.services.job_runner import run_job
 from app.services.short_etf import bounded_history_sync
 from app.services.short_etf.data import ProviderFetchResult
+from app.services.short_research import jobs as research_jobs
+from app.services.short_research.etf_identity_facts import IdentityFactProviderPage
 from app.services.short_research.etf_tracked_underlying import (
     EtfTrackedUnderlyingProviderError,
     _record_from_response,
@@ -252,3 +257,52 @@ async def test_partial_new_source_preserves_127_rows_without_claiming_180_comple
     assert len(by_provider["510300"]["tickflow"]) == 127
     assert result.completed_codes == ()
     assert result.status != "complete"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("partial_page", [False, True])
+async def test_scheduler_persists_real_identity_coverage_and_repeated_run(app, monkeypatch, partial_page):
+    async with app.state.db.session() as session:
+        await _seed(session, [])
+        session.add(_etf("510330"))
+        session.add(_membership("510330"))
+        session.add_all(EtfUniverseMembership(
+            etf_code=code, effective_from=T, effective_to=None, source="test-universe",
+            tracked_underlying_id=None,
+        ) for code in ("510300", "510330"))
+        await session.commit()
+
+    async def fetch(codes):
+        records = []
+        for code in codes:
+            if partial_page and code == "510330":
+                continue
+            records.append(_record_from_response(
+                code=code, source_url=f"https://fundf10.eastmoney.com/jbgk_{code}.html",
+                body=f"<table><tr><th>基金代码</th><td>{code}</td></tr>"
+                     "<tr><th>跟踪标的</th><td>沪深300指数</td></tr></table>",
+                observed_at=datetime(2026, 9, 10, 8),
+            ))
+        return IdentityFactProviderPage(
+            underlying_records=records,
+            provider_errors=(("510330", "provider_request_failed:HTTPStatusError"),)
+            if partial_page else (),
+        )
+
+    monkeypatch.setattr(research_jobs, "fetch_eastmoney_tracked_underlying_page", fetch)
+    results = []
+    for _ in range(2):
+        results.append(await run_job(
+            app.state.db.session, "etf_tracked_underlying_ingestion",
+            research_jobs.etf_tracked_underlying_ingestion_job,
+        ))
+    async with app.state.db.session() as session:
+        jobs = (await session.scalars(select(JobRun).where(
+            JobRun.job_name == "etf_tracked_underlying_ingestion"
+        ).order_by(JobRun.id))).all()
+    assert len(jobs) == 2
+    for job in jobs:
+        assert job.status == ("partial" if partial_page else "success")
+        json.dumps(job.details_json)
+        assert isinstance(job.details_json["coverage"]["evidence_groups"][0]["latest_observed_at"], str)
+    assert results[1]["underlying_facts_inserted"] == 0

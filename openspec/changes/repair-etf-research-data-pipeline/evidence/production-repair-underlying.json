@@ -1,0 +1,103 @@
+{
+  "mode": "underlying",
+  "exit_code": 0,
+  "result": {
+    "coverage": {
+      "cutoff": "2026-09-10T13:21:41.079877",
+      "evidence_groups": [
+        {
+          "count": 234,
+          "fact_kind": "taxonomy",
+          "latest_observed_at": "2026-09-08 07:00:24.816410",
+          "provider_version": "etf_theme_taxonomy_fact_v2",
+          "rule_version": "etf_theme_taxonomy_fact_v2",
+          "source": "asset_class"
+        },
+        {
+          "count": 225,
+          "fact_kind": "taxonomy",
+          "latest_observed_at": "2026-09-10 07:08:00.112126",
+          "provider_version": "etf_theme_taxonomy_fact_v2",
+          "rule_version": "etf_theme_taxonomy_fact_v2",
+          "source": "cross_border_keyword"
+        },
+        {
+          "count": 992,
+          "fact_kind": "taxonomy",
+          "latest_observed_at": "2026-09-10 07:08:00.112126",
+          "provider_version": "etf_theme_taxonomy_fact_v2",
+          "rule_version": "etf_theme_taxonomy_fact_v2",
+          "source": "domestic_keyword"
+        },
+        {
+          "count": 10,
+          "fact_kind": "taxonomy",
+          "latest_observed_at": "2026-08-27 07:00:25.561934",
+          "provider_version": "etf_theme_taxonomy_fact_v2",
+          "rule_version": "etf_theme_taxonomy_fact_v2",
+          "source": "manual_override"
+        },
+        {
+          "count": 58,
+          "fact_kind": "taxonomy",
+          "latest_observed_at": "2026-09-07 07:00:24.970095",
+          "provider_version": "etf_theme_taxonomy_fact_v2",
+          "rule_version": "etf_theme_taxonomy_fact_v2",
+          "source": "unknown"
+        },
+        {
+          "count": 9,
+          "fact_kind": "tracked_underlying",
+          "latest_observed_at": "2026-09-10 13:21:40.749573",
+          "provider_version": "fundf10-jbgk-v1",
+          "rule_version": "fundf10-tracked-underlying-v1",
+          "source": "eastmoney.fundf10"
+        }
+      ],
+      "identity_fact_contract": {
+        "contract_version": "etf_identity_fact_contract_v1",
+        "historical_selection": "highest_precedence_visible_at_cutoff",
+        "name_only_formal_underlying_inference": "forbidden",
+        "supersession_mode": "append_only",
+        "taxonomy_precedence": [
+          "authoritative_or_manual_override",
+          "cross_border_marker",
+          "asset_class",
+          "domestic_keyword",
+          "unknown"
+        ],
+        "taxonomy_precedence_policy_version": "etf_taxonomy_precedence_v1",
+        "tracked_underlying_evidence_policy_version": "etf_tracked_underlying_evidence_v1",
+        "tracked_underlying_precedence": [
+          "manual",
+          "authoritative"
+        ],
+        "visibility_field": "observed_at"
+      },
+      "known_taxonomy_count": 1461,
+      "resolved_underlying_count": 7,
+      "taxonomy_coverage_ratio": 0.961817,
+      "taxonomy_fact_count": 1519,
+      "tracked_underlying_coverage_ratio": 0.004608,
+      "tracked_underlying_fact_count": 9,
+      "universe_count": 1519,
+      "unknown_taxonomy_count": 58,
+      "unresolved_underlying_count": 1512
+    },
+    "elapsed_seconds": 1.352498,
+    "job_status": "partial",
+    "mode": "explicit_codes",
+    "provider_failure_count": 1,
+    "provider_failures": [
+      {
+        "etf_code": "512710",
+        "reason": "provider_request_failed:HTTPStatusError"
+      }
+    ],
+    "selected_count": 6,
+    "status": "partial",
+    "underlying_facts_existing": 0,
+    "underlying_facts_inserted": 5,
+    "unresolved_count": 1
+  }
+}
