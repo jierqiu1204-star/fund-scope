@@ -1,0 +1,10 @@
+{
+  "matches_baseline": true,
+  "checked": {
+    "ranking_registry": true,
+    "pure_momentum_20_contract_hash": true,
+    "v2_source_registry_hash": true,
+    "v2_formulas": true,
+    "cost_policies": true
+  }
+}

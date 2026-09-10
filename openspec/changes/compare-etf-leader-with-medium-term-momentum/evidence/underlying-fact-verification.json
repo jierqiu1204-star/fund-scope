@@ -1,0 +1,7 @@
+{
+  "checked_on": "2026-09-10",
+  "database_access": "read_only",
+  "query_scope": "etf_tracked_underlying_facts grouped by identity_state; count, distinct assets, minimum and maximum observed_at",
+  "tracked_underlying_fact_summary": [],
+  "record_count": 0
+}

@@ -1,0 +1,12 @@
+{
+  "baseline_code_version": "b2311aa4f5423799da9db0a2c796d62aef3b3f16",
+  "all_compared_files_match": true,
+  "files": {
+    "app/services/strategy_lab/etf_ranking_candidates.py": "11d157cd2520aa9d195b5a7e3e458e7a38be6bc9d6dfc5c5dd3d417ebebdad93",
+    "app/services/strategy_lab/etf_ranking_forward_outcomes.py": "37bd80d4066396642650f6d1260d322c21d9178aad016ce4a792edf424f7d992",
+    "app/services/strategy_lab/dual_universe_leader_tactics_v2.py": "d899883d1d91b27ccff2fec74a58082fa96b3281615aafd9159e6299315148f2",
+    "app/services/strategy_lab/etf_point_in_time_decision_data.py": "7eaa61204a7f7f6d7d0075015752a94078dec0680b2aaa8e88981c08b7123706",
+    "app/services/market_data.py": "9eec3bf291ecbfe938824411cc990726add1d142b1e038231c01f3ee66a0a09c"
+  },
+  "note": "Deployment root has no Git metadata; deployed source was compared by file SHA256 instead."
+}

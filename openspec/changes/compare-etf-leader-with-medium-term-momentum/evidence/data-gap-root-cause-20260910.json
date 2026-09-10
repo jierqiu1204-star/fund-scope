@@ -1,0 +1,245 @@
+{
+  "observed_at": "2026-09-10T08:08:18.845877+00:00",
+  "database_access": "read_only",
+  "settings": {
+    "etf_pit_capture_enabled": true,
+    "etf_pit_artifact_dir": "/app/data/etf-pit-artifacts",
+    "etf_leader_tactics_continuation_enabled": true,
+    "etf_leader_tactics_v2_capture_enabled": true,
+    "etf_leader_tactics_v2_theme_graph_enabled": true,
+    "etf_leader_tactics_v2_materialize_enabled": true,
+    "etf_leader_tactics_v2_etf_materialize_enabled": true,
+    "etf_leader_tactics_v2_morning_confirmation_enabled": false,
+    "etf_leader_tactics_v2_artifact_dir": "./data/dual-universe-leader-tactics-v2-artifacts",
+    "scheduler_timezone": "Asia/Shanghai"
+  },
+  "underlying_facts": [],
+  "pit_sources": [
+    {
+      "n": 14,
+      "first_day": "2026-07-31",
+      "last_day": "2026-09-09",
+      "latest_created": "2026-09-09 10:34:00.265464"
+    }
+  ],
+  "job_summary": [
+    {
+      "job_name": "dual_universe_leader_tactics_v2_materialize_etf",
+      "status": "partial",
+      "n": 233,
+      "latest_started": "2026-09-10 07:50:00.002105"
+    },
+    {
+      "job_name": "etf_taxonomy_fact_ingestion",
+      "status": "success",
+      "n": 1348,
+      "latest_started": "2026-09-10 08:06:00.001409"
+    },
+    {
+      "job_name": "production_etf_pit_capture",
+      "status": "failed",
+      "n": 338,
+      "latest_started": "2026-09-09 13:44:00.142474"
+    },
+    {
+      "job_name": "production_etf_pit_capture",
+      "status": "success",
+      "n": 16,
+      "latest_started": "2026-09-09 10:34:00.117850"
+    }
+  ],
+  "v2_etf_reasons": [
+    {
+      "reason": "etf_decision_data_snapshot_stale",
+      "n": 137,
+      "first_started": "2026-09-01 07:10:00.001456",
+      "last_started": "2026-09-10 07:50:00.002105"
+    },
+    {
+      "reason": "insufficient_etf_history_120_coverage",
+      "n": 96,
+      "first_started": "2026-09-01 01:10:00.003713",
+      "last_started": "2026-09-10 02:50:00.001993"
+    }
+  ],
+  "latest_prior_day_v2_job": {
+    "id": 42492,
+    "started_at": "2026-09-09 15:50:00.003169",
+    "status": "partial",
+    "details_json": {
+      "status": "waiting",
+      "job_status": "partial",
+      "signal_date": "2026-09-09",
+      "unavailable_reason": "insufficient_etf_history_120_coverage",
+      "unavailable_reasons": [
+        "insufficient_etf_history_120_coverage"
+      ],
+      "readiness": {
+        "schema_version": "leader_tactics_v2_etf_readiness_v1",
+        "signal_date": "2026-09-09",
+        "data_cutoff": "2026-09-09T10:32:12.566009",
+        "identity_cutoff": "2026-09-09T15:50:00.012423",
+        "authoritative_universe": {
+          "eligible_count": 1333,
+          "denominator": 1333,
+          "coverage": 1.0,
+          "threshold": 0.9
+        },
+        "adjusted_history_120": {
+          "eligible_count": 713,
+          "denominator": 1333,
+          "coverage": 0.5348837209302325,
+          "threshold": 0.9
+        },
+        "adjusted_history_180": {
+          "eligible_count": 713,
+          "denominator": 1333,
+          "coverage": 0.5348837209302325,
+          "threshold": 0.9
+        },
+        "pit_peer_group": {
+          "eligible_count": 1276,
+          "denominator": 1333,
+          "coverage": 0.9572393098274569,
+          "threshold": 0.9
+        },
+        "raw_decision_violations": 0,
+        "non_finite_violations": 0,
+        "exclusions": {
+          "missing_pit_theme_membership": 57,
+          "stale_or_ineligible_adjusted_input": 261,
+          "unproven_adjustment_point_in_time": 359
+        },
+        "research_only": true,
+        "adjusted_data_provider_availability": {
+          "tickflow": "healthy"
+        },
+        "provider_health": {
+          "eastmoney": "unavailable",
+          "efinance": "unavailable",
+          "tencent": "healthy",
+          "tickflow": "healthy"
+        },
+        "decision_data_snapshot": {
+          "schema_version": "etf_decision_data_snapshot_v1",
+          "snapshot_id": 14,
+          "trade_date": "2026-09-09",
+          "decision_cutoff": "2026-09-09T18:32:12.566009+08:00",
+          "daily_coverage_ratio": 0.955204,
+          "warmup_coverage_ratio": 0.945982,
+          "readiness_policy_version": "etf_readiness_policy_v4",
+          "source_snapshot_hash": "440eb88ef7ffdd5c5b11e2151d66d426ae9b4c7f37876b807fc2df93e9a4e40b",
+          "universe_manifest_hash": "dfae5a4972701710c4568ce21474c02b9eda2113a3b0d4204dac77ebca90f0bf",
+          "input_snapshot_hash": "7cd8a428df70596decb11c23d60ee9b5f0ab706502e84e7af17bf63dc0f6e593",
+          "provider_health_hash": "fcb589571dcc8620a2c5326bd4f5104c8c883ed24cc5d80554726308e59283ce",
+          "provenance_kind": "persisted_etf_pit_decision_data"
+        }
+      },
+      "decision_data_snapshot_id": 14,
+      "research_only": true
+    }
+  },
+  "pit_capture_failure": [
+    {
+      "id": 42456,
+      "started_at": "2026-09-09 13:44:00.142474",
+      "error_message": "load_point_in_time_etf_decision_inputs() missing 1 required keyword-only argument: 'required_history_sessions'"
+    },
+    {
+      "id": 42453,
+      "started_at": "2026-09-09 13:42:00.600386",
+      "error_message": "load_point_in_time_etf_decision_inputs() missing 1 required keyword-only argument: 'required_history_sessions'"
+    }
+  ],
+  "latest_capture_success": {
+    "id": 42229,
+    "started_at": "2026-09-09 10:34:00.117850",
+    "details_json": {
+      "status": "success",
+      "state": "advanced",
+      "unavailable_reason": null,
+      "trade_date": "2026-09-09",
+      "requested_trade_date": "2026-09-09",
+      "source_signal_run_id": 173,
+      "source_id": 14,
+      "manifest_hash": "2c4cc9cc0fd2d6ca7ae104f6417a31aa2b60b8357d6a93295d0535e965ec13fb",
+      "checkpoint": {
+        "schema_version": "etf_point_in_time_research_loop_v1",
+        "replay_run_key": "production-pit:ef853547e57170dced9578d998fa5695952b70c47a3e1c189f955f47daec6fd5:94adc8eb16f63ea63d46f42830eee368bf9c0781b9c39298e0aeca556ffff7e6",
+        "manifest_hash": "2c4cc9cc0fd2d6ca7ae104f6417a31aa2b60b8357d6a93295d0535e965ec13fb",
+        "code_version": "production_pit_capture_v1",
+        "phase": "stage_a",
+        "status": "partial",
+        "generation": 1,
+        "page_size": 10,
+        "processed_count": 1,
+        "coverage": {
+          "production_target_date": {
+            "rate": 0.955204,
+            "numerator": null,
+            "denominator": null
+          },
+          "production_warmup": {
+            "rate": 0.945982,
+            "numerator": null,
+            "denominator": null
+          }
+        },
+        "exclusions": {},
+        "peak_rss_bytes": 0,
+        "stop_reason": null,
+        "result_hash": "8ef966a6c2d2cb23f250002999eb3895a2528ed79fdb5841d7a4295253cd4ab2",
+        "research_only": true,
+        "production_mutation_allowed": false,
+        "ranking_ready": true,
+        "research_ready": false,
+        "readiness": {
+          "ranking_ready": true,
+          "research_ready": false,
+          "factual_pit_session_count": 1,
+          "non_overlapping_primary_date_count": 0,
+          "completed_walk_forward_fold_count": 0,
+          "pending_window_count": 0,
+          "pending_phase_blockers": [],
+          "exclusion_blockers": [],
+          "promotion_state": "insufficient_data",
+          "promotion_blockers": [
+            "eligible_point_in_time_sessions",
+            "independent_primary_dates",
+            "walk_forward_folds",
+            "adjusted_primary_interval",
+            "holdout_not_consumed"
+          ],
+          "production_weights_frozen": true,
+          "research_only": true,
+          "production_mutation_allowed": false
+        }
+      },
+      "provider_health_hash": "fcb589571dcc8620a2c5326bd4f5104c8c883ed24cc5d80554726308e59283ce",
+      "replay_visibility_cutoff": "2026-09-09T18:32:12.566009",
+      "captured_source_id": 14,
+      "artifact_path": "/app/data/etf-pit-artifacts/production-pit-research.sqlite3",
+      "research_only": true,
+      "production_mutation_allowed": false
+    }
+  },
+  "latest_taxonomy_job": {
+    "id": 43032,
+    "job_name": "etf_taxonomy_fact_ingestion",
+    "status": "success",
+    "started_at": "2026-09-10 08:06:00.001409",
+    "finished_at": "2026-09-10 08:06:00.046514",
+    "details_json": {
+      "status": "partial",
+      "stop_reason": null,
+      "selected_count": 20,
+      "cursor_before": "159562",
+      "cursor_after": "159588",
+      "has_more": true,
+      "elapsed_seconds": 0.028813,
+      "taxonomy_facts_inserted": 0,
+      "taxonomy_facts_existing": 20,
+      "error_summary": null
+    }
+  }
+}

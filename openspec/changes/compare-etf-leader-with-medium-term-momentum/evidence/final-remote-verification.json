@@ -1,0 +1,45 @@
+{
+  "status": "completed",
+  "code_matches_final_accepted_version": true,
+  "raw_sha256": "09454b29ab7fdc0e85509c621c9e5b6a02dedc41431a12530acb5db2d61c5036",
+  "preflight_elapsed_seconds": 31.90382127399998,
+  "result_hash": "bce6314f7cc43dc9a2baa82eff2085b3c9a547274d520ebe65d686fe28006331",
+  "artifact_store": {
+    "artifact_count": 5,
+    "path": "/app/data/etf-pit-artifacts/production-pit-research.sqlite3",
+    "phase": "route-comparison-result",
+    "phase_digest": "74d1268a4a9b5e29141cc8d145a94b82999e3b342a68dfa6924a8fbdc3b106fc",
+    "research_only": true,
+    "run_id": "etf-strategy-route-comparison-20260910-acceptance"
+  },
+  "routes": [
+    {
+      "id": "v2_breakout",
+      "status": "unavailable",
+      "reason": "v2_state_evidence_missing"
+    },
+    {
+      "id": "medium_term_momentum_126",
+      "status": "unavailable",
+      "reason": "insufficient_common_nonclone_universe"
+    },
+    {
+      "id": "daily_core_hysteresis",
+      "status": "unavailable",
+      "reason": "daily_core_targets_missing"
+    }
+  ],
+  "recovery": {
+    "instance_id": "lhins-rut7ynl8",
+    "normal_reboot_requested_at_approx": "2026-09-10 15:31 Asia/Shanghai",
+    "health_before_comparison": "app=ok, db=ok, HTTP 200",
+    "health_after_comparison": "app=ok, db=ok, HTTP 200",
+    "containers": [
+      "deploy-nginx-1",
+      "deploy-backend-1",
+      "deploy-postgres-1"
+    ],
+    "deployed_baseline_source_match": true,
+    "production_code_deployed": false
+  }
+}
