@@ -1,0 +1,10 @@
+{
+  "deployment_run": 34483289194,
+  "url": "https://github.com/jierqiu1204-star/fund-scope/actions/runs/34483289194",
+  "status": "completed",
+  "conclusion": "success",
+  "head_sha": "0e6049e22c1a7a64ee95a850d325820da351c511",
+  "completed_at_utc": "2026-09-10T13:42:47Z",
+  "code_hashes_match": true,
+  "verified_at_utc": "2026-09-10T13:45:09.614388+00:00"
+}

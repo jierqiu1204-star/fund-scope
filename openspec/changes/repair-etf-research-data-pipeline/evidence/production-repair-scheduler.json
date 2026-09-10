@@ -1,0 +1,26 @@
+{
+  "mode": "scheduler",
+  "exit_code": 0,
+  "result": {
+    "status": "partial",
+    "job_status": "partial",
+    "selected_count": 6,
+    "cursor_before": "159100",
+    "cursor_after": "159107",
+    "underlying_facts_inserted": 5,
+    "provider_failure_count": 1,
+    "provider_failures": [
+      {
+        "etf_code": "159107",
+        "reason": "provider_request_failed:HTTPStatusError"
+      }
+    ],
+    "persisted_job": {
+      "id": 43617,
+      "status": "partial",
+      "error_message": null,
+      "has_details": true
+    },
+    "coverage_json_serializable": true
+  }
+}
