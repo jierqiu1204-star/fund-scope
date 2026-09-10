@@ -1,0 +1,7 @@
+{
+  "app/services/market_data.py": "e4b437c5c39fee8e9c9ad6bb4f57f8bcafc232da4cb1687135e1c158d4e9ca2e",
+  "app/services/short_etf/bounded_history_sync.py": "06fc5b50dff4e92905a1a7dfc1a9f191b7c8ccb6dceeb9e291a84cb1a3ae98c7",
+  "app/services/short_research/jobs.py": "6d3358e2aba06aa469b55907c39f1bd5db05852168034f9288c766b8d1a99cbf",
+  "app/services/short_research/etf_tracked_underlying.py": "b14df6368e3c00632ea3b9386f4295b28ce6d3f2d9e738ac18acf12d7b5998b5",
+  "app/services/workflows/etf_research_history_sync.py": "6cce23f0918bea37ebc8b71f4b94b07777901ca4c84e1a774a5dfd53ef3961f3"
+}

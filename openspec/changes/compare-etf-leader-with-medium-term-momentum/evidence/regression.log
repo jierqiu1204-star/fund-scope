@@ -1,0 +1,357 @@
+.....................................................................F.. [ 64%]
+.............F.F.......................                                  [100%]
+=================================== FAILURES ===================================
+_ test_research_replay_cannot_write_production_decision_or_notification_state __
+
+app = <fastapi.applications.FastAPI object at 0x1173b9a90>
+tmp_path = PosixPath('/Users/churchill/Projects/fund-scope/worktree-0811/.test-tmp/133c85b425294b318b7d5d7854c38df6')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1173de5d0>
+
+    @pytest.mark.asyncio
+    async def test_research_replay_cannot_write_production_decision_or_notification_state(
+        app,
+        tmp_path,
+        monkeypatch,
+    ) -> None:
+        forbidden_tables = (
+            "short_research_signal_runs",
+            "short_research_signal_items",
+            "etf_observation_portfolio_snapshots",
+            "etf_observation_portfolio_items",
+            "etf_optimized_allocation_snapshots",
+            "etf_optimized_allocation_items",
+            "tracked_positions",
+            "tracked_position_alerts",
+            "tracked_position_alert_audits",
+            "tracked_position_action_decisions",
+            "tracked_position_action_executions",
+            "tracked_position_action_transition_receipts",
+            "tracked_position_lifecycle_shadow_evidence",
+            "tracked_position_notification_envelopes",
+            "tracked_position_notification_items",
+            "notification_log",
+        )
+        writes: list[str] = []
+        smtp_calls: list[str] = []
+
+        def capture_statement(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+            normalized = " ".join(str(statement).lower().split())
+            if normalized.startswith(("insert ", "update ", "delete ")) and any(
+                table in normalized for table in forbidden_tables
+            ):
+                writes.append(normalized)
+
+        def reject_smtp(*_args, **_kwargs):
+            smtp_calls.append("called")
+            raise AssertionError("research replay must not open SMTP connections")
+
+        monkeypatch.setattr(smtplib, "SMTP", reject_smtp)
+        monkeypatch.setattr(smtplib, "SMTP_SSL", reject_smtp)
+
+        async with app.state.db.session() as session:
+            session.add(_etf("510900"))
+            session.add(_membership("510900"))
+            session.add_all(_adjusted_history("510900"))
+            await session.commit()
+
+            sync_engine = session.sync_session.bind
+            assert sync_engine is not None
+            event.listen(sync_engine, "before_cursor_execute", capture_statement)
+            try:
+                def digest(label: str) -> str:
+                    return hashlib.sha256(label.encode()).hexdigest()
+
+                stage_a_contract = StageAReplayContract(
+                    replay_run_key="no-production-side-effects",
+                    score_manifest_hash=daily_reconstructable_manifest().manifest_hash,
+                    source_snapshot_hash=digest("source-registry"),
+                    universe_manifest_hash=digest("universe-registry"),
+                    decision_cutoff_semantics="asia_shanghai_post_close_v1",
+                    schema_version=STAGE_A_SCHEMA_VERSION,
+                    candidate_registry_hash=digest("candidate-registry"),
+                )
+                store = ReplayArtifactStore(tmp_path / "replay-artifacts.sqlite3")
+>               stage_a = await run_stage_a_loader_job(
+                    session=session,
+                    store=store,
+                    contract=stage_a_contract,
+                    request=StageABatchRequest(
+                        max_source_rows=61,
+                        max_items=1,
+                        max_pages=1,
+                        max_seconds=10.0,
+                        worker_count=1,
+                        peak_rss_limit_bytes=256 * 1024**2,
+                    ),
+                    replay_dates=(T,),
+                    decision_cutoffs=((T, CUTOFF),),
+                    max_codes_per_page=1,
+                    peak_rss_reader=lambda: 1024,
+                )
+
+tests/test_etf_pit_replay_input_loader.py:265:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    async def run_stage_a_loader_job(
+        *,
+        session: AsyncSession,
+        store: ReplayArtifactStore,
+        contract: StageAReplayContract,
+        request: StageABatchRequest,
+        replay_dates: tuple[date, ...],
+        decision_cutoffs: tuple[tuple[date, datetime], ...],
+        max_codes_per_page: int = MAX_CODES_PER_REPLAY_INPUT_PAGE,
+        loader: Callable[..., Awaitable[PointInTimeRankingInputSnapshot]] = (
+            load_point_in_time_etf_decision_inputs
+        ),
+        peak_rss_reader: Callable[[], int] = _default_peak_rss_reader,
+    ) -> StageAContinuationProgress:
+        """Load at most one non-empty indexed code page, then commit one Stage-A batch."""
+
+        started = time.monotonic()
+        deadline = started + request.max_seconds
+        check_rss = _rss_guard(request=request, peak_rss_reader=peak_rss_reader)
+        check_rss()
+        if (
+            not replay_dates
+            or replay_dates != tuple(sorted(set(replay_dates)))
+            or len(decision_cutoffs) != len(replay_dates)
+            or tuple(item[0] for item in decision_cutoffs) != replay_dates
+        ):
+            raise StageABoundedWorkError(
+                "replay_dates and decision_cutoffs must be sorted, unique and complete"
+            )
+        if not 1 <= max_codes_per_page <= MAX_CODES_PER_REPLAY_INPUT_PAGE:
+            raise StageABoundedWorkError(
+                f"max_codes_per_page must be within (0, {MAX_CODES_PER_REPLAY_INPUT_PAGE}]"
+            )
+        effective_max_codes = min(
+            max_codes_per_page,
+            request.max_items,
+            request.max_source_rows // REQUIRED_BAR_COUNT,
+        )
+        if effective_max_codes < 1:
+            raise StageABoundedWorkError("bounded request cannot fit one feature input")
+        cutoff_by_date = dict(decision_cutoffs)
+        checkpoint = load_stage_a_checkpoint(store=store, contract=contract)
+        if checkpoint is not None and checkpoint.active_replay_date is not None:
+            if (
+                cutoff_by_date.get(checkpoint.active_replay_date)
+                != checkpoint.active_decision_cutoff
+            ):
+                raise NewStageAReplayIdentityRequiredError(
+                    "active replay cutoff changed; a new replay identity is required"
+                )
+        if checkpoint is not None and checkpoint.status in {"blocked", "complete"}:
+            return _progress_from_checkpoint(
+                checkpoint,
+                started=started,
+                peak_rss=check_rss(),
+            )
+
+        if checkpoint is None:
+            date_index = 0
+            code_after: str | None = None
+        else:
+            resume_date = checkpoint.resume_date or checkpoint.last_completed_date
+            try:
+                date_index = replay_dates.index(resume_date)
+            except ValueError as exc:
+                raise NewStageAReplayIdentityRequiredError(
+                    "checkpoint date is absent; a new replay identity is required"
+                ) from exc
+            code_after = (
+                checkpoint.resume_code_after
+                if checkpoint.resume_date is not None
+                else checkpoint.last_completed_code
+            )
+
+        if date_index >= len(replay_dates):
+            raise NewStageAReplayIdentityRequiredError(
+                "checkpoint cursor exceeds replay dates; a new replay identity is required"
+            )
+        remaining = deadline - time.monotonic()
+        commit_reserve = min(_STAGE_A_COMMIT_RESERVE_SECONDS, remaining / 2)
+        loader_budget = remaining - commit_reserve
+        if loader_budget <= 0:
+            raise StageABoundedWorkError("Stage-A loader job has no bounded query budget")
+        replay_date = replay_dates[date_index]
+        try:
+            async with asyncio.timeout(loader_budget):
+>               snapshot = await loader(
+                    session,
+                    replay_date=replay_date,
+                    decision_cutoff=cutoff_by_date[replay_date],
+                    max_source_rows=request.max_source_rows,
+                    code_after=code_after,
+                    max_codes=effective_max_codes,
+                )
+E               TypeError: load_point_in_time_etf_decision_inputs() missing 1 required keyword-only argument: 'required_history_sessions'
+
+app/services/strategy_lab/etf_ranking_stage_a.py:1341: TypeError
+---------------------------- Captured stderr setup -----------------------------
+2026-09-10 15:08:12,964 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,964 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,964 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,964 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,964 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,964 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,964 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,965 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,965 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,965 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,965 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,965 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,965 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,965 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,965 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,965 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,965 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,965 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,966 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,966 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,966 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,966 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,966 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,966 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,966 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,966 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,966 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,966 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,967 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,967 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,967 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,967 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 15:08:12,967 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+_________ test_replay_outputs_and_checkpoint_commit_in_one_transaction _________
+
+tmp_path = PosixPath('/Users/churchill/Projects/fund-scope/worktree-0811/.test-tmp/eb3a95a3f05d4e18a23f3949482a2f0c')
+
+    def test_replay_outputs_and_checkpoint_commit_in_one_transaction(tmp_path) -> None:
+        store = ReplayArtifactStore(tmp_path / "artifacts.sqlite3")
+        ranking, event, equity = _outputs()
+
+        store.commit_replay_batch(
+            rankings=(ranking,),
+            events=(event,),
+            equity_curve=(equity,),
+            checkpoint=_checkpoint(1),
+            expected_generation=0,
+            max_rankings=1,
+            max_events=1,
+            max_equity_rows=1,
+        )
+
+>       assert store.artifact_counts("run-store") == {
+            "policies": 0,
+            "features": 0,
+            "manifests": 0,
+            "rankings": 1,
+            "events": 1,
+            "equity": 1,
+            "checkpoints": 1,
+        }
+E       AssertionError: assert {'checkpoints...ures': 0, ...} == {'checkpoints...ures': 0, ...}
+E
+E         Omitting 7 identical items, use -vv to show
+E         Left contains 1 more item:
+E         {'research': 0}
+E         Use -v to get more diff
+
+tests/test_etf_action_replay_artifact_store.py:208: AssertionError
+_________ test_sql_failure_rolls_back_outputs_and_checkpoint_together __________
+
+tmp_path = PosixPath('/Users/churchill/Projects/fund-scope/worktree-0811/.test-tmp/a3cb9a26da9d4330a4ab4ddbe4d3f168')
+
+    def test_sql_failure_rolls_back_outputs_and_checkpoint_together(tmp_path) -> None:
+        path = tmp_path / "artifacts.sqlite3"
+        store = ReplayArtifactStore(path)
+        with sqlite3.connect(path) as connection:
+            connection.execute(
+                """
+                CREATE TRIGGER reject_equity BEFORE INSERT ON replay_equity
+                BEGIN
+                    SELECT RAISE(ABORT, 'synthetic crash');
+                END
+                """
+            )
+        ranking, event, equity = _outputs()
+
+        with pytest.raises(sqlite3.IntegrityError, match="synthetic crash"):
+            store.commit_replay_batch(
+                rankings=(ranking,),
+                events=(event,),
+                equity_curve=(equity,),
+                checkpoint=_checkpoint(1),
+                expected_generation=0,
+                max_rankings=1,
+                max_events=1,
+                max_equity_rows=1,
+            )
+
+>       assert store.artifact_counts("run-store") == {
+            "policies": 0,
+            "features": 0,
+            "manifests": 0,
+            "rankings": 0,
+            "events": 0,
+            "equity": 0,
+            "checkpoints": 0,
+        }
+E       AssertionError: assert {'checkpoints...ures': 0, ...} == {'checkpoints...ures': 0, ...}
+E
+E         Omitting 7 identical items, use -vv to show
+E         Left contains 1 more item:
+E         {'research': 0}
+E         Use -v to get more diff
+
+tests/test_etf_action_replay_artifact_store.py:288: AssertionError
+=============================== warnings summary ===============================
+tests/test_dual_universe_leader_tactics_v2_lifecycle_storage.py::test_checkpoint_lease_is_database_cas_and_save_cannot_clobber_owner
+tests/test_dual_universe_leader_tactics_v2_lifecycle_storage.py::test_checkpoint_lease_is_database_cas_and_save_cannot_clobber_owner
+tests/test_dual_universe_leader_tactics_v2_lifecycle_storage.py::test_checkpoint_lease_is_database_cas_and_save_cannot_clobber_owner
+tests/test_dual_universe_leader_tactics_v2_lifecycle_storage.py::test_incremental_checkpoint_writes_only_changed_items
+  /Users/churchill/Projects/fund-scope/worktree-0811/backend/app/services/strategy_lab/dual_universe_leader_tactics_v2_lifecycle_storage.py:211: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    effective_now = now or datetime.utcnow()
+
+tests/test_dual_universe_leader_tactics_v2_lifecycle_storage.py: 42 warnings
+  /Users/churchill/Projects/fund-scope/worktree-0811/backend/.venv/lib/python3.13/site-packages/aiosqlite/core.py:63: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    result = function()
+
+tests/test_dual_universe_leader_tactics_v2_lifecycle_storage.py::test_checkpoint_lease_is_database_cas_and_save_cannot_clobber_owner
+  /Users/churchill/Projects/fund-scope/worktree-0811/backend/tests/test_dual_universe_leader_tactics_v2_lifecycle_storage.py:94: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    lease_expires_at=datetime.utcnow(),
+
+tests/test_dual_universe_leader_tactics_v2_lifecycle_storage.py::test_checkpoint_lease_is_database_cas_and_save_cannot_clobber_owner
+tests/test_dual_universe_leader_tactics_v2_lifecycle_storage.py::test_checkpoint_lease_is_database_cas_and_save_cannot_clobber_owner
+tests/test_dual_universe_leader_tactics_v2_lifecycle_storage.py::test_incremental_checkpoint_writes_only_changed_items
+tests/test_dual_universe_leader_tactics_v2_lifecycle_storage.py::test_incremental_checkpoint_writes_only_changed_items
+  /Users/churchill/Projects/fund-scope/worktree-0811/backend/app/services/strategy_lab/dual_universe_leader_tactics_v2_lifecycle_storage.py:545: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_dual_universe_leader_tactics_v2_lifecycle_storage.py::test_checkpoint_lease_is_database_cas_and_save_cannot_clobber_owner
+  /Users/churchill/Projects/fund-scope/worktree-0811/backend/app/services/strategy_lab/dual_universe_leader_tactics_v2_lifecycle_storage.py:330: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "updated_at": datetime.utcnow(),
+
+tests/test_dual_universe_leader_tactics_v2_lifecycle_storage.py::test_lifecycle_transitions_are_idempotent_and_caller_transaction_owned
+tests/test_dual_universe_leader_tactics_v2_lifecycle_storage.py::test_lifecycle_transitions_are_idempotent_and_caller_transaction_owned
+tests/test_dual_universe_leader_tactics_v2_lifecycle_storage.py::test_lifecycle_transitions_are_idempotent_and_caller_transaction_owned
+tests/test_dual_universe_leader_tactics_v2_lifecycle_storage.py::test_lifecycle_transitions_are_idempotent_and_caller_transaction_owned
+  /Users/churchill/Projects/fund-scope/worktree-0811/backend/app/services/strategy_lab/dual_universe_leader_tactics_v2_lifecycle_storage.py:152: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_dual_universe_leader_tactics_v2_lifecycle_storage.py: 16 warnings
+  /Users/churchill/Projects/fund-scope/worktree-0811/backend/.venv/lib/python3.13/site-packages/aiosqlite/core.py:63: DeprecationWarning: The default date adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    result = function()
+
+tests/test_etf_pit_replay_input_loader.py: 2061 warnings
+tests/test_etf_pit_continuation_review.py: 291 warnings
+  /Users/churchill/Projects/fund-scope/worktree-0811/backend/app/models/entities.py:35: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_etf_pit_replay_input_loader.py::test_research_replay_cannot_write_production_decision_or_notification_state
+FAILED tests/test_etf_action_replay_artifact_store.py::test_replay_outputs_and_checkpoint_commit_in_one_transaction
+FAILED tests/test_etf_action_replay_artifact_store.py::test_sql_failure_rolls_back_outputs_and_checkpoint_together
+3 failed, 108 passed, 2424 warnings in 3.98s

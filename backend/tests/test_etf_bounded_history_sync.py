@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 
@@ -119,6 +120,47 @@ def _research_request(
     )
 
 
+def _revision(
+    code: str,
+    trade_date: date,
+    *,
+    provider: str,
+    seen_at: datetime,
+) -> EtfAdjustedPriceRevision:
+    version = {
+        "eastmoney": "eastmoney.push2his.kline.hfq_v1",
+        "tickflow": "tickflow.free.klines.backward_v1",
+    }[provider]
+    marker = f"{code}:{trade_date.isoformat()}:{provider}"
+    revision_hash = hashlib.sha256(f"revision:{marker}".encode()).hexdigest()
+    payload_hash = hashlib.sha256(f"payload:{marker}".encode()).hexdigest()
+    return EtfAdjustedPriceRevision(
+        etf_code=code,
+        trade_date=trade_date,
+        open=1.0,
+        high=1.0,
+        low=1.0,
+        close=1.0,
+        volume=1_000_000.0,
+        turnover=100_000_000.0,
+        pct_change=0.0,
+        raw_price_basis="raw_ohlc",
+        research_adjusted_value=1.0,
+        research_price_basis="total_return_adjusted",
+        data_provider=provider,
+        provider_version=version,
+        source_timestamp=seen_at,
+        adjustment_version=version,
+        decision_eligible=True,
+        decision_ineligibility_reason=None,
+        first_seen_at=seen_at,
+        observed_at=seen_at,
+        payload_hash=payload_hash,
+        revision_hash=revision_hash,
+        created_at=seen_at,
+    )
+
+
 def test_process_rss_reader_returns_positive_value() -> None:
     assert read_process_rss_bytes() > 0
 
@@ -190,6 +232,58 @@ async def test_research_depth_preflight_requires_immutable_revisions(
         "510091": 0,
         "510094": 0,
     }
+
+
+@pytest.mark.asyncio
+async def test_research_depth_does_not_count_non_overlapping_providers_as_one_history(
+    app,
+) -> None:
+    code = "510093"
+    request = _research_request(eligible_codes=(code,), required_sessions=3)
+    eastmoney_seen = datetime(2026, 7, 3, 6, 0)
+    tickflow_seen = datetime(2026, 7, 3, 8, 0)
+
+    async with app.state.db.session() as session:
+        session.add(_etf(code))
+        session.add_all(
+            [
+                _revision(
+                    code,
+                    request.required_trade_dates[index],
+                    provider="eastmoney",
+                    seen_at=eastmoney_seen,
+                )
+                for index in (0, 1)
+            ]
+            + [
+                _revision(
+                    code,
+                    request.required_trade_dates[2],
+                    provider="tickflow",
+                    seen_at=tickflow_seen,
+                )
+            ]
+        )
+        await session.commit()
+
+        depths = await bounded_history_sync._eligible_depths(
+            session,
+            request=request,
+        )
+        missing = await bounded_history_sync._missing_required_trade_dates(
+            session,
+            code=code,
+            request=request,
+        )
+        complete = await bounded_history_sync._depth_is_complete(
+            session,
+            code=code,
+            request=request,
+        )
+
+    assert depths == {code: 2}
+    assert missing == (request.required_trade_dates[2],)
+    assert complete is False
 
 
 @pytest.mark.asyncio
@@ -284,7 +378,7 @@ async def test_projection_migration_fills_the_bounded_required_window(app) -> No
 
 
 @pytest.mark.asyncio
-async def test_research_depth_fetches_only_the_missing_required_span(app) -> None:
+async def test_research_depth_fetches_full_source_span_with_gap_minimum(app) -> None:
     code = "510095"
     calls: list[tuple[date, date, int, tuple[date, ...]]] = []
 
@@ -356,13 +450,89 @@ async def test_research_depth_fetches_only_the_missing_required_span(app) -> Non
             select(func.count()).select_from(EtfAdjustedPriceRevision)
         )
 
-    assert calls == [(date(2026, 7, 1), date(2026, 7, 1), 1, (date(2026, 7, 1),))]
+    assert calls == [(date(2026, 7, 1), date(2026, 7, 3), 1, (date(2026, 7, 1),))]
     assert result.status == "complete"
     assert result.completed_codes == (code,)
     assert result.fetched_rows == 3
     assert result.excluded_rows == 2
     assert row_count == 3
     assert revision_count == 3
+
+
+@pytest.mark.asyncio
+async def test_research_depth_persists_full_new_provider_window(app) -> None:
+    code = "510094"
+    required_dates = tuple(date(2026, 7, 1) + timedelta(days=index) for index in range(3))
+
+    class FullWindowFetcher:
+        async def fetch_with_minimum(
+            self,
+            _code: str,
+            _from: date,
+            _to: date,
+            *,
+            minimum_eligible_rows: int,
+            required_trade_dates: tuple[date, ...],
+        ) -> ProviderFetchResult:
+            assert minimum_eligible_rows == 1
+            assert required_trade_dates == (required_dates[0],)
+            return ProviderFetchResult(
+                rows=_rows(required_dates[0], len(required_dates)),
+                provider="eastmoney",
+                fallback_used=False,
+            )
+
+        async def __call__(self, _code: str, _from: date, _to: date) -> ProviderFetchResult:
+            raise AssertionError("research sync must use fetch_with_minimum")
+
+    async with app.state.db.session() as session:
+        session.add(_etf(code))
+        session.add_all(
+            EtfPriceHistory(
+                etf_code=code,
+                trade_date=trade_date,
+                open=1.0,
+                high=1.0,
+                low=1.0,
+                close=1.0,
+                volume=1_000_000.0,
+                turnover=100_000_000.0,
+                pct_change=0.0,
+                research_adjusted_value=1.0,
+                research_price_basis="total_return_adjusted",
+                data_provider="tickflow",
+                provider_version="tickflow.free.klines.backward_v1",
+                source_timestamp=datetime(2026, 7, 3, 15, 0),
+                adjustment_version="tickflow.free.klines.backward_v1",
+                decision_eligible=True,
+            )
+            for trade_date in required_dates[1:]
+        )
+        await session.commit()
+        request = replace(
+            _research_request(eligible_codes=(code,)),
+            required_trade_dates=required_dates,
+            from_date=required_dates[0],
+            to_date=required_dates[-1],
+        )
+        result = await run_bounded_history_sync_slice(
+            session,
+            request=request,
+            fetcher=FullWindowFetcher(),
+            rss_reader=lambda: 32 * 1024 * 1024,
+        )
+        rows = (
+            await session.scalars(
+                select(EtfPriceHistory)
+                .where(EtfPriceHistory.etf_code == code)
+                .order_by(EtfPriceHistory.trade_date.asc())
+            )
+        ).all()
+
+    assert result.status == "complete"
+    assert result.completed_codes == (code,)
+    assert [row.trade_date for row in rows] == list(required_dates)
+    assert {row.data_provider for row in rows} == {"eastmoney"}
 
 
 def test_research_rotation_never_moves_a_shallower_bucket_ahead() -> None:

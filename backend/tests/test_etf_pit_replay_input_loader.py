@@ -470,7 +470,7 @@ async def test_loader_reports_stable_adjustment_and_eligibility_exclusions(app) 
         for item in snapshot.exclusions
     } == {
         "510101": ReplayInputExclusionReason.STALE_OR_INELIGIBLE_ADJUSTED_INPUT,
-        "510102": ReplayInputExclusionReason.STALE_OR_INELIGIBLE_ADJUSTED_INPUT,
+        "510102": ReplayInputExclusionReason.UNPROVEN_ADJUSTMENT_POINT_IN_TIME,
         "510103": ReplayInputExclusionReason.STALE_OR_INELIGIBLE_ADJUSTED_INPUT,
         "510104": ReplayInputExclusionReason.STALE_OR_INELIGIBLE_ADJUSTED_INPUT,
         "510105": ReplayInputExclusionReason.STALE_OR_INELIGIBLE_ADJUSTED_INPUT,

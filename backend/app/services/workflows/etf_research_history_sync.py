@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -30,6 +31,7 @@ from app.services.short_research.coverage_policy import (
 from app.services.short_research.history_readiness import (
     DEEP_TELEMETRY_DEPTH_SCOPE,
     DEEP_TELEMETRY_DEPTH_SESSIONS,
+    TELEMETRY_DEPTH_SESSIONS,
     history_depth_scope,
 )
 from app.services.short_research.ranking_contract import canonical_hash
@@ -45,6 +47,20 @@ RESEARCH_PROFILE_MIN_CODES = 5
 RESEARCH_PROFILE_INITIAL_CODES = 10
 RESEARCH_PROFILE_MAX_CODES = 20
 COMPACT_SAMPLE_LIMIT = 20
+RESEARCH_WORKFLOW_TIMEOUT_SECONDS = 55.0
+INPUT_REPAIR_REQUIRED_HISTORY_SESSIONS = TELEMETRY_DEPTH_SESSIONS
+INPUT_REPAIR_SCOPE = "history_depth_input_repair_180"
+INPUT_REPAIR_CONTRACT_HASH = canonical_hash(
+    {
+        "schema_version": "etf_history_input_repair_v1",
+        "mode": "input_repair",
+        "required_sessions": INPUT_REPAIR_REQUIRED_HISTORY_SESSIONS,
+        "selection_policy": RESEARCH_DEPTH_SELECTION_POLICY,
+        "price_basis": "total_return_adjusted",
+        "adjustment_contract": RESEARCH_ADJUSTMENT_CONTRACT,
+        "provider_policy_version": PUBLICATION_PROVIDER_POLICY_VERSION,
+    }
+)
 _PRESSURE_STOP_REASONS = {
     "admission_deadline",
     "process_deadline",
@@ -295,10 +311,32 @@ def _restored_provider_health(
     return providers if isinstance(providers, Mapping) else None
 
 
-async def run_post_publication_etf_research_history_slice(
+def _observed_input_repair_dates(
+    readiness: Mapping[str, Any],
+) -> tuple[date, ...]:
+    observed_calendar = readiness.get("observed_session_calendar")
+    values = (
+        observed_calendar.get("dates")
+        if isinstance(observed_calendar, Mapping)
+        else None
+    )
+    if not isinstance(values, list):
+        return ()
+    try:
+        dates = tuple(date.fromisoformat(str(value)) for value in values)
+    except ValueError:
+        return ()
+    if dates != tuple(sorted(set(dates))):
+        return ()
+    return dates
+
+
+async def _run_post_publication_etf_research_history_slice(
     session: AsyncSession,
     *,
     target_date: date | None = None,
+    input_repair: bool = False,
+    input_repair_codes: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     requested_date = target_date or datetime.now(ASIA_SHANGHAI).date()
     effective_date = _latest_completed_etf_session(requested_date)
@@ -306,14 +344,24 @@ async def run_post_publication_etf_research_history_slice(
         return {
             "asset_type": ASSET_TYPE_ETF,
             "status": "skipped",
+            "job_status": "skipped",
             "reason": "completed_etf_session_unavailable",
             "target_date": requested_date.isoformat(),
+        }
+    if input_repair_codes is not None and not input_repair:
+        return {
+            "asset_type": ASSET_TYPE_ETF,
+            "status": "skipped",
+            "job_status": "skipped",
+            "reason": "input_repair_codes_require_input_repair",
+            "target_date": effective_date.isoformat(),
         }
     active_lease = await _active_history_lease(session)
     if active_lease is not None:
         return {
             "asset_type": ASSET_TYPE_ETF,
             "status": "skipped",
+            "job_status": "skipped",
             "reason": "overlapping_history_worker_lease",
             "target_date": effective_date.isoformat(),
         }
@@ -339,59 +387,184 @@ async def run_post_publication_etf_research_history_slice(
         warmup_coverage_ratio=float(warmup.get("coverage_ratio") or 0.0),
     )
     if not readiness_policy.complete_publication_allowed:
-        return {
+        result = {
             "asset_type": ASSET_TYPE_ETF,
             "status": "skipped",
+            "job_status": "skipped",
             "reason": "publication_priority_active",
             "target_date": effective_date.isoformat(),
             "publication_gates": compact_gates,
             "readiness_policy": readiness_policy.to_dict(),
         }
+        if input_repair:
+            result["input_repair"] = {
+                "mode": "input_repair",
+                "formal_research_ready": False,
+            }
+        return result
 
-    contract_lane = readiness.get("contract_depth") or {}
-    if not _lane_completion_gate_passed(contract_lane):
-        selected_lane = contract_lane
-        scope = history_depth_scope(str(readiness["contract_hash"]))
-        contract_hash = current_etf_history_contract_hash(
-            horizons=DEFAULT_HISTORY_HORIZONS
-        )
+    universe = readiness.get("universe") or {}
+    universe_codes = tuple(
+        sorted({str(code).strip() for code in universe.get("codes") or () if str(code).strip()})
+    )
+    universe_snapshot_hash = str(universe.get("snapshot_hash") or "")
+    universe_hash = universe_snapshot_hash
+    input_repair_observed_session_count: int | None = None
+
+    if input_repair:
+        observed_input_repair_dates = _observed_input_repair_dates(readiness)
+        input_repair_observed_session_count = len(observed_input_repair_dates)
+        if (
+            input_repair_observed_session_count
+            < INPUT_REPAIR_REQUIRED_HISTORY_SESSIONS
+        ):
+            return {
+                "asset_type": ASSET_TYPE_ETF,
+                "status": "skipped",
+                "job_status": "skipped",
+                "reason": "input_repair_observed_session_calendar_incomplete",
+                "target_date": effective_date.isoformat(),
+                "publication_gates": compact_gates,
+                "input_repair": {
+                    "mode": "input_repair",
+                    "formal_research_ready": False,
+                    "required_sessions": INPUT_REPAIR_REQUIRED_HISTORY_SESSIONS,
+                    "observed_session_count": input_repair_observed_session_count,
+                },
+            }
+        required_trade_dates = observed_input_repair_dates[
+            -INPUT_REPAIR_REQUIRED_HISTORY_SESSIONS:
+        ]
+        selected_lane = {
+            "scope": INPUT_REPAIR_SCOPE,
+            "required_sessions": INPUT_REPAIR_REQUIRED_HISTORY_SESSIONS,
+            "authoritative": False,
+            "required_trade_dates": [
+                item.isoformat() for item in required_trade_dates
+            ],
+            "cohort_codes": list(universe_codes),
+            "cohort_hash": None,
+            "denominator_kind": "point_in_time_universe_input_repair",
+            "expected_count": len(universe_codes),
+            "full_universe_count": len(universe_codes),
+            "session_calendar_hash": canonical_hash(
+                [item.isoformat() for item in required_trade_dates]
+            ),
+            "coverage_ratio": 0.0,
+            "completion_gate_passed": None,
+            "completion_blockers": ["input_repair_not_formal_research_ready"],
+        }
+        scope = INPUT_REPAIR_SCOPE
+        contract_hash = INPUT_REPAIR_CONTRACT_HASH
+        required_sessions = INPUT_REPAIR_REQUIRED_HISTORY_SESSIONS
     else:
-        selected_lane = readiness.get("telemetry_depth_500") or {}
-        scope = DEEP_TELEMETRY_DEPTH_SCOPE
-        contract_hash = _deep_telemetry_contract_hash()
+        contract_lane = readiness.get("contract_depth") or {}
+        if not _lane_completion_gate_passed(contract_lane):
+            selected_lane = contract_lane
+            scope = history_depth_scope(str(readiness["contract_hash"]))
+            contract_hash = current_etf_history_contract_hash(
+                horizons=DEFAULT_HISTORY_HORIZONS
+            )
+        else:
+            selected_lane = readiness.get("telemetry_depth_500") or {}
+            scope = DEEP_TELEMETRY_DEPTH_SCOPE
+            contract_hash = _deep_telemetry_contract_hash()
 
-    required_sessions = int(selected_lane.get("required_sessions") or 0)
-    try:
-        required_trade_dates = tuple(
-            date.fromisoformat(str(value))
-            for value in selected_lane.get("required_trade_dates") or ()
+        universe_hash = str(
+            selected_lane.get("cohort_hash") or universe_snapshot_hash
         )
-    except ValueError:
-        required_trade_dates = ()
-    if (
-        required_sessions <= 0
-        or len(required_trade_dates) != required_sessions
-        or required_trade_dates != tuple(sorted(set(required_trade_dates)))
-    ):
+
+        required_sessions = int(selected_lane.get("required_sessions") or 0)
+        try:
+            required_trade_dates = tuple(
+                date.fromisoformat(str(value))
+                for value in selected_lane.get("required_trade_dates") or ()
+            )
+        except ValueError:
+            required_trade_dates = ()
+        if (
+            required_sessions <= 0
+            or len(required_trade_dates) != required_sessions
+            or required_trade_dates != tuple(sorted(set(required_trade_dates)))
+        ):
+            return {
+                "asset_type": ASSET_TYPE_ETF,
+                "status": "skipped",
+                "job_status": "skipped",
+                "reason": "observed_session_calendar_incomplete",
+                "target_date": effective_date.isoformat(),
+                "publication_gates": compact_gates,
+                "lane": _compact_lane(selected_lane),
+            }
+
+    requested_codes = (
+        tuple(
+            sorted(
+                {
+                    str(code).strip()
+                    for code in input_repair_codes
+                    if str(code).strip()
+                }
+            )
+        )
+        if input_repair_codes is not None
+        else None
+    )
+    if requested_codes is not None and len(requested_codes) > 5:
         return {
             "asset_type": ASSET_TYPE_ETF,
             "status": "skipped",
-            "reason": "observed_session_calendar_incomplete",
+            "job_status": "skipped",
+            "reason": "input_repair_code_limit_exceeded",
             "target_date": effective_date.isoformat(),
             "publication_gates": compact_gates,
-            "lane": _compact_lane(selected_lane),
+            "input_repair": {
+                "mode": "input_repair",
+                "formal_research_ready": False,
+                "requested_codes": list(requested_codes),
+                "selected_codes": [],
+                "maximum_codes": 5,
+            },
         }
+    ignored_codes: tuple[str, ...] = ()
+    if requested_codes is not None:
+        codes = tuple(code for code in requested_codes if code in universe_codes)
+        ignored_codes = tuple(code for code in requested_codes if code not in universe_codes)
+        if not codes:
+            return {
+                "asset_type": ASSET_TYPE_ETF,
+                "status": "skipped",
+                "job_status": "skipped",
+                "reason": "input_repair_codes_not_in_point_in_time_universe",
+                "target_date": effective_date.isoformat(),
+                "publication_gates": compact_gates,
+                "input_repair": {
+                    "mode": "input_repair",
+                    "formal_research_ready": False,
+                    "requested_codes": list(requested_codes),
+                    "selected_codes": [],
+                    "ignored_codes": list(ignored_codes),
+                },
+            }
+    elif input_repair:
+        codes = universe_codes
+    else:
+        cohort_values = selected_lane.get("cohort_codes")
+        code_values = (
+            cohort_values if isinstance(cohort_values, list) else universe.get("codes") or ()
+        )
+        codes = tuple(sorted({str(code) for code in code_values}))
 
-    universe = readiness.get("universe") or {}
-    cohort_values = selected_lane.get("cohort_codes")
-    code_values = cohort_values if isinstance(cohort_values, list) else universe.get("codes") or ()
-    codes = tuple(sorted({str(code) for code in code_values}))
-    universe_hash = str(selected_lane.get("cohort_hash") or universe.get("snapshot_hash") or "")
     if not codes:
         return {
             "asset_type": ASSET_TYPE_ETF,
             "status": "skipped",
-            "reason": "seasoned_research_cohort_empty",
+            "job_status": "skipped",
+            "reason": (
+                "input_repair_universe_empty"
+                if input_repair
+                else "seasoned_research_cohort_empty"
+            ),
             "target_date": effective_date.isoformat(),
             "publication_gates": compact_gates,
             "lane": _compact_lane(selected_lane),
@@ -400,17 +573,19 @@ async def run_post_publication_etf_research_history_slice(
         return {
             "asset_type": ASSET_TYPE_ETF,
             "status": "skipped",
+            "job_status": "skipped",
             "reason": "point_in_time_universe_unavailable",
             "target_date": effective_date.isoformat(),
             "publication_gates": compact_gates,
         }
-    if (
+    if not input_repair and (
         selected_lane.get("listing_metadata_gate_passed") is False
         and float(selected_lane.get("coverage_ratio") or 0.0) >= ETF_RESEARCH_DEPTH_MIN_COVERAGE
     ):
         return {
             "asset_type": ASSET_TYPE_ETF,
             "status": "skipped",
+            "job_status": "skipped",
             "reason": "authoritative_listing_metadata_below_95pct",
             "target_date": effective_date.isoformat(),
             "publication_gates": compact_gates,
@@ -420,6 +595,11 @@ async def run_post_publication_etf_research_history_slice(
     recent_runs = await _recent_lane_slices(session, scope=scope)
     evidence = [dict(run.details_json or {}) for run in recent_runs]
     profile_max_codes = choose_research_depth_batch_size(evidence)
+    if requested_codes is not None:
+        profile_max_codes = max(
+            RESEARCH_PROFILE_MIN_CODES,
+            min(profile_max_codes, len(codes)),
+        )
     request = BoundedHistorySyncRequest(
         scope=scope,
         contract_hash=contract_hash,
@@ -433,8 +613,8 @@ async def run_post_publication_etf_research_history_slice(
         page_size=500,
         max_rows=5_000,
         admission_deadline_seconds=45.0,
-        worker_deadline_seconds=55.0,
-        process_deadline_seconds=60.0,
+        worker_deadline_seconds=50.0,
+        process_deadline_seconds=55.0,
         rss_limit_bytes=RESEARCH_RSS_LIMIT_BYTES,
         provider_timeout_seconds=6.0,
         selection_policy=RESEARCH_DEPTH_SELECTION_POLICY,
@@ -452,29 +632,89 @@ async def run_post_publication_etf_research_history_slice(
             request=request,
             fetcher=fetcher,
         )
-    readiness_after = await read_etf_history_readiness(
-        session,
-        target_date=effective_date,
-        horizons=DEFAULT_HISTORY_HORIZONS,
-    )
-    lane_key = (
-        "contract_depth"
-        if scope != DEEP_TELEMETRY_DEPTH_SCOPE
-        else "telemetry_depth_500"
-    )
-    return {
+    result = {
         "asset_type": ASSET_TYPE_ETF,
         "status": sync_result.status,
+        "job_status": (
+            sync_result.status
+            if sync_result.status in {"skipped", "partial", "failed"}
+            else "success"
+        ),
+        "job_message": (
+            sync_result.stop_reason if sync_result.status == "failed" else None
+        ),
         "reason": sync_result.stop_reason,
         "target_date": effective_date.isoformat(),
         "publication_gates": compact_gates,
-        "lane_before": _compact_lane(selected_lane),
-        "lane_after": _compact_lane(readiness_after.get(lane_key) or {}),
         "sync": _compact_sync_result(
             sync_result,
             profile_max_codes=profile_max_codes,
         ),
     }
+    if input_repair:
+        result["input_repair"] = {
+            "mode": "input_repair",
+            "scope": INPUT_REPAIR_SCOPE,
+            "contract_hash": INPUT_REPAIR_CONTRACT_HASH,
+            "required_sessions": INPUT_REPAIR_REQUIRED_HISTORY_SESSIONS,
+            "formal_research_ready": False,
+            "observed_session_count": input_repair_observed_session_count,
+            "requested_codes": (
+                list(requested_codes) if requested_codes is not None else None
+            ),
+            "selected_code_count": len(codes),
+            "ignored_codes": list(ignored_codes),
+            "status": sync_result.status,
+            "stop_reason": sync_result.stop_reason,
+        }
+    else:
+        readiness_after = await read_etf_history_readiness(
+            session,
+            target_date=effective_date,
+            horizons=DEFAULT_HISTORY_HORIZONS,
+        )
+        lane_key = (
+            "contract_depth"
+            if scope != DEEP_TELEMETRY_DEPTH_SCOPE
+            else "telemetry_depth_500"
+        )
+        result["lane_before"] = _compact_lane(selected_lane)
+        result["lane_after"] = _compact_lane(readiness_after.get(lane_key) or {})
+    return result
+
+
+async def run_post_publication_etf_research_history_slice(
+    session: AsyncSession,
+    *,
+    target_date: date | None = None,
+    input_repair: bool = False,
+    input_repair_codes: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    requested_date = target_date or datetime.now(ASIA_SHANGHAI).date()
+    try:
+        async with asyncio.timeout(RESEARCH_WORKFLOW_TIMEOUT_SECONDS) as timeout_scope:
+            return await _run_post_publication_etf_research_history_slice(
+                session,
+                target_date=target_date,
+                input_repair=input_repair,
+                input_repair_codes=input_repair_codes,
+            )
+    except TimeoutError:
+        if not timeout_scope.expired():
+            raise
+        await session.rollback()
+        return {
+            "asset_type": ASSET_TYPE_ETF,
+            "status": "partial",
+            "job_status": "partial",
+            "reason": "research_history_workflow_timeout",
+            "job_message": (
+                "post-publication ETF research history workflow reached its "
+                "hard timeout"
+            ),
+            "target_date": requested_date.isoformat(),
+            "timeout_seconds": RESEARCH_WORKFLOW_TIMEOUT_SECONDS,
+        }
 
 
 __all__ = [

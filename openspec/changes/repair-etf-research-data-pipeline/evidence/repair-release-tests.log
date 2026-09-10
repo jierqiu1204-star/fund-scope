@@ -1,0 +1,54 @@
+........................................................................ [ 28%]
+........................................................................ [ 57%]
+........................................................................ [ 86%]
+.................................                                        [100%]
+=============================== warnings summary ===============================
+tests/test_etf_data_pipeline_repair_acceptance.py: 1806 warnings
+tests/test_etf_adjusted_price_revisions.py: 368 warnings
+tests/test_etf_pit_replay_input_loader.py: 2061 warnings
+tests/test_etf_bounded_history_sync.py: 1923 warnings
+tests/test_etf_tracked_underlying.py: 389 warnings
+tests/test_etf_identity_facts.py: 359 warnings
+tests/test_scheduler.py: 238 warnings
+tests/test_short_research_jobs.py: 45 warnings
+tests/test_job_runner.py: 332 warnings
+tests/test_etf_research_history_sync.py: 82 warnings
+tests/test_etf_production_pit_capture.py: 449 warnings
+  /Users/churchill/Projects/fund-scope/worktree-0811/backend/app/models/entities.py:35: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+tests/test_etf_data_pipeline_repair_acceptance.py: 9 warnings
+tests/test_etf_bounded_history_sync.py: 224 warnings
+  /Users/churchill/Projects/fund-scope/worktree-0811/backend/app/services/short_etf/bounded_history_sync.py:314: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+tests/test_etf_adjusted_price_revisions.py::test_revision_pit_lookup_uses_the_declared_index
+  /Users/churchill/Projects/fund-scope/worktree-0811/backend/.venv/lib/python3.13/site-packages/aiosqlite/core.py:63: DeprecationWarning: The default date adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    result = function()
+
+tests/test_etf_adjusted_price_revisions.py::test_revision_pit_lookup_uses_the_declared_index
+tests/test_etf_adjusted_price_revisions.py::test_revision_pit_lookup_uses_the_declared_index
+  /Users/churchill/Projects/fund-scope/worktree-0811/backend/.venv/lib/python3.13/site-packages/aiosqlite/core.py:63: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    result = function()
+
+tests/test_etf_bounded_history_sync.py::test_research_depth_short_history_is_cooled_down_without_losing_denominator
+  /Users/churchill/Projects/fund-scope/worktree-0811/backend/tests/test_etf_bounded_history_sync.py:621: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    observation.retry_after = datetime.utcnow() - timedelta(seconds=1)
+
+tests/test_etf_bounded_history_sync.py::test_history_lease_is_global_across_lane_scopes
+  /Users/churchill/Projects/fund-scope/worktree-0811/backend/tests/test_etf_bounded_history_sync.py:875: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    started_at=datetime.utcnow(),
+
+tests/test_etf_bounded_history_sync.py::test_sync_rejects_overlapping_worker_lease
+  /Users/churchill/Projects/fund-scope/worktree-0811/backend/tests/test_etf_bounded_history_sync.py:1227: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    started_at=datetime.utcnow(),
+
+tests/test_job_runner.py::test_run_job_recovers_failed_flush_before_recording_failure
+  <sys>:0: SAWarning: New instance <JobRun at 0x10fbe7020> with identity key (<class 'app.models.entities.JobRun'>, (1,), None) conflicts with persistent instance <JobRun at 0x10fbe6f90>
+
+tests/test_etf_publication_providers.py: 14 warnings
+  /Users/churchill/Projects/fund-scope/worktree-0811/backend/app/services/short_etf/publication_providers.py:215: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+249 passed, 8306 warnings in 22.79s

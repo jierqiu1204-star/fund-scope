@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.entities import (
@@ -274,7 +274,11 @@ async def etf_adjusted_daily_facts_on_or_before(
             )
             rows.extend(reversed(result.mappings().all()))
     elif accepted_pairs:
-        provider_compatibility = or_(
+        accepted_providers = tuple(sorted({provider for provider, _version in accepted_pairs}))
+        provider_compatibility = func.lower(EtfAdjustedPriceRevision.data_provider).in_(
+            accepted_providers
+        )
+        pair_compatibility = or_(
             *(
                 and_(
                     func.lower(EtfAdjustedPriceRevision.data_provider) == provider,
@@ -309,11 +313,31 @@ async def etf_adjusted_daily_facts_on_or_before(
                 EtfAdjustedPriceRevision.first_seen_at.label("first_seen_at"),
                 EtfAdjustedPriceRevision.observed_at.label("observed_at"),
                 EtfAdjustedPriceRevision.id.label("revision_id"),
+                func.lower(EtfAdjustedPriceRevision.data_provider).label("provider_key"),
+                case(
+                    (
+                        and_(
+                            EtfAdjustedPriceRevision.decision_eligible.is_(True),
+                            EtfAdjustedPriceRevision.research_price_basis
+                            == "total_return_adjusted",
+                            pair_compatibility,
+                            EtfAdjustedPriceRevision.research_adjusted_value.is_not(None),
+                            EtfAdjustedPriceRevision.source_timestamp.is_not(None),
+                            EtfAdjustedPriceRevision.first_seen_at.is_not(None),
+                            EtfAdjustedPriceRevision.observed_at.is_not(None),
+                            EtfAdjustedPriceRevision.revision_hash.is_not(None),
+                            EtfAdjustedPriceRevision.source_timestamp <= cutoff,
+                        ),
+                        0,
+                    ),
+                    else_=1,
+                ).label("invalid_rank"),
                 func.row_number()
                 .over(
                     partition_by=(
                         EtfAdjustedPriceRevision.etf_code,
                         EtfAdjustedPriceRevision.trade_date,
+                        func.lower(EtfAdjustedPriceRevision.data_provider),
                     ),
                     order_by=(
                         EtfAdjustedPriceRevision.first_seen_at.desc(),
@@ -328,23 +352,105 @@ async def etf_adjusted_daily_facts_on_or_before(
                 EtfAdjustedPriceRevision.trade_date <= replay_date,
                 EtfAdjustedPriceRevision.first_seen_at <= cutoff,
                 EtfAdjustedPriceRevision.observed_at <= cutoff,
-                EtfAdjustedPriceRevision.decision_eligible.is_(True),
-                EtfAdjustedPriceRevision.research_price_basis == "total_return_adjusted",
                 provider_compatibility,
             )
             .subquery()
         )
-        latest_by_session = (
-            select(visible_revisions).where(visible_revisions.c.revision_rank == 1).subquery()
+        latest_by_provider_session = (
+            select(visible_revisions)
+            .where(visible_revisions.c.revision_rank == 1)
+            .subquery()
+        )
+        ranked_provider_sessions = (
+            select(
+                latest_by_provider_session,
+                func.row_number()
+                .over(
+                    partition_by=(
+                        latest_by_provider_session.c.etf_code,
+                        latest_by_provider_session.c.provider_key,
+                    ),
+                    order_by=(
+                        latest_by_provider_session.c.trade_date.desc(),
+                        latest_by_provider_session.c.revision_id.desc(),
+                    ),
+                )
+                .label("provider_session_rank"),
+            )
+            .subquery()
+        )
+        provider_window = (
+            select(ranked_provider_sessions)
+            .where(ranked_provider_sessions.c.provider_session_rank <= rows_per_code)
+            .subquery()
+        )
+        provider_stats = (
+            select(
+                provider_window.c.etf_code,
+                provider_window.c.provider_key,
+                func.count().label("session_count"),
+                func.sum(provider_window.c.invalid_rank).label("invalid_count"),
+                func.max(provider_window.c.trade_date).label("latest_trade_date"),
+                func.max(provider_window.c.first_seen_at).label(
+                    "latest_first_seen_at"
+                ),
+                func.max(provider_window.c.observed_at).label("latest_observed_at"),
+            )
+            .group_by(
+                provider_window.c.etf_code,
+                provider_window.c.provider_key,
+            )
+            .subquery()
+        )
+        ranked_providers = (
+            select(
+                provider_stats,
+                func.row_number()
+                .over(
+                    partition_by=provider_stats.c.etf_code,
+                    order_by=(
+                        provider_stats.c.invalid_count.asc(),
+                        provider_stats.c.latest_trade_date.desc(),
+                        case(
+                            (provider_stats.c.session_count >= rows_per_code, 0),
+                            else_=1,
+                        ).asc(),
+                        provider_stats.c.session_count.desc(),
+                        provider_stats.c.latest_first_seen_at.desc(),
+                        provider_stats.c.latest_observed_at.desc(),
+                        provider_stats.c.provider_key.asc(),
+                    ),
+                )
+                .label("provider_rank"),
+            )
+            .subquery()
+        )
+        selected_provider = (
+            select(ranked_providers)
+            .where(ranked_providers.c.provider_rank == 1)
+            .subquery()
+        )
+        selected_provider_rows = (
+            select(provider_window)
+            .join(
+                selected_provider,
+                and_(
+                    provider_window.c.etf_code
+                    == selected_provider.c.etf_code,
+                    provider_window.c.provider_key
+                    == selected_provider.c.provider_key,
+                ),
+            )
+            .subquery()
         )
         ranked_sessions = select(
-            latest_by_session,
+            selected_provider_rows,
             func.row_number()
             .over(
-                partition_by=latest_by_session.c.etf_code,
+                partition_by=selected_provider_rows.c.etf_code,
                 order_by=(
-                    latest_by_session.c.trade_date.desc(),
-                    latest_by_session.c.revision_id.desc(),
+                    selected_provider_rows.c.trade_date.desc(),
+                    selected_provider_rows.c.revision_id.desc(),
                 ),
             )
             .label("session_rank"),

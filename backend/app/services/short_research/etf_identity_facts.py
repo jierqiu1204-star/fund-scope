@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import Any
 
-from sqlalchemy import case, select
+from sqlalchemy import case, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.entities import (
@@ -37,6 +37,7 @@ IDENTITY_FACT_CURSOR_LANE = "identity_facts"
 IDENTITY_FACT_CONTRACT_VERSION = "etf_identity_fact_contract_v1"
 TAXONOMY_PRECEDENCE_POLICY_VERSION = "etf_taxonomy_precedence_v1"
 TRACKED_UNDERLYING_EVIDENCE_POLICY_VERSION = "etf_tracked_underlying_evidence_v1"
+IDENTITY_FACT_ADVISORY_LOCK_KEY = 2026091010
 
 _TAXONOMY_PRECEDENCE = {
     "authoritative": 0,
@@ -104,6 +105,11 @@ class IdentityFactProviderPage:
 
     taxonomy_records: Sequence[TaxonomyFactInput] = ()
     underlying_records: Sequence[TrackedUnderlyingFactInput] = ()
+    # A provider may return valid records for most of a bounded page while a
+    # single code is unavailable or malformed.  Keep those failures beside the
+    # successful records so the caller can report and retry them; they are not
+    # converted into unresolved identity facts.
+    provider_errors: Sequence[tuple[str, str]] = ()
 
 
 IdentityFactPageFetcher = Callable[[tuple[str, ...]], Awaitable[IdentityFactProviderPage]]
@@ -178,6 +184,25 @@ class IdentityFactCoverageProjection:
             "evidence_groups": [dict(group) for group in self.evidence_groups],
             "identity_fact_contract": identity_fact_contract(),
         }
+
+
+async def try_acquire_identity_fact_worker_lock(session: AsyncSession) -> bool:
+    """Use the existing PostgreSQL transaction advisory-lock primitive.
+
+    The production scheduler and the explicit CLI share this lock.  SQLite
+    tests and local development have no competing server workers, so they keep
+    the existing no-op behavior.
+    """
+
+    if session.get_bind().dialect.name != "postgresql":
+        return True
+    return bool(
+        await session.scalar(
+            text("SELECT pg_try_advisory_xact_lock(:lock_key)").bindparams(
+                lock_key=IDENTITY_FACT_ADVISORY_LOCK_KEY,
+            )
+        )
+    )
 
 
 def _json_default(value: object) -> str:
@@ -598,6 +623,34 @@ async def _persist_underlying_fact(
     )
     if existing is not None:
         return existing, False
+    # Provider pages are fetched again on the next daily sweep.  A page may
+    # contain changing fund metadata even when its explicit tracked-underlying
+    # field is unchanged, so evidence_hash alone would append a duplicate fact
+    # on every sweep.  Compare the latest source revision's identity semantics
+    # while retaining a new revision whenever the mapping or provider contract
+    # actually changes.
+    latest = await session.scalar(
+        select(EtfTrackedUnderlyingFact)
+        .where(
+            EtfTrackedUnderlyingFact.etf_code == payload["etf_code"],
+            EtfTrackedUnderlyingFact.source == payload["source"],
+            EtfTrackedUnderlyingFact.external_source_id == payload["external_source_id"],
+        )
+        .order_by(EtfTrackedUnderlyingFact.observed_at.desc(), EtfTrackedUnderlyingFact.id.desc())
+        .limit(1)
+    )
+    if (
+        latest is not None
+        and latest.observed_at <= payload["observed_at"]
+        and latest.provider_version == payload["provider_version"]
+        and latest.rule_version == payload["rule_version"]
+        and latest.identity_state == payload["identity_state"]
+        and latest.tracked_underlying_id == payload["tracked_underlying_id"]
+        and latest.mapping_basis == payload["mapping_basis"]
+        and latest.confidence == payload["confidence"]
+        and latest.identity_reason == payload["identity_reason"]
+    ):
+        return latest, False
     previous = await session.scalar(
         select(EtfTrackedUnderlyingFact)
         .where(
@@ -839,6 +892,17 @@ def _validate_provider_page(
             f"provider page exceeds {MAX_IDENTITY_FACT_RECORDS} identity facts",
         )
     allowed_codes = set(selected_codes)
+    provider_error_codes = tuple(code for code, _reason in page.provider_errors)
+    if len(provider_error_codes) != len(set(provider_error_codes)):
+        raise ValueError("provider returned duplicate per-code failures")
+    if not set(provider_error_codes).issubset(allowed_codes):
+        raise ValueError("provider returned failures outside the selected page")
+    record_codes = tuple(
+        [record.etf_code for record in taxonomy_records]
+        + [record.etf_code for record in underlying_records]
+    )
+    if set(provider_error_codes) & set(record_codes):
+        raise ValueError("provider returned both evidence and a failure for one ETF")
     for record in taxonomy_records:
         if not isinstance(record, TaxonomyFactInput):
             raise ValueError("provider taxonomy output must use TaxonomyFactInput")

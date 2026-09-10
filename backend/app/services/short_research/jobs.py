@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
@@ -8,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
 from app.defaults.short_research import ASSET_TYPE_ETF, ASSET_TYPE_FUND
-from app.models.entities import EtfPriceHistory, EtfThemeProfile, JobRun
+from app.models.entities import EtfPriceHistory, EtfSyncCursor, EtfThemeProfile, JobRun, utcnow
 from app.services.etf_exit_calibration import run_etf_exit_hyperopt
 from app.services.llm import LLMClient
 from app.services.market_data import ASIA_SHANGHAI, is_etf_exchange_trading_day
@@ -25,10 +26,18 @@ from app.services.short_research.coverage_policy import (
 )
 from app.services.short_research.etf_exit_credibility import run_etf_exit_credibility
 from app.services.short_research.etf_identity_facts import (
+    MAX_IDENTITY_FACT_SLICE_SECONDS,
     IdentityFactIngestionRequest,
     IdentityFactProviderPage,
     TaxonomyFactInput,
+    identity_fact_coverage_at_cutoff,
     run_identity_fact_ingestion_slice,
+    try_acquire_identity_fact_worker_lock,
+)
+from app.services.short_research.etf_tracked_underlying import (
+    EASTMONEY_TRACKED_UNDERLYING_PROVIDER_VERSION,
+    EtfTrackedUnderlyingProviderError,
+    fetch_eastmoney_tracked_underlying_page,
 )
 from app.services.short_research.healthcheck import run_etf_strategy_healthcheck
 from app.services.short_research.history_readiness import (
@@ -82,6 +91,15 @@ SHORT_RESEARCH_DAILY_ASSET_TYPES = [ASSET_TYPE_FUND, ASSET_TYPE_ETF]
 ETF_HISTORY_BACKFILL_ALLOWED_DAYS = (365, 730, 1095)
 ETF_CANONICAL_MIN_COVERAGE = 0.95
 ETF_TAXONOMY_FACT_RULE_VERSION = "etf_theme_taxonomy_fact_v2"
+ETF_TRACKED_UNDERLYING_FACT_SCOPE_PREFIX = (
+    f"etf_tracked_underlying_facts:{EASTMONEY_TRACKED_UNDERLYING_PROVIDER_VERSION}"
+)
+ETF_TRACKED_UNDERLYING_FACT_SCOPE = ETF_TRACKED_UNDERLYING_FACT_SCOPE_PREFIX
+ETF_TRACKED_UNDERLYING_SWEEP_LANE = "identity_facts"
+
+
+def _underlying_sweep_marker(kind: str, sweep_date: date) -> str:
+    return f"{kind}:{sweep_date.isoformat()}"
 
 
 def _count(value: Any, key: str) -> int:
@@ -399,6 +417,17 @@ async def etf_taxonomy_fact_ingestion_job(
     persisted = result.persisted or None
     return {
         "status": result.status,
+        # JobRunner persists this as the business status.  A completed slice
+        # is the normal scheduler success; provider failures and bounded
+        # partial pages must remain visible to operations.
+        "job_status": (
+            result.status if result.status in {"failed", "partial", "skipped"} else None
+        ),
+        "job_message": (
+            "ETF taxonomy fact ingestion failed"
+            if result.status == "failed"
+            else None
+        ),
         "stop_reason": result.stop_reason,
         "selected_count": len(result.selected_codes),
         "cursor_before": result.cursor_before,
@@ -412,6 +441,219 @@ async def etf_taxonomy_fact_ingestion_job(
             persisted.taxonomy_facts_existing if persisted is not None else 0
         ),
         "error_summary": result.error_summary,
+    }
+
+
+async def etf_tracked_underlying_ingestion_job(
+    session: AsyncSession,
+) -> dict[str, Any]:
+    try:
+        async with asyncio.timeout(MAX_IDENTITY_FACT_SLICE_SECONDS):
+            return await _run_etf_tracked_underlying_ingestion_job(session)
+    except TimeoutError:
+        await session.rollback()
+        return {
+            "status": "partial",
+            "job_status": "partial",
+            "stop_reason": "slice_timeout",
+            "selected_count": 0,
+            "cursor_before": None,
+            "cursor_after": None,
+            "has_more": True,
+            "elapsed_seconds": MAX_IDENTITY_FACT_SLICE_SECONDS,
+            "underlying_facts_inserted": 0,
+            "underlying_facts_existing": 0,
+            "unresolved_count": 0,
+            "provider_failure_count": 0,
+            "provider_failures": [],
+            "coverage": None,
+            "error_summary": "ETF tracked-underlying ingestion exceeded 55 seconds",
+        }
+
+
+async def _run_etf_tracked_underlying_ingestion_job(
+    session: AsyncSession,
+) -> dict[str, Any]:
+    """Advance one bounded page of explicit ETF tracked-underlying facts."""
+
+    if not await try_acquire_identity_fact_worker_lock(session):
+        await session.rollback()
+        return {
+            "status": "skipped",
+            "job_status": "skipped",
+            "stop_reason": "identity_fact_worker_lock_busy",
+            "selected_count": 0,
+            "underlying_facts_inserted": 0,
+            "underlying_facts_existing": 0,
+            "unresolved_count": 0,
+            "provider_failure_count": 0,
+            "provider_failures": [],
+            "coverage": None,
+            "error_summary": None,
+        }
+
+    scope = ETF_TRACKED_UNDERLYING_FACT_SCOPE
+    sweep_date = date.today()
+    cursor = await session.get(EtfSyncCursor, scope)
+    done_marker = _underlying_sweep_marker("done", sweep_date)
+    retry_marker = _underlying_sweep_marker("retry", sweep_date)
+    if cursor is not None and cursor.last_lane == done_marker:
+        coverage = await identity_fact_coverage_at_cutoff(session, cutoff=utcnow())
+        coverage_payload = coverage.as_dict()
+        coverage_payload["cutoff"] = coverage.cutoff.isoformat()
+        await session.commit()
+        return {
+            "status": "complete",
+            "stop_reason": "daily_sweep_complete",
+            "selected_count": 0,
+            "cursor_before": cursor.last_regular_code,
+            "cursor_after": cursor.last_regular_code,
+            "has_more": False,
+            "elapsed_seconds": 0.0,
+            "underlying_facts_inserted": 0,
+            "underlying_facts_existing": 0,
+            "unresolved_count": 0,
+            "provider_failure_count": 0,
+            "provider_failures": [],
+            "coverage": coverage_payload,
+            "error_summary": None,
+        }
+    if (
+        cursor is not None
+        and cursor.last_lane is not None
+        and cursor.last_lane.startswith(("done:", "retry:"))
+        and cursor.last_lane.rsplit(":", 1)[-1] != sweep_date.isoformat()
+        and (
+            cursor.last_lane.startswith("done:")
+            or cursor.last_regular_code is None
+        )
+    ):
+        # A completed or failed sweep from an earlier day starts from the
+        # head today. An incomplete sweep without a marker continues where it
+        # stopped, so a full universe cannot starve at the tail.
+        cursor.last_regular_code = None
+        cursor.last_lane = ETF_TRACKED_UNDERLYING_SWEEP_LANE
+        await session.flush()
+
+    provider_page: IdentityFactProviderPage | None = None
+
+    async def fetch_page(codes: tuple[str, ...]) -> IdentityFactProviderPage:
+        nonlocal provider_page
+        try:
+            provider_page = await fetch_eastmoney_tracked_underlying_page(codes)
+        except EtfTrackedUnderlyingProviderError as exc:
+            provider_page = IdentityFactProviderPage(
+                provider_errors=exc.failures,
+            )
+            raise
+        return provider_page
+
+    result = await run_identity_fact_ingestion_slice(
+        session,
+        request=IdentityFactIngestionRequest(
+            # Keep one persistent cursor across dates; the lane marker resets
+            # only after a completed daily sweep.
+            scope=scope,
+            target_page_size=20,
+            # The adapter is serial and each request has an 8-second bound;
+            # reserve enough time for persistence and coverage so a slow page
+            # cannot consume the whole 55-second slice.
+            estimated_seconds_per_etf=8.0,
+            commit_reserve_seconds=5.0,
+        ),
+        fetch_page=fetch_page,
+    )
+    persisted = result.persisted
+    coverage = await identity_fact_coverage_at_cutoff(session, cutoff=utcnow())
+    coverage_payload = coverage.as_dict()
+    coverage_payload["cutoff"] = coverage.cutoff.isoformat()
+    provider_failures = tuple(provider_page.provider_errors if provider_page else ())
+    provider_records = tuple(provider_page.underlying_records if provider_page else ())
+    status = result.status
+    stop_reason = result.stop_reason
+    error_summary = result.error_summary
+    if provider_failures and result.persisted is not None:
+        # Persist valid records and advance the bounded page while exposing
+        # each malformed/unavailable code for the next daily retry.  A failed
+        # code is never represented as a fabricated unresolved identity.
+        status = "partial" if provider_records else "failed"
+        stop_reason = "provider_partial_failure" if provider_records else "provider_fetch_failed"
+        failure_text = "; ".join(f"{code}:{reason}" for code, reason in provider_failures)
+        error_summary = failure_text[:160]
+    cursor_after = await session.get(EtfSyncCursor, scope)
+    had_retry_marker = cursor_after is not None and cursor_after.last_lane == retry_marker
+    if status == "complete":
+        if cursor_after is None:
+            cursor_after = EtfSyncCursor(scope=scope)
+            session.add(cursor_after)
+        cursor_after.last_regular_code = None
+        cursor_after.last_lane = done_marker
+        cursor_after.updated_at = utcnow()
+    elif provider_failures or status == "failed" or had_retry_marker:
+        if cursor_after is None:
+            cursor_after = EtfSyncCursor(scope=scope)
+            session.add(cursor_after)
+        if (provider_failures or status == "failed") and not result.has_more:
+            # A failed final page still completes the ordinal sweep. Clear the
+            # cursor so the next daily retry starts at the head; an incomplete
+            # failed page retains its last code and continues across days.
+            cursor_after.last_regular_code = None
+        cursor_after.last_lane = retry_marker
+        cursor_after.updated_at = utcnow()
+    elif cursor_after is not None:
+        cursor_after.last_lane = ETF_TRACKED_UNDERLYING_SWEEP_LANE
+        cursor_after.updated_at = utcnow()
+    await session.commit()
+    unresolved_count = (
+        sum(
+            record.identity_state == "unresolved"
+            for record in provider_records
+        )
+        if persisted is not None
+        else 0
+    )
+    return {
+        "status": status,
+        # JobRunner persists this as the business status. A completed slice
+        # is the normal scheduler success; provider failures and bounded
+        # partial pages must remain visible to operations.
+        "job_status": (
+            status if status in {"failed", "partial", "skipped"} else None
+        ),
+        "job_message": (
+            "ETF tracked-underlying provider fetch failed"
+            if status == "failed"
+            else None
+        ),
+        "stop_reason": stop_reason,
+        "selected_count": len(result.selected_codes),
+        "cursor_before": result.cursor_before,
+        "cursor_after": (
+            cursor_after.last_regular_code
+            if cursor_after is not None
+            else result.cursor_after
+        ),
+        "has_more": result.has_more,
+        "elapsed_seconds": result.elapsed_seconds,
+        "underlying_facts_inserted": (
+            persisted.underlying_facts_inserted if persisted is not None else 0
+        ),
+        "underlying_facts_existing": (
+            persisted.underlying_facts_existing if persisted is not None else 0
+        ),
+        "unresolved_count": unresolved_count,
+        "provider_failure_count": (
+            len(provider_failures)
+            if provider_failures
+            else len(result.selected_codes)
+            if result.stop_reason == "provider_fetch_failed"
+            else 0
+        ),
+        "provider_failures": [
+            {"etf_code": code, "reason": reason} for code, reason in provider_failures
+        ],
+        "coverage": coverage_payload,
+        "error_summary": error_summary,
     }
 
 
@@ -669,6 +911,15 @@ async def post_publication_etf_research_history_job(
     session: AsyncSession,
 ) -> dict[str, Any]:
     return await run_post_publication_etf_research_history_slice(session)
+
+
+async def etf_research_input_history_sync_job(
+    session: AsyncSession,
+) -> dict[str, Any]:
+    return await run_post_publication_etf_research_history_slice(
+        session,
+        input_repair=True,
+    )
 
 
 async def daily_short_research_advisor_job(

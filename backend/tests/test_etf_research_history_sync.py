@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date, timedelta
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from sqlalchemy import select
 
+from app.models.entities import JobRun
+from app.services.job_runner import run_job
+from app.services.short_research import jobs as short_research_jobs
 from app.services.workflows import etf_research_history_sync as coordinator
 
 
@@ -79,6 +84,22 @@ def _readiness(
             authoritative=False,
         ),
     }
+
+
+def _readiness_with_observed_calendar(*, count: int = 466) -> dict[str, Any]:
+    result = _readiness(warmup=0.95)
+    observed_dates: list[str] = []
+    candidate = date(2024, 1, 2)
+    while len(observed_dates) < count:
+        if candidate.weekday() < 5:
+            observed_dates.append(candidate.isoformat())
+        candidate += timedelta(days=1)
+    result["observed_session_calendar"] = {
+        "source": "fixture_observed_calendar",
+        "session_count": count,
+        "dates": observed_dates,
+    }
+    return result
 
 
 class _Fetcher:
@@ -241,6 +262,228 @@ async def test_research_completion_waits_for_authoritative_listing_metadata(
 
 
 @pytest.mark.asyncio
+async def test_input_repair_uses_latest_180_observed_dates_and_explicit_codes(
+    monkeypatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_lease(_session: object) -> None:
+        return None
+
+    async def fake_recent(_session: object, **_kwargs: Any) -> list[object]:
+        return []
+
+    async def fake_readiness(_session: object, **_kwargs: Any) -> dict[str, Any]:
+        return _readiness_with_observed_calendar()
+
+    async def fake_run(
+        _session: object,
+        *,
+        request: Any,
+        fetcher: object,
+    ) -> SimpleNamespace:
+        captured["request"] = request
+        captured["fetcher"] = fetcher
+        return _sync_result()
+
+    monkeypatch.setattr(coordinator, "_active_history_lease", fake_lease)
+    monkeypatch.setattr(coordinator, "_recent_lane_slices", fake_recent)
+    monkeypatch.setattr(coordinator, "read_etf_history_readiness", fake_readiness)
+    monkeypatch.setattr(coordinator, "PublicationAdjustedHistoryFetcher", _Fetcher)
+    monkeypatch.setattr(coordinator, "run_bounded_history_sync_slice", fake_run)
+
+    result = await coordinator.run_post_publication_etf_research_history_slice(
+        object(),  # type: ignore[arg-type]
+        target_date=date(2026, 7, 24),
+        input_repair=True,
+        input_repair_codes=("510002", "outside-universe"),
+    )
+
+    request = captured["request"]
+    observed_dates = tuple(
+        date.fromisoformat(value)
+        for value in _readiness_with_observed_calendar()[
+            "observed_session_calendar"
+        ]["dates"]
+    )
+    assert request.scope == coordinator.INPUT_REPAIR_SCOPE
+    assert request.contract_hash == coordinator.INPUT_REPAIR_CONTRACT_HASH
+    assert request.universe_hash == "b" * 64
+    assert request.required_sessions == 180
+    assert request.required_trade_dates == observed_dates[-180:]
+    assert request.eligible_codes == ("510002",)
+    assert request.selection_policy == "research_depth"
+    assert request.max_codes == 5
+    assert result["status"] == "partial"
+    assert result["input_repair"]["formal_research_ready"] is False
+    assert result["input_repair"]["observed_session_count"] == 466
+    assert result["input_repair"]["ignored_codes"] == ["outside-universe"]
+    assert result["input_repair"]["status"] == "partial"
+    assert "lane_after" not in result
+
+
+@pytest.mark.asyncio
+async def test_input_repair_preserves_publication_priority_gate(monkeypatch) -> None:
+    async def forbidden(*_args: object, **_kwargs: Any) -> None:
+        raise AssertionError("input repair must yield while publication is blocked")
+
+    async def no_lease(_session: object) -> None:
+        return None
+
+    async def blocked_readiness(
+        _session: object,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        return _readiness(daily=0.94, warmup=0.95)
+
+    monkeypatch.setattr(coordinator, "_active_history_lease", no_lease)
+    monkeypatch.setattr(coordinator, "read_etf_history_readiness", blocked_readiness)
+    monkeypatch.setattr(coordinator, "run_bounded_history_sync_slice", forbidden)
+
+    result = await coordinator.run_post_publication_etf_research_history_slice(
+        object(),  # type: ignore[arg-type]
+        target_date=date(2026, 7, 24),
+        input_repair=True,
+    )
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "publication_priority_active"
+    assert result["input_repair"]["formal_research_ready"] is False
+
+
+@pytest.mark.asyncio
+async def test_input_repair_skips_without_180_observed_dates(monkeypatch) -> None:
+    async def fake_lease(_session: object) -> None:
+        return None
+
+    async def fake_readiness(_session: object, **_kwargs: Any) -> dict[str, Any]:
+        return _readiness_with_observed_calendar(count=179)
+
+    async def forbidden(*_args: object, **_kwargs: Any) -> None:
+        raise AssertionError("incomplete calendar must not start provider work")
+
+    monkeypatch.setattr(coordinator, "_active_history_lease", fake_lease)
+    monkeypatch.setattr(coordinator, "read_etf_history_readiness", fake_readiness)
+    monkeypatch.setattr(coordinator, "run_bounded_history_sync_slice", forbidden)
+
+    result = await coordinator.run_post_publication_etf_research_history_slice(
+        object(),  # type: ignore[arg-type]
+        target_date=date(2026, 7, 24),
+        input_repair=True,
+    )
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "input_repair_observed_session_calendar_incomplete"
+    assert result["input_repair"]["observed_session_count"] == 179
+
+
+@pytest.mark.asyncio
+async def test_input_repair_codes_cannot_change_formal_deep_path() -> None:
+    result = await coordinator.run_post_publication_etf_research_history_slice(
+        object(),  # type: ignore[arg-type]
+        target_date=date(2026, 7, 24),
+        input_repair_codes=("510001",),
+    )
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "input_repair_codes_require_input_repair"
+
+
+@pytest.mark.asyncio
+async def test_input_repair_history_job_wrapper_selects_input_repair_mode(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_slice(session: object, **kwargs: Any) -> dict[str, Any]:
+        captured["session"] = session
+        captured.update(kwargs)
+        return {"status": "partial", "input_repair": kwargs["input_repair"]}
+
+    monkeypatch.setattr(
+        short_research_jobs,
+        "run_post_publication_etf_research_history_slice",
+        fake_slice,
+    )
+
+    session = object()
+    result = await short_research_jobs.etf_research_input_history_sync_job(session)  # type: ignore[arg-type]
+
+    assert result == {"status": "partial", "input_repair": True}
+    assert captured == {"session": session, "input_repair": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("business_status", ["skipped", "partial"])
+async def test_job_runner_persists_post_publication_business_status(
+    app,
+    monkeypatch,
+    business_status: str,
+) -> None:
+    async def fake_slice(_session: object) -> dict[str, Any]:
+        return {
+            "status": business_status,
+            "job_status": business_status,
+            "reason": "observed_session_calendar_incomplete",
+        }
+
+    monkeypatch.setattr(
+        short_research_jobs,
+        "run_post_publication_etf_research_history_slice",
+        fake_slice,
+    )
+
+    returned = await run_job(
+        app.state.db.session,
+        "post_publication_etf_research_history",
+        short_research_jobs.post_publication_etf_research_history_job,
+    )
+
+    async with app.state.db.session() as session:
+        job_run = await session.scalar(
+            select(JobRun)
+            .where(JobRun.job_name == "post_publication_etf_research_history")
+            .order_by(JobRun.id.desc())
+        )
+
+    assert returned["job_status"] == business_status
+    assert job_run is not None
+    assert job_run.status == business_status
+    assert job_run.details_json == returned
+
+
+@pytest.mark.asyncio
+async def test_research_history_timeout_covers_readiness_and_rolls_back(
+    monkeypatch,
+) -> None:
+    rollback_calls: list[bool] = []
+
+    class _Session:
+        async def rollback(self) -> None:
+            rollback_calls.append(True)
+
+    async def no_lease(_session: object) -> None:
+        return None
+
+    async def slow_readiness(_session: object, **_kwargs: Any) -> dict[str, Any]:
+        await asyncio.sleep(0.05)
+        return _readiness()
+
+    monkeypatch.setattr(coordinator, "RESEARCH_WORKFLOW_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(coordinator, "_active_history_lease", no_lease)
+    monkeypatch.setattr(coordinator, "read_etf_history_readiness", slow_readiness)
+
+    result = await coordinator.run_post_publication_etf_research_history_slice(
+        _Session(),  # type: ignore[arg-type]
+        target_date=date(2026, 7, 24),
+    )
+
+    assert result["status"] == "partial"
+    assert result["job_status"] == "partial"
+    assert result["reason"] == "research_history_workflow_timeout"
+    assert result["timeout_seconds"] == 0.01
+    assert rollback_calls == [True]
+
+
+@pytest.mark.asyncio
 async def test_research_depth_skips_weekend_active_lease_and_invalid_universe(
     monkeypatch,
 ) -> None:
@@ -335,6 +578,7 @@ async def test_coordinator_runs_300_before_500_with_safe_bounded_profile(
 
     request = captured["request"]
     assert request.scope == expected_scope
+    assert request.universe_hash == "d" * 64
     assert request.required_sessions == expected_sessions
     assert request.selection_policy == "research_depth"
     assert request.max_codes == 10
@@ -342,7 +586,8 @@ async def test_coordinator_runs_300_before_500_with_safe_bounded_profile(
     assert request.max_rows == 5_000
     assert request.rss_limit_bytes == 512 * 1024 * 1024
     assert request.provider_timeout_seconds == 6.0
-    assert request.process_deadline_seconds == 60.0
+    assert request.worker_deadline_seconds == 50.0
+    assert request.process_deadline_seconds == 55.0
     assert result["sync"]["attempted_count"] == 1
     assert result["publication_gates"]["thresholds"] == {
         "daily_freshness": 0.95,

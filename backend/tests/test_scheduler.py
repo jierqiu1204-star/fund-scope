@@ -140,6 +140,7 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     research_history = scheduler.get_job(
         "post_publication_etf_research_history"
     )
+    input_repair_history = scheduler.get_job("etf_research_input_history_sync")
     taxonomy_facts = scheduler.get_job("etf_taxonomy_fact_ingestion")
     daily_short_research_data = scheduler.get_job("daily_short_research_data")
     post_close_etf_label_review = scheduler.get_job("post_close_etf_label_outcome_review")
@@ -162,6 +163,7 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     assert "post_close_etf_adjusted_sync" in job_ids
     assert "production_etf_pit_capture" in job_ids
     assert "post_publication_etf_research_history" in job_ids
+    assert "etf_research_input_history_sync" in job_ids
     assert "etf_taxonomy_fact_ingestion" in job_ids
     assert "post_close_etf_label_outcome_review" in job_ids
     assert "post_close_etf_observation_portfolio" in job_ids
@@ -182,6 +184,7 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     assert post_close_etf_adjusted_sync is not None
     assert production_etf_pit_capture is not None
     assert research_history is not None
+    assert input_repair_history is not None
     assert taxonomy_facts is not None
     assert daily_short_research_data is not None
     assert post_close_etf_label_review is not None
@@ -210,9 +213,15 @@ def test_scheduler_uses_unified_short_research_jobs(app) -> None:
     assert production_etf_pit_capture.coalesce is True
     assert trigger_field(research_history, "day_of_week") == "mon-sun"
     assert trigger_field(research_history, "hour") == "23"
-    assert trigger_field(research_history, "minute") == "0-28/2"
+    assert trigger_field(research_history, "minute") == "0-28/4"
     assert research_history.max_instances == 1
     assert research_history.coalesce is True
+    assert trigger_field(input_repair_history, "day_of_week") == "mon-sun"
+    assert trigger_field(input_repair_history, "hour") == "23"
+    assert trigger_field(input_repair_history, "minute") == "2-28/4"
+    assert input_repair_history.max_instances == 1
+    assert input_repair_history.coalesce is True
+    assert input_repair_history.args[2] is scheduler_module.etf_research_input_history_sync_job
     assert trigger_field(taxonomy_facts, "hour") == "15-22"
     assert trigger_field(taxonomy_facts, "minute") == "*/2"
     assert taxonomy_facts.max_instances == 1

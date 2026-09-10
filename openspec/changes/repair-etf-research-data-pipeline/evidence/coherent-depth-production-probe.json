@@ -1,0 +1,72 @@
+{
+  "module_sha256": "06fc5b50dff4e92905a1a7dfc1a9f191b7c8ccb6dceeb9e291a84cb1a3ae98c7",
+  "exit_code": 0,
+  "probe": {
+    "observed_at": "2026-09-10T13:04:21.430606+00:00",
+    "reader_seconds": 0.201,
+    "rows": 900,
+    "by_source": {
+      "159915:eastmoney:eastmoney.push2his.kline.hfq_v1": 88,
+      "159915:tickflow:tickflow.free.klines.backward_v1": 92,
+      "510300:eastmoney:eastmoney.push2his.kline.hfq_v1": 88,
+      "510300:tickflow:tickflow.free.klines.backward_v1": 89,
+      "510300:tencent:tencent.ifzq.fqkline.hfq_turnover_yuan_v2": 3,
+      "510330:eastmoney:eastmoney.push2his.kline.hfq_v1": 88,
+      "510330:tickflow:tickflow.free.klines.backward_v1": 87,
+      "510330:tencent:tencent.ifzq.fqkline.hfq_turnover_yuan_v2": 5,
+      "512100:eastmoney:eastmoney.push2his.kline.hfq_v1": 88,
+      "512100:tickflow:tickflow.free.klines.backward_v1": 92,
+      "512710:eastmoney:eastmoney.push2his.kline.hfq_v1": 88,
+      "512710:tickflow:tickflow.free.klines.backward_v1": 90,
+      "512710:tencent:tencent.ifzq.fqkline.hfq_turnover_yuan_v2": 2
+    },
+    "calendar": [
+      {
+        "first_day": "2024-10-16",
+        "last_day": "2026-09-10",
+        "sessions": 466
+      }
+    ],
+    "readiness": {
+      "daily_freshness": {
+        "required_sessions": 1,
+        "expected_count": 1519,
+        "covered_count": 1452,
+        "coverage_ratio": 0.955892034233048
+      },
+      "history_depth_61": {
+        "required_sessions": 61,
+        "expected_count": 1519,
+        "covered_count": 1434,
+        "coverage_ratio": 0.9440421329822252
+      },
+      "contract_depth": {
+        "required_sessions": 300,
+        "expected_count": 1104,
+        "covered_count": 1055,
+        "coverage_ratio": 0.9556159420289855,
+        "completion_gate_passed": true,
+        "completion_blockers": []
+      },
+      "telemetry_depth_500": {
+        "required_sessions": 500,
+        "expected_count": 0,
+        "covered_count": 0,
+        "coverage_ratio": 0.0,
+        "completion_gate_passed": false,
+        "completion_blockers": [
+          "observed_session_calendar_incomplete",
+          "seasoned_research_cohort_empty",
+          "adjusted_research_coverage_below_95pct"
+        ]
+      }
+    },
+    "coherent_full_universe": {
+      "seconds": 13.762,
+      "universe_count": 1519,
+      "covered_codes": 600,
+      "peak_rss_kib_before": 180464,
+      "peak_rss_kib_after": 204264
+    }
+  }
+}

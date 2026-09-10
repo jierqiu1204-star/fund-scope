@@ -1,0 +1,129 @@
+F.F.                                                                     [100%]
+=================================== FAILURES ===================================
+___ test_v2_selects_complete_coherent_source_instead_of_newer_partial_source ___
+
+app = <fastapi.applications.FastAPI object at 0x10a982ad0>
+
+    @pytest.mark.asyncio
+    async def test_v2_selects_complete_coherent_source_instead_of_newer_partial_source(app):
+        async with app.state.db.session() as session:
+            await _seed(
+                session,
+                [
+                    *_adjusted_history("510300", count=180),
+                    *_new_revision_rows(count=40, observed=datetime(2022, 6, 30, 6, 40)),
+                ],
+            )
+            bundle = await read_etf_v2_asset_inputs(
+                session, replay_date=T, decision_cutoff=CUTOFF
+            )
+        assert bundle.universe_count == 1
+>       assert bundle.adjusted_120_count == 1
+E       AssertionError: assert 0 == 1
+E        +  where 0 = V2EtfInputBundle(signal_date=datetime.date(2022, 6, 30), source_cutoff=datetime.datetime(2022, 6, 30, 7, 0), identity_...t_theme_membership', 1), ('unproven_adjustment_point_in_time', 1)), raw_decision_violations=0, non_finite_violations=0).adjusted_120_count
+
+tests/test_etf_data_pipeline_repair_acceptance.py:57: AssertionError
+---------------------------- Captured stderr setup -----------------------------
+2026-09-10 19:59:31,505 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,505 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,506 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,506 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,506 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,506 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,506 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,506 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,506 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,506 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,506 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,506 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,506 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,507 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,507 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,507 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,507 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,507 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,507 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,507 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,507 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,507 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,507 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,508 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,508 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,508 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,508 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,508 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,508 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,508 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,508 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,508 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,508 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:31,508 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+__ test_new_invalid_revision_cannot_resurrect_old_price_or_rewrite_past[True] __
+
+app = <fastapi.applications.FastAPI object at 0x110324190>
+received_before_cutoff = True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("received_before_cutoff", [True, False])
+    async def test_new_invalid_revision_cannot_resurrect_old_price_or_rewrite_past(
+        app, received_before_cutoff
+    ):
+        observed = datetime(2022, 6, 30, 6, 40) if received_before_cutoff else datetime(2022, 7, 1)
+        invalid = _new_revision_rows(count=1, observed=observed, provider="eastmoney")[0]
+        invalid.decision_eligible = False
+        invalid.decision_ineligibility_reason = "provider_withdrew_adjustment_evidence"
+        async with app.state.db.session() as session:
+            await _seed(session, [*_adjusted_history("510300", count=180), invalid])
+            bundle = await read_etf_v2_asset_inputs(
+                session, replay_date=T, decision_cutoff=CUTOFF
+            )
+>       assert bundle.adjusted_120_count == (0 if received_before_cutoff else 1)
+E       AssertionError: assert 1 == 0
+E        +  where 1 = V2EtfInputBundle(signal_date=datetime.date(2022, 6, 30), source_cutoff=datetime.datetime(2022, 6, 30, 7, 0), identity_...', 'healthy'),), exclusions=(('missing_pit_theme_membership', 1),), raw_decision_violations=0, non_finite_violations=0).adjusted_120_count
+
+tests/test_etf_data_pipeline_repair_acceptance.py:99: AssertionError
+---------------------------- Captured stderr setup -----------------------------
+2026-09-10 19:59:32,008 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,008 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,009 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,009 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,009 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,009 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,009 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,009 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,009 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,009 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,009 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,009 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,010 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,010 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,010 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,010 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,010 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,010 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,010 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,010 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,010 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,010 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,010 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,011 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,011 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,011 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,011 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,011 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,011 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,011 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,011 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,011 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,011 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-09-10 19:59:32,012 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+=============================== warnings summary ===============================
+tests/test_etf_data_pipeline_repair_acceptance.py: 785 warnings
+  /Users/churchill/Projects/fund-scope/worktree-0811/backend/app/models/entities.py:35: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_etf_data_pipeline_repair_acceptance.py::test_v2_selects_complete_coherent_source_instead_of_newer_partial_source
+FAILED tests/test_etf_data_pipeline_repair_acceptance.py::test_new_invalid_revision_cannot_resurrect_old_price_or_rewrite_past[True]
+2 failed, 2 passed, 785 warnings in 0.96s

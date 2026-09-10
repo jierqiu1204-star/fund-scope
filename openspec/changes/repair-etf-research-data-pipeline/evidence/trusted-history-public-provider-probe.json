@@ -1,0 +1,13 @@
+{
+  "database_access": "none",
+  "observed_at": "2026-09-10T12:12:33.924370+00:00",
+  "code": "510300",
+  "provider": "tickflow",
+  "rows": 228,
+  "first_day": "2025-10-09",
+  "last_day": "2026-09-10",
+  "versions": [
+    "tickflow.free.klines.backward_v1"
+  ],
+  "sha256": "aba3a385e272416515bc62606abbeed82392ddbb52bb949d8248c5a6f7fe3fc1"
+}

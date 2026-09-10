@@ -1345,6 +1345,7 @@ async def run_stage_a_loader_job(
                 max_source_rows=request.max_source_rows,
                 code_after=code_after,
                 max_codes=effective_max_codes,
+                required_history_sessions=REQUIRED_BAR_COUNT,
             )
     except TimeoutError as exc:
         raise StageABoundedWorkError(

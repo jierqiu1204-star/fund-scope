@@ -246,6 +246,128 @@ async def test_cutoff_selector_uses_latest_compatible_revision_and_excludes_lega
 
 
 @pytest.mark.asyncio
+async def test_cutoff_selector_keeps_a_complete_provider_series_when_latest_rows_are_mixed(
+    app,
+) -> None:
+    code = "510806"
+    trade_dates = (date(2026, 7, 8), date(2026, 7, 9), date(2026, 7, 10))
+    eastmoney_seen = datetime(2026, 7, 10, 6, 0)
+    tickflow_seen = datetime(2026, 7, 10, 8, 0)
+
+    async with app.state.db.session() as session:
+        session.add(_etf(code))
+        await session.commit()
+        await persist_etf_price_history_page(
+            session,
+            etf_code=code,
+            rows=[
+                (
+                    trade_date,
+                    _values(
+                        adjusted_close=1.0 + index / 10,
+                        observed_at=eastmoney_seen,
+                    ),
+                )
+                for index, trade_date in enumerate(trade_dates)
+            ],
+        )
+        await persist_etf_price_history_page(
+            session,
+            etf_code=code,
+            rows=[
+                (
+                    trade_dates[-1],
+                    _values(
+                        adjusted_close=2.0,
+                        observed_at=tickflow_seen,
+                        provider="tickflow",
+                        provider_version="tickflow.free.klines.backward_v1",
+                    ),
+                )
+            ],
+        )
+        await session.commit()
+
+        rows = await etf_adjusted_daily_facts_on_or_before(
+            session,
+            etf_codes=(code,),
+            replay_date=trade_dates[-1],
+            rows_per_code=len(trade_dates),
+            max_source_rows=len(trade_dates),
+            decision_cutoff=datetime(2026, 7, 10, 10, 0),
+            compatible_provider_versions=(
+                ("eastmoney", "eastmoney.push2his.kline.hfq_v1"),
+                ("tickflow", "tickflow.free.klines.backward_v1"),
+            ),
+        )
+
+    assert [row.trade_date for row in rows] == list(trade_dates)
+    assert {row.data_provider for row in rows} == {"eastmoney"}
+    assert rows[-1].adjusted_close == 1.2
+    assert all(row.revision_hash for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_cutoff_selector_does_not_fallback_after_a_same_provider_invalid_revision(
+    app,
+) -> None:
+    code = "510807"
+    trade_dates = (date(2026, 7, 8), date(2026, 7, 9), date(2026, 7, 10))
+    valid_seen = datetime(2026, 7, 10, 6, 0)
+    invalid_seen = datetime(2026, 7, 10, 8, 0)
+
+    async with app.state.db.session() as session:
+        session.add(_etf(code))
+        await session.commit()
+        await persist_etf_price_history_page(
+            session,
+            etf_code=code,
+            rows=[
+                (
+                    trade_date,
+                    _values(
+                        adjusted_close=1.0 + index / 10,
+                        observed_at=valid_seen,
+                    ),
+                )
+                for index, trade_date in enumerate(trade_dates)
+            ],
+        )
+        await persist_etf_price_history_page(
+            session,
+            etf_code=code,
+            rows=[
+                (
+                    trade_dates[-1],
+                    _values(
+                        adjusted_close=9.0,
+                        observed_at=invalid_seen,
+                        decision_eligible=False,
+                    ),
+                )
+            ],
+        )
+        await session.commit()
+
+        rows = await etf_adjusted_daily_facts_on_or_before(
+            session,
+            etf_codes=(code,),
+            replay_date=trade_dates[-1],
+            rows_per_code=len(trade_dates),
+            max_source_rows=len(trade_dates),
+            decision_cutoff=datetime(2026, 7, 10, 10, 0),
+            compatible_provider_versions=(
+                ("eastmoney", "eastmoney.push2his.kline.hfq_v1"),
+            ),
+        )
+
+    assert [row.trade_date for row in rows] == list(trade_dates)
+    assert rows[-1].decision_eligible is False
+    assert rows[-1].adjusted_close is None
+    assert rows[-1].decision_ineligibility_reason == "missing_total_return_provenance"
+
+
+@pytest.mark.asyncio
 async def test_replay_input_binds_selected_revision_hashes(app) -> None:
     code = "510804"
     replay_date = date(2022, 6, 30)

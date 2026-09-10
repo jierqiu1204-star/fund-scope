@@ -1,0 +1,23 @@
+{
+  "module_sha256": "e4b437c5c39fee8e9c9ad6bb4f57f8bcafc232da4cb1687135e1c158d4e9ca2e",
+  "exit_code": 0,
+  "probe": {
+    "observed_at": "2026-09-10T12:49:05.106736+00:00",
+    "reader_seconds": 0.224,
+    "rows": 460,
+    "by_source": {
+      "159915:tickflow:tickflow.free.klines.backward_v1": 92,
+      "510300:tickflow:tickflow.free.klines.backward_v1": 92,
+      "510330:tickflow:tickflow.free.klines.backward_v1": 92,
+      "512100:tickflow:tickflow.free.klines.backward_v1": 92,
+      "512710:tickflow:tickflow.free.klines.backward_v1": 92
+    },
+    "calendar": [
+      {
+        "first_day": "2024-10-16",
+        "last_day": "2026-09-10",
+        "sessions": 466
+      }
+    ]
+  }
+}

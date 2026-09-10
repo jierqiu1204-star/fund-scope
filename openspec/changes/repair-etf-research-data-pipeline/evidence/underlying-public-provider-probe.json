@@ -1,0 +1,107 @@
+{
+  "module_sha256": "7768582de7040aad8174a6acaf59f8eb79f08e473a8710e7487b11d221c7a4ca",
+  "identity_module_sha256": "add9e9c20ad920a19f8c9493cc71de4929957b7b5d58ffc18801db6636595b3e",
+  "exit_code": 0,
+  "probe": {
+    "database_access": "none",
+    "provider_errors": [],
+    "records": [
+      {
+        "code": "510300",
+        "identity_state": "resolved",
+        "underlying_id": "eastmoney.fundf10:index:2a3a4c0dd4f7327f3f79a6fb55c010793033804ebf437cdb253bf1aae9d3ad74",
+        "observed_at": "2026-09-10T12:14:48.984627",
+        "source": "eastmoney.fundf10",
+        "raw_payload": {
+          "fund_code": "510300",
+          "source_url": "https://fundf10.eastmoney.com/jbgk_510300.html",
+          "provider_field": "跟踪标的",
+          "tracked_underlying_label": "沪深300指数",
+          "code_row": [
+            "基金代码",
+            "510300(主代码) 基金类型 指数型-股票"
+          ],
+          "underlying_row": [
+            "业绩比较基准",
+            "沪深300指数",
+            "跟踪标的",
+            "沪深300指数"
+          ],
+          "source_response_sha256": "83906a4666c74f5eaa5651785f1e7f3be07c952f2d19c4737b2d0a14d4cd28d2"
+        }
+      },
+      {
+        "code": "510330",
+        "identity_state": "resolved",
+        "underlying_id": "eastmoney.fundf10:index:2a3a4c0dd4f7327f3f79a6fb55c010793033804ebf437cdb253bf1aae9d3ad74",
+        "observed_at": "2026-09-10T12:14:49.154803",
+        "source": "eastmoney.fundf10",
+        "raw_payload": {
+          "fund_code": "510330",
+          "source_url": "https://fundf10.eastmoney.com/jbgk_510330.html",
+          "provider_field": "跟踪标的",
+          "tracked_underlying_label": "沪深300指数",
+          "code_row": [
+            "基金代码",
+            "510330(主代码) 基金类型 指数型-股票"
+          ],
+          "underlying_row": [
+            "业绩比较基准",
+            "沪深300指数",
+            "跟踪标的",
+            "沪深300指数"
+          ],
+          "source_response_sha256": "1c58817355967406ddc0ce28050e165f0ec2bcb5c00299b15fac98ec8d07b646"
+        }
+      },
+      {
+        "code": "512100",
+        "identity_state": "resolved",
+        "underlying_id": "eastmoney.fundf10:index:4fef89a5dd949924ccfb810cc24b5a328f224da150f5ab76a152f28c2e8c0f5c",
+        "observed_at": "2026-09-10T12:14:49.338985",
+        "source": "eastmoney.fundf10",
+        "raw_payload": {
+          "fund_code": "512100",
+          "source_url": "https://fundf10.eastmoney.com/jbgk_512100.html",
+          "provider_field": "跟踪标的",
+          "tracked_underlying_label": "中证1000指数",
+          "code_row": [
+            "基金代码",
+            "512100(主代码) 基金类型 指数型-股票"
+          ],
+          "underlying_row": [
+            "业绩比较基准",
+            "中证1000指数",
+            "跟踪标的",
+            "中证1000指数"
+          ],
+          "source_response_sha256": "5fa9c064a45a36757e9a2c5e45bfdf87f6fc25b0f4d91377eff26142bde15b93"
+        }
+      },
+      {
+        "code": "511990",
+        "identity_state": "unresolved",
+        "underlying_id": null,
+        "observed_at": "2026-09-10T12:14:49.496428",
+        "source": "eastmoney.fundf10",
+        "raw_payload": {
+          "fund_code": "511990",
+          "source_url": "https://fundf10.eastmoney.com/jbgk_511990.html",
+          "provider_field": "跟踪标的",
+          "tracked_underlying_label": "该基金无跟踪标的",
+          "code_row": [
+            "基金代码",
+            "511990(主代码) 基金类型 货币型-普通货币"
+          ],
+          "underlying_row": [
+            "业绩比较基准",
+            "同期七天通知存款利率(税后)",
+            "跟踪标的",
+            "该基金无跟踪标的"
+          ],
+          "source_response_sha256": "b5b00e4ddce7cb6904ec3c208d65dd6a9fc0fdc198d5df4706cb7c27224779f7"
+        }
+      }
+    ]
+  }
+}
