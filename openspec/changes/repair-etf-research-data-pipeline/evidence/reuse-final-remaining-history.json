@@ -1,0 +1,477 @@
+{
+  "exit_code": 0,
+  "result": {
+    "seasoned_pending_codes": [
+      "159203",
+      "159211",
+      "159216",
+      "159240",
+      "159318",
+      "159377",
+      "159508",
+      "159515",
+      "159555",
+      "159556",
+      "159563",
+      "159571",
+      "159578",
+      "159587",
+      "159620",
+      "159627",
+      "159653",
+      "159677",
+      "159730",
+      "159862",
+      "159889",
+      "159913",
+      "511670",
+      "511820",
+      "512390",
+      "516330",
+      "560030",
+      "560820"
+    ],
+    "seasoned_codes_without_recent_shortfall": [],
+    "observed_at": "2026-09-11 04:10:14.010869+00:00",
+    "first_required_date": "2025-12-16",
+    "last_required_date": "2026-09-10",
+    "required_dates": 180,
+    "pending_count": 296,
+    "authoritatively_unseasoned_count": 268,
+    "seasoned_pending_count": 28,
+    "unknown_listing_count": 0,
+    "pending_depth_histogram": {
+      "0": 8,
+      "2": 2,
+      "3": 2,
+      "4": 2,
+      "6": 1,
+      "7": 1,
+      "8": 1,
+      "9": 2,
+      "10": 1,
+      "12": 1,
+      "13": 3,
+      "15": 1,
+      "16": 1,
+      "17": 4,
+      "18": 1,
+      "19": 3,
+      "20": 1,
+      "24": 1,
+      "25": 2,
+      "26": 1,
+      "27": 2,
+      "28": 3,
+      "29": 3,
+      "32": 1,
+      "33": 2,
+      "34": 4,
+      "35": 5,
+      "36": 1,
+      "37": 2,
+      "38": 4,
+      "53": 2,
+      "55": 5,
+      "57": 2,
+      "60": 3,
+      "62": 1,
+      "63": 3,
+      "65": 4,
+      "66": 3,
+      "67": 6,
+      "68": 2,
+      "69": 2,
+      "71": 1,
+      "73": 3,
+      "74": 3,
+      "75": 2,
+      "77": 3,
+      "78": 2,
+      "79": 2,
+      "80": 3,
+      "81": 2,
+      "82": 1,
+      "83": 1,
+      "84": 10,
+      "85": 1,
+      "86": 4,
+      "87": 2,
+      "88": 7,
+      "89": 44,
+      "90": 16,
+      "91": 61,
+      "92": 1,
+      "173": 1,
+      "175": 1,
+      "176": 2,
+      "178": 1,
+      "179": 23
+    },
+    "seasoned_depth_histogram": {
+      "173": 1,
+      "175": 1,
+      "176": 2,
+      "178": 1,
+      "179": 23
+    },
+    "availability_since_repair": [
+      {
+        "status": "source_history_shortfall",
+        "codes": 28,
+        "earliest_retry": "2026-09-18 03:22:42.163625",
+        "latest_retry": "2026-09-18 04:05:11.376703"
+      },
+      {
+        "status": "sufficient",
+        "codes": 553,
+        "earliest_retry": null,
+        "latest_retry": null
+      }
+    ],
+    "samples": [
+      {
+        "code": "159578",
+        "listing": {
+          "etf_code": "159578",
+          "listing_date": "2024-06-07",
+          "source": "szse.fund.etf.list",
+          "observed_at": "2026-09-10 07:00:26.474518"
+        },
+        "source_depths": {
+          "tickflow": 179,
+          "tencent": 71
+        },
+        "best_provider": "tickflow",
+        "missing_count": 1,
+        "missing_dates_sample": [
+          "2026-09-01"
+        ],
+        "rows_on_first_missing_dates": []
+      },
+      {
+        "code": "159627",
+        "listing": {
+          "etf_code": "159627",
+          "listing_date": "2022-11-30",
+          "source": "szse.fund.etf.list",
+          "observed_at": "2026-09-10 07:00:26.474518"
+        },
+        "source_depths": {
+          "tickflow": 179,
+          "tencent": 78
+        },
+        "best_provider": "tickflow",
+        "missing_count": 1,
+        "missing_dates_sample": [
+          "2025-12-23"
+        ],
+        "rows_on_first_missing_dates": []
+      },
+      {
+        "code": "159216",
+        "listing": {
+          "etf_code": "159216",
+          "listing_date": "2025-04-11",
+          "source": "szse.fund.etf.list",
+          "observed_at": "2026-09-10 07:00:26.474518"
+        },
+        "source_depths": {
+          "tickflow": 179,
+          "tencent": 84
+        },
+        "best_provider": "tickflow",
+        "missing_count": 1,
+        "missing_dates_sample": [
+          "2026-01-26"
+        ],
+        "rows_on_first_missing_dates": []
+      },
+      {
+        "code": "159653",
+        "listing": {
+          "etf_code": "159653",
+          "listing_date": "2023-03-24",
+          "source": "szse.fund.etf.list",
+          "observed_at": "2026-09-10 07:00:26.474518"
+        },
+        "source_depths": {
+          "eastmoney": 86,
+          "tickflow": 178,
+          "tencent": 78
+        },
+        "best_provider": "tickflow",
+        "missing_count": 2,
+        "missing_dates_sample": [
+          "2025-12-31",
+          "2026-04-13"
+        ],
+        "rows_on_first_missing_dates": [
+          {
+            "trade_date": "2025-12-31",
+            "data_provider": "tickflow",
+            "volume": 0.0,
+            "decision_eligible": true,
+            "decision_ineligibility_reason": null,
+            "open": 1.206,
+            "high": 1.206,
+            "low": 1.206,
+            "close": 1.206,
+            "research_adjusted_value": 1.206
+          },
+          {
+            "trade_date": "2026-04-13",
+            "data_provider": "tickflow",
+            "volume": 0.0,
+            "decision_eligible": true,
+            "decision_ineligibility_reason": null,
+            "open": 1.211,
+            "high": 1.211,
+            "low": 1.211,
+            "close": 1.211,
+            "research_adjusted_value": 1.211
+          }
+        ]
+      },
+      {
+        "code": "560030",
+        "listing": {
+          "etf_code": "560030",
+          "listing_date": "2023-07-10",
+          "source": "sse.etf.fundlist",
+          "observed_at": "2026-09-10 07:00:26.474518"
+        },
+        "source_depths": {
+          "eastmoney": 88,
+          "tickflow": 179,
+          "tencent": 65
+        },
+        "best_provider": "tickflow",
+        "missing_count": 1,
+        "missing_dates_sample": [
+          "2026-06-11"
+        ],
+        "rows_on_first_missing_dates": [
+          {
+            "trade_date": "2026-06-11",
+            "data_provider": "tickflow",
+            "volume": 0.0,
+            "decision_eligible": true,
+            "decision_ineligibility_reason": null,
+            "open": 1.268,
+            "high": 1.268,
+            "low": 1.268,
+            "close": 1.268,
+            "research_adjusted_value": 1.268
+          }
+        ]
+      },
+      {
+        "code": "159203",
+        "listing": {
+          "etf_code": "159203",
+          "listing_date": "2025-06-30",
+          "source": "szse.fund.etf.list",
+          "observed_at": "2026-09-10 07:00:26.474518"
+        },
+        "source_depths": {
+          "tickflow": 179,
+          "tencent": 84
+        },
+        "best_provider": "tickflow",
+        "missing_count": 1,
+        "missing_dates_sample": [
+          "2026-04-29"
+        ],
+        "rows_on_first_missing_dates": []
+      },
+      {
+        "code": "159211",
+        "listing": {
+          "etf_code": "159211",
+          "listing_date": "2025-04-14",
+          "source": "szse.fund.etf.list",
+          "observed_at": "2026-09-10 07:00:26.474518"
+        },
+        "source_depths": {
+          "tickflow": 179,
+          "tencent": 65
+        },
+        "best_provider": "tickflow",
+        "missing_count": 1,
+        "missing_dates_sample": [
+          "2026-08-03"
+        ],
+        "rows_on_first_missing_dates": []
+      },
+      {
+        "code": "159240",
+        "listing": {
+          "etf_code": "159240",
+          "listing_date": "2025-06-17",
+          "source": "szse.fund.etf.list",
+          "observed_at": "2026-09-10 07:00:26.474518"
+        },
+        "source_depths": {
+          "tickflow": 179,
+          "tencent": 87
+        },
+        "best_provider": "tickflow",
+        "missing_count": 1,
+        "missing_dates_sample": [
+          "2026-04-14"
+        ],
+        "rows_on_first_missing_dates": []
+      },
+      {
+        "code": "159318",
+        "listing": {
+          "etf_code": "159318",
+          "listing_date": "2024-06-21",
+          "source": "szse.fund.etf.list",
+          "observed_at": "2026-09-10 07:00:26.474518"
+        },
+        "source_depths": {
+          "tickflow": 179,
+          "tencent": 84
+        },
+        "best_provider": "tickflow",
+        "missing_count": 1,
+        "missing_dates_sample": [
+          "2026-04-15"
+        ],
+        "rows_on_first_missing_dates": []
+      },
+      {
+        "code": "159377",
+        "listing": {
+          "etf_code": "159377",
+          "listing_date": "2025-04-15",
+          "source": "szse.fund.etf.list",
+          "observed_at": "2026-09-10 07:00:26.474518"
+        },
+        "source_depths": {
+          "tickflow": 179,
+          "tencent": 78
+        },
+        "best_provider": "tickflow",
+        "missing_count": 1,
+        "missing_dates_sample": [
+          "2026-03-03"
+        ],
+        "rows_on_first_missing_dates": []
+      },
+      {
+        "code": "159508",
+        "listing": {
+          "etf_code": "159508",
+          "listing_date": "2023-07-14",
+          "source": "szse.fund.etf.list",
+          "observed_at": "2026-09-10 07:00:26.474518"
+        },
+        "source_depths": {
+          "tickflow": 179,
+          "tencent": 88
+        },
+        "best_provider": "tickflow",
+        "missing_count": 1,
+        "missing_dates_sample": [
+          "2026-05-18"
+        ],
+        "rows_on_first_missing_dates": []
+      },
+      {
+        "code": "159515",
+        "listing": {
+          "etf_code": "159515",
+          "listing_date": "2023-09-06",
+          "source": "szse.fund.etf.list",
+          "observed_at": "2026-09-10 07:00:26.474518"
+        },
+        "source_depths": {
+          "eastmoney": 88,
+          "tickflow": 179,
+          "tencent": 75
+        },
+        "best_provider": "tickflow",
+        "missing_count": 1,
+        "missing_dates_sample": [
+          "2026-07-30"
+        ],
+        "rows_on_first_missing_dates": []
+      },
+      {
+        "code": "159007",
+        "listing": {
+          "etf_code": "159007",
+          "listing_date": "2026-04-17",
+          "source": "szse.fund.etf.list",
+          "observed_at": "2026-09-10 07:00:26.474518"
+        },
+        "source_depths": {
+          "tencent": 90,
+          "tickflow": 88,
+          "eastmoney": 66
+        },
+        "best_provider": "tencent",
+        "missing_count": 90,
+        "missing_dates_sample": [
+          "2025-12-16",
+          "2025-12-17",
+          "2025-12-18",
+          "2025-12-19",
+          "2025-12-22"
+        ],
+        "rows_on_first_missing_dates": []
+      },
+      {
+        "code": "159008",
+        "listing": {
+          "etf_code": "159008",
+          "listing_date": "2026-04-28",
+          "source": "szse.fund.etf.list",
+          "observed_at": "2026-09-10 07:00:26.474518"
+        },
+        "source_depths": {
+          "tencent": 86,
+          "tickflow": 88,
+          "eastmoney": 66
+        },
+        "best_provider": "tickflow",
+        "missing_count": 92,
+        "missing_dates_sample": [
+          "2025-12-16",
+          "2025-12-17",
+          "2025-12-18",
+          "2025-12-19",
+          "2025-12-22"
+        ],
+        "rows_on_first_missing_dates": []
+      },
+      {
+        "code": "159009",
+        "listing": {
+          "etf_code": "159009",
+          "listing_date": "2026-04-14",
+          "source": "szse.fund.etf.list",
+          "observed_at": "2026-09-10 07:00:26.474518"
+        },
+        "source_depths": {
+          "tencent": 90,
+          "tickflow": 88,
+          "eastmoney": 66
+        },
+        "best_provider": "tencent",
+        "missing_count": 90,
+        "missing_dates_sample": [
+          "2025-12-16",
+          "2025-12-17",
+          "2025-12-18",
+          "2025-12-19",
+          "2025-12-22"
+        ],
+        "rows_on_first_missing_dates": []
+      }
+    ]
+  }
+}

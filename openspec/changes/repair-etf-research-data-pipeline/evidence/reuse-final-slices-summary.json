@@ -1,0 +1,87 @@
+{
+  "deployed_sha": "16e2f8a281f466e5c8c843b38dfd02f6e3f7c996",
+  "target_trade_date": "2026-09-10",
+  "source_files": [
+    "full-pool-20260911T032009Z.jsonl",
+    "full-pool-20260911T032215Z.jsonl",
+    "full-pool-20260911T035958Z.jsonl"
+  ],
+  "slice_count": 93,
+  "first_finished_at": "2026-09-11T03:21:02.101633+00:00",
+  "last_finished_at": "2026-09-11T04:09:19.303213+00:00",
+  "statuses": {
+    "partial": 65,
+    "complete": 28
+  },
+  "stop_reasons": {
+    "admission_deadline": 1,
+    "continuation_required": 64,
+    "null": 28
+  },
+  "all_cli_exit_codes_zero": true,
+  "persisted_rows": 48898,
+  "unique_completed_codes": 521,
+  "maximum_cli_wall_seconds": 52.969,
+  "peak_rss_bytes": 196345856,
+  "last_sync": {
+    "attempted_count": 4,
+    "attempted_samples": [
+      "589820",
+      "589850",
+      "589950",
+      "589960"
+    ],
+    "checkpoint_identity_hash": "673ba061daccb575a5e6ff4ae555c7116b0ac5638c27bd1461f390023e18d138",
+    "completed_count": 4,
+    "completed_samples": [
+      "589820",
+      "589850",
+      "589950",
+      "589960"
+    ],
+    "elapsed_seconds": 3.325635,
+    "exclusion_count": 0,
+    "exclusion_samples": [],
+    "fetched_rows": 720,
+    "last_completed_code": "589960",
+    "peak_rss_bytes": 184086528,
+    "persisted_rows": 308,
+    "profile_max_codes": 5,
+    "rows_per_second": 92.614,
+    "status": "complete",
+    "stop_reason": null
+  },
+  "unresolved_observed_exclusions": {
+    "560820": "insufficient_contiguous_adjusted_sessions",
+    "511820": "insufficient_contiguous_adjusted_sessions",
+    "511670": "insufficient_contiguous_adjusted_sessions",
+    "159913": "insufficient_contiguous_adjusted_sessions",
+    "159653": "insufficient_contiguous_adjusted_sessions",
+    "560030": "insufficient_contiguous_adjusted_sessions",
+    "159211": "insufficient_contiguous_adjusted_sessions",
+    "159571": "insufficient_contiguous_adjusted_sessions",
+    "159578": "insufficient_contiguous_adjusted_sessions",
+    "159620": "insufficient_contiguous_adjusted_sessions",
+    "159862": "insufficient_contiguous_adjusted_sessions",
+    "159889": "insufficient_contiguous_adjusted_sessions",
+    "516330": "insufficient_contiguous_adjusted_sessions",
+    "159318": "insufficient_contiguous_adjusted_sessions",
+    "159377": "insufficient_contiguous_adjusted_sessions",
+    "159508": "insufficient_contiguous_adjusted_sessions",
+    "159555": "insufficient_contiguous_adjusted_sessions",
+    "159556": "insufficient_contiguous_adjusted_sessions",
+    "159563": "insufficient_contiguous_adjusted_sessions",
+    "159587": "insufficient_contiguous_adjusted_sessions",
+    "159627": "insufficient_contiguous_adjusted_sessions",
+    "159730": "insufficient_contiguous_adjusted_sessions",
+    "159216": "insufficient_contiguous_adjusted_sessions",
+    "159203": "insufficient_contiguous_adjusted_sessions",
+    "159240": "insufficient_contiguous_adjusted_sessions",
+    "159515": "insufficient_contiguous_adjusted_sessions",
+    "159677": "insufficient_contiguous_adjusted_sessions",
+    "512390": "insufficient_contiguous_adjusted_sessions"
+  },
+  "unresolved_exclusion_reason_counts": {
+    "insufficient_contiguous_adjusted_sessions": 28
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "observed_at": "2026-09-11T03:11:46Z",
+  "blocked_deployment_run": 34556666062,
+  "failed_attempt": 1,
+  "failure": "The job was not acquired by Runner of type self-hosted even after multiple attempts",
+  "root_cause": "Runner 2.335.1 auto-update download timed out after 900 seconds; the next attempt remained too slow to acquire deploy jobs.",
+  "official_release": "https://github.com/actions/runner/releases/tag/v2.337.0",
+  "asset": "actions-runner-linux-x64-2.337.0.tar.gz",
+  "verified_size_bytes": 226430031,
+  "verified_sha256": "70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613",
+  "installed_version": "2.337.0",
+  "service": "active",
+  "github_runner_after_update": {
+    "status": "online",
+    "busy": false
+  },
+  "previous_program_backup": "/srv/actions-runner/_manual-update-2.337.0/old",
+  "registration_preserved": true,
+  "app_health": 200,
+  "db_health": "ok",
+  "deployed_app_sha_at_recovery": "3ef6e9e93b02c9e254d54f2379ae0a9310a4ab3a",
+  "next_step": "Rerun original deployment with database backup and normal validation."
+}
