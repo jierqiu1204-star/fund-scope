@@ -48,6 +48,9 @@ RESEARCH_PROFILE_INITIAL_CODES = 10
 RESEARCH_PROFILE_MAX_CODES = 20
 COMPACT_SAMPLE_LIMIT = 20
 RESEARCH_WORKFLOW_TIMEOUT_SECONDS = 55.0
+_WORKFLOW_CLEANUP_RESERVE_SECONDS = 3.0
+_MIN_DYNAMIC_PROCESS_SECONDS = 15.0
+_DEADLINE_GAP_SECONDS = 5.0
 INPUT_REPAIR_REQUIRED_HISTORY_SESSIONS = TELEMETRY_DEPTH_SESSIONS
 INPUT_REPAIR_SCOPE = "history_depth_input_repair_180"
 INPUT_REPAIR_CONTRACT_HASH = canonical_hash(
@@ -331,13 +334,42 @@ def _observed_input_repair_dates(
     return dates
 
 
+def _history_sync_deadlines(
+    *,
+    timeout_seconds: float,
+    available_seconds: float,
+) -> tuple[float, float, float] | None:
+    """Return admission, worker and process budgets sharing one deadline."""
+
+    process_seconds = min(timeout_seconds, available_seconds)
+    if process_seconds < _MIN_DYNAMIC_PROCESS_SECONDS:
+        return None
+    worker_seconds = min(
+        50.0,
+        process_seconds - _DEADLINE_GAP_SECONDS,
+    )
+    admission_seconds = min(
+        45.0,
+        worker_seconds - _DEADLINE_GAP_SECONDS,
+    )
+    if admission_seconds <= 0:
+        return None
+    return admission_seconds, worker_seconds, process_seconds
+
+
 async def _run_post_publication_etf_research_history_slice(
     session: AsyncSession,
     *,
     target_date: date | None = None,
     input_repair: bool = False,
     input_repair_codes: Sequence[str] | None = None,
+    _workflow_started_at: float | None = None,
+    _workflow_timeout_seconds: float = RESEARCH_WORKFLOW_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
+    loop = asyncio.get_running_loop()
+    workflow_started_at = (
+        _workflow_started_at if _workflow_started_at is not None else loop.time()
+    )
     requested_date = target_date or datetime.now(ASIA_SHANGHAI).date()
     effective_date = _latest_completed_etf_session(requested_date)
     if effective_date is None:
@@ -366,11 +398,13 @@ async def _run_post_publication_etf_research_history_slice(
             "target_date": effective_date.isoformat(),
         }
 
+    readiness_started_at = loop.time()
     readiness = await read_etf_history_readiness(
         session,
         target_date=effective_date,
         horizons=DEFAULT_HISTORY_HORIZONS,
     )
+    readiness_elapsed = loop.time() - readiness_started_at
     daily = readiness.get("daily_freshness") or {}
     warmup = readiness.get("history_depth_61") or {}
     compact_gates = {
@@ -600,6 +634,47 @@ async def _run_post_publication_etf_research_history_slice(
             RESEARCH_PROFILE_MIN_CODES,
             min(profile_max_codes, len(codes)),
         )
+    preparation_elapsed = loop.time() - workflow_started_at
+    available_worker_seconds = (
+        _workflow_timeout_seconds
+        - preparation_elapsed
+        - _WORKFLOW_CLEANUP_RESERVE_SECONDS
+        - (
+            readiness_elapsed
+            if not input_repair
+            else 0.0
+        )
+    )
+    deadlines = _history_sync_deadlines(
+        timeout_seconds=_workflow_timeout_seconds,
+        available_seconds=available_worker_seconds,
+    )
+    if deadlines is None:
+        result = {
+            "asset_type": ASSET_TYPE_ETF,
+            "status": "partial",
+            "job_status": "partial",
+            "reason": "research_history_worker_budget_exhausted",
+            "target_date": effective_date.isoformat(),
+            "publication_gates": compact_gates,
+            "lane": _compact_lane(selected_lane),
+        }
+        if input_repair:
+            result["input_repair"] = {
+                "mode": "input_repair",
+                "formal_research_ready": False,
+                "status": "partial",
+                "stop_reason": result["reason"],
+                "requested_codes": (
+                    list(requested_codes) if requested_codes is not None else None
+                ),
+                "selected_code_count": len(codes),
+                "ignored_codes": list(ignored_codes),
+            }
+        return result
+    admission_deadline_seconds, worker_deadline_seconds, process_deadline_seconds = (
+        deadlines
+    )
     request = BoundedHistorySyncRequest(
         scope=scope,
         contract_hash=contract_hash,
@@ -612,9 +687,9 @@ async def _run_post_publication_etf_research_history_slice(
         max_codes=profile_max_codes,
         page_size=500,
         max_rows=5_000,
-        admission_deadline_seconds=45.0,
-        worker_deadline_seconds=50.0,
-        process_deadline_seconds=55.0,
+        admission_deadline_seconds=admission_deadline_seconds,
+        worker_deadline_seconds=worker_deadline_seconds,
+        process_deadline_seconds=process_deadline_seconds,
         rss_limit_bytes=RESEARCH_RSS_LIMIT_BYTES,
         provider_timeout_seconds=6.0,
         selection_policy=RESEARCH_DEPTH_SELECTION_POLICY,
@@ -689,15 +764,26 @@ async def run_post_publication_etf_research_history_slice(
     target_date: date | None = None,
     input_repair: bool = False,
     input_repair_codes: Sequence[str] | None = None,
+    max_seconds: float | None = None,
 ) -> dict[str, Any]:
     requested_date = target_date or datetime.now(ASIA_SHANGHAI).date()
+    timeout_seconds = (
+        RESEARCH_WORKFLOW_TIMEOUT_SECONDS
+        if max_seconds is None
+        else min(RESEARCH_WORKFLOW_TIMEOUT_SECONDS, float(max_seconds))
+    )
+    if timeout_seconds <= 0:
+        raise ValueError("max_seconds must be positive")
+    workflow_started_at = asyncio.get_running_loop().time()
     try:
-        async with asyncio.timeout(RESEARCH_WORKFLOW_TIMEOUT_SECONDS) as timeout_scope:
+        async with asyncio.timeout(timeout_seconds) as timeout_scope:
             return await _run_post_publication_etf_research_history_slice(
                 session,
                 target_date=target_date,
                 input_repair=input_repair,
                 input_repair_codes=input_repair_codes,
+                _workflow_started_at=workflow_started_at,
+                _workflow_timeout_seconds=timeout_seconds,
             )
     except TimeoutError:
         if not timeout_scope.expired():
@@ -713,7 +799,7 @@ async def run_post_publication_etf_research_history_slice(
                 "hard timeout"
             ),
             "target_date": requested_date.isoformat(),
-            "timeout_seconds": RESEARCH_WORKFLOW_TIMEOUT_SECONDS,
+            "timeout_seconds": timeout_seconds,
         }
 
 

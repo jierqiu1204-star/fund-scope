@@ -586,8 +586,15 @@ async def test_coordinator_runs_300_before_500_with_safe_bounded_profile(
     assert request.max_rows == 5_000
     assert request.rss_limit_bytes == 512 * 1024 * 1024
     assert request.provider_timeout_seconds == 6.0
-    assert request.worker_deadline_seconds == 50.0
-    assert request.process_deadline_seconds == 55.0
+    assert (
+        0
+        < request.admission_deadline_seconds
+        < request.worker_deadline_seconds
+        < request.process_deadline_seconds
+        < coordinator.RESEARCH_WORKFLOW_TIMEOUT_SECONDS
+    )
+    assert request.process_deadline_seconds - request.worker_deadline_seconds == pytest.approx(5.0)
+    assert request.worker_deadline_seconds - request.admission_deadline_seconds == pytest.approx(5.0)
     assert result["sync"]["attempted_count"] == 1
     assert result["publication_gates"]["thresholds"] == {
         "daily_freshness": 0.95,

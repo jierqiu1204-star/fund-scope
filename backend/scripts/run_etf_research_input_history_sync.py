@@ -93,6 +93,7 @@ async def _run(arguments: argparse.Namespace) -> dict[str, Any]:
                 target_date=arguments.target_date,
                 input_repair=True,
                 input_repair_codes=codes,
+                max_seconds=arguments.max_seconds,
             )
     finally:
         await database.engine.dispose()
@@ -101,9 +102,7 @@ async def _run(arguments: argparse.Namespace) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     arguments = _arguments(argv)
     try:
-        result = asyncio.run(
-            asyncio.wait_for(_run(arguments), timeout=arguments.max_seconds)
-        )
+        result = asyncio.run(_run(arguments))
     except Exception as exc:  # noqa: BLE001 - CLI emits a bounded redacted result
         result = {
             "status": "failed",

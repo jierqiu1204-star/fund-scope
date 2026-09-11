@@ -1,0 +1,1 @@
+{"index": 1, "observed_at": "2026-09-11T02:44:06.838233+00:00", "exit_code": 1, "wall_seconds": 59.258, "result": {"reason": "InterfaceError: (sqlalchemy.dialects.postgresql.asyncpg.InterfaceError) <class 'asyncpg.exceptions._base.InterfaceError'>: cannot call Transaction.rollback(): the underlying connection is closed\n(Background on this e", "status": "failed"}}

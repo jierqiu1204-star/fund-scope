@@ -105,3 +105,16 @@ python -m scripts.run_etf_research_input_history_sync --target-date 2026-09-10 -
 ```
 
 完整同源数据会跳过；已有游标、租约、失败冷却和日常增量调度继续复用。首次初始化实际结果和生效版本在发布后追加，当前不把“CLI 开放”写成“全池补齐”。
+
+
+### 首次发布、实际发现与预算补丁
+
+`3ef6e9e93b02c9e254d54f2379ae0a9310a4ab3a` 已通过 [正式部署](https://github.com/jierqiu1204-star/fund-scope/actions/runs/34555052748)。部署后实际文件 hash 与已验收版本相符，应用/数据库正常。
+
+首轮全池 CLI 运行约 59 秒后报告连接已关闭，不能把本轮标成正常结束。独立数据库检查确认此前已提交 191 条新修订（Tickflow 11 条/11 只、AKShare/Eastmoney 180 条/1 只），180 根同源覆盖 670→682，300 根正式池覆盖 651→661；游标 159572→159610。旧 running JobRun 保留审计，没有改写成功，既有 120 秒过期租约允许后续恢复。
+
+主代理两个预算反例复现：前置 readiness 已耗时间，内层仍重新领取 45/50/55 秒，CLI 和 workflow 又在相同 55 秒同时取消事务，导致结果收尾被打断。预算补丁改为全程共享剩余时间，预留外层 3 秒收尾；process、worker、admission 相隔 5 秒，formal lane_after 额外预留本轮首次 readiness 的实耗。余量不足则部分完成且不启动 worker。CLI 把 max-seconds 传给 workflow，删除相同时间的第二层取消。
+
+主代理最终 33 个相关测试文件 **302 passed（41.28 秒）**，含 8 项预算反例：两种采集模式、快速/延迟准备、短预算不启动 worker。领域边界、全 backend Ruff 均通过。
+
+发布补丁前，在服务器临时进程加载候选 workflow/CLI，未覆盖线上文件：真实续采耗时 **39.218 秒**，取回 3600 根，补入 20 个缺口，20 只全部完成，游标至 159732，峰值 RSS 185942016 字节，退出码 0，正确返回 partial/continuation_required。该条明确为候选进程验证，最终仍按正常发布流程更新服务。证据见 `evidence/reuse-budget-candidate-production.json`。
