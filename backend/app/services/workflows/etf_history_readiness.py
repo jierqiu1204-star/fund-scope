@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from datetime import UTC, date, datetime, time
 from typing import Any
 
-from sqlalchemy import and_, case, false, func, or_, select
+from sqlalchemy import false, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.entities import (
@@ -13,10 +13,8 @@ from app.models.entities import (
     JobRun,
     ShortResearchSignalRun,
 )
-from app.services.market_data import (
-    ASIA_SHANGHAI,
-    etf_decision_adjusted_provider_versions,
-)
+from app.services.market_data import ASIA_SHANGHAI
+from app.services.short_etf.bounded_history_sync import _coherent_revision_depths
 from app.services.short_research.coverage_policy import (
     ETF_COMPLETE_SCORE_COVERAGE,
     ETF_DAILY_DECISION_MIN_COVERAGE,
@@ -339,20 +337,6 @@ def _cutoff_utc_naive(
     return cutoff.astimezone(UTC).replace(tzinfo=None)
 
 
-def _accepted_adjusted_provider_filter() -> Any:
-    pairs = etf_decision_adjusted_provider_versions()
-    return or_(
-        *(
-            and_(
-                EtfPriceHistory.data_provider == provider,
-                EtfPriceHistory.provider_version == version,
-                EtfPriceHistory.adjustment_version == version,
-            )
-            for provider, version in pairs
-        )
-    )
-
-
 async def read_etf_history_readiness(
     session: AsyncSession,
     *,
@@ -463,55 +447,31 @@ async def read_etf_history_readiness(
         session_dates[-DEEP_TELEMETRY_DEPTH_SESSIONS:]
     )
 
-    daily_by_code = {code: 0 for code in codes}
-    warmup_by_code = {code: 0 for code in codes}
-    telemetry_by_code = {code: 0 for code in codes}
-    contract_by_code = {code: 0 for code in codes}
-    deep_telemetry_by_code = {code: 0 for code in codes}
-    if codes and session_dates:
-        rows = await session.execute(
-            select(
-                EtfPriceHistory.etf_code,
-                func.sum(
-                    case((EtfPriceHistory.trade_date == effective_date, 1), else_=0)
-                ),
-                func.sum(
-                    case((EtfPriceHistory.trade_date.in_(warmup_dates), 1), else_=0)
-                ),
-                func.sum(
-                    case((EtfPriceHistory.trade_date.in_(telemetry_dates), 1), else_=0)
-                ),
-                func.sum(
-                    case((EtfPriceHistory.trade_date.in_(contract_dates), 1), else_=0)
-                ),
-                func.sum(
-                    case(
-                        (
-                            EtfPriceHistory.trade_date.in_(deep_telemetry_dates),
-                            1,
-                        ),
-                        else_=0,
-                    )
-                ),
-            )
-            .where(
-                EtfPriceHistory.etf_code.in_(codes),
-                EtfPriceHistory.trade_date.in_(deep_telemetry_dates),
-                EtfPriceHistory.decision_eligible.is_(True),
-                EtfPriceHistory.research_price_basis == "total_return_adjusted",
-                EtfPriceHistory.source_timestamp.is_not(None),
-                EtfPriceHistory.source_timestamp <= cutoff_utc,
-                _accepted_adjusted_provider_filter(),
-            )
-            .group_by(EtfPriceHistory.etf_code)
+    coherent_depths = (
+        await _coherent_revision_depths(
+            session,
+            codes=codes,
+            windows=(
+                (effective_date,),
+                warmup_dates,
+                telemetry_dates,
+                contract_dates,
+                deep_telemetry_dates,
+            ),
+            source_cutoff=cutoff_utc,
         )
-        for code, daily, warmup, telemetry, contract, deep_telemetry in rows:
-            key = str(code)
-            daily_by_code[key] = int(daily or 0)
-            warmup_by_code[key] = int(warmup or 0)
-            telemetry_by_code[key] = int(telemetry or 0)
-            contract_by_code[key] = int(contract or 0)
-            deep_telemetry_by_code[key] = int(deep_telemetry or 0)
+        if codes and session_dates
+        else {}
+    )
+
+    def depths_for(index: int) -> dict[str, int]:
+        return {code: coherent_depths.get(code, (0,) * 5)[index] for code in codes}
+
+    daily_by_code = depths_for(0)
+    warmup_by_code = depths_for(1)
+    telemetry_by_code = depths_for(2)
+    contract_by_code = depths_for(3)
+    deep_telemetry_by_code = depths_for(4)
 
     daily_attempted = await _latest_attempted_codes(session, scope=DAILY_FRESHNESS_SCOPE)
     warmup_attempted = await _latest_attempted_codes(session, scope=SCORE_WARMUP_SCOPE)

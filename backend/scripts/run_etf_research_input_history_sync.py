@@ -31,17 +31,27 @@ def _parse_date(value: str) -> date:
 def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run one bounded ETF research-history input-repair slice for at most "
-            "five point-in-time ETF codes."
+            "Run one bounded ETF research-history input-repair slice. Omit --codes "
+            "for the full point-in-time universe cursor, or pass up to five codes "
+            "for a sample batch."
         )
     )
     parser.add_argument(
         "--codes",
         nargs="+",
-        required=True,
-        help="one to five ETF codes from the point-in-time universe",
+        help=(
+            "optional one to five ETF codes from the point-in-time universe; "
+            "omit to continue the full-universe cursor"
+        ),
     )
-    parser.add_argument("--target-date", type=_parse_date)
+    parser.add_argument(
+        "--target-date",
+        type=_parse_date,
+        help=(
+            "completed ETF session date, for example the latest closed session "
+            "2026-09-10; the CLI does not infer or guess this date"
+        ),
+    )
     parser.add_argument("--max-seconds", type=float, default=MAX_SECONDS)
     return parser.parse_args(argv)
 
@@ -72,7 +82,7 @@ def _normalise_codes(values: list[str]) -> tuple[str, ...]:
 async def _run(arguments: argparse.Namespace) -> dict[str, Any]:
     if not 0 < arguments.max_seconds <= MAX_SECONDS:
         raise ValueError("max-seconds must be within (0, 55]")
-    codes = _normalise_codes(arguments.codes)
+    codes = _normalise_codes(arguments.codes) if arguments.codes else None
     settings = get_settings()
     _require_server_database(settings.database_url)
     database = DatabaseManager(settings.database_url)

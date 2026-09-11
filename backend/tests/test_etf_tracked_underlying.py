@@ -291,6 +291,12 @@ async def test_mixed_provider_failure_persists_success_and_advances_bounded_curs
     app,
     monkeypatch,
 ) -> None:
+    class FixedDate(date):
+        @classmethod
+        def today(cls) -> date:
+            return date(2026, 9, 10)
+
+    monkeypatch.setattr(jobs, "date", FixedDate)
     codes = ("510300", "510330")
     async with app.state.db.session() as session:
         for code in codes:

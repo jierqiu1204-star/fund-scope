@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import date, datetime, time, timedelta
 
 import pytest
 from sqlalchemy import text
 
 from app.models.entities import (
+    EtfAdjustedPriceRevision,
     EtfListingDateObservation,
     EtfPriceHistory,
     EtfUniverseMembership,
@@ -90,6 +92,44 @@ def _price(code: str, trade_date: date, *, eligible: bool) -> EtfPriceHistory:
     )
 
 
+def _revision(price: EtfPriceHistory) -> EtfAdjustedPriceRevision:
+    revision_hash = hashlib.sha256(
+        f"{price.etf_code}:{price.trade_date}:{price.data_provider}:{price.decision_eligible}".encode()
+    ).hexdigest()
+    return EtfAdjustedPriceRevision(
+        etf_code=price.etf_code,
+        trade_date=price.trade_date,
+        open=price.open,
+        high=price.high,
+        low=price.low,
+        close=price.close,
+        volume=price.volume,
+        turnover=price.turnover,
+        pct_change=price.pct_change,
+        raw_price_basis=price.raw_price_basis,
+        research_adjusted_value=price.research_adjusted_value,
+        research_price_basis=price.research_price_basis,
+        data_provider=price.data_provider or "fixture",
+        provider_version=price.provider_version,
+        source_timestamp=price.source_timestamp or datetime.combine(price.trade_date, time(6)),
+        adjustment_version=price.adjustment_version,
+        decision_eligible=bool(price.decision_eligible),
+        decision_ineligibility_reason=price.decision_ineligibility_reason,
+        first_seen_at=price.source_timestamp or datetime.combine(price.trade_date, time(6)),
+        observed_at=price.source_timestamp or datetime.combine(price.trade_date, time(6)),
+        payload_hash=hashlib.sha256(f"payload:{revision_hash}".encode()).hexdigest(),
+        revision_hash=revision_hash,
+        created_at=price.created_at,
+    )
+
+
+def _price_rows(code: str, trade_date: date, *, eligible: bool) -> tuple[
+    EtfPriceHistory, EtfAdjustedPriceRevision
+]:
+    price = _price(code, trade_date, eligible=eligible)
+    return price, _revision(price)
+
+
 @pytest.mark.asyncio
 async def test_readiness_separates_current_freshness_from_61_session_depth(app) -> None:
     target = date(2026, 7, 17)
@@ -105,9 +145,17 @@ async def test_readiness_separates_current_freshness_from_61_session_depth(app) 
                 _membership("510702", effective_from=sessions[0]),
             ]
         )
-        session.add_all(_price("510701", day, eligible=True) for day in sessions)
-        session.add(_price("510702", target, eligible=True))
-        session.add_all(_price("510702", day, eligible=False) for day in sessions[:-1])
+        session.add_all(
+            item
+            for day in sessions
+            for item in _price_rows("510701", day, eligible=True)
+        )
+        session.add_all(_price_rows("510702", target, eligible=True))
+        session.add_all(
+            item
+            for day in sessions[:-1]
+            for item in _price_rows("510702", day, eligible=False)
+        )
         await session.commit()
 
         report = await read_etf_history_readiness(
@@ -161,9 +209,9 @@ async def test_readiness_uses_ranking_point_in_time_universe_denominator(app) ->
         )
         session.add_all(
             [
-                _price("510710", target, eligible=True),
-                _price("510711", target, eligible=True),
-                _price("510712", target, eligible=True),
+                *_price_rows("510710", target, eligible=True),
+                *_price_rows("510711", target, eligible=True),
+                *_price_rows("510712", target, eligible=True),
             ]
         )
         await session.commit()
@@ -217,8 +265,12 @@ async def test_research_depth_uses_a_seasoned_authoritative_cohort(app) -> None:
             _membership(code, effective_from=sessions[0])
             for code in (old_code, new_code, unknown_code)
         )
-        session.add_all(_price(old_code, day, eligible=True) for day in sessions)
-        session.add_all(_price(new_code, day, eligible=False) for day in sessions)
+        session.add_all(
+            item for day in sessions for item in _price_rows(old_code, day, eligible=True)
+        )
+        session.add_all(
+            item for day in sessions for item in _price_rows(new_code, day, eligible=False)
+        )
         await session.commit()
 
         report = await read_etf_history_readiness(
@@ -269,8 +321,16 @@ async def test_raw_rows_extend_calendar_but_never_adjusted_coverage(app) -> None
             _membership(code, effective_from=sessions[0])
             for code in (seasoned_code, calendar_only_code)
         )
-        session.add_all(_price(calendar_only_code, day, eligible=False) for day in sessions)
-        session.add_all(_price(seasoned_code, day, eligible=True) for day in sessions[1:])
+        session.add_all(
+            item
+            for day in sessions
+            for item in _price_rows(calendar_only_code, day, eligible=False)
+        )
+        session.add_all(
+            item
+            for day in sessions[1:]
+            for item in _price_rows(seasoned_code, day, eligible=True)
+        )
         await session.commit()
 
         report = await read_etf_history_readiness(
@@ -323,7 +383,7 @@ async def test_readiness_cutoff_and_central_provider_registry_fail_closed(app) -
         forged.data_provider = "tencent"
         forged.provider_version = "tencent.forged_v9"
         forged.adjustment_version = "tencent.forged_v9"
-        session.add_all([accepted, forged])
+        session.add_all([accepted, forged, _revision(accepted), _revision(forged)])
         await session.commit()
 
         report = await read_etf_history_readiness(

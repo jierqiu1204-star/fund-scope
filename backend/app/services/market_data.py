@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import sys
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any
@@ -173,6 +174,104 @@ def _compatible_adjusted_provider_pairs(
     )
 
 
+def _revision_column(row: Any, label: str, model_name: str) -> Any:
+    """Resolve a revision field from an ORM model or labeled subquery."""
+
+    columns = getattr(row, "c", row)
+    value = getattr(columns, label, None)
+    return value if value is not None else getattr(columns, model_name)
+
+
+def _revision_hash_is_hex(value: Any) -> Any:
+    """Return a portable SQL predicate for a 64-character hexadecimal hash."""
+
+    return and_(
+        value.is_not(None),
+        func.length(value) == 64,
+        value.regexp_match(r"^[0-9a-fA-F]{64}$"),
+    )
+
+
+def _adjusted_revision_coherence_predicate(
+    row: Any,
+    *,
+    accepted_pairs: tuple[tuple[str, str], ...] | None = None,
+    source_cutoff: datetime | None = None,
+) -> Any:
+    """Build the shared SQL validity predicate for adjusted revisions.
+
+    ``row`` may be ``EtfAdjustedPriceRevision`` or a subquery with the same
+    labeled fields.  Keep this predicate aligned with the Python replay
+    invariants so provider selection and readiness cannot choose different
+    evidence.
+    """
+
+    pairs = _compatible_adjusted_provider_pairs(accepted_pairs)
+    provider_key = func.lower(_revision_column(row, "provider_key", "data_provider"))
+    provider_version = _revision_column(row, "provider_version", "provider_version")
+    adjustment_version = _revision_column(row, "adjustment_version", "adjustment_version")
+    pair_compatibility = or_(
+        *(
+            and_(
+                provider_key == provider,
+                provider_version == version,
+                adjustment_version == version,
+            )
+            for provider, version in pairs
+        )
+    )
+    decision_eligible = _revision_column(row, "decision_eligible", "decision_eligible")
+    research_price_basis = _revision_column(
+        row, "research_price_basis", "research_price_basis"
+    )
+    adjusted_close = _revision_column(row, "adjusted_close", "research_adjusted_value")
+    raw_open = _revision_column(row, "raw_open", "open")
+    raw_high = _revision_column(row, "raw_high", "high")
+    raw_low = _revision_column(row, "raw_low", "low")
+    raw_close = _revision_column(row, "raw_close", "close")
+    volume = _revision_column(row, "volume", "volume")
+    source_timestamp = _revision_column(row, "source_timestamp", "source_timestamp")
+    first_seen_at = _revision_column(row, "first_seen_at", "first_seen_at")
+    observed_at = _revision_column(row, "observed_at", "observed_at")
+    revision_hash = _revision_column(row, "revision_hash", "revision_hash")
+
+    def positive_finite(value: Any) -> Any:
+        return and_(
+            value.is_not(None),
+            value > 0,
+            value <= sys.float_info.max,
+        )
+
+    cutoff = _utc_naive(source_cutoff) if source_cutoff is not None else None
+    visibility = (
+        (source_timestamp <= cutoff,)
+        if cutoff is not None
+        else ()
+    )
+    return and_(
+        decision_eligible.is_(True),
+        research_price_basis == "total_return_adjusted",
+        pair_compatibility,
+        positive_finite(raw_open),
+        positive_finite(raw_high),
+        positive_finite(raw_low),
+        positive_finite(raw_close),
+        positive_finite(volume),
+        positive_finite(adjusted_close),
+        raw_high >= raw_open,
+        raw_high >= raw_close,
+        raw_high >= raw_low,
+        raw_low <= raw_open,
+        raw_low <= raw_close,
+        raw_low <= raw_high,
+        source_timestamp.is_not(None),
+        first_seen_at.is_not(None),
+        observed_at.is_not(None),
+        _revision_hash_is_hex(revision_hash),
+        *visibility,
+    )
+
+
 async def etf_membership_facts_covering(
     session: AsyncSession,
     *,
@@ -278,15 +377,10 @@ async def etf_adjusted_daily_facts_on_or_before(
         provider_compatibility = func.lower(EtfAdjustedPriceRevision.data_provider).in_(
             accepted_providers
         )
-        pair_compatibility = or_(
-            *(
-                and_(
-                    func.lower(EtfAdjustedPriceRevision.data_provider) == provider,
-                    EtfAdjustedPriceRevision.provider_version == version,
-                    EtfAdjustedPriceRevision.adjustment_version == version,
-                )
-                for provider, version in accepted_pairs
-            )
+        coherence_predicate = _adjusted_revision_coherence_predicate(
+            EtfAdjustedPriceRevision,
+            accepted_pairs=accepted_pairs,
+            source_cutoff=cutoff,
         )
         visible_revisions = (
             select(
@@ -315,21 +409,7 @@ async def etf_adjusted_daily_facts_on_or_before(
                 EtfAdjustedPriceRevision.id.label("revision_id"),
                 func.lower(EtfAdjustedPriceRevision.data_provider).label("provider_key"),
                 case(
-                    (
-                        and_(
-                            EtfAdjustedPriceRevision.decision_eligible.is_(True),
-                            EtfAdjustedPriceRevision.research_price_basis
-                            == "total_return_adjusted",
-                            pair_compatibility,
-                            EtfAdjustedPriceRevision.research_adjusted_value.is_not(None),
-                            EtfAdjustedPriceRevision.source_timestamp.is_not(None),
-                            EtfAdjustedPriceRevision.first_seen_at.is_not(None),
-                            EtfAdjustedPriceRevision.observed_at.is_not(None),
-                            EtfAdjustedPriceRevision.revision_hash.is_not(None),
-                            EtfAdjustedPriceRevision.source_timestamp <= cutoff,
-                        ),
-                        0,
-                    ),
+                    (coherence_predicate, 0),
                     else_=1,
                 ).label("invalid_rank"),
                 func.row_number()

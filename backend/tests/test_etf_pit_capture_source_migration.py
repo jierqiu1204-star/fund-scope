@@ -77,5 +77,5 @@ def test_pit_capture_source_chain_has_one_current_alembic_head() -> None:
     config.set_main_option("script_location", str(VERSIONS_DIR.parent))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["20260817_000072"]
+    assert script.get_heads() == ["20260901_000074"]
     assert script.get_revision("20260809_000063").down_revision == "20260804_000062"

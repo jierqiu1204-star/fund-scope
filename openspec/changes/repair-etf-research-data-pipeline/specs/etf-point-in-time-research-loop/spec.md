@@ -32,3 +32,15 @@ Affected research workflows SHALL report business waiting, failure, partial prog
 #### Scenario: Restart or repeated trigger resumes ingestion
 - **WHEN** a bounded task is interrupted and resumed or the same source is received again
 - **THEN** durable progress is retained and completed facts are not duplicated or backdated
+
+#### Scenario: Projection dates span multiple providers
+- **WHEN** legacy price projection rows span multiple accepted providers but no single provider has the complete required window
+- **THEN** readiness reports the same incomplete history as the cutoff-aware research reader and does not pass a gate using the union
+
+#### Scenario: A maintained library supplies ETF history
+- **WHEN** the existing AKShare library supplies raw and adjusted ETF history
+- **THEN** ingestion retains the real upstream provider identity, aligned raw prices and adjusted closes, current receipt time and existing integrity checks, with a bounded cancellable invocation
+
+#### Scenario: First full-universe history collection
+- **WHEN** the operator invokes the existing input-repair command without a sample code list
+- **THEN** a bounded slice resumes the durable universe cursor, reports remaining work truthfully, and leaves later daily incremental collection available

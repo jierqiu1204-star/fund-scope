@@ -9,7 +9,7 @@ import sys
 import time
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from functools import partial
 from typing import Any, Literal
 
@@ -24,7 +24,10 @@ from app.models.entities import (
     JobRun,
     TradableEtf,
 )
-from app.services.market_data import etf_decision_adjusted_provider_versions
+from app.services.market_data import (
+    _adjusted_revision_coherence_predicate,
+    etf_decision_adjusted_provider_versions,
+)
 from app.services.short_etf.data import (
     _ADJUSTED_PRICE_MATERIAL_FIELDS,
     MAX_ADJUSTED_PRICE_PERSISTENCE_PAGE_ROWS,
@@ -314,6 +317,12 @@ def _utcnow() -> datetime:
     return datetime.utcnow()
 
 
+def _utc_naive(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(UTC).replace(tzinfo=None)
+
+
 def _remaining_hard_seconds(deadline: float) -> float:
     return max(0.0, deadline - asyncio.get_running_loop().time())
 
@@ -560,17 +569,32 @@ def _latest_eligible_revision_rows(
     *,
     codes: Sequence[str],
     trade_dates: Sequence[date],
+    source_cutoff: datetime | None = None,
 ) -> Any:
-    """Return the latest visible eligible row per provider and session.
+    """Return the latest visible revision row per provider and session.
 
     Provider rows are ranked before the eligibility filter so a newer invalid
     revision cannot make an older valid revision look current.  Callers can
     then count one provider's dates without treating a cross-provider union as
-    a coherent history.
+    a coherent history.  A cutoff is applied before ranking, matching the PIT
+    reader's visibility rule.
     """
 
     accepted_pairs = etf_decision_adjusted_provider_versions()
     accepted_providers = tuple(sorted({provider for provider, _version in accepted_pairs}))
+    cutoff = _utc_naive(source_cutoff) if source_cutoff is not None else None
+    visible_filters = [
+        EtfAdjustedPriceRevision.etf_code.in_(tuple(codes)),
+        EtfAdjustedPriceRevision.trade_date.in_(tuple(trade_dates)),
+        func.lower(EtfAdjustedPriceRevision.data_provider).in_(accepted_providers),
+    ]
+    if cutoff is not None:
+        visible_filters.extend(
+            (
+                EtfAdjustedPriceRevision.first_seen_at <= cutoff,
+                EtfAdjustedPriceRevision.observed_at <= cutoff,
+            )
+        )
     visible = (
         select(
             EtfAdjustedPriceRevision.etf_code.label("etf_code"),
@@ -605,31 +629,18 @@ def _latest_eligible_revision_rows(
             )
             .label("revision_rank"),
         )
-        .where(
-            EtfAdjustedPriceRevision.etf_code.in_(tuple(codes)),
-            EtfAdjustedPriceRevision.trade_date.in_(tuple(trade_dates)),
-            func.lower(EtfAdjustedPriceRevision.data_provider).in_(accepted_providers),
-        )
+        .where(*visible_filters)
         .subquery()
-    )
-    pair_compatibility = or_(
-        *(
-            and_(
-                visible.c.provider_key == provider,
-                visible.c.provider_version == version,
-                visible.c.adjustment_version == version,
-            )
-            for provider, version in accepted_pairs
-        )
     )
     return (
         select(visible)
         .where(
             visible.c.revision_rank == 1,
-            visible.c.decision_eligible.is_(True),
-            visible.c.research_price_basis == "total_return_adjusted",
-            visible.c.adjusted_close.is_not(None),
-            pair_compatibility,
+            _adjusted_revision_coherence_predicate(
+                visible,
+                accepted_pairs=accepted_pairs,
+                source_cutoff=cutoff,
+            ),
         )
         .subquery()
     )
@@ -656,6 +667,7 @@ def _revision_row_is_coherent(
     row: Mapping[str, Any],
     *,
     accepted_pairs: Mapping[str, str],
+    source_cutoff: datetime | None = None,
 ) -> bool:
     """Apply replay row invariants after selecting the latest revision."""
 
@@ -682,6 +694,11 @@ def _revision_row_is_coherent(
         or not _revision_hash_is_valid(row["revision_hash"])
     ):
         return False
+    if (
+        source_cutoff is not None
+        and _utc_naive(row["source_timestamp"]) > _utc_naive(source_cutoff)
+    ):
+        return False
     return not (
         float(row["raw_high"]) < max(
             float(row["raw_open"]),
@@ -701,20 +718,72 @@ async def _coherent_revision_dates(
     *,
     codes: Sequence[str],
     trade_dates: Sequence[date],
+    source_cutoff: datetime | None = None,
 ) -> dict[str, dict[str, set[date]]]:
     if not codes or not trade_dates:
         return {}
-    latest = _latest_eligible_revision_rows(codes=codes, trade_dates=trade_dates)
+    cutoff = _utc_naive(source_cutoff) if source_cutoff is not None else None
+    latest = _latest_eligible_revision_rows(
+        codes=codes,
+        trade_dates=trade_dates,
+        source_cutoff=cutoff,
+    )
     accepted_pairs = dict(etf_decision_adjusted_provider_versions())
     dates_by_code: dict[str, dict[str, set[date]]] = {}
     rows = await session.stream(select(latest).execution_options(yield_per=500))
     async for row in rows.mappings():
-        if not _revision_row_is_coherent(row, accepted_pairs=accepted_pairs):
+        if not _revision_row_is_coherent(
+            row,
+            accepted_pairs=accepted_pairs,
+            source_cutoff=cutoff,
+        ):
             continue
         dates_by_code.setdefault(str(row["etf_code"]), {}).setdefault(
             str(row["provider_key"]), set()
         ).add(row["trade_date"])
     return dates_by_code
+
+
+async def _coherent_revision_depths(
+    session: AsyncSession,
+    *,
+    codes: Sequence[str],
+    windows: Sequence[Sequence[date]],
+    source_cutoff: datetime | None = None,
+) -> dict[str, tuple[int, ...]]:
+    """Count coherent same-provider depths for all requested windows in one query."""
+
+    if not codes or not windows:
+        return {}
+    targets = tuple(
+        sorted({trade_date for window in windows for trade_date in window})
+    )
+    if not targets:
+        return {}
+    latest = _latest_eligible_revision_rows(
+        codes=codes,
+        trade_dates=targets,
+        source_cutoff=source_cutoff,
+    )
+    counts = tuple(
+        func.sum(
+            case((latest.c.trade_date.in_(tuple(window)), 1), else_=0)
+        ).label(f"window_{index}")
+        for index, window in enumerate(windows)
+    )
+    result = await session.execute(
+        select(latest.c.etf_code, latest.c.provider_key, *counts).group_by(
+            latest.c.etf_code,
+            latest.c.provider_key,
+        )
+    )
+    depths: dict[str, list[int]] = {}
+    for row in result.mappings():
+        code = str(row["etf_code"])
+        current = depths.setdefault(code, [0] * len(windows))
+        for index in range(len(windows)):
+            current[index] = max(current[index], int(row[f"window_{index}"] or 0))
+    return {code: tuple(values) for code, values in depths.items()}
 
 
 async def _eligible_depths(
@@ -742,20 +811,13 @@ async def _eligible_depths(
             )
         )
     if request.selection_policy == RESEARCH_DEPTH_SELECTION_POLICY:
-        coherent_dates = await _coherent_revision_dates(
+        coherent_depths = await _coherent_revision_depths(
             session,
             codes=request.eligible_codes,
-            trade_dates=target_sessions,
+            windows=(target_sessions,),
         )
         depths = {
-            code: max(
-                (len(provider_dates) for provider_dates in providers.values()),
-                default=0,
-            )
-            for code, providers in coherent_dates.items()
-        }
-        depths = {
-            code: depths.get(code, 0)
+            code: coherent_depths.get(code, (0,))[0]
             for code in request.eligible_codes
         }
         depth_statement = None
@@ -1530,16 +1592,12 @@ async def _depth_is_complete(
     request: BoundedHistorySyncRequest,
 ) -> bool:
     if request.selection_policy == RESEARCH_DEPTH_SELECTION_POLICY:
-        coherent_dates = await _coherent_revision_dates(
+        coherent_depths = await _coherent_revision_depths(
             session,
             codes=(code,),
-            trade_dates=request.required_trade_dates,
+            windows=(request.required_trade_dates,),
         )
-        covered_count = max(
-            (len(provider_dates) for provider_dates in coherent_dates.get(code, {}).values()),
-            default=0,
-        )
-        return covered_count == request.required_sessions
+        return coherent_depths.get(code, (0,))[0] == request.required_sessions
 
     target_sessions = (
         select(EtfPriceHistory.trade_date)

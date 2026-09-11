@@ -4,7 +4,8 @@ import asyncio
 import hashlib
 import json
 import os
-from collections.abc import Awaitable, Callable, Sequence
+import sys
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from math import isfinite, sqrt
@@ -30,6 +31,9 @@ from app.models.entities import (
     utcnow,
 )
 from app.services.retry import retry_async
+from app.services.short_etf.akshare_history_snapshot import (
+    MAX_OUTPUT_BYTES as AKSHARE_HISTORY_MAX_OUTPUT_BYTES,
+)
 
 MIN_AVERAGE_TURNOVER = 50_000_000
 CHASE_RETURN_20D = 0.25
@@ -42,6 +46,8 @@ DEFAULT_SYNC_DELAY_SECONDS = 1.0
 DEFAULT_PROVIDER_RETRIES = 2
 DEFAULT_PROVIDER_RETRY_DELAY_SECONDS = 1.0
 ETF_HISTORY_PROVIDER_TIMEOUT_SECONDS = 20.0
+AKSHARE_HISTORY_SUBPROCESS_MODULE = "app.services.short_etf.akshare_history_snapshot"
+AKSHARE_HISTORY_MAX_STDERR_BYTES = 32_000
 MAX_ADJUSTED_PRICE_PERSISTENCE_PAGE_ROWS = 20
 
 INELIGIBLE_NAME_KEYWORDS = ("一年持有", "持有期", "定开", "封闭", "封闭期")
@@ -53,21 +59,14 @@ EASTMONEY_HFQ_ADJUSTMENT_VERSION = "eastmoney.push2his.kline.hfq_v1"
 EFINANCE_HFQ_ADJUSTMENT_VERSION = "efinance.stock.get_quote_history.fqt2_v1"
 TICKFLOW_BACKWARD_ADJUSTMENT_VERSION = "tickflow.free.klines.backward_v1"
 TENCENT_HFQ_ADJUSTMENT_VERSION = "tencent.ifzq.fqkline.hfq_turnover_yuan_v2"
-EASTMONEY_HISTORY_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 TICKFLOW_HISTORY_URL = "https://free-api.tickflow.org/v1/klines"
 TENCENT_RAW_HISTORY_URL = "https://web.ifzq.gtimg.cn/appstock/app/kline/kline"
 TENCENT_HFQ_HISTORY_URL = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
-EASTMONEY_HISTORY_HEADERS = {
+TENCENT_HISTORY_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
     ),
-    "Accept": "application/json,text/plain,*/*",
-    "Referer": "https://quote.eastmoney.com/",
-    "Connection": "close",
-}
-TENCENT_HISTORY_HEADERS = {
-    "User-Agent": EASTMONEY_HISTORY_HEADERS["User-Agent"],
     "Accept": "application/json,text/plain,*/*",
     "Referer": "https://gu.qq.com/",
 }
@@ -429,25 +428,62 @@ def _provider_retry_delay_seconds() -> float:
     return _float_env("SHORT_ETF_PROVIDER_RETRY_DELAY_SECONDS", DEFAULT_PROVIDER_RETRY_DELAY_SECONDS)
 
 
-def parse_etf_history_frame(frame: Any, from_date: date, to_date: date) -> list[dict[str, float | str]]:
+def parse_etf_history_records(
+    records: Iterable[Mapping[str, Any]],
+    from_date: date,
+    to_date: date,
+    *,
+    require_complete: bool = False,
+) -> list[dict[str, float | str]]:
     rows: list[dict[str, float | str]] = []
-    for _, record in frame.iterrows():
-        trade_date = _parse_date(record.get("日期") or record.get("trade_date"))
+    for record in records:
+        trade_date = _parse_date(
+            record.get("日期") or record.get("trade_date") or record.get("date")
+        )
         if not from_date <= trade_date <= to_date:
             continue
-        rows.append(
-            {
-                "date": trade_date.isoformat(),
-                "open": _number(record, "开盘", "open"),
-                "high": _number(record, "最高", "high"),
-                "low": _number(record, "最低", "low"),
-                "close": _number(record, "收盘", "close"),
-                "volume": _number(record, "成交量", "volume"),
-                "turnover": _number(record, "成交额", "turnover"),
-                "pct_change": _number(record, "涨跌幅", "pct_change"),
-            }
-        )
+        if require_complete and not all(
+            any(record.get(key) not in (None, "") for key in aliases)
+            for aliases in (
+                ("开盘", "open"),
+                ("最高", "high"),
+                ("最低", "low"),
+                ("收盘", "close"),
+                ("成交量", "volume"),
+                ("成交额", "turnover"),
+                ("涨跌幅", "pct_change"),
+            )
+        ):
+            raise ValueError("etf_history_record_incomplete")
+        parsed: dict[str, float | str] = {
+            "date": trade_date.isoformat(),
+            "open": _number(record, "开盘", "open"),
+            "high": _number(record, "最高", "high"),
+            "low": _number(record, "最低", "low"),
+            "close": _number(record, "收盘", "close"),
+            "volume": _number(record, "成交量", "volume"),
+            "turnover": _number(record, "成交额", "turnover"),
+            "pct_change": _number(record, "涨跌幅", "pct_change"),
+        }
+        if require_complete and (
+            any(not isfinite(float(parsed[field])) for field in parsed if field != "date")
+            or any(
+                float(parsed[field]) <= 0
+                for field in ("open", "high", "low", "close")
+            )
+            or any(float(parsed[field]) < 0 for field in ("volume", "turnover"))
+        ):
+            raise ValueError("etf_history_record_invalid")
+        rows.append(parsed)
     return rows
+
+
+def parse_etf_history_frame(frame: Any, from_date: date, to_date: date) -> list[dict[str, float | str]]:
+    return parse_etf_history_records(
+        (record for _, record in frame.iterrows()),
+        from_date,
+        to_date,
+    )
 
 
 def _attach_hfq_research_prices(
@@ -477,58 +513,17 @@ def _attach_hfq_research_prices(
     return raw_rows
 
 
-def parse_eastmoney_history_payload(
-    payload: Any,
-    from_date: date,
-    to_date: date,
-) -> PriceHistoryRows:
-    data = payload.get("data") if isinstance(payload, dict) else None
-    klines = data.get("klines") if isinstance(data, dict) else None
-    if not isinstance(klines, list):
-        return []
-    rows: PriceHistoryRows = []
-    for item in klines:
-        fields = str(item).split(",")
-        if len(fields) < 11:
-            raise ValueError("东方财富返回了不完整的 ETF 日线数据")
-        trade_date = _parse_date(fields[0])
-        if not from_date <= trade_date <= to_date:
-            continue
-        rows.append(
-            {
-                "date": trade_date.isoformat(),
-                "open": float(fields[1]),
-                "close": float(fields[2]),
-                "high": float(fields[3]),
-                "low": float(fields[4]),
-                "volume": float(fields[5]),
-                "turnover": float(fields[6]),
-                "pct_change": float(fields[8]),
-            }
-        )
-    return rows
-
-
-def _eastmoney_market_id(code: str) -> int:
-    return 1 if code.startswith(("5", "6")) else 0
-
-
 async def fetch_eastmoney_etf_price_history(
     code: str,
     from_date: date,
     to_date: date,
 ) -> PriceHistoryRows:
     async def fetch_primary() -> PriceHistoryRows:
-        async with httpx.AsyncClient(
-            timeout=ETF_HISTORY_PROVIDER_TIMEOUT_SECONDS,
-            headers=EASTMONEY_HISTORY_HEADERS,
-        ) as client:
-            return await fetch_eastmoney_etf_price_history_once(
-                client,
-                code,
-                from_date,
-                to_date,
-            )
+        return await fetch_eastmoney_etf_price_history_akshare_once(
+            code,
+            from_date,
+            to_date,
+        )
 
     return await retry_async(
         "fetch_eastmoney_etf_price_history",
@@ -546,36 +541,103 @@ async def fetch_eastmoney_etf_price_history_once(
     *,
     keep_alive: bool = False,
 ) -> PriceHistoryRows:
-    common_params = {
-        "fields1": "f1,f2,f3,f4,f5,f6",
-        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
-        "ut": "7eea3edcaed734bea9cbfc24409ed989",
-        "invt": "2",
-        "klt": "101",
-        "beg": from_date.strftime("%Y%m%d"),
-        "end": to_date.strftime("%Y%m%d"),
-        "secid": f"{_eastmoney_market_id(code)}.{code}",
-    }
-    headers = (
-        {key: value for key, value in EASTMONEY_HISTORY_HEADERS.items() if key != "Connection"}
-        if keep_alive
-        else EASTMONEY_HISTORY_HEADERS
+    # Keep the existing low-level signature for publication callers while
+    # routing Eastmoney history through the cancellable AKShare adapter.
+    _ = client, keep_alive
+    return await fetch_eastmoney_etf_price_history_akshare_once(
+        code,
+        from_date,
+        to_date,
     )
-    raw_response = await client.get(
-        EASTMONEY_HISTORY_URL,
-        params={**common_params, "fqt": "0"},
-        headers=headers,
+
+
+async def _stop_akshare_history_subprocess(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is None:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+    try:
+        await asyncio.wait_for(process.wait(), timeout=1.0)
+    except (TimeoutError, ProcessLookupError):
+        pass
+
+
+async def _fetch_akshare_history_records(
+    code: str,
+    from_date: date,
+    to_date: date,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        AKSHARE_HISTORY_SUBPROCESS_MODULE,
+        code,
+        from_date.isoformat(),
+        to_date.isoformat(),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
     )
-    raw_response.raise_for_status()
-    hfq_response = await client.get(
-        EASTMONEY_HISTORY_URL,
-        params={**common_params, "fqt": "2"},
-        headers=headers,
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(),
+            timeout=ETF_HISTORY_PROVIDER_TIMEOUT_SECONDS,
+        )
+    except TimeoutError as exc:
+        await _stop_akshare_history_subprocess(process)
+        raise TimeoutError("eastmoney_akshare_history_timeout") from exc
+    except asyncio.CancelledError:
+        await _stop_akshare_history_subprocess(process)
+        raise
+    if len(stdout) > AKSHARE_HISTORY_MAX_OUTPUT_BYTES or len(stderr) > AKSHARE_HISTORY_MAX_STDERR_BYTES:
+        raise RuntimeError("eastmoney_akshare_history_response_too_large")
+    if process.returncode != 0:
+        raise RuntimeError(
+            "eastmoney_akshare_history_failed:"
+            f"returncode={int(process.returncode or 0)}"
+        )
+    try:
+        payload = json.loads(stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("eastmoney_akshare_history_json_invalid") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("eastmoney_akshare_history_payload_invalid")
+    raw_records = payload.get("raw_rows")
+    hfq_records = payload.get("hfq_rows")
+    if not isinstance(raw_records, list) or not isinstance(hfq_records, list):
+        raise RuntimeError("eastmoney_akshare_history_payload_invalid")
+    if not all(isinstance(record, dict) for record in (*raw_records, *hfq_records)):
+        raise RuntimeError("eastmoney_akshare_history_record_invalid")
+    return (
+        cast(list[dict[str, Any]], raw_records),
+        cast(list[dict[str, Any]], hfq_records),
     )
-    hfq_response.raise_for_status()
+
+
+async def fetch_eastmoney_etf_price_history_akshare_once(
+    code: str,
+    from_date: date,
+    to_date: date,
+) -> PriceHistoryRows:
+    """Fetch Eastmoney raw and HFQ histories through bounded AKShare calls."""
+
+    raw_records, hfq_records = await _fetch_akshare_history_records(
+        code,
+        from_date,
+        to_date,
+    )
     return _attach_hfq_research_prices(
-        parse_eastmoney_history_payload(raw_response.json(), from_date, to_date),
-        parse_eastmoney_history_payload(hfq_response.json(), from_date, to_date),
+        parse_etf_history_records(
+            raw_records,
+            from_date,
+            to_date,
+            require_complete=True,
+        ),
+        parse_etf_history_records(
+            hfq_records,
+            from_date,
+            to_date,
+        ),
         EASTMONEY_HFQ_ADJUSTMENT_VERSION,
     )
 
@@ -1178,17 +1240,17 @@ async def sync_etf_price_history(
     codes: list[str] | None = None,
 ) -> dict[str, Any]:
     etfs = await list_short_etfs(session, codes)
+    target_codes = [etf.code for etf in etfs]
     inserted = 0
     updated = 0
     failures: list[dict[str, str]] = []
     fallback_used = 0
     provider_counts: dict[str, int] = {provider: 0 for provider in PRICE_HISTORY_PROVIDER_NAMES}
     sync_delay = _sync_delay_seconds()
-    for index, etf in enumerate(etfs):
+    for index, etf_code in enumerate(target_codes):
         # Bulk revision/projection upserts expire ORM state. Keep the immutable
         # loop identity as a scalar so post-flush health/metric work never causes
         # implicit async IO through an expired TradableEtf instance.
-        etf_code = etf.code
         try:
             result = await fetch_etf_price_history_with_provider(etf_code, from_date, to_date)
             rows = result.rows
@@ -1244,7 +1306,7 @@ async def sync_etf_price_history(
             )
             await session.commit()
             await compute_etf_metric(session, etf_code, to_date)
-        if sync_delay > 0 and index < len(etfs) - 1:
+        if sync_delay > 0 and index < len(target_codes) - 1:
             await asyncio.sleep(sync_delay)
     return {
         "etfs": len(etfs),

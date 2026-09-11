@@ -31,42 +31,51 @@ class _Frame:
 
 
 @pytest.mark.asyncio
-async def test_eastmoney_history_uses_required_headers_and_total_return_provenance(
+async def test_eastmoney_history_uses_akshare_raw_and_hfq_provenance(
     monkeypatch,
 ) -> None:
-    requests: list[httpx.Request] = []
+    calls: list[str] = []
 
-    async def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        close = "1.0" if request.url.params["fqt"] == "0" else "2.0"
-        return httpx.Response(
-            200,
-            json={
-                "data": {
-                    "klines": [
-                        f"2026-07-10,{close},{close},{close},{close},100,200,0,0,0,0"
-                    ]
+    async def fake_records(
+        _code: str,
+        _from_date: date,
+        _to_date: date,
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        calls.append("raw_then_hfq")
+        return (
+            [
+                {
+                    "日期": "2026-07-10",
+                    "开盘": 1.0,
+                    "最高": 1.0,
+                    "最低": 1.0,
+                    "收盘": 1.0,
+                    "成交量": 100.0,
+                    "成交额": 200.0,
+                    "涨跌幅": 0.0,
                 }
-            },
+            ],
+            [
+                {
+                    "日期": "2026-07-10",
+                    "开盘": 2.0,
+                    "最高": 2.0,
+                    "最低": 2.0,
+                    "收盘": 2.0,
+                    "成交量": 100.0,
+                    "成交额": 200.0,
+                    "涨跌幅": 0.0,
+                }
+            ],
         )
 
-    transport = httpx.MockTransport(handler)
-    async_client = httpx.AsyncClient
-
-    def client_factory(*args: object, **kwargs: object) -> httpx.AsyncClient:
-        return async_client(*args, transport=transport, **kwargs)
-
-    monkeypatch.setattr(data.httpx, "AsyncClient", client_factory)
+    monkeypatch.setattr(data, "_fetch_akshare_history_records", fake_records)
 
     rows = await data.fetch_eastmoney_etf_price_history(
         "159605", date(2026, 7, 10), date(2026, 7, 10)
     )
 
-    assert [request.url.params["fqt"] for request in requests] == ["0", "2"]
-    assert [request.url.params["invt"] for request in requests] == ["2", "2"]
-    assert all(request.headers["referer"] == "https://quote.eastmoney.com/" for request in requests)
-    assert all(request.headers["accept"] == "application/json,text/plain,*/*" for request in requests)
-    assert all(request.headers["connection"] == "close" for request in requests)
+    assert calls == ["raw_then_hfq"]
     assert rows[0]["close"] == 1.0
     assert rows[0]["research_adjusted_value"] == 2.0
     assert rows[0]["research_price_basis"] == data.TOTAL_RETURN_PRICE_BASIS

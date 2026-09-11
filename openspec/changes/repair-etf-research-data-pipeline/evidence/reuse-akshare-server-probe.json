@@ -1,0 +1,19 @@
+{
+  "exit_code": 0,
+  "result": {
+    "observed_at": "2026-09-11T01:04:41.355743+00:00",
+    "akshare_version": "1.18.94",
+    "database_access": "none",
+    "code": "510300",
+    "raw": {
+      "error": "ConnectionError",
+      "seconds": 0.072
+    },
+    "hfq": {
+      "error": "ConnectionError",
+      "seconds": 0.032
+    },
+    "direct_error": "RemoteProtocolError",
+    "elapsed_seconds": 0.231
+  }
+}

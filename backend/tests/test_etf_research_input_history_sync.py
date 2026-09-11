@@ -83,3 +83,55 @@ async def test_input_repair_cli_calls_workflow_with_explicit_scope(monkeypatch) 
     assert captured["input_repair_codes"] == ("510002", "510001")
     assert captured["target_date"] is None
     assert captured["disposed"] is True
+
+
+@pytest.mark.asyncio
+async def test_input_repair_cli_without_codes_resumes_full_universe_cursor(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _SessionContext:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    class _Engine:
+        async def dispose(self) -> None:
+            captured["disposed"] = True
+
+    class _Database:
+        def __init__(self, _url: str) -> None:
+            self.engine = _Engine()
+
+        def session(self) -> _SessionContext:
+            return _SessionContext()
+
+    async def fake_workflow(session: object, **kwargs: object) -> dict[str, object]:
+        captured["session"] = session
+        captured.update(kwargs)
+        return {"status": "partial", "job_status": "partial", "cursor_after": "510159"}
+
+    monkeypatch.setattr(
+        cli,
+        "get_settings",
+        lambda: SimpleNamespace(
+            database_url="postgresql+asyncpg://fundscope:secret@postgres:5432/fundscope"
+        ),
+    )
+    monkeypatch.setattr(cli, "_require_server_database", lambda _url: None)
+    monkeypatch.setattr(cli, "DatabaseManager", _Database)
+    monkeypatch.setattr(cli, "run_post_publication_etf_research_history_slice", fake_workflow)
+
+    arguments = cli._arguments(
+        ["--target-date", "2026-09-10", "--max-seconds", "55"]
+    )
+    assert arguments.codes is None
+
+    result = await cli._run(arguments)
+
+    assert result["status"] == "partial"
+    assert captured["input_repair"] is True
+    assert captured["input_repair_codes"] is None
+    assert captured["target_date"].isoformat() == "2026-09-10"  # type: ignore[union-attr]
+    assert captured["disposed"] is True
