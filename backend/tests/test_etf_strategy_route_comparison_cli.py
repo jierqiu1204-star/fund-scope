@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import date, datetime, time
+from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -46,8 +47,73 @@ _INTEGRATION_END = date(2026, 8, 28)
 _INTEGRATION_CODES = tuple(f"510{index:03d}" for index in range(10))
 
 
+def _freeze_exit_research_clock(monkeypatch, hour=18):
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = datetime(2026, 9, 11, hour, 0, tzinfo=_SHANGHAI)
+            return value.astimezone(tz) if tz is not None else value.replace(tzinfo=None)
+
+    monkeypatch.setattr(cli, "datetime", FrozenDateTime)
+
+
+@pytest.mark.parametrize(("policy", "day"), [
+    ("legacy_ma5", "2026-09-11"),
+    ("shared_daily", "2026-09-09"),
+    ("shared_daily_2r", "2026-12-14"),
+])
+async def test_exit_policy_cannot_reopen_another_frozen_window(monkeypatch, policy, day):
+    def unexpected_settings():
+        raise AssertionError("invalid experiment must be rejected before DB setup")
+
+    monkeypatch.setattr(cli, "get_settings", unexpected_settings)
+    args = _arguments(["--start-date", day, "--end-date", day, "--leader-exit-policy", policy])
+    with pytest.raises(ValueError):
+        await cli._run(args)
+
+
+async def test_new_exit_research_cannot_read_today_before_its_cutoff(monkeypatch):
+    _freeze_exit_research_clock(monkeypatch, hour=18)
+
+    def unexpected_settings():
+        raise AssertionError("future cutoff must be rejected before DB setup")
+
+    monkeypatch.setattr(cli, "get_settings", unexpected_settings)
+    args = _arguments(["--start-date", "2026-09-11", "--end-date", "2026-09-11", "--leader-exit-policy", "shared_daily"])
+    with pytest.raises(ValueError):
+        await cli._run(args)
+
+
+async def test_new_exit_research_accepts_elapsed_prospective_cutoff(monkeypatch):
+    _freeze_exit_research_clock(monkeypatch, hour=20)
+
+    def reached_settings():
+        raise RuntimeError("valid window reached data setup")
+
+    monkeypatch.setattr(cli, "get_settings", reached_settings)
+    args = _arguments(["--start-date", "2026-09-11", "--end-date", "2026-09-11", "--leader-exit-policy", "shared_daily_2r"])
+    with pytest.raises(RuntimeError, match="valid window reached data setup"):
+        await cli._run(args)
+
+
 def _fixture_hash(value: object) -> str:
     return stable_contract_hash({"cli-integration-fixture": value})
+
+
+def test_legacy_cli_config_identity_and_new_policy_scope():
+    sessions = _read_valuation_calendar(None, start_date=_INTEGRATION_START, end_date=_INTEGRATION_END)
+    report = _integration_report(valuation_sessions=sessions, store_path=Path("/tmp/unused-exit-acceptance.sqlite"))
+    args = _arguments(["--start-date", "2026-08-26", "--end-date", "2026-08-28", "--run-id", "legacy-config-acceptance"])
+    config = cli._frozen_config(report, arguments=args, calendar_hash=report.calendar_hash)
+    # Captured from the original HEAD implementation before adding policy fields.
+    assert stable_contract_hash(config) == "6f14e7b6260096fc65001ddd2f23208a2641f188f006afd1d1bc968f99601ef9"
+    args.leader_exit_policy = "shared_daily_2r"
+    new = cli._frozen_config(report, arguments=args, calendar_hash=report.calendar_hash)
+    assert new["experiment_id"] != config["experiment_id"]
+    assert new["schema_version"] != config["schema_version"]
+    assert dict(new["route_policy_hashes"])["v2_breakout"] != dict(config["route_policy_hashes"])["v2_breakout"]
+    assert new["diagnostic_window_guard"]["start_date"] == date(2026, 9, 11)
+    assert new["diagnostic_window_guard"]["end_date"] == date(2026, 12, 11)
 
 
 def _fixture_series(

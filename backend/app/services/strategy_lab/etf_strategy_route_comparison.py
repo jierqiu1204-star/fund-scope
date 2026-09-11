@@ -17,6 +17,11 @@ from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from app.services.etf_research_evidence import stable_contract_hash
+from app.services.leader_tactics_exit_policy import (
+    evaluate_leader_exit_thresholds,
+    initial_leader_risk,
+    leader_atr20,
+)
 from app.services.market_data import (
     ExchangeCalendarUnavailableError,
     is_etf_exchange_trading_day,
@@ -82,6 +87,21 @@ COMPARISON_ROUTE_IDS = (
 V2_EVENT_CONFIRMATION = "confirmation"
 V2_EVENT_EXIT = "exit"
 V2_STATE_CHECK_SCHEMA_VERSION = "etf_strategy_route_comparison_v2_day_check_v1"
+
+# The legacy route is deliberately the default.  The two shared-rule modes
+# are research identities and do not alter the production leader policy.
+LEADER_EXIT_POLICY_LEGACY_MA5 = "legacy_ma5"
+LEADER_EXIT_POLICY_SHARED_DAILY = "shared_daily"
+LEADER_EXIT_POLICY_SHARED_DAILY_2R = "shared_daily_2r"
+LEADER_EXIT_POLICY_IDS = (
+    LEADER_EXIT_POLICY_LEGACY_MA5,
+    LEADER_EXIT_POLICY_SHARED_DAILY,
+    LEADER_EXIT_POLICY_SHARED_DAILY_2R,
+)
+LEADER_EXIT_POLICY_DEFAULT = LEADER_EXIT_POLICY_LEGACY_MA5
+LEADER_EXIT_EXECUTION_MODEL = "next_session_adjusted_close_v1"
+LEADER_EXIT_RESEARCH_SCHEMA_VERSION = "etf_leader_exit_comparison_v1"
+LEADER_EXIT_RESEARCH_EXPERIMENT_PREFIX = f"{COMPARISON_EXPERIMENT_ID}:leader_exit"
 
 
 class ComparisonContractError(ValueError):
@@ -674,6 +694,68 @@ class ComparisonRouteResult:
     base_ledger: RankingPortfolioLedger | None
     stress_ledger: RankingPortfolioLedger | None
     input_hash: str
+    leader_exit_policy: str = LEADER_EXIT_POLICY_DEFAULT
+    leader_exit_policy_hash: str | None = None
+    leader_exit_records: tuple[LeaderExitComparisonRecord, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class LeaderExitComparisonRecord:
+    """Auditable daily exit identity for a shared-rule V2 holding."""
+
+    policy_id: str
+    policy_hash: str
+    asset_code: str
+    original_signal_date: date
+    confirmation_date: date
+    entry_execution_date: date
+    entry_reference_price: float
+    entry_atr20: float
+    signal_low: float
+    initial_stop: float
+    risk_unit: float
+    exit_signal_date: date | None
+    exit_execution_date: date | None
+    exit_reason: str | None
+    data_eligible: bool
+    execution_model: str = LEADER_EXIT_EXECUTION_MODEL
+
+    def __post_init__(self) -> None:
+        if self.policy_id not in LEADER_EXIT_POLICY_IDS:
+            raise ComparisonContractError("leader exit policy is unsupported")
+        _sha256(self.policy_hash, "leader exit policy hash")
+        if not self.asset_code.strip():
+            raise ComparisonContractError("leader exit record asset is required")
+        for value in (
+            self.entry_reference_price,
+            self.entry_atr20,
+            self.signal_low,
+            self.initial_stop,
+            self.risk_unit,
+        ):
+            _finite(value)
+        if self.entry_reference_price <= 0 or self.entry_atr20 <= 0:
+            raise ComparisonContractError("leader exit entry facts must be positive")
+        if self.initial_stop <= 0 or self.initial_stop >= self.entry_reference_price:
+            raise ComparisonContractError("leader exit initial stop is invalid")
+        if self.risk_unit <= 0:
+            raise ComparisonContractError("leader exit risk unit must be positive")
+        if self.exit_execution_date is not None and self.exit_signal_date is None:
+            raise ComparisonContractError("leader exit execution requires a signal date")
+        if self.exit_signal_date is not None and self.exit_signal_date < self.entry_execution_date:
+            raise ComparisonContractError("leader exit cannot precede entry execution")
+        if self.exit_execution_date is not None and self.exit_execution_date <= self.exit_signal_date:
+            raise ComparisonContractError("leader exit execution must follow its signal")
+        if not isinstance(self.data_eligible, bool):
+            raise ComparisonContractError("leader exit data eligibility must be boolean")
+
+
+@dataclass(frozen=True, slots=True)
+class SharedDailyV2BridgeResult:
+    """Targets plus the shared-rule diagnostics used to produce them."""
+
+    targets: tuple[RankingPortfolioTarget, ...]
+    exit_records: tuple[LeaderExitComparisonRecord, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -688,6 +770,8 @@ class ComparisonInput:
     daily_core_targets: tuple[RankingPortfolioTarget, ...]
     daily_core_required_signal_dates: tuple[date, ...]
     initial_capital: float = 1.0
+    leader_exit_policy: str = LEADER_EXIT_POLICY_DEFAULT
+    leader_exit_pit_series: tuple[PointInTimeAdjustedSeries, ...] = ()
 
     def __post_init__(self) -> None:
         sessions = self.valuation.trading_sessions
@@ -697,6 +781,41 @@ class ComparisonInput:
             raise ComparisonContractError("comparison start must not follow end")
         if isinstance(self.initial_capital, bool) or not math.isfinite(self.initial_capital) or self.initial_capital <= 0:
             raise ComparisonContractError("comparison initial capital must be positive")
+        if self.leader_exit_policy not in LEADER_EXIT_POLICY_IDS:
+            raise ComparisonContractError("leader exit policy is unsupported")
+        pit_series = tuple(self.leader_exit_pit_series)
+        if any(
+            not isinstance(series, PointInTimeAdjustedSeries) or not series.bars
+            for series in pit_series
+        ):
+            raise ComparisonContractError("leader exit PIT series has an invalid type or no bars")
+        if pit_series != tuple(
+            sorted(
+                pit_series,
+                key=lambda item: (item.bars[-1].session_date, item.asset_code),
+            )
+        ):
+            raise ComparisonContractError("leader exit PIT series must be canonical")
+        seen_pit_keys: set[tuple[str, date]] = set()
+        for series in pit_series:
+            key = (series.asset_code, series.bars[-1].session_date)
+            if key in seen_pit_keys:
+                raise ComparisonContractError("leader exit PIT series has duplicates")
+            seen_pit_keys.add(key)
+            if series.bars[-1].session_date not in sessions:
+                raise ComparisonContractError(
+                    "leader exit PIT series is outside the valuation calendar"
+                )
+            if series.metadata.asset_code != series.asset_code:
+                raise ComparisonContractError("leader exit PIT metadata code does not match series")
+            if series.synchronized_after_cutoff:
+                raise ComparisonContractError("leader exit PIT series is synchronized after cutoff")
+            if stable_contract_hash(_pit_series_payload(series)) != series.series_hash:
+                raise ComparisonContractError("leader exit PIT series hash is invalid")
+            if not series.bars or tuple(item.session_date for item in series.bars) != tuple(
+                sorted({item.session_date for item in series.bars})
+            ):
+                raise ComparisonContractError("leader exit PIT bars must be ordered and unique")
         snapshots = tuple(self.decision_snapshots)
         dates = tuple(item.signal_date for item in snapshots)
         if len(dates) != len(set(dates)) or dates != tuple(sorted(dates)):
@@ -735,6 +854,8 @@ class ComparisonResult:
     input_hash: str
     result_hash: str
     report_markdown: str
+    leader_exit_policy: str = LEADER_EXIT_POLICY_DEFAULT
+    leader_exit_policy_hash: str = ""
 
 
 MEDIUM_TERM_MOMENTUM_CONTRACT_HASH = stable_contract_hash(
@@ -762,6 +883,78 @@ V2_COMPARISON_ALLOCATION_POLICY_HASH = stable_contract_hash(
         "capacity": "no_delayed_entry_queue_no_displacement",
     }
 )
+_LEADER_EXIT_SHARED_DAILY_POLICY_PAYLOAD = {
+    "schema_version": LEADER_EXIT_RESEARCH_SCHEMA_VERSION,
+    "policy_id": LEADER_EXIT_POLICY_SHARED_DAILY,
+    "initial_risk": "max(signal_low, entry_reference - 2*entry_atr20)",
+    "arming": "entry_reference + 1*risk_unit",
+    "exit_line": "max(initial_stop, breakeven_after_arming, ma5)",
+    "priority": ("hard_stop", "breakeven", "ma5"),
+    "execution_model": LEADER_EXIT_EXECUTION_MODEL,
+    "entry_reference": "next_session_adjusted_close",
+    "signal_low_and_atr": "point_in_time_bars_only",
+    "parameter_search": False,
+}
+LEADER_EXIT_SHARED_DAILY_POLICY_HASH = stable_contract_hash(
+    _LEADER_EXIT_SHARED_DAILY_POLICY_PAYLOAD
+)
+LEADER_EXIT_POLICY_HASHES = (
+    (
+        LEADER_EXIT_POLICY_LEGACY_MA5,
+        stable_contract_hash(
+            {
+                "schema_version": LEADER_EXIT_RESEARCH_SCHEMA_VERSION,
+                "policy_id": LEADER_EXIT_POLICY_LEGACY_MA5,
+                "lifecycle": "existing_v2_confirmation_and_ma5_invalidation",
+                "preserve_existing_results": True,
+                "parameter_search": False,
+            }
+        ),
+    ),
+    (
+        LEADER_EXIT_POLICY_SHARED_DAILY,
+        LEADER_EXIT_SHARED_DAILY_POLICY_HASH,
+    ),
+    (
+        LEADER_EXIT_POLICY_SHARED_DAILY_2R,
+        stable_contract_hash(
+            {
+                "schema_version": LEADER_EXIT_RESEARCH_SCHEMA_VERSION,
+                "policy_id": LEADER_EXIT_POLICY_SHARED_DAILY_2R,
+                "base_policy_hash": LEADER_EXIT_SHARED_DAILY_POLICY_HASH,
+                "take_profit": "entry_reference + 2*risk_unit",
+                "execution_model": LEADER_EXIT_EXECUTION_MODEL,
+                "parameter_search": False,
+            }
+        ),
+    ),
+)
+LEADER_EXIT_POLICY_HASH_MAP = dict(LEADER_EXIT_POLICY_HASHES)
+
+
+def leader_exit_policy_hash(policy_id: str) -> str:
+    try:
+        return LEADER_EXIT_POLICY_HASH_MAP[policy_id]
+    except KeyError as exc:
+        raise ComparisonContractError("leader exit policy is unsupported") from exc
+
+
+def comparison_experiment_id_for_policy(policy_id: str) -> str:
+    if policy_id == LEADER_EXIT_POLICY_LEGACY_MA5:
+        return COMPARISON_EXPERIMENT_ID
+    if policy_id not in LEADER_EXIT_POLICY_IDS:
+        raise ComparisonContractError("leader exit policy is unsupported")
+    return f"{LEADER_EXIT_RESEARCH_EXPERIMENT_PREFIX}:{policy_id}"
+
+
+def comparison_schema_version_for_policy(policy_id: str) -> str:
+    if policy_id == LEADER_EXIT_POLICY_LEGACY_MA5:
+        return COMPARISON_SCHEMA_VERSION
+    if policy_id not in LEADER_EXIT_POLICY_IDS:
+        raise ComparisonContractError("leader exit policy is unsupported")
+    return "etf_strategy_route_comparison_v2"
+
+
 DAILY_CORE_COMPARISON_POLICY_HASH = stable_contract_hash(
     {
         "schema_version": "daily_core_hysteresis_comparison_input_v1",
@@ -775,6 +968,28 @@ COMPARISON_ROUTE_POLICY_HASHES = (
     (ROUTE_MEDIUM_TERM_MOMENTUM, MEDIUM_TERM_MOMENTUM_CONTRACT_HASH),
     (ROUTE_DAILY_CORE_HYSTERESIS, DAILY_CORE_COMPARISON_POLICY_HASH),
 )
+
+
+def comparison_route_policy_hashes_for_policy(
+    policy_id: str,
+) -> tuple[tuple[str, str], ...]:
+    """Return route identities bound to the selected leader-exit policy."""
+
+    if policy_id == LEADER_EXIT_POLICY_LEGACY_MA5:
+        return COMPARISON_ROUTE_POLICY_HASHES
+    if policy_id not in LEADER_EXIT_POLICY_IDS:
+        raise ComparisonContractError("leader exit policy is unsupported")
+    v2_hash = stable_contract_hash(
+        {
+            "allocation_policy_hash": V2_COMPARISON_ALLOCATION_POLICY_HASH,
+            "leader_exit_policy_hash": leader_exit_policy_hash(policy_id),
+        }
+    )
+    return (
+        (ROUTE_V2_BREAKOUT, v2_hash),
+        (ROUTE_MEDIUM_TERM_MOMENTUM, MEDIUM_TERM_MOMENTUM_CONTRACT_HASH),
+        (ROUTE_DAILY_CORE_HYSTERESIS, DAILY_CORE_COMPARISON_POLICY_HASH),
+    )
 
 
 def _validate_target(target: RankingPortfolioTarget, sessions: Sequence[date]) -> None:
@@ -1263,8 +1478,18 @@ def _validate_v2_checks(
 def bridge_v2_targets(
     *,
     input_data: ComparisonInput,
+    leader_exit_policy: str | None = None,
 ) -> tuple[RankingPortfolioTarget, ...]:
     """Map causal V2 events to sparse targets with deterministic capacity rules."""
+
+    selected_policy = leader_exit_policy or input_data.leader_exit_policy
+    if selected_policy not in LEADER_EXIT_POLICY_IDS:
+        raise ComparisonContractError("leader exit policy is unsupported")
+    if selected_policy != LEADER_EXIT_POLICY_LEGACY_MA5:
+        return bridge_shared_daily_v2_targets(
+            input_data=input_data,
+            take_profit=selected_policy == LEADER_EXIT_POLICY_SHARED_DAILY_2R,
+        )
 
     sessions = input_data.valuation.trading_sessions
     state_dates = tuple(
@@ -1406,6 +1631,637 @@ def bridge_v2_targets(
     return tuple(targets)
 
 
+@dataclass
+class _SharedDailyPosition:
+    event: V2ComparisonEvent
+    entry_execution_date: date | None
+    entry_reference_price: float | None
+    entry_atr20: float | None
+    signal_low: float | None
+    initial_stop: float | None
+    risk_unit: float | None
+    visible_closes: list[float]
+    provenance_signature: tuple[object, ...] | None = None
+    armed: bool = False
+    exit_record: LeaderExitComparisonRecord | None = None
+
+
+def _leader_series_index(
+    input_data: ComparisonInput,
+) -> dict[tuple[str, date], PointInTimeAdjustedSeries]:
+    return {
+        (series.asset_code, series.bars[-1].session_date): series
+        for series in input_data.leader_exit_pit_series
+    }
+
+
+def _leader_provenance_signature(
+    series: PointInTimeAdjustedSeries,
+) -> tuple[object, ...]:
+    return tuple(asdict(series.provenance).values())
+
+
+def _leader_valuation_index(
+    input_data: ComparisonInput,
+) -> dict[tuple[str, date], ForwardAdjustedClose]:
+    return {
+        (row.asset_code, row.session_date): row
+        for row in input_data.valuation.adjusted_closes
+    }
+
+
+def _leader_series_for_date(
+    *,
+    series_index: Mapping[tuple[str, date], PointInTimeAdjustedSeries],
+    snapshots: Mapping[date, ComparisonDecisionSnapshot],
+    asset_code: str,
+    session_date: date,
+    signal_date: date,
+    failure_date: date | None = None,
+) -> PointInTimeAdjustedSeries:
+    unavailable_date = failure_date or signal_date
+    series = series_index.get((asset_code, session_date))
+    snapshot = snapshots.get(session_date)
+    if series is None:
+        raise ComparisonDataUnavailableError(
+            "leader_exit_pit_series_missing",
+            f"{asset_code}:{session_date.isoformat()}",
+            signal_date=unavailable_date,
+        )
+    if snapshot is None:
+        raise ComparisonDataUnavailableError(
+            "leader_exit_pit_snapshot_missing",
+            session_date.isoformat(),
+            signal_date=unavailable_date,
+        )
+    if (
+        series.synchronized_after_cutoff
+        or series.metadata.eligible_at > session_date
+        or not series.provenance.provider.strip()
+        or not series.provenance.adjustment_version.strip()
+        or series.provenance.price_basis != "total_return_adjusted"
+    ):
+        raise ComparisonDataUnavailableError(
+            "leader_exit_pit_series_late_or_ineligible",
+            f"{asset_code}:{session_date.isoformat()}",
+            signal_date=unavailable_date,
+        )
+    try:
+        # Reuse the existing daily PIT validator so every receipt/metadata
+        # timestamp and the canonical series hash have one implementation.
+        DailyCorePITDateInput(
+            replay_date=session_date,
+            decision_cutoff=snapshot.decision_cutoff,
+            universe_hash=snapshot.source_hash,
+            authoritative_asset_codes=(asset_code,),
+            series=(series,),
+        )
+    except ComparisonDataUnavailableError as exc:
+        raise ComparisonDataUnavailableError(
+            exc.reason,
+            str(exc),
+            signal_date=unavailable_date,
+        ) from exc
+    if series.bars[-1].session_date != session_date:
+        raise ComparisonDataUnavailableError(
+            "leader_exit_pit_series_stale_or_future",
+            f"{asset_code}:{session_date.isoformat()}",
+            signal_date=unavailable_date,
+        )
+    snapshot_rows = _snapshot_rows(snapshot)
+    current_snapshot_row = snapshot_rows.get((asset_code, session_date))
+    if current_snapshot_row is None:
+        raise ComparisonDataUnavailableError(
+            "leader_exit_snapshot_close_missing",
+            f"{asset_code}:{session_date.isoformat()}",
+            signal_date=unavailable_date,
+        )
+    for bar in series.bars:
+        snapshot_row = snapshot_rows.get((asset_code, bar.session_date))
+        if snapshot_row is None:
+            continue
+        if not math.isclose(
+            _finite(bar.adjusted_close),
+            _finite(snapshot_row.adjusted_close),
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        ):
+            raise ComparisonDataUnavailableError(
+                "leader_exit_snapshot_close_mismatch",
+                f"{asset_code}:{bar.session_date.isoformat()}",
+                signal_date=unavailable_date,
+            )
+    return series
+
+
+def _leader_bar_for_date(
+    series: PointInTimeAdjustedSeries,
+    session_date: date,
+    *,
+    signal_date: date,
+) -> Any:
+    for bar in series.bars:
+        if bar.session_date == session_date:
+            return bar
+    raise ComparisonDataUnavailableError(
+        "leader_exit_pit_bar_missing",
+        f"{series.asset_code}:{session_date.isoformat()}",
+        signal_date=signal_date,
+    )
+
+
+def _shared_daily_entry(
+    *,
+    event: V2ComparisonEvent,
+    sessions: tuple[date, ...],
+) -> _SharedDailyPosition:
+    try:
+        confirmation_index = sessions.index(event.signal_date)
+    except ValueError as exc:
+        raise ComparisonDataUnavailableError(
+            "leader_exit_confirmation_outside_calendar",
+            event.signal_date.isoformat(),
+            signal_date=event.signal_date,
+        ) from exc
+    entry_date = sessions[confirmation_index + 1] if confirmation_index + 1 < len(sessions) else None
+    return _SharedDailyPosition(
+        event=event,
+        entry_execution_date=entry_date,
+        entry_reference_price=None,
+        entry_atr20=None,
+        signal_low=None,
+        initial_stop=None,
+        risk_unit=None,
+        visible_closes=[],
+    )
+
+
+def _initialize_shared_daily_position(
+    *,
+    position: _SharedDailyPosition,
+    input_data: ComparisonInput,
+    series_index: Mapping[tuple[str, date], PointInTimeAdjustedSeries],
+    snapshots: Mapping[date, ComparisonDecisionSnapshot],
+    valuation_index: Mapping[tuple[str, date], ForwardAdjustedClose],
+) -> None:
+    entry_date = position.entry_execution_date
+    if entry_date is None:
+        return
+    event = position.event
+    entry_row = valuation_index.get((event.asset_code, entry_date))
+    if entry_row is None or not entry_row.decision_eligible:
+        raise ComparisonDataUnavailableError(
+            "leader_exit_entry_valuation_missing",
+            f"{event.asset_code}:{entry_date.isoformat()}",
+            signal_date=entry_date,
+        )
+    entry_series = _leader_series_for_date(
+        series_index=series_index,
+        snapshots=snapshots,
+        asset_code=event.asset_code,
+        session_date=entry_date,
+        signal_date=event.signal_date,
+        failure_date=entry_date,
+    )
+    signal_series = _leader_series_for_date(
+        series_index=series_index,
+        snapshots=snapshots,
+        asset_code=event.asset_code,
+        session_date=event.original_signal_date,
+        signal_date=event.signal_date,
+    )
+    signal_bar = _leader_bar_for_date(
+        signal_series,
+        event.original_signal_date,
+        signal_date=event.signal_date,
+    )
+    entry_bar = _leader_bar_for_date(
+        entry_series,
+        entry_date,
+        signal_date=event.signal_date,
+    )
+    entry_price = _finite(entry_bar.adjusted_close)
+    valuation_entry_price = _finite(entry_row.adjusted_close)
+    if not math.isclose(entry_price, valuation_entry_price, rel_tol=0.0, abs_tol=1e-9):
+        raise ComparisonDataUnavailableError(
+            "leader_exit_entry_price_mismatch",
+            f"{event.asset_code}:{entry_date.isoformat()}",
+            signal_date=entry_date,
+        )
+    signal_low = _finite(signal_bar.adjusted_low)
+    if signal_low <= 0:
+        raise ComparisonDataUnavailableError(
+            "leader_exit_signal_low_invalid",
+            f"{event.asset_code}:{event.original_signal_date.isoformat()}",
+            signal_date=event.signal_date,
+        )
+    bars = tuple(item for item in entry_series.bars if item.session_date <= entry_date)
+    try:
+        entry_index = input_data.valuation.trading_sessions.index(entry_date)
+    except ValueError as exc:
+        raise ComparisonDataUnavailableError(
+            "leader_exit_entry_session_missing",
+            entry_date.isoformat(),
+            signal_date=event.signal_date,
+        ) from exc
+    expected_atr_sessions = input_data.valuation.trading_sessions[: entry_index + 1][-21:]
+    actual_atr_sessions = tuple(item.session_date for item in bars[-21:])
+    if actual_atr_sessions != expected_atr_sessions:
+        raise ComparisonDataUnavailableError(
+            "leader_exit_entry_atr_sessions_missing",
+            f"{event.asset_code}:{entry_date.isoformat()}",
+            signal_date=entry_date,
+        )
+    if _leader_provenance_signature(signal_series) != _leader_provenance_signature(entry_series):
+        raise ComparisonDataUnavailableError(
+            "leader_exit_price_basis_mismatch",
+            event.asset_code,
+            signal_date=entry_date,
+        )
+    atr = leader_atr20(
+        tuple(float(item.adjusted_high) for item in bars),
+        tuple(float(item.adjusted_low) for item in bars),
+        tuple(float(item.adjusted_close) for item in bars),
+    )
+    if atr is None:
+        raise ComparisonDataUnavailableError(
+            "leader_exit_entry_atr20_missing",
+            f"{event.asset_code}:{event.signal_date.isoformat()}",
+            signal_date=entry_date,
+        )
+    risk = initial_leader_risk(
+        entry_close=entry_price,
+        entry_atr20=atr,
+        source_signal_low=signal_low,
+    )
+    if risk is None:
+        raise ComparisonDataUnavailableError(
+            "leader_exit_initial_risk_invalid",
+            f"{event.asset_code}:{event.signal_date.isoformat()}",
+            signal_date=event.signal_date,
+        )
+    initial_stop, risk_unit, _ignored_signal_low = risk
+    position.entry_reference_price = entry_price
+    position.entry_atr20 = atr
+    position.signal_low = signal_low
+    position.initial_stop = initial_stop
+    position.risk_unit = risk_unit
+    position.provenance_signature = _leader_provenance_signature(entry_series)
+
+
+def _leader_daily_pit_facts(
+    *,
+    series: PointInTimeAdjustedSeries,
+    sessions: tuple[date, ...],
+    asset_code: str,
+    session_date: date,
+    signal_date: date,
+) -> tuple[float, float]:
+    """Return one cutoff-visible close and its complete five-session MA."""
+
+    bar = _leader_bar_for_date(series, session_date, signal_date=signal_date)
+    try:
+        session_index = sessions.index(session_date)
+    except ValueError as exc:
+        raise ComparisonDataUnavailableError(
+            "leader_exit_session_outside_calendar",
+            session_date.isoformat(),
+            signal_date=signal_date,
+        ) from exc
+    expected_sessions = sessions[: session_index + 1][-5:]
+    if len(expected_sessions) != 5:
+        raise ComparisonDataUnavailableError(
+            "leader_exit_ma5_warmup_missing",
+            f"{asset_code}:{session_date.isoformat()}",
+            signal_date=signal_date,
+        )
+    bars_by_date = {item.session_date: item for item in series.bars}
+    if tuple(item.session_date for item in series.bars) != tuple(
+        sorted(item.session_date for item in series.bars)
+    ):
+        raise ComparisonDataUnavailableError(
+            "leader_exit_pit_bars_not_canonical",
+            f"{asset_code}:{session_date.isoformat()}",
+            signal_date=signal_date,
+        )
+    if any(day not in bars_by_date for day in expected_sessions):
+        raise ComparisonDataUnavailableError(
+            "leader_exit_ma5_session_missing",
+            f"{asset_code}:{session_date.isoformat()}",
+            signal_date=signal_date,
+        )
+    ma5_closes = tuple(float(bars_by_date[day].adjusted_close) for day in expected_sessions)
+    if any(not math.isfinite(value) or value <= 0 for value in ma5_closes):
+        raise ComparisonDataUnavailableError(
+            "leader_exit_ma5_value_invalid",
+            f"{asset_code}:{session_date.isoformat()}",
+            signal_date=signal_date,
+        )
+    current = _finite(bar.adjusted_close)
+    if current <= 0:
+        raise ComparisonDataUnavailableError(
+            "leader_exit_current_close_invalid",
+            f"{asset_code}:{session_date.isoformat()}",
+            signal_date=signal_date,
+        )
+    return current, math.fsum(ma5_closes) / len(ma5_closes)
+
+
+def _shared_daily_policy_id(input_data: ComparisonInput, take_profit: bool) -> str:
+    if take_profit:
+        return LEADER_EXIT_POLICY_SHARED_DAILY_2R
+    if input_data.leader_exit_policy == LEADER_EXIT_POLICY_SHARED_DAILY_2R:
+        return LEADER_EXIT_POLICY_SHARED_DAILY_2R
+    return LEADER_EXIT_POLICY_SHARED_DAILY
+
+
+def build_shared_daily_v2_targets(
+    input_data: ComparisonInput,
+    *,
+    take_profit: bool = False,
+) -> SharedDailyV2BridgeResult:
+    """Replay V2 confirmations with the shared daily leader exit policy."""
+
+    policy_id = _shared_daily_policy_id(input_data, take_profit)
+    policy_hash = leader_exit_policy_hash(policy_id)
+    sessions = tuple(
+        day
+        for day in input_data.valuation.trading_sessions
+        if input_data.start_date <= day <= input_data.end_date
+    )
+    checks = _validate_v2_checks(input_data=input_data, required_dates=sessions)
+    snapshots = _snapshot_by_date(input_data)
+    complete_codes_by_date: dict[date, set[str]] = {}
+    for session_date in sessions:
+        snapshot = snapshots.get(session_date)
+        if snapshot is None:
+            raise ComparisonDataUnavailableError(
+                "common_pool_snapshot_missing",
+                session_date.isoformat(),
+                signal_date=session_date,
+            )
+        readiness = preflight_common_pool(snapshot=snapshot, trading_sessions=input_data.valuation.trading_sessions)
+        if not readiness.available:
+            raise ComparisonDataUnavailableError(
+                readiness.reason,
+                session_date.isoformat(),
+                signal_date=session_date,
+            )
+        complete_codes_by_date[session_date] = set(
+            _complete_history_codes(
+                snapshot=snapshot,
+                trading_sessions=input_data.valuation.trading_sessions,
+            )
+        )
+    events_by_date: dict[date, list[V2ComparisonEvent]] = {}
+    for event in input_data.v2_events:
+        if input_data.start_date <= event.signal_date <= input_data.end_date:
+            if (
+                event.event_type == V2_EVENT_CONFIRMATION
+                and event.asset_code not in complete_codes_by_date[event.signal_date]
+            ):
+                raise ComparisonDataUnavailableError(
+                    "v2_event_outside_common_pool",
+                    f"{event.signal_date.isoformat()}:{event.asset_code}",
+                    signal_date=event.signal_date,
+                )
+            events_by_date.setdefault(event.signal_date, []).append(event)
+
+    series_index = _leader_series_index(input_data)
+    valuation_index = _leader_valuation_index(input_data)
+    held: dict[str, _SharedDailyPosition] = {}
+    targets: list[RankingPortfolioTarget] = []
+    records: list[LeaderExitComparisonRecord] = []
+    for session_date in sessions:
+        events = events_by_date.get(session_date, [])
+        check = checks[session_date]
+        actual_hashes = tuple(sorted(item.source_hash for item in events))
+        if actual_hashes != tuple(sorted(check.transition_source_hashes)):
+            raise ComparisonDataUnavailableError(
+                "v2_transition_evidence_mismatch",
+                session_date.isoformat(),
+                signal_date=session_date,
+            )
+        checked_keys = set(check.checked_observation_keys)
+        if any(
+            _v2_observation_key(
+                asset_code=item.asset_code,
+                signal_date=item.original_signal_date,
+                formula_id=item.formula_id,
+            )
+            not in checked_keys
+            for item in events
+        ):
+            raise ComparisonDataUnavailableError(
+                "v2_event_missing_from_observation_evidence",
+                session_date.isoformat(),
+                signal_date=session_date,
+            )
+        membership_before = tuple(sorted(held))
+        removed_clone_groups: set[str] = set()
+        exited_records: list[LeaderExitComparisonRecord] = []
+        for code, position in tuple(sorted(held.items())):
+            if position.entry_execution_date is None or session_date < position.entry_execution_date:
+                continue
+            row = valuation_index.get((code, session_date))
+            if row is None or not row.decision_eligible:
+                raise ComparisonDataUnavailableError(
+                    "leader_exit_daily_valuation_missing",
+                    f"{code}:{session_date.isoformat()}",
+                    signal_date=session_date,
+                )
+            if position.entry_reference_price is None:
+                _initialize_shared_daily_position(
+                    position=position,
+                    input_data=input_data,
+                    series_index=series_index,
+                    snapshots=snapshots,
+                    valuation_index=valuation_index,
+                )
+            current_series = _leader_series_for_date(
+                series_index=series_index,
+                snapshots=snapshots,
+                asset_code=code,
+                session_date=session_date,
+                signal_date=session_date,
+            )
+            if _leader_provenance_signature(current_series) != position.provenance_signature:
+                raise ComparisonDataUnavailableError(
+                    "leader_exit_price_basis_mismatch",
+                    f"{code}:{session_date.isoformat()}",
+                    signal_date=session_date,
+                )
+            current, ma5 = _leader_daily_pit_facts(
+                series=current_series,
+                sessions=input_data.valuation.trading_sessions,
+                asset_code=code,
+                session_date=session_date,
+                signal_date=session_date,
+            )
+            position.visible_closes.append(current)
+            assert position.entry_reference_price is not None
+            assert position.initial_stop is not None
+            assert position.risk_unit is not None
+            threshold = evaluate_leader_exit_thresholds(
+                entry_close=position.entry_reference_price,
+                initial_stop=position.initial_stop,
+                risk_unit=position.risk_unit,
+                previous_high=None,
+                visible_closes=tuple(position.visible_closes),
+                ma5=ma5,
+                previously_armed=position.armed,
+                take_profit_line=(
+                    position.entry_reference_price + 2.0 * position.risk_unit
+                    if policy_id == LEADER_EXIT_POLICY_SHARED_DAILY_2R
+                    else None
+                ),
+            )
+            position.armed = threshold.armed
+            if threshold.reason_code is None:
+                continue
+            try:
+                execution_date = next_etf_exchange_trading_day(session_date)
+            except ExchangeCalendarUnavailableError:
+                execution_date = None
+            record = LeaderExitComparisonRecord(
+                policy_id=policy_id,
+                policy_hash=policy_hash,
+                asset_code=code,
+                original_signal_date=position.event.original_signal_date,
+                confirmation_date=position.event.signal_date,
+                entry_execution_date=position.entry_execution_date,
+                entry_reference_price=position.entry_reference_price,
+                entry_atr20=position.entry_atr20,
+                signal_low=position.signal_low,
+                initial_stop=position.initial_stop,
+                risk_unit=position.risk_unit,
+                exit_signal_date=session_date,
+                exit_execution_date=execution_date,
+                exit_reason=threshold.reason_code,
+                data_eligible=True,
+            )
+            position.exit_record = record
+            records.append(record)
+            exited_records.append(record)
+            removed_clone_groups.add(position.event.clone_group)
+            held.pop(code, None)
+
+        candidates = sorted(
+            (item for item in events if item.event_type == V2_EVENT_CONFIRMATION),
+            key=lambda item: (
+                -item.score,
+                -item.original_signal_date.toordinal(),
+                item.formula_id,
+                item.asset_code,
+            ),
+        )
+        exited_assets = {item.asset_code for item in exited_records}
+        for event in candidates:
+            if len(held) >= MEDIUM_TERM_MOMENTUM_TOP_N:
+                break
+            if (
+                event.asset_code in held
+                or event.asset_code in exited_assets
+                or event.clone_group in removed_clone_groups
+                or event.clone_group in {position.event.clone_group for position in held.values()}
+            ):
+                continue
+            held[event.asset_code] = _shared_daily_entry(
+                event=event,
+                sessions=input_data.valuation.trading_sessions,
+            )
+        membership_after = tuple(sorted(held))
+        for code, position in held.items():
+            if (
+                _v2_observation_key(
+                    asset_code=code,
+                    signal_date=position.event.original_signal_date,
+                    formula_id=position.event.formula_id,
+                )
+                not in checked_keys
+            ):
+                raise ComparisonDataUnavailableError(
+                    "v2_held_lifecycle_missing_from_observation_evidence",
+                    session_date.isoformat(),
+                    signal_date=session_date,
+                )
+        if membership_after != membership_before:
+            targets.append(
+                freeze_ranking_portfolio_target(
+                    signal_date=session_date,
+                    target_weights={code: 0.1 for code in membership_after},
+                    source_hash=stable_contract_hash(
+                        {
+                            "policy_id": policy_id,
+                            "policy_hash": policy_hash,
+                            "session_date": session_date,
+                            "state_check": asdict(check),
+                            "events": tuple(asdict(item) for item in events),
+                            "exit_records": tuple(asdict(item) for item in exited_records),
+                            "selected_asset_codes": membership_after,
+                        }
+                    ),
+                )
+            )
+    for position in held.values():
+        if (
+            position.entry_reference_price is None
+            or position.entry_atr20 is None
+            or position.signal_low is None
+            or position.initial_stop is None
+            or position.risk_unit is None
+        ):
+            # A confirmation on the terminal decision date is a pending
+            # target; without a subsequent PIT entry bar it has no frozen
+            # risk context and must not become a fabricated record.
+            continue
+        records.append(
+            LeaderExitComparisonRecord(
+                policy_id=policy_id,
+                policy_hash=policy_hash,
+                asset_code=position.event.asset_code,
+                original_signal_date=position.event.original_signal_date,
+                confirmation_date=position.event.signal_date,
+                entry_execution_date=position.entry_execution_date,
+                entry_reference_price=position.entry_reference_price,
+                entry_atr20=position.entry_atr20,
+                signal_low=position.signal_low,
+                initial_stop=position.initial_stop,
+                risk_unit=position.risk_unit,
+                exit_signal_date=None,
+                exit_execution_date=None,
+                exit_reason=None,
+                data_eligible=True,
+            )
+        )
+    return SharedDailyV2BridgeResult(
+        targets=tuple(targets),
+        exit_records=tuple(
+            sorted(
+                records,
+                key=lambda item: (
+                    item.confirmation_date,
+                    item.asset_code,
+                    item.exit_signal_date or date.max,
+                ),
+            )
+        ),
+    )
+
+
+def bridge_shared_daily_v2_targets(
+    input_data: ComparisonInput,
+    *,
+    take_profit: bool = False,
+) -> tuple[RankingPortfolioTarget, ...]:
+    """Return targets from the shared daily policy, retaining legacy bridge separately."""
+
+    return build_shared_daily_v2_targets(
+        input_data,
+        take_profit=take_profit,
+    ).targets
+
+
 def _route_required_dates(
     *,
     input_data: ComparisonInput,
@@ -1518,6 +2374,8 @@ def _blocked_route(
     reason: str,
     required_signal_dates: tuple[date, ...],
     input_hash: str,
+    *,
+    leader_exit_policy: str = LEADER_EXIT_POLICY_DEFAULT,
 ) -> ComparisonRouteResult:
     return ComparisonRouteResult(
         route_id=route_id,
@@ -1528,6 +2386,10 @@ def _blocked_route(
         base_ledger=None,
         stress_ledger=None,
         input_hash=input_hash,
+        leader_exit_policy=leader_exit_policy,
+        leader_exit_policy_hash=leader_exit_policy_hash(leader_exit_policy)
+        if route_id == ROUTE_V2_BREAKOUT
+        else None,
     )
 
 
@@ -1538,6 +2400,8 @@ def _route_result(
     required_signal_dates: tuple[date, ...],
     base: RankingPortfolioLedger,
     stress: RankingPortfolioLedger,
+    leader_exit_policy: str = LEADER_EXIT_POLICY_DEFAULT,
+    leader_exit_records: tuple[LeaderExitComparisonRecord, ...] = (),
 ) -> ComparisonRouteResult:
     status = "completed" if base.status == stress.status == "completed" else "unavailable"
     reason = None
@@ -1549,6 +2413,24 @@ def _route_result(
             if stress.unavailable_intervals
             else "ledger_unavailable"
         )
+    route_identity: dict[str, Any] = {
+        "route_id": route_id,
+        "targets": tuple(asdict(item) for item in targets),
+        "required_signal_dates": required_signal_dates,
+        "base_ledger_hash": base.ledger_hash,
+        "stress_ledger_hash": stress.ledger_hash,
+    }
+    if route_id == ROUTE_V2_BREAKOUT and leader_exit_policy != LEADER_EXIT_POLICY_LEGACY_MA5:
+        route_identity.update(
+            {
+                "leader_exit_policy": leader_exit_policy,
+                "leader_exit_policy_hash": leader_exit_policy_hash(leader_exit_policy),
+                "route_policy_hash": dict(
+                    comparison_route_policy_hashes_for_policy(leader_exit_policy)
+                )[ROUTE_V2_BREAKOUT],
+                "leader_exit_records": tuple(asdict(item) for item in leader_exit_records),
+            }
+        )
     return ComparisonRouteResult(
         route_id=route_id,
         status=status,
@@ -1557,14 +2439,15 @@ def _route_result(
         targets=targets,
         base_ledger=base,
         stress_ledger=stress,
-        input_hash=stable_contract_hash(
-            {
-                "route_id": route_id,
-                "targets": tuple(asdict(item) for item in targets),
-                "required_signal_dates": required_signal_dates,
-                "base_ledger_hash": base.ledger_hash,
-                "stress_ledger_hash": stress.ledger_hash,
-            }
+        input_hash=stable_contract_hash(route_identity),
+        leader_exit_policy=leader_exit_policy,
+        leader_exit_policy_hash=(
+            leader_exit_policy_hash(leader_exit_policy)
+            if route_id == ROUTE_V2_BREAKOUT
+            else None
+        ),
+        leader_exit_records=(
+            leader_exit_records if route_id == ROUTE_V2_BREAKOUT else ()
         ),
     )
 
@@ -1601,9 +2484,11 @@ def _route_payload(route: ComparisonRouteResult) -> dict[str, Any]:
             "classification_concentration": None,
         }
 
-    return {
+    payload = {
         "route_id": route.route_id,
-        "policy_hash": dict(COMPARISON_ROUTE_POLICY_HASHES).get(route.route_id),
+        "policy_hash": dict(
+            comparison_route_policy_hashes_for_policy(route.leader_exit_policy)
+        ).get(route.route_id),
         "status": route.status,
         "reason": route.reason,
         "required_signal_dates": route.required_signal_dates,
@@ -1614,6 +2499,18 @@ def _route_payload(route: ComparisonRouteResult) -> dict[str, Any]:
         "metrics": metrics,
         "input_hash": route.input_hash,
     }
+    if (
+        route.route_id == ROUTE_V2_BREAKOUT
+        and route.leader_exit_policy != LEADER_EXIT_POLICY_LEGACY_MA5
+    ):
+        payload.update(
+            {
+                "leader_exit_policy": route.leader_exit_policy,
+                "leader_exit_policy_hash": route.leader_exit_policy_hash,
+                "leader_exit_records": [asdict(item) for item in route.leader_exit_records],
+            }
+        )
+    return payload
 
 
 def _partial_route_result(
@@ -1636,9 +2533,15 @@ def _partial_route_result(
     if not prefix_sessions:
         return None
     prefix_input = replace(input_data, end_date=prefix_sessions[-1])
+    leader_exit_records: tuple[LeaderExitComparisonRecord, ...] = ()
     try:
         if route_id == ROUTE_V2_BREAKOUT:
-            targets = bridge_v2_targets(input_data=prefix_input)
+            if prefix_input.leader_exit_policy == LEADER_EXIT_POLICY_LEGACY_MA5:
+                targets = bridge_v2_targets(input_data=prefix_input)
+            else:
+                shared = build_shared_daily_v2_targets(prefix_input)
+                targets = shared.targets
+                leader_exit_records = shared.exit_records
         elif route_id == ROUTE_MEDIUM_TERM_MOMENTUM:
             targets = generate_medium_term_momentum_targets(prefix_input)
             required = _route_required_dates(
@@ -1677,6 +2580,12 @@ def _partial_route_result(
         required_signal_dates=required,
         base=base,
         stress=stress,
+        leader_exit_policy=(
+            input_data.leader_exit_policy
+            if route_id == ROUTE_V2_BREAKOUT
+            else LEADER_EXIT_POLICY_DEFAULT
+        ),
+        leader_exit_records=leader_exit_records,
     )
     return replace(
         partial,
@@ -1705,7 +2614,9 @@ def comparison_result_payload(result: ComparisonResult) -> dict[str, Any]:
         "start_date": result.start_date,
         "end_date": result.end_date,
         "routes": [_route_payload(route) for route in result.routes],
-        "route_policy_hashes": dict(COMPARISON_ROUTE_POLICY_HASHES),
+        "route_policy_hashes": dict(
+            comparison_route_policy_hashes_for_policy(result.leader_exit_policy)
+        ),
         "common_status": result.common_status,
         "common_start_date": result.common_start_date,
         "common_end_date": result.common_end_date,
@@ -1714,6 +2625,13 @@ def comparison_result_payload(result: ComparisonResult) -> dict[str, Any]:
         "input_hash": result.input_hash,
         "result_hash": result.result_hash,
     }
+    if result.leader_exit_policy != LEADER_EXIT_POLICY_LEGACY_MA5:
+        payload.update(
+            {
+                "leader_exit_policy": result.leader_exit_policy,
+                "leader_exit_policy_hash": result.leader_exit_policy_hash,
+            }
+        )
     return _safe(payload)  # type: ignore[return-value]
 
 
@@ -1815,6 +2733,9 @@ def _ledger_common_summary(
 
 
 def comparison_result_to_markdown(result: ComparisonResult) -> str:
+    route_policy_hashes = dict(
+        comparison_route_policy_hashes_for_policy(result.leader_exit_policy)
+    )
     lines = [
         "# ETF 三路线连续账户比较",
         "",
@@ -1823,7 +2744,7 @@ def comparison_result_to_markdown(result: ComparisonResult) -> str:
         f"- 区间：{result.start_date.isoformat()} 至 {result.end_date.isoformat()}",
         f"- 初始资金：{result.initial_capital:g}",
         f"- 数据版本：{result.provenance.data_version}",
-        f"- 三路线策略身份：{', '.join(f'{route}={policy_hash}' for route, policy_hash in COMPARISON_ROUTE_POLICY_HASHES)}",
+        f"- 三路线策略身份：{', '.join(f'{route}={policy_hash}' for route, policy_hash in route_policy_hashes.items())}",
         f"- 共同连续区间：{result.common_start_date.isoformat() if result.common_start_date else '暂无'} 至 {result.common_end_date.isoformat() if result.common_end_date else '暂无'}（{result.common_status}）",
         "",
         "| 路线 | 状态 | 基础净收益 | 基础毛收益 | 基础最大回撤 | 换手 | 成本 | 再平衡/订单 | 平均仓位/现金 | 平均目标 HHI（分类集中度暂无） | 压力净收益 |",
@@ -1834,6 +2755,24 @@ def comparison_result_to_markdown(result: ComparisonResult) -> str:
         ROUTE_MEDIUM_TERM_MOMENTUM: "126 日正动量 Top10",
         ROUTE_DAILY_CORE_HYSTERESIS: "daily_core 低换手",
     }
+    if result.leader_exit_policy != LEADER_EXIT_POLICY_LEGACY_MA5:
+        labels[ROUTE_V2_BREAKOUT] = (
+            "ETF 龙头突破 V2（共享日线 + 固定 2R 研究对照）"
+            if result.leader_exit_policy == LEADER_EXIT_POLICY_SHARED_DAILY_2R
+            else "ETF 龙头突破 V2（共享日线退出）"
+        )
+        lines.insert(
+            7,
+            f"- 龙头退出研究政策：{result.leader_exit_policy}（hash={result.leader_exit_policy_hash}；执行模型={LEADER_EXIT_EXECUTION_MODEL}）",
+        )
+        lines.insert(
+            8,
+            "- 规则：入场日 PIT 收盘冻结 ATR20/初始止损；盈利达到 1R 后启用保本线（entry reference，费用在连续账本执行时计入）；MA5 退出按同一份 PIT 日线重放。固定 2R 仅作为预注册、尚未验证的研究对照，不改变生产阈值。",
+        )
+        lines.insert(
+            9,
+            "- 研究边界：计划退出日按下一交易日计算，实际成交由连续账本证明；signal_low 重放自原始 V2 signal_date 的 PIT adjusted_low，与旧候选 gate 是否提供该字段分开记录；手续费、保本与盘中执行不作超出 PIT 证据的推断。",
+        )
     interval_lines: list[str] = []
     for route in result.routes:
         base = route.base_ledger
@@ -1862,6 +2801,24 @@ def comparison_result_to_markdown(result: ComparisonResult) -> str:
         ]
     )
     lines.extend(["", "## 各路线实际估值区间", "", *interval_lines])
+    if result.leader_exit_policy != LEADER_EXIT_POLICY_LEGACY_MA5:
+        lines.extend(
+            [
+                "",
+                "## 龙头退出诊断",
+                "",
+                "| 资产 | 原始信号日 | 入场执行日 | 退出信号日 | 计划退出日 | 原因 | 信号数据合格 |",
+                "|---|---|---|---|---|---|---|",
+            ]
+        )
+        v2_route = next(
+            (route for route in result.routes if route.route_id == ROUTE_V2_BREAKOUT),
+            None,
+        )
+        for item in v2_route.leader_exit_records if v2_route is not None else ():
+            lines.append(
+                f"| {item.asset_code} | {item.original_signal_date.isoformat()} | {item.entry_execution_date.isoformat()} | {item.exit_signal_date.isoformat() if item.exit_signal_date else '持有中'} | {item.exit_execution_date.isoformat() if item.exit_execution_date else '暂无'} | {item.exit_reason or '暂无'} | {'是' if item.data_eligible else '否'} |"
+            )
     if result.common_start_date is not None and result.common_end_date is not None:
         lines.extend(
             [
@@ -1896,35 +2853,72 @@ def run_comparison(input_data: ComparisonInput) -> ComparisonResult:
         for day in input_data.valuation.trading_sessions
         if input_data.start_date <= day <= input_data.end_date
     )
-    input_hash = stable_contract_hash(
-        {
-            "schema_version": COMPARISON_SCHEMA_VERSION,
-            "experiment_id": COMPARISON_EXPERIMENT_ID,
-            "provenance": asdict(input_data.provenance),
-            "start_date": input_data.start_date,
-            "end_date": input_data.end_date,
-            "valuation": asdict(input_data.valuation),
-            "decision_snapshots": tuple(asdict(item) for item in input_data.decision_snapshots),
-            "v2_events": tuple(asdict(item) for item in input_data.v2_events),
-            "v2_state_checks": tuple(asdict(item) for item in input_data.v2_state_checks),
-            "daily_core_targets": tuple(asdict(item) for item in input_data.daily_core_targets),
-            "daily_core_required_signal_dates": input_data.daily_core_required_signal_dates,
-            "route_policy_hashes": COMPARISON_ROUTE_POLICY_HASHES,
-            "cost_policies": (
-                asdict(RANKING_PORTFOLIO_BASE_COST_POLICY),
-                asdict(RANKING_PORTFOLIO_STRESS_COST_POLICY),
-            ),
-            "execution_model": "t_plus_one_adjusted_close_continuous_cash_share_v1",
-            "initial_capital": input_data.initial_capital,
-        }
-    )
+    input_identity: dict[str, Any] = {
+        "schema_version": COMPARISON_SCHEMA_VERSION,
+        "experiment_id": COMPARISON_EXPERIMENT_ID,
+        "provenance": asdict(input_data.provenance),
+        "start_date": input_data.start_date,
+        "end_date": input_data.end_date,
+        "valuation": asdict(input_data.valuation),
+        "decision_snapshots": tuple(asdict(item) for item in input_data.decision_snapshots),
+        "v2_events": tuple(asdict(item) for item in input_data.v2_events),
+        "v2_state_checks": tuple(asdict(item) for item in input_data.v2_state_checks),
+        "daily_core_targets": tuple(asdict(item) for item in input_data.daily_core_targets),
+        "daily_core_required_signal_dates": input_data.daily_core_required_signal_dates,
+        "route_policy_hashes": COMPARISON_ROUTE_POLICY_HASHES,
+        "cost_policies": (
+            asdict(RANKING_PORTFOLIO_BASE_COST_POLICY),
+            asdict(RANKING_PORTFOLIO_STRESS_COST_POLICY),
+        ),
+        "execution_model": "t_plus_one_adjusted_close_continuous_cash_share_v1",
+        "initial_capital": input_data.initial_capital,
+    }
+    if input_data.leader_exit_policy != LEADER_EXIT_POLICY_LEGACY_MA5:
+        input_identity.update(
+            {
+                "schema_version": comparison_schema_version_for_policy(
+                    input_data.leader_exit_policy
+                ),
+                "experiment_id": comparison_experiment_id_for_policy(
+                    input_data.leader_exit_policy
+                ),
+                "leader_exit_policy": input_data.leader_exit_policy,
+                "leader_exit_policy_hash": leader_exit_policy_hash(
+                    input_data.leader_exit_policy
+                ),
+                "leader_exit_pit_series": tuple(
+                    _pit_series_payload(item)
+                    for item in input_data.leader_exit_pit_series
+                ),
+                "route_policy_hashes": comparison_route_policy_hashes_for_policy(
+                    input_data.leader_exit_policy
+                ),
+            }
+        )
+    input_hash = stable_contract_hash(input_identity)
     routes: list[ComparisonRouteResult] = []
 
     try:
-        v2_targets = bridge_v2_targets(input_data=input_data)
+        v2_records: tuple[LeaderExitComparisonRecord, ...] = ()
+        if input_data.leader_exit_policy == LEADER_EXIT_POLICY_LEGACY_MA5:
+            v2_targets = bridge_v2_targets(input_data=input_data)
+        else:
+            shared = build_shared_daily_v2_targets(input_data)
+            v2_targets = shared.targets
+            v2_records = shared.exit_records
         v2_required = _route_required_dates(input_data=input_data, route_id=ROUTE_V2_BREAKOUT, targets=v2_targets)
         base, stress = _ledger_pair(input_data=input_data, targets=v2_targets, required_signal_dates=v2_required)
-        routes.append(_route_result(route_id=ROUTE_V2_BREAKOUT, targets=v2_targets, required_signal_dates=v2_required, base=base, stress=stress))
+        routes.append(
+            _route_result(
+                route_id=ROUTE_V2_BREAKOUT,
+                targets=v2_targets,
+                required_signal_dates=v2_required,
+                base=base,
+                stress=stress,
+                leader_exit_policy=input_data.leader_exit_policy,
+                leader_exit_records=v2_records,
+            )
+        )
     except ComparisonDataUnavailableError as exc:
         partial = _partial_route_result(
             input_data=input_data,
@@ -1934,7 +2928,13 @@ def run_comparison(input_data: ComparisonInput) -> ComparisonResult:
         routes.append(
             partial
             if partial is not None
-            else _blocked_route(ROUTE_V2_BREAKOUT, exc.reason, sessions, input_hash)
+            else _blocked_route(
+                ROUTE_V2_BREAKOUT,
+                exc.reason,
+                sessions,
+                input_hash,
+                leader_exit_policy=input_data.leader_exit_policy,
+            )
         )
 
     try:
@@ -2005,8 +3005,8 @@ def run_comparison(input_data: ComparisonInput) -> ComparisonResult:
         common_status = "prefix_only"
         common_reason = "route_or_valuation_prefix_incomplete"
     draft = ComparisonResult(
-        schema_version=COMPARISON_SCHEMA_VERSION,
-        experiment_id=COMPARISON_EXPERIMENT_ID,
+        schema_version=comparison_schema_version_for_policy(input_data.leader_exit_policy),
+        experiment_id=comparison_experiment_id_for_policy(input_data.leader_exit_policy),
         provenance=input_data.provenance,
         initial_capital=input_data.initial_capital,
         start_date=input_data.start_date,
@@ -2019,14 +3019,22 @@ def run_comparison(input_data: ComparisonInput) -> ComparisonResult:
         input_hash=input_hash,
         result_hash="pending",
         report_markdown="",
+        leader_exit_policy=input_data.leader_exit_policy,
+        leader_exit_policy_hash=leader_exit_policy_hash(input_data.leader_exit_policy)
+        if input_data.leader_exit_policy != LEADER_EXIT_POLICY_LEGACY_MA5
+        else "",
     )
-    result_hash = stable_contract_hash(
-        {
-            key: value
-            for key, value in asdict(draft).items()
-            if key not in {"result_hash", "report_markdown"}
-        }
-    )
+    result_identity = asdict(draft)
+    result_identity.pop("result_hash", None)
+    result_identity.pop("report_markdown", None)
+    if input_data.leader_exit_policy == LEADER_EXIT_POLICY_LEGACY_MA5:
+        result_identity.pop("leader_exit_policy", None)
+        result_identity.pop("leader_exit_policy_hash", None)
+        for route in result_identity.get("routes", ()):
+            route.pop("leader_exit_policy", None)
+            route.pop("leader_exit_policy_hash", None)
+            route.pop("leader_exit_records", None)
+    result_hash = stable_contract_hash(result_identity)
     result = replace(draft, result_hash=result_hash)
     return replace(result, report_markdown=comparison_result_to_markdown(result))
 
@@ -2036,6 +3044,17 @@ __all__ = [
     "COMPARISON_ROUTE_IDS",
     "COMPARISON_ROUTE_POLICY_HASHES",
     "COMPARISON_SCHEMA_VERSION",
+    "LEADER_EXIT_EXECUTION_MODEL",
+    "LEADER_EXIT_POLICY_DEFAULT",
+    "LEADER_EXIT_POLICY_HASHES",
+    "LEADER_EXIT_POLICY_HASH_MAP",
+    "LEADER_EXIT_POLICY_IDS",
+    "LEADER_EXIT_POLICY_LEGACY_MA5",
+    "LEADER_EXIT_POLICY_SHARED_DAILY",
+    "LEADER_EXIT_POLICY_SHARED_DAILY_2R",
+    "LEADER_EXIT_SHARED_DAILY_POLICY_HASH",
+    "LEADER_EXIT_RESEARCH_EXPERIMENT_PREFIX",
+    "LEADER_EXIT_RESEARCH_SCHEMA_VERSION",
     "ComparisonContractError",
     "ComparisonDataUnavailableError",
     "ComparisonDecisionSnapshot",
@@ -2047,6 +3066,7 @@ __all__ = [
     "DailyCorePITDateInput",
     "DAILY_CORE_COMPARISON_POLICY_HASH",
     "FrozenComparisonProvenance",
+    "LeaderExitComparisonRecord",
     "MEDIUM_TERM_MOMENTUM_CONTRACT_HASH",
     "MEDIUM_TERM_MOMENTUM_LOOKBACK_SESSIONS",
     "MEDIUM_TERM_MOMENTUM_REQUIRED_HISTORY_SESSIONS",
@@ -2060,16 +3080,23 @@ __all__ = [
     "V2_STATE_CHECK_SCHEMA_VERSION",
     "V2StateCheck",
     "V2_COMPARISON_ALLOCATION_POLICY_HASH",
+    "SharedDailyV2BridgeResult",
     "build_v2_comparison_events",
     "build_v2_state_check",
     "bridge_v2_targets",
+    "bridge_shared_daily_v2_targets",
+    "build_shared_daily_v2_targets",
     "comparison_result_payload",
     "comparison_result_to_json",
     "comparison_result_to_markdown",
+    "comparison_experiment_id_for_policy",
+    "comparison_route_policy_hashes_for_policy",
+    "comparison_schema_version_for_policy",
     "generate_medium_term_momentum_targets",
     "canonical_daily_core_targets",
     "canonical_daily_core_targets_from_pit",
     "preflight_common_pool",
     "run_comparison",
     "select_medium_term_momentum_top10",
+    "leader_exit_policy_hash",
 ]

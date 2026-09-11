@@ -282,16 +282,18 @@ def test_incremental_input_hash_uses_persisted_bar_fact_identity() -> None:
 
 def test_hot_path_canonical_payloads_match_dataclass_contract() -> None:
     membership = _membership()
-    expected_membership = asdict(membership)
-    for derived_field in (
-        "fact_hash",
-        "fact_hash_contract",
-        "source_asset_code",
-        "source",
-        "confidence",
-        "supersedes_fact_hash",
-    ):
-        expected_membership.pop(derived_field)
+    # The frozen membership payload excludes later fact-identity sidecars.
+    # Adding a dataclass field must not silently change this legacy contract.
+    membership_fields = (
+        "group_id", "effective_from", "effective_to", "observed_at",
+        "mapping_kind", "taxonomy_version", "theme", "sector",
+        "tracked_index", "clone_group", "issuer", "hierarchy_level",
+        "normalized_theme_key", "resolution_mode", "fallback_reason",
+    )
+    dataclass_membership = asdict(membership)
+    expected_membership = {
+        field: dataclass_membership[field] for field in membership_fields
+    }
     assert membership.canonical_payload() == expected_membership
 
     items = tuple(_asset(f"510{index:03d}") for index in range(1, 7))

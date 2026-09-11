@@ -61,7 +61,12 @@ LIFECYCLE_STATES = (
 
 SESSION_PIT_MODE = "session_pit"
 POST_CLOSE_WATCHLIST_MODE = "post_close_watchlist"
-DECISION_MODES = (SESSION_PIT_MODE, POST_CLOSE_WATCHLIST_MODE)
+HISTORICAL_RECONSTRUCTION_MODE = "historical_reconstruction"
+DECISION_MODES = (
+    SESSION_PIT_MODE,
+    POST_CLOSE_WATCHLIST_MODE,
+    HISTORICAL_RECONSTRUCTION_MODE,
+)
 
 PRICE_BASIS = "total_return_adjusted"
 FORBIDDEN_DECISION_PROVIDERS = frozenset({"sina", "efinance"})
@@ -94,6 +99,7 @@ REPAIR_LOOKBACK = 120
 REPAIR_HISTORY = 180
 MA5_COST_BPS_PER_SIDE = 5.0
 MA5_SLIPPAGE_BPS_PER_SIDE = 5.0
+V2_CODE_VERSION = "dual-universe-leader-tactics-v2-exit-facts-v1"
 
 
 class V2ContractError(ValueError):
@@ -682,7 +688,9 @@ class V2AssetInput:
     membership: V2PITMembership | None
     baseline_score: float | None = None
     input_unavailable_reasons: tuple[str, ...] = ()
-    decision_mode: Literal["session_pit", "post_close_watchlist"] = SESSION_PIT_MODE
+    decision_mode: Literal[
+        "session_pit", "post_close_watchlist", "historical_reconstruction"
+    ] = SESSION_PIT_MODE
     membership_evaluation_date: date | None = None
     next_eligible_date: date | None = None
     primary_industry: V2PITMembership | None = None
@@ -749,7 +757,7 @@ class V2ScreenResult:
     data_receipt_cutoff: datetime | None = None
     # Keep identity inputs on the screen result so persistence cannot silently
     # rebuild a different manifest from out-of-band defaults.
-    code_version: str = "dual-universe-leader-tactics-v2"
+    code_version: str = V2_CODE_VERSION
     provider_health: tuple[tuple[str, str], ...] = ()
 
     @property
@@ -886,7 +894,7 @@ def build_v2_manifest(
     decision_cutoff: datetime,
     data_receipt_cutoff: datetime,
     input_hash: str,
-    code_version: str = "dual-universe-leader-tactics-v2",
+    code_version: str = V2_CODE_VERSION,
     holdout_identity: str = "holdout-2026-08-03-single-use-v1",
     pagination_cursor: str | None = None,
     exclusions: tuple[tuple[str, int], ...] = (),
@@ -993,11 +1001,14 @@ def _context_rejection_reason(
     evaluation_date = item.membership_evaluation_date or item.signal_date
     if not membership.group_id.strip():
         return "missing_pit_peer_group"
-    if membership.mapping_kind not in {
+    accepted_mapping_kinds = {
         "historical_pit",
         "primary_hierarchy",
         "broad_fallback",
-    }:
+    }
+    if item.decision_mode == HISTORICAL_RECONSTRUCTION_MODE:
+        accepted_mapping_kinds.add("current_vintage_proxy")
+    if membership.mapping_kind not in accepted_mapping_kinds:
         return "taxonomy_not_point_in_time"
     if membership.effective_from > evaluation_date:
         return "membership_effective_after_signal"
@@ -1133,6 +1144,9 @@ def _membership_reasons(item: V2AssetInput) -> list[str]:
     elif item.decision_mode == SESSION_PIT_MODE:
         if membership_date != item.signal_date:
             reasons.append("session_pit_membership_date_mismatch")
+    elif item.decision_mode == HISTORICAL_RECONSTRUCTION_MODE:
+        if membership_date < item.signal_date:
+            reasons.append("historical_membership_date_before_signal")
     elif (
         membership_date < item.signal_date
         or item.next_eligible_date is None
@@ -1148,11 +1162,14 @@ def _membership_reasons(item: V2AssetInput) -> list[str]:
         return sorted(set(reasons))
     if not membership.group_id.strip():
         reasons.append("missing_pit_peer_group")
-    if membership.mapping_kind not in {
+    accepted_mapping_kinds = {
         "historical_pit",
         "primary_hierarchy",
         "broad_fallback",
-    }:
+    }
+    if item.decision_mode == HISTORICAL_RECONSTRUCTION_MODE:
+        accepted_mapping_kinds.add("current_vintage_proxy")
+    if membership.mapping_kind not in accepted_mapping_kinds:
         reasons.append("taxonomy_not_point_in_time")
     if membership.effective_from > membership_date:
         reasons.append("membership_effective_after_signal")
@@ -2257,6 +2274,22 @@ def _observation(
             "historical_validation_eligible": item.decision_mode == SESSION_PIT_MODE,
         }
     )
+    signal_bar = item.bars[-1] if item.bars and item.bars[-1].trade_date == item.signal_date else None
+    signal_low = _finite(signal_bar.adjusted_low) if signal_bar is not None else None
+    if (
+        availability == "available"
+        and qualifies
+        and signal_bar is not None
+        and signal_bar.decision_eligible
+        and signal_bar.observed_at.date() >= signal_bar.trade_date
+        and signal_bar.observed_at <= item.source_cutoff
+        and signal_bar.price_basis == PRICE_BASIS
+        and signal_bar.provider.strip().lower() not in FORBIDDEN_DECISION_PROVIDERS
+        and bool(signal_bar.revision_id.strip())
+        and signal_low is not None
+        and signal_low > 0
+    ):
+        facts["adjusted_low"] = signal_low
     if formula_id == LOW_BASE_CATCHUP_V1:
         hypothesis_visible = item.source_cutoff >= LOW_BASE_HYPOTHESIS_RECEIVED_AT
         facts.update(
@@ -2351,7 +2384,7 @@ def _cross_close(item: V2AssetInput) -> bool:
 def screen_dual_universe(
     items: Sequence[V2AssetInput],
     *,
-    code_version: str = "dual-universe-leader-tactics-v2",
+    code_version: str = V2_CODE_VERSION,
     provider_health: tuple[tuple[str, str], ...] = (),
     theme_percentile_overrides: Mapping[str, tuple[float, float, float]] | None = None,
 ) -> V2ScreenResult:
@@ -3404,7 +3437,9 @@ __all__ = [
     "ASHARE_FINE_THEME_FACT_HASH_CONTRACT",
     "BASE_LAUNCH_V2",
     "BREAKOUT_V2",
+    "DECISION_MODES",
     "FORMER_LEADER_REPAIR_V2",
+    "HISTORICAL_RECONSTRUCTION_MODE",
     "LOW_BASE_CATCHUP_V1",
     "LOW_BASE_HYPOTHESIS_RECEIVED_AT",
     "LOW_BASE_SOURCE_CAPTURES",

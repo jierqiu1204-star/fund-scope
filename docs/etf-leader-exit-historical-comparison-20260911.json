@@ -1,0 +1,228 @@
+{
+  "asset_count": 874,
+  "assets_with_at_least_120_bars": 735,
+  "candidate_assets": 7,
+  "candidate_lifecycle_audit": {
+    "feature_hashes_match": true,
+    "transition_hashes_match": true,
+    "unconfirmed": [
+      {
+        "asset_code": "159839",
+        "executed_trade": false,
+        "invalidated_date": "2026-07-17",
+        "signal_date": "2026-07-15"
+      },
+      {
+        "asset_code": "159992",
+        "executed_trade": false,
+        "invalidated_date": "2026-07-17",
+        "signal_date": "2026-07-15"
+      },
+      {
+        "asset_code": "513780",
+        "executed_trade": false,
+        "invalidated_date": "2026-08-24",
+        "signal_date": "2026-08-20"
+      },
+      {
+        "asset_code": "159366",
+        "executed_trade": false,
+        "invalidated_date": "2026-08-24",
+        "signal_date": "2026-08-20"
+      },
+      {
+        "asset_code": "159865",
+        "executed_trade": false,
+        "invalidated_date": "2026-09-10",
+        "signal_date": "2026-09-04"
+      }
+    ],
+    "unconfirmed_reason": "adjusted_close_below_same_session_ma5_before_confirmation"
+  },
+  "candidates": 7,
+  "code_archive_sha256": "47274b4d6e26973ea9857d644c3368ef9b84f3c9e195393257b07ca3b80ae15a",
+  "confirmation_assets": 2,
+  "confirmations": 2,
+  "dataset_hash": "fa65ef7d59263fe501d0227154925573b2fea6c77dbb0037a1bdbdff6136ff11",
+  "distinct_underlying_mature": 320,
+  "execution_model": "next_session_adjusted_close_v1",
+  "final_runtime_seconds": 25.344,
+  "flow_exclusions": {
+    "adjusted_history_not_current_to_signal": 373,
+    "clone_not_representative": 22880,
+    "core_leader_gate_failed": 35533,
+    "historical_session_gap": 4146,
+    "hot_theme_gate_failed": 28111,
+    "insufficient_adjusted_history": 5569,
+    "insufficient_peer_count": 22964,
+    "insufficient_volume_history": 5569,
+    "invalid_adjusted_ohlcv": 393,
+    "ma_alignment_failed": 25221,
+    "price_breakout_gate_failed": 34855,
+    "volume_peak_gate_failed": 30503
+  },
+  "formal_end": "2026-09-10",
+  "formal_pit_credit": 0,
+  "formal_start": "2026-07-15",
+  "frozen_at": "2026-09-11T07:03:38.963143+00:00",
+  "independent_trade_checks": {
+    "account_math_passed": true,
+    "distinct_policy_hashes": 3,
+    "trades": [
+      {
+        "asset_code": "510880",
+        "asset_name": "红利ETF华泰柏瑞",
+        "confirmation_date": "2026-07-22",
+        "entry_execution_date": "2026-07-23",
+        "entry_reference_price": 5.982356648724861,
+        "exit_execution_date": "2026-07-27",
+        "exit_price": 5.8948099660605955,
+        "exit_signal_date": "2026-07-24",
+        "gross_trade_return": -0.014634146341463206,
+        "initial_stop": 5.731936658520616,
+        "max_decision_close": 5.982356648724861,
+        "original_signal_date": "2026-07-20",
+        "reached_1r": false,
+        "risk_unit": 0.25041999020424477,
+        "take_profit_2r": 6.48319662913335
+      },
+      {
+        "asset_code": "159798",
+        "asset_name": "消费ETF易方达",
+        "confirmation_date": "2026-07-30",
+        "entry_execution_date": "2026-07-31",
+        "entry_reference_price": 0.898,
+        "exit_execution_date": "2026-08-04",
+        "exit_price": 0.868,
+        "exit_signal_date": "2026-08-03",
+        "gross_trade_return": -0.03340757238307357,
+        "initial_stop": 0.868,
+        "max_decision_close": 0.898,
+        "original_signal_date": "2026-07-29",
+        "reached_1r": false,
+        "risk_unit": 0.030000000000000027,
+        "take_profit_2r": 0.9580000000000001
+      }
+    ]
+  },
+  "input_complete": true,
+  "input_exclusion_count": 737,
+  "input_exclusion_counts": {
+    "history_ineligible": 2,
+    "listing_after_end_date": 1,
+    "listing_fact_missing": 4,
+    "taxonomy_fact_missing": 87,
+    "taxonomy_group_missing": 40,
+    "underlying_fact_missing": 596,
+    "underlying_unresolved": 7
+  },
+  "mature_group_unique_underlyings": {
+    "broad_base": 69,
+    "consumer": 25,
+    "cross_border": 64,
+    "dividend": 14,
+    "energy": 23,
+    "financial": 13,
+    "gold": 2,
+    "healthcare": 17,
+    "industrial": 24,
+    "materials": 11,
+    "technology": 67
+  },
+  "policies": [
+    {
+      "candidate_count": 7,
+      "confirmation_count": 2,
+      "entry_count": 2,
+      "exclusions": [],
+      "exit_count": 2,
+      "exit_reason_counts": {
+        "adjusted_close_below_same_session_ma5": 2
+      },
+      "fee_bps_per_side": 5.0,
+      "gross_return": -0.004799282959422002,
+      "ledger_points": 42,
+      "net_maximum_drawdown": 0.005193488686946579,
+      "net_return": -0.005193488686946579,
+      "order_count": 4,
+      "policy_id": "legacy_ma5",
+      "slippage_bps_per_side": 5.0,
+      "status": "completed",
+      "stress_drawdown": 0.0053905622676678755,
+      "stress_net_return": -0.0053905622676678755,
+      "stress_slippage_bps": 10.0,
+      "stress_status": "completed",
+      "total_transaction_cost": 0.0003948689900592102,
+      "trade_status_counts": {
+        "closed": 2
+      },
+      "turnover": 0.3948689900592102,
+      "unavailable_intervals": []
+    },
+    {
+      "candidate_count": 7,
+      "confirmation_count": 2,
+      "entry_count": 2,
+      "exclusions": [],
+      "exit_count": 2,
+      "exit_reason_counts": {
+        "leader_tactics_ma5_exit": 2
+      },
+      "fee_bps_per_side": 5.0,
+      "gross_return": -0.004799282959422002,
+      "ledger_points": 42,
+      "net_maximum_drawdown": 0.005193488686946579,
+      "net_return": -0.005193488686946579,
+      "order_count": 4,
+      "policy_id": "shared_daily",
+      "slippage_bps_per_side": 5.0,
+      "status": "completed",
+      "stress_drawdown": 0.0053905622676678755,
+      "stress_net_return": -0.0053905622676678755,
+      "stress_slippage_bps": 10.0,
+      "stress_status": "completed",
+      "total_transaction_cost": 0.0003948689900592102,
+      "trade_status_counts": {
+        "closed": 2
+      },
+      "turnover": 0.3948689900592102,
+      "unavailable_intervals": []
+    },
+    {
+      "candidate_count": 7,
+      "confirmation_count": 2,
+      "entry_count": 2,
+      "exclusions": [],
+      "exit_count": 2,
+      "exit_reason_counts": {
+        "leader_tactics_ma5_exit": 2
+      },
+      "fee_bps_per_side": 5.0,
+      "gross_return": -0.004799282959422002,
+      "ledger_points": 42,
+      "net_maximum_drawdown": 0.005193488686946579,
+      "net_return": -0.005193488686946579,
+      "order_count": 4,
+      "policy_id": "shared_daily_2r",
+      "slippage_bps_per_side": 5.0,
+      "status": "completed",
+      "stress_drawdown": 0.0053905622676678755,
+      "stress_net_return": -0.0053905622676678755,
+      "stress_slippage_bps": 10.0,
+      "stress_status": "completed",
+      "total_transaction_cost": 0.0003948689900592102,
+      "trade_status_counts": {
+        "closed": 2
+      },
+      "turnover": 0.3948689900592102,
+      "unavailable_intervals": []
+    }
+  ],
+  "production_deployed": false,
+  "selection": "BREAKOUT_V2 candidates plus lifecycle confirmation",
+  "status": "partial",
+  "target_weight_per_asset": 0.1,
+  "universe_count": 1611,
+  "verdict": "two_closed_trades_same_ma5_exits; no_empirical_winner_for_exit_policies",
+  "warmup_start": "2026-01-05"
+}

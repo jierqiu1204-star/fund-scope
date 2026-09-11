@@ -35,6 +35,36 @@ class LeaderIntradayThresholds:
     reason_code: str | None
 
 
+def leader_atr20(
+    highs: tuple[float, ...], lows: tuple[float, ...], closes: tuple[float, ...]
+) -> float | None:
+    """Calculate ATR20 from aligned daily high, low, and close series."""
+
+    if len(highs) != len(lows) or len(highs) != len(closes) or len(highs) < 21:
+        return None
+    prices = (*highs, *lows, *closes)
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, int | float)
+        or not math.isfinite(value)
+        or value <= 0
+        for value in prices
+    ):
+        return None
+    if any(high < low for high, low in zip(highs, lows, strict=True)):
+        return None
+    ranges = [
+        max(high - low, abs(high - previous_close), abs(low - previous_close))
+        for high, low, previous_close in zip(
+            highs[-20:], lows[-20:], closes[-21:-1], strict=True
+        )
+    ]
+    if any(not math.isfinite(true_range) or true_range <= 0 for true_range in ranges):
+        return None
+    result = math.fsum(ranges) / 20.0
+    return result if math.isfinite(result) and result > 0 else None
+
+
 def initial_leader_risk(
     *, entry_close: float, entry_atr20: float, source_signal_low: float | None
 ) -> tuple[float, float, bool] | None:

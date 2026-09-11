@@ -1,0 +1,71 @@
+{
+  "asset_count": 80,
+  "assets_with_at_least_120_bars": 16,
+  "candidates": 0,
+  "code_archive_sha256": "15f8b80ebe2e22f76d07f34731a7633da91c28b61a303f9ef323acb3675c6c5c",
+  "confirmations": 0,
+  "dataset_hash": "30efcc3f94072b32ab89ea4c987d09330aa937be5c0294aaaa95011c023ea5c4",
+  "flow_exclusions": {
+    "adjusted_history_not_current_to_signal": 240,
+    "clone_not_representative": 2570,
+    "core_leader_gate_failed": 3026,
+    "historical_session_gap": 828,
+    "hot_theme_gate_failed": 2457,
+    "insufficient_adjusted_history": 2444,
+    "insufficient_peer_count": 2822,
+    "insufficient_volume_history": 2444,
+    "ma_alignment_failed": 2101,
+    "price_breakout_gate_failed": 2991,
+    "volume_peak_gate_failed": 666
+  },
+  "formal_end": "2026-09-10",
+  "formal_pit_credit": 0,
+  "formal_start": "2026-07-15",
+  "frozen_at": "2026-09-11T06:44:36.490325+00:00",
+  "input_exclusion_counts": {
+    "history_ineligible": 1,
+    "listing_fact_missing": 4,
+    "taxonomy_fact_missing": 87,
+    "underlying_fact_missing": 1436,
+    "underlying_unresolved": 2
+  },
+  "policies": [
+    {
+      "candidate_count": 0,
+      "confirmation_count": 0,
+      "entry_count": 0,
+      "exit_count": 0,
+      "ledger_status": "completed",
+      "net_maximum_drawdown": 0.0,
+      "net_return": 0.0,
+      "policy_id": "legacy_ma5",
+      "stress_net_return": 0.0
+    },
+    {
+      "candidate_count": 0,
+      "confirmation_count": 0,
+      "entry_count": 0,
+      "exit_count": 0,
+      "ledger_status": "completed",
+      "net_maximum_drawdown": 0.0,
+      "net_return": 0.0,
+      "policy_id": "shared_daily",
+      "stress_net_return": 0.0
+    },
+    {
+      "candidate_count": 0,
+      "confirmation_count": 0,
+      "entry_count": 0,
+      "exit_count": 0,
+      "ledger_status": "completed",
+      "net_maximum_drawdown": 0.0,
+      "net_return": 0.0,
+      "policy_id": "shared_daily_2r",
+      "stress_net_return": 0.0
+    }
+  ],
+  "status": "partial",
+  "universe_count": 1610,
+  "verdict": "no_qualified_candidates; cash-only return is not strategy performance evidence",
+  "warmup_start": "2026-01-05"
+}

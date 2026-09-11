@@ -122,7 +122,7 @@ class Settings(BaseSettings):
         alias="ETF_LEADER_TACTICS_V2_MORNING_CONFIRMATION_ENABLED",
     )
     etf_leader_tactics_v2_code_version: str = Field(
-        default="dual-universe-leader-tactics-v2",
+        default="dual-universe-leader-tactics-v2-exit-facts-v1",
         alias="ETF_LEADER_TACTICS_V2_CODE_VERSION",
     )
     etf_leader_tactics_v2_artifact_dir: str = Field(

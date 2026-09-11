@@ -67,15 +67,16 @@ from app.services.strategy_lab.etf_point_in_time_decision_data import (
 )
 from app.services.strategy_lab.etf_ranking_forward_outcomes import ForwardAdjustedClose
 from app.services.strategy_lab.etf_strategy_route_comparison import (
-    ComparisonDecisionSnapshot as CoreComparisonDecisionSnapshot,
-)
-from app.services.strategy_lab.etf_strategy_route_comparison import (
+    LEADER_EXIT_POLICY_DEFAULT,
     ComparisonInput,
     ComparisonValuationInput,
     FrozenComparisonProvenance,
     V2ComparisonEvent,
     V2StateCheck,
     build_v2_comparison_events,
+)
+from app.services.strategy_lab.etf_strategy_route_comparison import (
+    ComparisonDecisionSnapshot as CoreComparisonDecisionSnapshot,
 )
 
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -1398,6 +1399,7 @@ def build_comparison_input(
     daily_core_targets: Sequence[Any] = (),
     daily_core_required_signal_dates: Sequence[date] = (),
     initial_capital: float = 1.0,
+    leader_exit_policy: str = LEADER_EXIT_POLICY_DEFAULT,
 ) -> ComparisonInput:
     """Assemble the core's frozen input contract from loader sidecars."""
 
@@ -1421,6 +1423,17 @@ def build_comparison_input(
         daily_core_targets=tuple(daily_core_targets),
         daily_core_required_signal_dates=tuple(daily_core_required_signal_dates),
         initial_capital=initial_capital,
+        leader_exit_policy=leader_exit_policy,
+        leader_exit_pit_series=tuple(
+            sorted(
+                (
+                    series
+                    for snapshot in snapshots
+                    for series in snapshot.pit_series
+                ),
+                key=lambda item: (item.bars[-1].session_date, item.asset_code),
+            )
+        ),
     )
 
 
@@ -2240,7 +2253,7 @@ async def _materialize_and_check_v2_day(
         try:
             screen = screen_dual_universe(
                 bundle.inputs,
-                code_version="dual-universe-leader-tactics-v2",
+                code_version="dual-universe-leader-tactics-v2-exit-facts-v1",
                 provider_health=bundle.provider_health,
             )
         except (SQLAlchemyError, ValueError, V2ContractError, TypeError) as exc:

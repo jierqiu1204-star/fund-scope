@@ -153,9 +153,23 @@ def test_default_screen_identity_is_reproducible() -> None:
     result = screen_dual_universe((_asset(),))
     expected = _canonical_manifest_for(result)
 
-    assert result.code_version == "dual-universe-leader-tactics-v2"
+    assert result.code_version == "dual-universe-leader-tactics-v2-exit-facts-v1"
     assert result.provider_health == ()
     assert result.manifest_hash == expected.manifest_hash
+
+
+def test_exit_facts_build_has_new_manifest_without_changing_formula_identity() -> None:
+    current = screen_dual_universe((_asset(),))
+    explicit_legacy = screen_dual_universe(
+        (_asset(),), code_version="dual-universe-leader-tactics-v2"
+    )
+    assert current.input_hash == explicit_legacy.input_hash
+    assert (
+        _canonical_manifest_for(current).formula_registry_hash
+        == _canonical_manifest_for(explicit_legacy).formula_registry_hash
+    )
+    assert current.manifest_hash != explicit_legacy.manifest_hash
+    assert explicit_legacy.code_version == "dual-universe-leader-tactics-v2"
 
 
 def test_screen_result_payload_is_json_safe_and_retains_pit_evidence() -> None:

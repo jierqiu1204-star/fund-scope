@@ -23,6 +23,7 @@ from app.services.leader_tactics_exit_policy import (
     LEADER_TACTICS_ROUND_TRIP_COST_BPS,
     evaluate_leader_exit_thresholds,
     initial_leader_risk,
+    leader_atr20,
 )
 
 ALERT_EXIT_WATCH = "exit_watch"
@@ -972,27 +973,12 @@ def _leader_cutoff_trade_date(value: datetime) -> date:
 def _leader_atr20(bars: Sequence[LeaderTacticsDailyBar], end_index: int) -> float | None:
     if end_index < 20 or end_index >= len(bars):
         return None
-    ranges: list[float] = []
-    for previous, current in zip(
-        bars[end_index - 20 : end_index],
-        bars[end_index - 19 : end_index + 1],
-        strict=True,
-    ):
-        high = _leader_positive_finite(current.adjusted_high)
-        low = _leader_positive_finite(current.adjusted_low)
-        previous_close = _leader_positive_finite(previous.adjusted_close)
-        if high is None or low is None or previous_close is None or low > high:
-            return None
-        true_range = max(
-            high - low,
-            abs(high - previous_close),
-            abs(low - previous_close),
-        )
-        if not math.isfinite(true_range) or true_range <= 0:
-            return None
-        ranges.append(true_range)
-    result = math.fsum(ranges) / len(ranges) if ranges else None
-    return result if result is not None and math.isfinite(result) and result > 0 else None
+    window = bars[end_index - 20 : end_index + 1]
+    return leader_atr20(
+        tuple(bar.adjusted_high for bar in window),
+        tuple(bar.adjusted_low for bar in window),
+        tuple(bar.adjusted_close for bar in window),
+    )
 
 
 def evaluate_leader_tactics_exit(

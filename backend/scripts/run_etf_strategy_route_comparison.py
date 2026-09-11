@@ -54,12 +54,18 @@ from app.services.strategy_lab.etf_strategy_route_comparison import (
     COMPARISON_ROUTE_IDS,
     COMPARISON_ROUTE_POLICY_HASHES,
     COMPARISON_SCHEMA_VERSION,
+    LEADER_EXIT_POLICY_DEFAULT,
+    LEADER_EXIT_POLICY_IDS,
     ComparisonInput,
     ComparisonValuationInput,
     DailyCorePITDateInput,
     FrozenComparisonProvenance,
     canonical_daily_core_targets_from_pit,
+    comparison_experiment_id_for_policy,
     comparison_result_payload,
+    comparison_route_policy_hashes_for_policy,
+    comparison_schema_version_for_policy,
+    leader_exit_policy_hash,
     run_comparison,
 )
 from app.services.strategy_lab.etf_strategy_route_comparison_inputs import (
@@ -79,6 +85,8 @@ DECISION_CUTOFF_POLICY = "19:00 Asia/Shanghai on each requested trading session"
 COMPARISON_RESULT_PHASE = "route-comparison-result"
 DEVELOPMENT_DIAGNOSTIC_START = date(2026, 8, 26)
 DEVELOPMENT_DIAGNOSTIC_END = date(2026, 9, 9)
+PROSPECTIVE_LEADER_EXIT_START = date(2026, 9, 11)
+PROSPECTIVE_LEADER_EXIT_END = date(2026, 12, 11)
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 _PIT_PAGE_SIZE = 16
 _DATABASE_URL_PATTERN = re.compile(
@@ -130,7 +138,17 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         help="existing research SQLite path; defaults to ETF_PIT_ARTIFACT_DIR/production-pit-research.sqlite3",
     )
-    parser.add_argument("--run-id", default="etf-strategy-route-comparison")
+    parser.add_argument("--run-id")
+    parser.add_argument(
+        "--leader-exit-policy",
+        choices=LEADER_EXIT_POLICY_IDS,
+        default=LEADER_EXIT_POLICY_DEFAULT,
+        help=(
+            "leader exit policy: legacy_ma5 (frozen diagnostic rule), "
+            "shared_daily (shared daily stop/breakeven/MA5 rule), or "
+            "shared_daily_2r (shared daily rule with 2R take profit)"
+        ),
+    )
     parser.add_argument("--phase", default=V2_DAY_CHECK_PHASE)
     parser.add_argument(
         "--max-seconds",
@@ -149,7 +167,12 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         help="write the Chinese Markdown report to this file",
     )
-    return parser.parse_args(argv)
+    arguments = parser.parse_args(argv)
+    if arguments.run_id is None:
+        arguments.run_id = "etf-strategy-route-comparison"
+        if arguments.leader_exit_policy != LEADER_EXIT_POLICY_DEFAULT:
+            arguments.run_id += f":{arguments.leader_exit_policy}"
+    return arguments
 
 
 def _parse_date(value: str) -> date:
@@ -462,6 +485,7 @@ async def _build_input(
         daily_core_targets=daily_targets,
         daily_core_required_signal_dates=required_daily_dates,
         initial_capital=arguments.initial_capital,
+        leader_exit_policy=arguments.leader_exit_policy,
     )
     if not isinstance(result, ComparisonInput):
         raise ComparisonInputBuilderUnavailableError(
@@ -487,7 +511,7 @@ def _frozen_config(
     v2_manifest_hashes = tuple(
         item.manifest_hash for item in report.v2_days if item.manifest_hash
     )
-    return {
+    config = {
         "schema_version": "etf_route_comparison_cli_config_v1",
         "experiment_id": COMPARISON_EXPERIMENT_ID,
         "comparison_schema_version": COMPARISON_SCHEMA_VERSION,
@@ -519,6 +543,32 @@ def _frozen_config(
         "production_policy": "no_production_writes",
         "parameter_search": False,
     }
+    if arguments.leader_exit_policy != LEADER_EXIT_POLICY_DEFAULT:
+        config.update(
+            {
+                "schema_version": "etf_route_comparison_cli_config_v2",
+                "experiment_id": comparison_experiment_id_for_policy(
+                    arguments.leader_exit_policy
+                ),
+                "comparison_schema_version": comparison_schema_version_for_policy(
+                    arguments.leader_exit_policy
+                ),
+                "leader_exit_policy": arguments.leader_exit_policy,
+                "leader_exit_policy_hash": leader_exit_policy_hash(
+                    arguments.leader_exit_policy
+                ),
+                "route_policy_hashes": comparison_route_policy_hashes_for_policy(
+                    arguments.leader_exit_policy
+                ),
+                "diagnostic_window_guard": {
+                    "start_date": PROSPECTIVE_LEADER_EXIT_START,
+                    "end_date": PROSPECTIVE_LEADER_EXIT_END,
+                    "universe": "ETF",
+                    "holdout_consumption": False,
+                },
+            }
+        )
+    return config
 
 
 def _write_comparison_artifacts(
@@ -617,11 +667,29 @@ async def _run(arguments: argparse.Namespace) -> dict[str, Any]:
         raise ValueError(f"phase is fixed at {V2_DAY_CHECK_PHASE}")
     if not math.isfinite(arguments.initial_capital) or arguments.initial_capital <= 0:
         raise ValueError("initial-capital must be positive")
-    if (
-        arguments.start_date < DEVELOPMENT_DIAGNOSTIC_START
-        or arguments.end_date > DEVELOPMENT_DIAGNOSTIC_END
-    ):
-        raise ValueError("comparison dates must remain within the frozen 2026-08-26..2026-09-09 diagnostic window")
+    if arguments.leader_exit_policy == LEADER_EXIT_POLICY_DEFAULT:
+        if (
+            arguments.start_date < DEVELOPMENT_DIAGNOSTIC_START
+            or arguments.end_date > DEVELOPMENT_DIAGNOSTIC_END
+        ):
+            raise ValueError(
+                "comparison dates must remain within the frozen 2026-08-26..2026-09-09 diagnostic window"
+            )
+    else:
+        if (
+            arguments.start_date < PROSPECTIVE_LEADER_EXIT_START
+            or arguments.end_date > PROSPECTIVE_LEADER_EXIT_END
+        ):
+            raise ValueError(
+                "new leader exit policies require the prospective 2026-09-11..2026-12-11 window"
+            )
+        cutoff = datetime.combine(
+            arguments.end_date,
+            _DECISION_CUTOFF,
+            tzinfo=_SHANGHAI,
+        )
+        if datetime.now(_SHANGHAI) < cutoff:
+            raise ValueError("comparison end date must be past its 19:00 Asia/Shanghai cutoff")
     started = time.monotonic()
     settings = get_settings()
     sessions = _read_calendar(
@@ -670,6 +738,14 @@ async def _run(arguments: argparse.Namespace) -> dict[str, Any]:
                 "mode": arguments.mode,
                 "status": "ready" if report.ready else "blocked",
                 "research_only": True,
+                "leader_exit_policy": arguments.leader_exit_policy,
+                "leader_exit_policy_hash": leader_exit_policy_hash(arguments.leader_exit_policy),
+                "experiment_id": comparison_experiment_id_for_policy(
+                    arguments.leader_exit_policy
+                ),
+                "comparison_schema_version": comparison_schema_version_for_policy(
+                    arguments.leader_exit_policy
+                ),
                 "decision_cutoff_policy": DECISION_CUTOFF_POLICY,
                 "preflight": report.as_dict(),
                 "report_markdown": report.to_markdown(),
@@ -796,6 +872,14 @@ def main(argv: list[str] | None = None) -> None:
         result = {
             "mode": arguments.mode,
             "research_only": True,
+            "leader_exit_policy": arguments.leader_exit_policy,
+            "leader_exit_policy_hash": leader_exit_policy_hash(arguments.leader_exit_policy),
+            "experiment_id": comparison_experiment_id_for_policy(
+                arguments.leader_exit_policy
+            ),
+            "comparison_schema_version": comparison_schema_version_for_policy(
+                arguments.leader_exit_policy
+            ),
             "status": "blocked",
             "reason": _safe_error(exc),
         }
