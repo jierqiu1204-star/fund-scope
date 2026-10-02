@@ -87,6 +87,12 @@ jobs:
           mkdir -p "$deploy_dir"
           candidate_image="fundscope-backend-candidate:$GITHUB_SHA"
           trap 'sudo docker image rm "$candidate_image" >/dev/null 2>&1 || true' EXIT
+          if command -v apt-get > /dev/null 2>&1; then
+            if [ -d /var/cache/apt/archives ]; then
+              sudo du -sh /var/cache/apt/archives >&2
+            fi
+            sudo apt-get clean
+          fi
           for old_image in $(sudo docker image ls --filter 'reference=fundscope-*' \
             --format '{{.Repository}}:{{.Tag}}'); do
             container_refs=$(sudo docker ps -aq --filter "ancestor=$old_image")

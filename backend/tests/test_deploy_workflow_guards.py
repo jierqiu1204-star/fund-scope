@@ -277,6 +277,7 @@ def test_deploy_reclaims_cache_and_cleans_candidate_when_backup_has_no_capacity(
     commands.mkdir()
     mocks = {
         "sudo": '#!/bin/sh\nprintf "%s\\n" "$*" >> "$COMMAND_LOG"\nexec "$@"\n',
+        "apt-get": '#!/bin/sh\ntest "$*" = clean\n',
         "docker": textwrap.dedent(r"""
             #!/bin/sh
             case "$*" in
@@ -336,6 +337,8 @@ def test_deploy_reclaims_cache_and_cleans_candidate_when_backup_has_no_capacity(
 
     assert result.returncode == 1
     log = command_log.read_text(encoding="utf-8").splitlines()
+    build_index = next(index for index, command in enumerate(log) if command.startswith("docker build "))
+    assert log.index("apt-get clean") < build_index
     candidate_remove = f"docker image rm fundscope-backend-candidate:{'a' * 40}"
     if not candidate_valid:
         assert "Insufficient backup capacity" not in result.stderr
@@ -353,7 +356,6 @@ def test_deploy_reclaims_cache_and_cleans_candidate_when_backup_has_no_capacity(
     assert "fixture-stopped fundscope-v2-research:stopped Exited (0)" in result.stderr
     assert "public | fixture_table | 3000000000" in result.stderr
     assert "fixture" not in result.stdout
-    build_index = next(index for index, command in enumerate(log) if command.startswith("docker build "))
     backup_index = next(index for index, command in enumerate(log) if command.endswith("/deploy/backup-compose.sh"))
     assert log.index("docker image prune -f") < build_index < backup_index
     assert log.index("docker builder prune -af") < build_index

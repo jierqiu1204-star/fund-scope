@@ -49,7 +49,8 @@ to `/srv/fundscope`, preserves server-local configuration files, and runs Compos
 from `/srv/fundscope/deploy`.
 The server checkout does not need to be a git repository.
 
-Before building, the workflow removes unused `fundscope-*` images, unused
+Before building, the workflow clears cached APT installation packages when
+APT is available, and removes unused `fundscope-*` images, unused
 Docker build cache and dangling images. It skips images referenced by any
 container, including stopped containers, and image removal is not forced.
 Database and active research containers retain their images. If the frontend
