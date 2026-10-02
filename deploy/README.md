@@ -49,6 +49,14 @@ to `/srv/fundscope`, preserves server-local configuration files, and runs Compos
 from `/srv/fundscope/deploy`.
 The server checkout does not need to be a git repository.
 
+Before building, the workflow removes unused Docker build cache and dangling
+images. It also removes its temporary candidate image when the deployment step
+exits, including on failure. Database volumes and sealed backups are retained.
+The backup still requires the larger of the configured estimate (5 GiB by
+default) or the latest sealed dump, plus 2 GiB of free space. If that check
+fails, use the disk, Docker, database and backup-size diagnostics in the job log
+to decide whether more storage is needed; source replacement has not started.
+
 Server-local files preserved across each deploy:
 
 - `/srv/fundscope/.env`

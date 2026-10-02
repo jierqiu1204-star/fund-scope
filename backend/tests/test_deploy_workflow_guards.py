@@ -238,6 +238,96 @@ def test_deploy_backs_up_before_replacing_source() -> None:
     assert "docker builder prune -af" in workflow
 
 
+def test_deploy_reclaims_cache_and_cleans_candidate_when_backup_has_no_capacity(
+    tmp_path: Path,
+) -> None:
+    workflow = _read_repository_file(".github/workflows/deploy.yml")
+    script = textwrap.dedent(
+        workflow.split("      - name: Deploy on VPS\n        run: |\n", 1)[1]
+    )
+    deploy_dir = tmp_path / "deployed"
+    (deploy_dir / "deploy").mkdir(parents=True)
+    (deploy_dir / "deploy/docker-compose.ip.yml").write_text("previous compose\n")
+    previous_source = deploy_dir / "previous-source"
+    previous_source.write_text("previous deployment\n")
+    workspace = tmp_path / "workspace"
+    (workspace / "backend").mkdir(parents=True)
+    (workspace / "deploy").mkdir()
+    for name in ("backup-compose.sh", "backup-retention.sh"):
+        (workspace / "deploy" / name).write_text(
+            _read_repository_file(f"deploy/{name}"), encoding="utf-8"
+        )
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir()
+    previous_backup = backup_dir / "fundscope_20261001_000000.dump"
+    _write_backup(previous_backup, modified_at=time.time())
+    script = script.replace("/srv/fundscope", str(deploy_dir)).replace(
+        "/var/backups/fundscope", str(backup_dir)
+    )
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    mocks = {
+        "sudo": '#!/bin/sh\nprintf "%s\\n" "$*" >> "$COMMAND_LOG"\nexec "$@"\n',
+        "docker": textwrap.dedent(r"""
+            #!/bin/sh
+            case "$*" in
+              "image prune -f"|"builder prune -af"|"image rm fundscope-backend-candidate:$GITHUB_SHA") ;;
+              "build --tag "*) ;;
+              "run --rm --entrypoint alembic "*) printf 'candidate (head)\n' ;;
+              "system df") printf 'Build Cache: fixture reclaimable\n' ;;
+              "compose -f docker-compose.ip.yml up -d postgres") ;;
+              *"pg_isready -U fundscope -d fundscope") printf 'accepting connections\n' ;;
+              *"SELECT count(*) FROM alembic_version") printf '1\n' ;;
+              *"SELECT version_num FROM alembic_version") printf 'previous\n' ;;
+              *"SELECT pg_database_size(current_database())") printf '3000000000\n' ;;
+              *) printf 'Unexpected Docker command: %s\n' "$*" >&2; exit 64 ;;
+            esac
+            """).lstrip(),
+        "df": "#!/bin/sh\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\nfixture 10000000 5194868 4805132 52%% /\\n'\n",
+        "flock": "#!/bin/sh\nexit 0\n",
+        "find": '#!/bin/sh\ncase "$*" in *-printf*) printf "Backup fundscope_20261001_000000.dump: 6 bytes\\n" ;; esac\n',
+    }
+    for name, content in mocks.items():
+        command = commands / name
+        command.write_text(content, encoding="utf-8")
+        command.chmod(0o755)
+    command_log = tmp_path / "commands.log"
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={
+            **_retention_env(backup_dir),
+            "PATH": f"{commands}{os.pathsep}{os.environ['PATH']}",
+            "COMMAND_LOG": str(command_log),
+            "COMPOSE_FILE": "docker-compose.ip.yml",
+            "GITHUB_WORKSPACE": str(workspace),
+            "GITHUB_SHA": "a" * 40,
+            "BACKUP_KEEP_COUNT": "2",
+            "BACKUP_MIN_FREE_BYTES": "2147483648",
+            "BACKUP_ESTIMATED_BYTES": "5368709120",
+            "BACKUP_COMPRESSION": "zstd:1",
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 1
+    assert "Insufficient backup capacity: available=4805132KB required=7340032KB" in result.stderr
+    assert "Build Cache: fixture reclaimable" in result.stderr
+    assert "PostgreSQL database size (bytes): 3000000000" in result.stderr
+    assert "fixture" not in result.stdout
+    log = command_log.read_text(encoding="utf-8").splitlines()
+    build_index = next(index for index, command in enumerate(log) if command.startswith("docker build "))
+    backup_index = next(index for index, command in enumerate(log) if command.endswith("/deploy/backup-compose.sh"))
+    assert log.index("docker image prune -f") < build_index < backup_index
+    assert log.index("docker builder prune -af") < build_index
+    assert log[-1] == f"docker image rm fundscope-backend-candidate:{'a' * 40}"
+    assert not any(command.startswith("rsync ") or " pg_dump " in command for command in log)
+    assert not any(" down " in command or "alembic upgrade" in command for command in log)
+    assert previous_source.read_text() == "previous deployment\n"
+    assert previous_backup.read_bytes() == b"backup"
+
+
 def test_deploy_checks_single_head_before_migration_and_health_afterward() -> None:
     workflow = _read_repository_file(".github/workflows/deploy.yml")
 

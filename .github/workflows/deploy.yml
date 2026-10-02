@@ -86,6 +86,9 @@ jobs:
 
           mkdir -p "$deploy_dir"
           candidate_image="fundscope-backend-candidate:$GITHUB_SHA"
+          trap 'sudo docker image rm "$candidate_image" >/dev/null 2>&1 || true' EXIT
+          sudo docker image prune -f
+          sudo docker builder prune -af
           sudo docker build --tag "$candidate_image" "$GITHUB_WORKSPACE/backend"
           candidate_heads=$(
             sudo docker run --rm --entrypoint alembic "$candidate_image" heads
@@ -149,6 +152,17 @@ jobs:
               "SELECT version_num FROM alembic_version"
           )
           test -n "$previous_schema_head"
+          {
+            df -Pk "$backup_dir"
+            sudo du -sh "$backup_dir"
+            sudo find "$backup_dir" -maxdepth 1 -type f -name 'fundscope_*.dump' \
+              -printf 'Backup %f: %s bytes\n'
+            sudo docker system df
+            printf 'PostgreSQL database size (bytes): '
+            sudo docker compose -f "$COMPOSE_FILE" exec -T postgres \
+              psql -U fundscope -d fundscope -Atqc \
+              "SELECT pg_database_size(current_database())"
+          } >&2
           backup_path=$(
             sudo env \
               BACKUP_DIR="$backup_dir" \
