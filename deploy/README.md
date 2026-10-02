@@ -8,16 +8,17 @@ public IP before buying or configuring a domain, use `README-ip.md` instead.
 - `postgres`: application database
 - `backend`: FastAPI API and APScheduler jobs
 - `frontend-static-builder`: Next.js static export builder
-- `nginx`: static hosting and `/api/` reverse proxy. Access control is handled by the FundScope application login.
+- `nginx`: static hosting and `/api/` reverse proxy. This personal instance has no application login; Compose listens on loopback by default.
 - `certbot`: certificate issuance helper
 
 ## Required Local Files
 
 Create these files on the deployment host. Do not commit private values.
 
-- `/srv/fundscope/.env`: copy from `.env.example` and replace database, OpenAI, SMTP, JWT, and bootstrap admin placeholders.
+- `/srv/fundscope/.env`: copy from `.env.example` and replace database, OpenAI, and SMTP placeholders.
 - `POSTGRES_PASSWORD`: set it in `/srv/fundscope/deploy/.env`.
-- `FQDN`: set the public hostname in `/srv/fundscope/deploy/.env` for nginx and Certbot.
+- `FQDN`: set the hostname in `/srv/fundscope/deploy/.env` for nginx and Certbot.
+- `FUNDSCOPE_BIND_ADDRESS`: defaults to `127.0.0.1`; set in `deploy/.env` only for a trusted private interface or a deployment with network access restrictions. Every reachable client can read and change this instance.
 
 ## GitHub Actions Runner
 
@@ -72,15 +73,7 @@ Optional GitHub Actions repository variables:
 2. Copy `.env.example` to `.env` and replace placeholder values.
 3. Set `POSTGRES_PASSWORD=<strong-password>` and `FQDN=<your-domain>` in
    `/srv/fundscope/deploy/.env`.
-4. Ensure `.env` contains the application login settings:
-
-   ```bash
-   AUTH_JWT_SECRET=<random-long-secret>
-   AUTH_TOKEN_EXPIRE_DAYS=30
-   AUTH_BOOTSTRAP_ADMIN_EMAIL=19535838578@163.com
-   AUTH_BOOTSTRAP_ADMIN_DISPLAY_NAME=qje
-   AUTH_BOOTSTRAP_ADMIN_PASSWORD=<qje-login-password>
-   ```
+4. Restrict access using a private network, SSH tunnel, or trusted proxy. When upgrading a database with multiple old accounts, set `INSTANCE_OWNER_EMAIL` in the root `.env` to its existing owner email (see `README-auth.md`). New instances need no account configuration.
 
 5. Bootstrap HTTP with the IP Compose file. This keeps the application online
    while serving the ACME challenge from the shared Certbot volume:
@@ -94,6 +87,8 @@ Optional GitHub Actions repository variables:
    ```bash
    CERTBOT_EMAIL=<email> ./certbot-init.sh <domain>
    ```
+
+   The HTTP challenge path must be reachable by the certificate authority through your external proxy; a loopback-only listener by itself cannot complete it. For private access without an existing TLS proxy, use the IP guide with an SSH tunnel instead.
 
 7. Only after certificate issuance succeeds, switch to the domain stack and
    install bounded daily renewal:
@@ -110,7 +105,7 @@ Optional GitHub Actions repository variables:
    docker compose -f docker-compose.yml exec backend alembic upgrade head
    ```
 
-9. Visit `/login`, log in as the bootstrap admin, then open `/onboarding` if default data still needs seeding.
+9. Open `/short-term` through your trusted connection and configure `/settings/notifications`. Open `/onboarding` if default data still needs seeding.
 
 ## Local Compose Verification
 
@@ -134,9 +129,9 @@ If startup is blocked, record the failing command, full output, and next action 
 After deployment, verify these items before calling the release ready:
 
 - HTTPS: `curl -I https://$FQDN` returns a 2xx or 3xx response with a valid certificate.
-- Application login: open `/login`, sign in as the bootstrap admin, and confirm `/admin/users` is visible.
+- Personal instance: open `/short-term` and `/settings/notifications` without signing in, and confirm the expected holdings and recipient.
 - Backend health: `curl -f https://$FQDN/api/health`.
-- nginx proxying: log in through the browser, then confirm business pages load their `/api/` data.
+- nginx proxying: confirm business pages load their `/api/` data through the trusted connection.
 - Static frontend: open `/portfolio`, `/valuation`, `/news`, `/short-term`, and `/recommendations`.
 - Scheduler: temporarily set one job to run in the next few minutes, then check `docker compose logs -f backend` and `/api/admin/jobs`.
 - Backups: every `deploy.yml` run creates an atomic custom-format dump before

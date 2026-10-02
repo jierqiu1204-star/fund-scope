@@ -8,7 +8,7 @@ from uuid import uuid4
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.core.auth import create_access_token, hash_password
+from app.core.auth import hash_password
 from app.core.config import Settings
 from app.db.base import Base
 from app.defaults.funds import DEFAULT_RESEARCH_FUNDS
@@ -105,9 +105,4 @@ async def app(settings: Settings):
 @pytest.fixture
 async def client(app) -> AsyncIterator[AsyncClient]:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as test_client:
-        async with app.state.db.session() as session:
-            user = await session.get(User, 1)
-            assert user is not None
-            token, _ = create_access_token(user, app.state.settings)
-        test_client.headers["Authorization"] = f"Bearer {token}"
         yield test_client

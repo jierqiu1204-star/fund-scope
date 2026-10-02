@@ -46,7 +46,7 @@ def test_validation_continuation_cli_is_one_bounded_registered_run() -> None:
 
 
 @pytest.mark.asyncio
-async def test_super_admin_can_read_bounded_fail_closed_etf_readiness(client) -> None:
+async def test_instance_can_read_bounded_fail_closed_etf_readiness(client) -> None:
     response = await client.get(
         "/api/admin/jobs/etf-readiness?target_date=2026-07-17"
     )
@@ -62,13 +62,15 @@ async def test_super_admin_can_read_bounded_fail_closed_etf_readiness(client) ->
 
 
 @pytest.mark.asyncio
-async def test_etf_readiness_admin_endpoint_rejects_unauthenticated_access(client) -> None:
+async def test_etf_readiness_endpoint_needs_no_login(client) -> None:
     response = await client.get(
         "/api/admin/jobs/etf-readiness",
         headers={"Authorization": ""},
     )
 
-    assert response.status_code == 401
+    assert response.status_code == 200
+    assert response.json()["read_only"] is True
+    assert "secret" not in response.json()["attestation"]
 
 
 @pytest.mark.asyncio

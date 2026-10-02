@@ -53,7 +53,10 @@ async def test_invalid_smtp_credentials_are_not_persisted(client) -> None:
 
 
 @pytest.mark.asyncio
-async def test_notification_test_send_uses_submitted_smtp_fields(client, app, monkeypatch) -> None:
+@pytest.mark.parametrize("submitted_password", ["saved-password", ""])
+async def test_notification_test_send_uses_submitted_smtp_fields(
+    client, app, monkeypatch, submitted_password
+) -> None:
     captured: dict[str, object] = {}
 
     class FakeSMTP:
@@ -88,7 +91,7 @@ async def test_notification_test_send_uses_submitted_smtp_fields(client, app, mo
             "smtp_host": "smtp.real.local",
             "smtp_port": 2525,
             "smtp_username": "saved-user",
-            "smtp_password": "saved-password",
+            "smtp_password": submitted_password,
             "smtp_from": "FundScope <saved@example.com>",
             "recipient_email": "saved-recipient@example.com",
         },
@@ -100,7 +103,7 @@ async def test_notification_test_send_uses_submitted_smtp_fields(client, app, mo
     assert captured["use_tls"] is False
     assert captured["connected"] is True
     assert captured["username"] == "saved-user"
-    assert captured["password"] == "saved-password"
+    assert captured["password"] == (submitted_password or app.state.settings.smtp_password)
     assert captured["quit"] is True
     assert captured["send_to"] == "saved-recipient@example.com"
     assert captured["send_from"] == "FundScope <saved@example.com>"
@@ -110,7 +113,7 @@ async def test_notification_test_send_uses_submitted_smtp_fields(client, app, mo
         "hostname": "smtp.real.local",
         "port": 2525,
         "username": "saved-user",
-        "password": "saved-password",
+        "password": submitted_password or app.state.settings.smtp_password,
         "start_tls": True,
         "use_tls": False,
     }
@@ -236,7 +239,7 @@ async def test_manual_monthly_reminder_uses_saved_notification_settings(
 
 
 @pytest.mark.asyncio
-async def test_monthly_reminder_continues_when_one_user_fails(app, monkeypatch) -> None:
+async def test_monthly_reminder_only_sends_for_instance_owner_without_approval(app, monkeypatch) -> None:
     async def fake_send_template(self, session, *, recipient: str, template_name: str, payload: dict) -> str:
         if recipient == "19535838578@163.com":
             raise RuntimeError("first smtp failed")
@@ -245,6 +248,8 @@ async def test_monthly_reminder_continues_when_one_user_fails(app, monkeypatch) 
     monkeypatch.setattr("app.services.notifier.Notifier.send_template", fake_send_template)
 
     async with app.state.db.session() as session:
+        owner = await session.get(User, 1)
+        owner.is_approved = False
         session.add(
             User(
                 email="second@example.com",
@@ -274,8 +279,7 @@ async def test_monthly_reminder_continues_when_one_user_fails(app, monkeypatch) 
     assert result["send_status"] == "failed"
     assert result["user_results"][0]["recipient"] == "19535838578@163.com"
     assert result["user_results"][0]["send_status"] == "failed"
-    assert result["user_results"][1]["recipient"] == "second@example.com"
-    assert result["user_results"][1]["send_status"] == "sent"
+    assert len(result["user_results"]) == 1
 
 
 @pytest.mark.asyncio

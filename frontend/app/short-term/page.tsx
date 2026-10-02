@@ -20,7 +20,6 @@ import {
 } from "recharts";
 
 import { Panel, StatPill } from "@/components/ui";
-import { useAuth } from "../auth-provider";
 import { api } from "@/lib/api";
 import { formatCurrency, formatDate, formatPercent } from "@/lib/format";
 import type {
@@ -2335,7 +2334,6 @@ function SectionKicker({
 
 function ShortTermClient() {
   const queryClient = useQueryClient();
-  const { user } = useAuth();
   const searchParams = useSearchParams();
   const requestedSection = searchParams.get("section");
   const holdingsSectionRef = useRef<HTMLDivElement | null>(null);
@@ -2582,8 +2580,7 @@ function ShortTermClient() {
   });
 
   const trackedPositions = useQuery({
-    queryKey: ["tracked-positions", user?.id ?? "anonymous"],
-    enabled: Boolean(user),
+    queryKey: ["tracked-positions", "instance"],
     queryFn: async ({ signal }) =>
       (await api.get<TrackedPositionList>("/api/tracked-positions", { signal }))
         .data,
@@ -2636,25 +2633,25 @@ function ShortTermClient() {
   useEffect(() => {
     return () => {
       void queryClient.cancelQueries({
-        queryKey: ["tracked-positions", user?.id ?? "anonymous"]
+        queryKey: ["tracked-positions", "instance"]
       });
       queryClient.removeQueries({
-        queryKey: ["tracked-positions", user?.id ?? "anonymous"]
+        queryKey: ["tracked-positions", "instance"]
       });
       void queryClient.cancelQueries({
-        queryKey: ["tracked-position", user?.id ?? "anonymous"]
+        queryKey: ["tracked-position", "instance"]
       });
       queryClient.removeQueries({
-        queryKey: ["tracked-position", user?.id ?? "anonymous"]
+        queryKey: ["tracked-position", "instance"]
       });
       void queryClient.cancelQueries({
-        queryKey: ["tracked-position-audit", user?.id ?? "anonymous"]
+        queryKey: ["tracked-position-audit", "instance"]
       });
       queryClient.removeQueries({
-        queryKey: ["tracked-position-audit", user?.id ?? "anonymous"]
+        queryKey: ["tracked-position-audit", "instance"]
       });
     };
-  }, [queryClient, user?.id]);
+  }, [queryClient]);
 
   useEffect(() => {
     setAssetOffset(0);
@@ -3162,8 +3159,8 @@ function ShortTermClient() {
     primaryTracked?.latest_alert?.trigger_label ??
     "暂无持仓原因";
   const trackedDetail = useQuery({
-    queryKey: ["tracked-position", user?.id ?? "anonymous", primaryTracked?.id],
-    enabled: Boolean(user) && primaryTracked !== null,
+    queryKey: ["tracked-position", "instance", primaryTracked?.id],
+    enabled: primaryTracked !== null,
     queryFn: async ({ signal }) =>
       (
         await api.get<TrackedPositionDetail>(
@@ -3175,10 +3172,10 @@ function ShortTermClient() {
   const trackedAudit = useQuery({
     queryKey: [
       "tracked-position-audit",
-      user?.id ?? "anonymous",
+      "instance",
       primaryTracked?.id
     ],
-    enabled: Boolean(user) && primaryTracked !== null,
+    enabled: primaryTracked !== null,
     queryFn: async ({ signal }) =>
       (
         await api.get<TrackedPositionAlertAuditList>(
@@ -5450,7 +5447,7 @@ function ShortTermClient() {
           />
           <div className="rounded-[10px] bg-paper px-4 py-3 text-sm leading-6 text-ink/65">
             收件邮箱：
-            {trackedPositions.data?.recipient_email ?? "19535838578@163.com"}
+            {trackedPositions.data?.recipient_email || "未设置"}
             <br />
             邮件通道：
             {trackedPositions.data?.email_configured

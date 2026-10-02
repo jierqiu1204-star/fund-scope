@@ -8,7 +8,8 @@ from typing import Any, cast
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import Settings
+from app.core.config import Settings, get_settings
+from app.core.instance import resolve_instance_owner
 from app.models.entities import (
     Fund,
     FundNavHistory,
@@ -371,15 +372,10 @@ async def monthly_dca_reminder_job(
     session: AsyncSession,
     notifier_or_settings: Notifier | Settings,
 ) -> dict[str, Any]:
-    users = (
-        await session.scalars(
-            select(User)
-            .where(User.is_approved.is_(True))
-            .order_by(User.is_super_admin.desc(), User.id.asc())
-        )
-    ).all()
-    if not users:
-        return {"amount": 0.0, "reason": "没有已批准用户", "send_status": "skipped"}
+    effective_settings = (
+        notifier_or_settings if isinstance(notifier_or_settings, Settings) else get_settings()
+    )
+    users = (await resolve_instance_owner(session, effective_settings),)
 
     results = []
     for user in users:

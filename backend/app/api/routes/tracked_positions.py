@@ -8,8 +8,8 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, s
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import require_approved_user
 from app.core.db import get_db_session
+from app.core.instance import get_instance_owner
 from app.models.entities import (
     TrackedEtfSleeveLedgerEvent,
     TrackedPosition,
@@ -317,7 +317,7 @@ async def _position_detail_out(session: AsyncSession, row: TrackedPosition, *, u
 @router.get("", response_model=TrackedPositionListOut)
 async def list_tracked_positions(
     request: Request,
-    user: User = Depends(require_approved_user),
+    user: User = Depends(get_instance_owner),
     session: AsyncSession = Depends(get_db_session),
 ) -> TrackedPositionListOut:
     rows = list(
@@ -389,7 +389,7 @@ async def list_tracked_positions(
 @router.post("", response_model=TrackedPositionOut, status_code=status.HTTP_201_CREATED)
 async def create_tracked_position(
     payload: TrackedPositionCreate,
-    user: User = Depends(require_approved_user),
+    user: User = Depends(get_instance_owner),
     session: AsyncSession = Depends(get_db_session),
 ) -> TrackedPositionOut:
     try:
@@ -421,7 +421,7 @@ async def create_tracked_position(
 async def reconcile_tracked_etf_sleeve(
     payload: TrackedEtfSleeveReconciliationInput,
     idempotency_key: str = Header(alias="Idempotency-Key", min_length=1, max_length=128),
-    user: User = Depends(require_approved_user),
+    user: User = Depends(get_instance_owner),
     session: AsyncSession = Depends(get_db_session),
 ) -> TrackedEtfSleeveReconciliationOut:
     if user.etf_trading_capital_confirmed_at is None:
@@ -563,7 +563,7 @@ async def get_tracked_position_alert_audit(
     position_id: int,
     limit: int = Query(default=20, ge=1, le=MAX_PAGE_SIZE),
     cursor: str | None = Query(default=None, max_length=512),
-    user: User = Depends(require_approved_user),
+    user: User = Depends(get_instance_owner),
     session: AsyncSession = Depends(get_db_session),
 ) -> TrackedPositionAlertAuditListOut:
     row = await session.get(TrackedPosition, position_id)
@@ -622,7 +622,7 @@ async def get_tracked_position_alert_audit(
 @router.get("/{position_id}", response_model=TrackedPositionDetailOut)
 async def get_tracked_position(
     position_id: int,
-    user: User = Depends(require_approved_user),
+    user: User = Depends(get_instance_owner),
     session: AsyncSession = Depends(get_db_session),
 ) -> TrackedPositionDetailOut:
     row = await session.get(TrackedPosition, position_id)
@@ -635,7 +635,7 @@ async def get_tracked_position(
 async def update_tracked_position(
     position_id: int,
     payload: TrackedPositionUpdate,
-    user: User = Depends(require_approved_user),
+    user: User = Depends(get_instance_owner),
     session: AsyncSession = Depends(get_db_session),
 ) -> TrackedPositionOut:
     row = await session.get(TrackedPosition, position_id)
@@ -762,7 +762,7 @@ async def transition_tracked_position_action(
     action_id: int,
     payload: TrackedPositionActionTransitionRequest,
     idempotency_key: str = Header(alias="Idempotency-Key", min_length=1, max_length=128),
-    user: User = Depends(require_approved_user),
+    user: User = Depends(get_instance_owner),
     session: AsyncSession = Depends(get_db_session),
 ) -> TrackedPositionActionTransitionOut:
     now = utcnow()
@@ -811,7 +811,7 @@ async def transition_tracked_position_action(
 async def close_tracked_position(
     position_id: int,
     payload: TrackedPositionCloseRequest,
-    user: User = Depends(require_approved_user),
+    user: User = Depends(get_instance_owner),
     session: AsyncSession = Depends(get_db_session),
 ) -> TrackedPositionOut:
     row = await session.get(TrackedPosition, position_id)

@@ -1088,7 +1088,7 @@ async def test_live_rank_change_rejects_mismatched_scope(client, app, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_live_tracking_filter_is_limited_to_current_user(client, app, monkeypatch) -> None:
+async def test_live_tracking_filter_is_limited_to_instance_owner(client, app, monkeypatch) -> None:
     await _seed_signal_run(app, count=2, total_scores=[80.0, 70.0])
     now = datetime(2026, 6, 12, 16, 0, 0)
     monkeypatch.setattr(
@@ -1137,11 +1137,12 @@ async def test_live_tracking_filter_is_limited_to_current_user(client, app, monk
     assert body["items"][0]["filtered_position"] == 1
     assert "tracked_position" not in body["items"][0]["sources"]
 
-    unauthenticated = await client.get(
+    without_token = await client.get(
         "/api/etf-quotes/live-rankings?tracking_states=我已持仓",
         headers={"Authorization": ""},
     )
-    assert unauthenticated.status_code == 401
+    assert without_token.status_code == 200
+    assert [item["etf_code"] for item in without_token.json()["items"]] == ["510001"]
     unsupported = await client.get("/api/etf-quotes/live-rankings?tracking_states=未知状态")
     assert unsupported.status_code == 400
 

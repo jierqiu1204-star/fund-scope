@@ -20,21 +20,21 @@ const fields: Array<[string, TextFieldKey]> = [
   ["SMTP 端口", "smtp_port"],
   ["SMTP 用户名", "smtp_username"],
   ["发件人", "smtp_from"],
-  ["SMTP 密码", "smtp_password"]
+  ["SMTP 测试密码（可选）", "smtp_password"]
 ];
 
 function defaultForm() {
   return {
-    recipient_email: "19535838578@163.com",
+    recipient_email: "",
     reminder_day: "1",
     reference_index_code: "CSI300",
     base_monthly_amount: "833",
     etf_trading_capital: "10000",
     allow_full_exit: true,
-    smtp_host: "smtp.163.com",
-    smtp_port: "465",
-    smtp_username: "19535838578@163.com",
-    smtp_from: "FundScope <19535838578@163.com>",
+    smtp_host: "",
+    smtp_port: "587",
+    smtp_username: "",
+    smtp_from: "",
     smtp_password: ""
   };
 }
@@ -79,8 +79,7 @@ export default function NotificationSettingsPage() {
         smtp_host: form.smtp_host,
         smtp_port: Number(form.smtp_port),
         smtp_username: form.smtp_username,
-        smtp_from: form.smtp_from,
-        smtp_password: form.smtp_password || undefined
+        smtp_from: form.smtp_from
       }),
     onSuccess: async () => {
       setStatusText("设置已保存。");
@@ -107,7 +106,7 @@ export default function NotificationSettingsPage() {
       <SectionHeader
         eyebrow="设置"
         title="定投提醒和邮件发送配置。"
-        description="这里配置每月提醒日、参考指数、基础投入金额和 SMTP 邮件服务器。163 邮箱需要填写授权码，不要填写网页登录密码。"
+        description="配置每月提醒日、参考指数、基础投入金额和 SMTP 邮件服务器。如邮箱服务要求，请使用 SMTP 授权码。"
       />
 
       <Panel className="max-w-4xl">
@@ -126,6 +125,11 @@ export default function NotificationSettingsPage() {
                   }))
                 }
               />
+              {key === "smtp_password" ? (
+                <p className="mt-2 text-xs leading-5 text-ink/60">
+                  自动提醒使用服务器 .env 的 SMTP_PASSWORD；此输入仅用于测试，不会保存。
+                </p>
+              ) : null}
             </label>
           ))}
           <label className="flex items-center gap-3 rounded-[8px] border border-ink/10 bg-paper px-4 py-3 text-sm">
@@ -146,6 +150,7 @@ export default function NotificationSettingsPage() {
           <button
             className="rounded-full bg-ink px-5 py-3 text-sm font-semibold text-white transition hover:bg-pine"
             onClick={() => saveSettings.mutate()}
+            disabled={!settings.data || saveSettings.isPending}
           >
             保存设置
           </button>

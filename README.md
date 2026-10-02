@@ -2,6 +2,14 @@
 
 FundScope is a single-user fund and ETF research dashboard for short-term research, manual position tracking, index valuation context, fund news, reminders, and explainable screening candidates.
 
+## Single-user deployment
+
+Each deployment is one personal instance: pages and APIs need no login, registration, or approval. All devices accessing that instance share its holdings and notification settings. Separate deployments must use separate databases and environment files; pulling code does not copy another instance's data or secrets.
+
+Docker Compose uses PostgreSQL 16 in the persistent `postgres-data` volume. Without `DATABASE_URL`, the backend falls back to `./fundscope.db` (SQLite) in its working directory. SMTP credentials, including `SMTP_PASSWORD`, live in the root `.env`; the recipient and optional SMTP overrides are stored in the database and edited at `/settings/notifications`. The password input on that page is for testing only.
+
+Compose binds to `127.0.0.1` by default. For a remote machine, use an SSH tunnel, a private network, or a proxy restricted to trusted clients. Set `FUNDSCOPE_BIND_ADDRESS` in `deploy/.env` only when you have configured that access boundary. See `deploy/README-ip.md` for an SSH tunnel example and `deploy/README-auth.md` for preserving an existing owner's settings.
+
 ## Stack
 
 - Backend: FastAPI, SQLAlchemy async, Alembic, APScheduler
@@ -137,4 +145,4 @@ These images use static frontend export output with mocked sample data, so they 
 ## Notes
 
 - The application does not execute trades. It aggregates information, generates reminders, and ranks research candidates only.
-- nginx basic auth is the primary authentication layer for the deployed site.
+- A personal instance has no application authentication. Restrict network access to its owner.

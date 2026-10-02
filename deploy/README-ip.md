@@ -1,17 +1,8 @@
 # FundScope IP 临时部署指南
 
-本指南用于不使用域名时的临时部署，访问地址：
+本指南用于个人实例部署，不需要登录、注册或管理员审批。默认只在服务器 `127.0.0.1:80` 监听，从电脑通过 SSH 隧道访问；无需对公网开放应用端口。能访问同一实例的设备共享全部数据和操作权限。
 
-```text
-http://110.42.222.9
-```
-
-IP 阶段使用 HTTP，浏览器传输没有 HTTPS 加密。安全边界依赖两层：
-
-- 云服务器安全组或 `ufw` 只允许可信来源访问 `22` 和 `80`。
-- FundScope 应用内邮箱登录和人工审批。
-
-当前版本不再使用 nginx Basic Auth；不要再创建或依赖 `deploy/.htpasswd`。
+如果使用私有网络或来源受限的代理，可在 `deploy/.env` 配置 `FUNDSCOPE_BIND_ADDRESS`。直接绑定公网地址时，必须先限制允许访问的来源；应用没有账号隔离。HTTP 访问请通过 SSH 隧道或可信加密网络。当前版本不使用 nginx Basic Auth。
 
 ## 1. 服务器安全初始化
 
@@ -26,14 +17,12 @@ sudo usermod -aG sudo fundscope
 
 ```text
 22/tcp  你的电脑公网 IP
-80/tcp  你的电脑公网 IP
 ```
 
 如果启用 `ufw`：
 
 ```bash
 sudo ufw allow from <你的电脑公网IP> to any port 22 proto tcp
-sudo ufw allow from <你的电脑公网IP> to any port 80 proto tcp
 sudo ufw enable
 sudo ufw status
 ```
@@ -87,6 +76,7 @@ cd /srv/fundscope/deploy
 cat > .env <<'EOF'
 POSTGRES_PASSWORD=<换成强数据库密码>
 NEXT_PUBLIC_API_BASE_URL=
+FUNDSCOPE_BIND_ADDRESS=127.0.0.1
 EOF
 ```
 
@@ -96,7 +86,7 @@ EOF
 cd /srv/fundscope
 cat > .env <<'EOF'
 DATABASE_URL=postgresql+asyncpg://fundscope:<同一个数据库密码>@postgres:5432/fundscope
-CORS_ORIGINS=http://110.42.222.9,http://taslr2.xyz
+CORS_ORIGINS=http://localhost:8080
 OPENAI_BASE_URL=https://api.example.com/v1
 OPENAI_API_KEY=replace-me
 MODEL_NAME=gpt-4o-mini
@@ -105,15 +95,10 @@ SMTP_PORT=587
 SMTP_USERNAME=user@example.com
 SMTP_PASSWORD=replace-me
 SMTP_FROM=FundScope <user@example.com>
-AUTH_JWT_SECRET=<换成随机长字符串>
-AUTH_TOKEN_EXPIRE_DAYS=30
-AUTH_BOOTSTRAP_ADMIN_EMAIL=19535838578@163.com
-AUTH_BOOTSTRAP_ADMIN_DISPLAY_NAME=qje
-AUTH_BOOTSTRAP_ADMIN_PASSWORD=<qje登录密码>
 EOF
 ```
 
-`AUTH_BOOTSTRAP_ADMIN_PASSWORD` 只放在服务器 `.env`，不要提交到 Git。
+数据库密码、SMTP 授权码和 API 密钥只放在本机 `.env`，不要提交到 Git。收件邮箱在网页设置中配置，网页测试密码不会保存。升级已有多账号数据库时，用 `INSTANCE_OWNER_EMAIL=<原账号邮箱>` 保留选定持仓（详见 `README-auth.md`）。
 
 ## 5. 启动服务
 
@@ -126,13 +111,13 @@ docker compose -f docker-compose.ip.yml exec backend alembic upgrade head
 docker compose -f docker-compose.ip.yml ps
 ```
 
-打开：
+在自己的电脑建立 SSH 隧道（连接保持打开）：
 
-```text
-http://110.42.222.9/login
+```bash
+ssh -N -L 8080:127.0.0.1:80 <部署用户>@<服务器IP>
 ```
 
-使用 `AUTH_BOOTSTRAP_ADMIN_EMAIL` 和 `AUTH_BOOTSTRAP_ADMIN_PASSWORD` 登录。新用户注册后默认不可用，需要 qje 到 `/admin/users` 批准。
+然后直接打开 `http://localhost:8080/short-term` 和 `http://localhost:8080/settings/notifications`。
 
 ## 6. 部署后验证
 
@@ -143,10 +128,9 @@ curl -f http://127.0.0.1/api/health
 浏览器验证：
 
 ```text
-http://110.42.222.9/login
-http://110.42.222.9/short-term
-http://110.42.222.9/admin/jobs
-http://110.42.222.9/admin/users
+http://localhost:8080/short-term
+http://localhost:8080/admin/jobs
+http://localhost:8080/settings/notifications
 ```
 
 ## 7. 日常更新
@@ -292,7 +276,7 @@ docker compose -f docker-compose.ip.yml exec backend alembic upgrade head
 - `/srv/fundscope/deploy/.env`
 - `/srv/fundscope/deploy/.htpasswd`（如果当前部署仍使用）
 
-这些文件可能包含数据库密码、SMTP 授权码、JWT 密钥等，不要写进 Git，也不要放进归档包。
+这些文件可能包含数据库密码、SMTP 授权码、API 密钥等，不要写进 Git，也不要放进归档包。
 
 ## 9. 部署后完整验证清单
 
@@ -308,10 +292,9 @@ curl -f http://127.0.0.1/api/health
 浏览器验证：
 
 ```text
-http://110.42.222.9/login
-http://110.42.222.9/short-term
-http://110.42.222.9/admin/jobs
-http://110.42.222.9/settings/notifications
+http://localhost:8080/short-term
+http://localhost:8080/admin/jobs
+http://localhost:8080/settings/notifications
 ```
 
 如果本次涉及 ETF 研究链路，还需要手动检查：
@@ -338,6 +321,6 @@ sudo ls -lh /var/backups/fundscope/
 
 ## 11. 重要限制
 
-- IP 阶段是临时方案，不是最终生产安全方案。
-- HTTP 没有传输加密，录入敏感真实资产信息前应尽快切换到域名 + HTTPS。
+- 仅供个人实例使用，同一实例没有多用户数据隔离。
+- HTTP 本身没有传输加密；远程访问使用 SSH 隧道、可信加密网络或来源受限的 HTTPS 代理。
 - FundScope 不连接支付宝、不连接券商、不自动下单，只做研究、追踪和提醒。

@@ -3,8 +3,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import optional_approved_user
 from app.core.db import get_db_session
+from app.core.instance import get_instance_owner
 from app.models.entities import User
 from app.schemas.etf_quotes import EtfLiveRankingListOut, IntradayEtfWatchStatusOut
 from app.services.intraday_etf.service import watch_status
@@ -37,7 +37,7 @@ async def get_live_rankings(
     entry_labels: str | None = Query(default=None),
     tracking_states: str | None = Query(default=None),
     session: AsyncSession = Depends(get_db_session),
-    user: User | None = Depends(optional_approved_user),
+    user: User = Depends(get_instance_owner),
 ) -> EtfLiveRankingListOut:
     safe_limit = max(1, limit)
     safe_offset = max(0, offset)
@@ -46,8 +46,6 @@ async def get_live_rankings(
         validate_tracking_states(tracking_filters)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if tracking_filters and user is None:
-        raise HTTPException(status_code=401, detail="持仓筛选需要登录")
     return await live_rankings(
         session,
         limit=safe_limit,
@@ -57,5 +55,5 @@ async def get_live_rankings(
         observation_labels=_csv_values(observation_labels),
         entry_labels=_csv_values(entry_labels),
         tracking_states=tracking_filters,
-        user_id=user.id if user is not None else None,
+        user_id=user.id,
     )

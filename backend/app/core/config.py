@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     smtp_username: str = Field(default="", alias="SMTP_USERNAME")
     smtp_password: str = Field(default="", alias="SMTP_PASSWORD")
     smtp_from: str = Field(default="", alias="SMTP_FROM")
+    instance_owner_email: str = Field(default="", alias="INSTANCE_OWNER_EMAIL")
     auth_jwt_secret: str = Field(default="", alias="AUTH_JWT_SECRET")
     auth_token_expire_days: int = Field(default=30, alias="AUTH_TOKEN_EXPIRE_DAYS")
     auth_bootstrap_admin_email: str = Field(default="", alias="AUTH_BOOTSTRAP_ADMIN_EMAIL")

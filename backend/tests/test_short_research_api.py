@@ -1544,7 +1544,7 @@ async def test_one_code_detail_preserves_persisted_global_rank(client, app) -> N
 
 
 @pytest.mark.asyncio
-async def test_static_tracking_filters_are_user_scoped_and_expire_alerts(client, app) -> None:
+async def test_static_tracking_filters_use_instance_owner_and_expire_alerts(client, app) -> None:
     await _seed_opportunity_signal_run(app)
     async with app.state.db.session() as session:
         owner = await session.get(User, 1)
@@ -1616,11 +1616,12 @@ async def test_static_tracking_filters_are_user_scoped_and_expire_alerts(client,
     assert expired.status_code == 200
     assert expired.json()["total"] == 0
 
-    unauthenticated = await client.get(
-        "/api/short-research/assets?asset_type=etf&tracking_states=我已持仓",
+    without_token = await client.get(
+        "/api/short-research/assets?asset_type=etf&universe=all&tracking_states=我已持仓",
         headers={"Authorization": ""},
     )
-    assert unauthenticated.status_code == 401
+    assert without_token.status_code == 200
+    assert [item["code"] for item in without_token.json()["items"]] == ["159002"]
     unsupported = await client.get("/api/short-research/assets?asset_type=fund&tracking_states=我已持仓")
     assert unsupported.status_code == 400
 

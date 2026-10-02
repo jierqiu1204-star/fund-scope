@@ -36,8 +36,8 @@ services:
     environment:
       FQDN: ${FQDN}
     ports:
-      - "80:80"
-      - "443:443"
+      - "${FUNDSCOPE_BIND_ADDRESS:-127.0.0.1}:80:80"
+      - "${FUNDSCOPE_BIND_ADDRESS:-127.0.0.1}:443:443"
     command: >
       /bin/sh -c "envsubst '$$FQDN' < /etc/nginx/templates/default.conf.template
       > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"

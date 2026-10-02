@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
+from app.core.instance import resolve_instance_owner
 from app.defaults.short_research import ASSET_TYPE_ETF
 from app.models.entities import TrackedPosition, User, utcnow
 from app.services.tracked_positions.owner_risk import (
@@ -50,10 +51,15 @@ async def daily_tracked_position_alerts_job(
     *,
     post_evaluation_observer: PositionEvaluationObserver | None = None,
 ) -> dict[str, Any]:
+    effective_settings = settings or get_settings()
+    owner = await resolve_instance_owner(session, effective_settings)
     rows = (
         await session.scalars(
             select(TrackedPosition)
-            .where(TrackedPosition.status == ACTIVE_STATUS)
+            .where(
+                TrackedPosition.status == ACTIVE_STATUS,
+                TrackedPosition.user_id == owner.id,
+            )
             .order_by(TrackedPosition.created_at.asc(), TrackedPosition.id.asc())
         )
     ).all()
@@ -76,7 +82,6 @@ async def daily_tracked_position_alerts_job(
         "liquidity_stressed_exits": 0,
         **_empty_shadow_counters(),
     }
-    effective_settings = settings or get_settings()
     owner_ids = tuple(sorted({position.user_id for position in rows}))
     job_now = utcnow()
     owner_risk_by_id, owner_risk_counters = await materialize_owner_risk_contexts(
@@ -144,11 +149,14 @@ async def intraday_tracked_position_alerts_job(
     *,
     post_evaluation_observer: PositionEvaluationObserver | None = None,
 ) -> dict[str, int]:
+    effective_settings = settings or get_settings()
+    owner = await resolve_instance_owner(session, effective_settings)
     rows = (
         await session.scalars(
             select(TrackedPosition).where(
                 TrackedPosition.asset_type == ASSET_TYPE_ETF,
                 TrackedPosition.status == ACTIVE_STATUS,
+                TrackedPosition.user_id == owner.id,
             )
         )
     ).all()
@@ -173,7 +181,6 @@ async def intraday_tracked_position_alerts_job(
         "liquidity_stressed_exits": 0,
         **_empty_shadow_counters(),
     }
-    effective_settings = settings or get_settings()
     owner_ids = tuple(sorted({position.user_id for position in rows}))
     users = tuple(
         (

@@ -8,8 +8,8 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import optional_approved_user, require_approved_user
 from app.core.db import get_db_session
+from app.core.instance import get_instance_owner
 from app.models.entities import (
     EtfSignalValidationItem,
     EtfSignalValidationRun,
@@ -1059,15 +1059,13 @@ async def list_short_research_assets(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_db_session),
-    user: User | None = Depends(optional_approved_user),
+    user: User = Depends(get_instance_owner),
 ) -> ShortResearchAssetListOut:
     try:
         tracking_filters = _csv_values(tracking_states)
         observation_filters = _csv_values(observation_labels)
         entry_filters = _csv_values(entry_labels)
         validate_tracking_states(tracking_filters)
-        if tracking_filters and user is None:
-            raise HTTPException(status_code=401, detail="持仓筛选需要登录")
         if tracking_filters and asset_type == "fund":
             raise ValueError("持仓筛选仅支持 ETF")
         selection = (
@@ -1120,7 +1118,6 @@ async def list_short_research_assets(
             ranking_surface=ranking_surface if asset_type == "etf" else None,
         )
         if tracking_filters:
-            assert user is not None
             states_by_code = await tracking_states_by_code(
                 session, user_id=user.id, as_of_date=run.as_of_date
             )
@@ -1236,7 +1233,7 @@ async def get_short_research_observation_portfolio(
 @router.post("/etf-strategy-healthcheck/run", response_model=EtfStrategyHealthcheckOut)
 async def run_etf_strategy_healthcheck_endpoint(
     session: AsyncSession = Depends(get_db_session),
-    _user: User = Depends(require_approved_user),
+    _user: User = Depends(get_instance_owner),
 ) -> dict[str, Any]:
     snapshot = await run_etf_strategy_healthcheck(session)
     result = await healthcheck_payload(session, snapshot)
@@ -1248,7 +1245,7 @@ async def run_etf_strategy_healthcheck_endpoint(
 @router.get("/etf-strategy-healthcheck/latest", response_model=EtfStrategyHealthcheckOut | None)
 async def get_latest_etf_strategy_healthcheck(
     session: AsyncSession = Depends(get_db_session),
-    _user: User = Depends(require_approved_user),
+    _user: User = Depends(get_instance_owner),
 ) -> dict[str, Any] | None:
     snapshot = await latest_healthcheck_snapshot(session)
     if snapshot is None:
@@ -1259,7 +1256,7 @@ async def get_latest_etf_strategy_healthcheck(
 @router.post("/etf-optimized-allocation/run", response_model=EtfOptimizedAllocationOut)
 async def run_etf_optimized_allocation_endpoint(
     session: AsyncSession = Depends(get_db_session),
-    _user: User = Depends(require_approved_user),
+    _user: User = Depends(get_instance_owner),
 ) -> dict[str, Any]:
     snapshot = await run_etf_optimized_allocation(session)
     result = await optimized_allocation_payload(
@@ -1275,7 +1272,7 @@ async def run_etf_optimized_allocation_endpoint(
 @router.get("/etf-optimized-allocation/latest", response_model=EtfOptimizedAllocationOut | None)
 async def get_latest_etf_optimized_allocation(
     session: AsyncSession = Depends(get_db_session),
-    _user: User = Depends(require_approved_user),
+    _user: User = Depends(get_instance_owner),
 ) -> dict[str, Any] | None:
     snapshot = await latest_optimized_allocation_snapshot(session)
     if snapshot is None:
@@ -1291,7 +1288,7 @@ async def get_latest_etf_optimized_allocation(
 async def start_etf_portfolio_backtest(
     payload: EtfPortfolioBacktestRequest | None = Body(default=None),
     session: AsyncSession = Depends(get_db_session),
-    user: User = Depends(require_approved_user),
+    user: User = Depends(get_instance_owner),
 ) -> dict[str, Any]:
     payload = payload or EtfPortfolioBacktestRequest()
     run_factory = (
@@ -1316,7 +1313,7 @@ async def start_etf_portfolio_backtest(
 async def list_etf_portfolio_backtests(
     limit: int = Query(default=10, ge=1, le=50),
     session: AsyncSession = Depends(get_db_session),
-    _user: User = Depends(require_approved_user),
+    _user: User = Depends(get_instance_owner),
 ) -> dict[str, Any]:
     runs = await list_backtest_runs(session, limit=limit)
     return {"items": [backtest_summary_payload(run) for run in runs]}
@@ -1326,7 +1323,7 @@ async def list_etf_portfolio_backtests(
 async def get_etf_portfolio_backtest(
     run_id: int,
     session: AsyncSession = Depends(get_db_session),
-    _user: User = Depends(require_approved_user),
+    _user: User = Depends(get_instance_owner),
 ) -> dict[str, Any]:
     run = await get_backtest_run(session, run_id)
     if run is None:
@@ -1339,7 +1336,7 @@ async def get_etf_portfolio_backtest(
 async def run_etf_exit_hyperopt_endpoint(
     payload: EtfExitHyperoptRequest | None = Body(default=None),
     session: AsyncSession = Depends(get_db_session),
-    _user: User = Depends(require_approved_user),
+    _user: User = Depends(get_instance_owner),
 ) -> dict[str, Any]:
     payload = payload or EtfExitHyperoptRequest()
     run = await run_etf_exit_hyperopt(
@@ -1358,7 +1355,7 @@ async def run_etf_exit_hyperopt_endpoint(
 @router.get("/etf-exit-hyperopt/latest", response_model=EtfExitHyperoptRunOut | None)
 async def get_latest_etf_exit_hyperopt(
     session: AsyncSession = Depends(get_db_session),
-    _user: User = Depends(require_approved_user),
+    _user: User = Depends(get_instance_owner),
 ) -> dict[str, Any] | None:
     run = await latest_etf_exit_hyperopt_run(session)
     if run is None:
@@ -1370,7 +1367,7 @@ async def get_latest_etf_exit_hyperopt(
 async def run_etf_exit_credibility_endpoint(
     payload: EtfExitCredibilityRequest | None = Body(default=None),
     session: AsyncSession = Depends(get_db_session),
-    _user: User = Depends(require_approved_user),
+    _user: User = Depends(get_instance_owner),
 ) -> dict[str, Any]:
     payload = payload or EtfExitCredibilityRequest()
     run = await run_etf_exit_credibility(
@@ -1387,7 +1384,7 @@ async def run_etf_exit_credibility_endpoint(
 async def get_latest_etf_exit_credibility(
     execution_model: str | None = Query(default=None),
     session: AsyncSession = Depends(get_db_session),
-    _user: User = Depends(require_approved_user),
+    _user: User = Depends(get_instance_owner),
 ) -> dict[str, Any] | None:
     run = await latest_etf_exit_credibility_run(session, execution_model=execution_model)
     if run is None:
