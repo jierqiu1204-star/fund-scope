@@ -52,9 +52,12 @@ The server checkout does not need to be a git repository.
 Before building, the workflow removes unused `fundscope-*` images, unused
 Docker build cache and dangling images. It skips images referenced by any
 container, including stopped containers, and image removal is not forced.
-Database and active research containers retain their images. The workflow
-also removes its temporary candidate image when the deployment step
-exits, including on failure. Database volumes and sealed backups are retained.
+Database and active research containers retain their images. If the frontend
+changes, an unreferenced previous static-builder image is removed before its
+replacement is built; the exported frontend volume is retained. After checking
+the candidate schema head, the workflow releases the temporary candidate image
+and build cache before backing up. It also cleans the candidate on failure.
+Database volumes and sealed backups are retained.
 The backup still requires the larger of the configured estimate (5 GiB by
 default) or the latest sealed dump, plus 2 GiB of free space. If that check
 fails, use the disk, Docker, database and backup-size diagnostics in the job log

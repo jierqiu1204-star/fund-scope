@@ -238,8 +238,11 @@ def test_deploy_backs_up_before_replacing_source() -> None:
     assert "docker builder prune -af" in workflow
 
 
+@pytest.mark.parametrize("frontend_changed", [True, False])
+@pytest.mark.parametrize("builder_referenced", [True, False])
+@pytest.mark.parametrize("candidate_valid", [True, False])
 def test_deploy_reclaims_cache_and_cleans_candidate_when_backup_has_no_capacity(
-    tmp_path: Path,
+    tmp_path: Path, frontend_changed: bool, builder_referenced: bool, candidate_valid: bool,
 ) -> None:
     workflow = _read_repository_file(".github/workflows/deploy.yml")
     script = textwrap.dedent(
@@ -253,6 +256,12 @@ def test_deploy_reclaims_cache_and_cleans_candidate_when_backup_has_no_capacity(
     workspace = tmp_path / "workspace"
     (workspace / "backend").mkdir(parents=True)
     (workspace / "deploy").mkdir()
+    (deploy_dir / "frontend").mkdir()
+    (deploy_dir / "frontend/index.html").write_text("previous frontend")
+    (workspace / "frontend").mkdir()
+    (workspace / "frontend/index.html").write_text(
+        "new frontend" if frontend_changed else "previous frontend"
+    )
     for name in ("backup-compose.sh", "backup-retention.sh"):
         (workspace / "deploy" / name).write_text(
             _read_repository_file(f"deploy/{name}"), encoding="utf-8"
@@ -271,18 +280,20 @@ def test_deploy_reclaims_cache_and_cleans_candidate_when_backup_has_no_capacity(
         "docker": textwrap.dedent(r"""
             #!/bin/sh
             case "$*" in
-              "image prune -f"|"builder prune -af"|"image rm fundscope-"*) ;;
+              "image prune -f"|"builder prune -af"|"image rm fundscope-"*|"image rm deploy-frontend-static-builder:latest") ;;
               "image ls --filter reference=fundscope-* --format {{.Repository}}:{{.Tag}}")
                 printf 'fundscope-backend-candidate:older\nfundscope-backend-candidate:previous\nfundscope-v2-research:unused\nfundscope-v2-cache:active\nfundscope-v2-research:stopped\nfundscope-v2-research:base\n' ;;
               "ps -aq --filter ancestor=fundscope-v2-cache:active") printf 'active-container\n' ;;
               "ps -aq --filter ancestor=fundscope-v2-research:stopped") printf 'stopped-container\n' ;;
               "ps -aq --filter ancestor=fundscope-v2-research:base") printf 'descendant-container\n' ;;
               "ps -aq --filter ancestor=fundscope-"*) ;;
+              "ps -aq --filter ancestor=deploy-frontend-static-builder:latest")
+                if [ "$BUILDER_REFERENCED" = true ]; then printf 'builder-container\n'; fi ;;
               "ps -a --format table {{.Names}}\t{{.Image}}\t{{.Status}}")
                 printf 'fixture-active fundscope-v2-cache:active Up 1 hour\nfixture-stopped fundscope-v2-research:stopped Exited (0) 1 hour ago\n' ;;
               "image ls --format table "*) printf 'other-project keep fixture-image 1GB\n' ;;
               "build --tag "*) ;;
-              "run --rm --entrypoint alembic "*) printf 'candidate (head)\n' ;;
+              "run --rm --entrypoint alembic "*) printf '%s\n' "$CANDIDATE_HEADS" ;;
               "system df") printf 'Build Cache: fixture reclaimable\n' ;;
               "compose -f docker-compose.ip.yml up -d postgres") ;;
               *"pg_isready -U fundscope -d fundscope") printf 'accepting connections\n' ;;
@@ -315,6 +326,8 @@ def test_deploy_reclaims_cache_and_cleans_candidate_when_backup_has_no_capacity(
             "BACKUP_MIN_FREE_BYTES": "2147483648",
             "BACKUP_ESTIMATED_BYTES": "5368709120",
             "BACKUP_COMPRESSION": "zstd:1",
+            "BUILDER_REFERENCED": "true" if builder_referenced else "false",
+            "CANDIDATE_HEADS": "candidate (head)" if candidate_valid else "one (head)\ntwo (head)",
         },
         capture_output=True,
         text=True,
@@ -322,6 +335,17 @@ def test_deploy_reclaims_cache_and_cleans_candidate_when_backup_has_no_capacity(
     )
 
     assert result.returncode == 1
+    log = command_log.read_text(encoding="utf-8").splitlines()
+    candidate_remove = f"docker image rm fundscope-backend-candidate:{'a' * 40}"
+    if not candidate_valid:
+        assert "Insufficient backup capacity" not in result.stderr
+        assert not any(command.endswith("/deploy/backup-compose.sh") for command in log)
+        assert log[-1] == candidate_remove
+        assert log.count(candidate_remove) == 1
+        assert log.count("docker builder prune -af") == 1
+        assert previous_source.read_text() == "previous deployment\n"
+        assert previous_backup.read_bytes() == b"backup"
+        return
     assert "Insufficient backup capacity: available=4805132KB required=7340032KB" in result.stderr
     assert "Build Cache: fixture reclaimable" in result.stderr
     assert "PostgreSQL database size (bytes): 3000000000" in result.stderr
@@ -329,11 +353,21 @@ def test_deploy_reclaims_cache_and_cleans_candidate_when_backup_has_no_capacity(
     assert "fixture-stopped fundscope-v2-research:stopped Exited (0)" in result.stderr
     assert "public | fixture_table | 3000000000" in result.stderr
     assert "fixture" not in result.stdout
-    log = command_log.read_text(encoding="utf-8").splitlines()
     build_index = next(index for index, command in enumerate(log) if command.startswith("docker build "))
     backup_index = next(index for index, command in enumerate(log) if command.endswith("/deploy/backup-compose.sh"))
     assert log.index("docker image prune -f") < build_index < backup_index
     assert log.index("docker builder prune -af") < build_index
+    heads_index = next(index for index, command in enumerate(log) if command.startswith("docker run --rm --entrypoint alembic "))
+    assert heads_index < log.index(candidate_remove) < backup_index
+    assert log.index("docker builder prune -af", log.index(candidate_remove)) < backup_index
+    builder_remove = "docker image rm deploy-frontend-static-builder:latest"
+    builder_check = "docker ps -aq --filter ancestor=deploy-frontend-static-builder:latest"
+    if frontend_changed and not builder_referenced:
+        assert log.index(builder_check) < log.index(builder_remove) < build_index
+    else:
+        assert builder_remove not in log
+    if not frontend_changed:
+        assert builder_check not in log
     assert log.index("docker image rm fundscope-backend-candidate:older") < build_index
     assert log.index("docker image rm fundscope-backend-candidate:previous") < build_index
     assert log.index("docker image rm fundscope-v2-research:unused") < build_index
@@ -347,7 +381,7 @@ def test_deploy_reclaims_cache_and_cleans_candidate_when_backup_has_no_capacity(
         assert f"Keeping FundScope image referenced by a container: {protected_image}" in result.stderr
     assert log[-1] == f"docker image rm fundscope-backend-candidate:{'a' * 40}"
     assert all(
-        command.startswith("docker image rm fundscope-")
+        command.startswith("docker image rm fundscope-") or command == builder_remove
         for command in log if command.startswith("docker image rm ")
     )
     assert not any(command.startswith("rsync ") or " pg_dump " in command for command in log)

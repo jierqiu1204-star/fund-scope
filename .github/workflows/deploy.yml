@@ -96,6 +96,13 @@ jobs:
             fi
             sudo docker image rm "$old_image" || true
           done
+          if [ "$frontend_changed" = true ]; then
+            frontend_builder_image=deploy-frontend-static-builder:latest
+            builder_refs=$(sudo docker ps -aq --filter "ancestor=$frontend_builder_image")
+            if [ -z "$builder_refs" ]; then
+              sudo docker image rm "$frontend_builder_image" || true
+            fi
+          fi
           sudo docker image prune -f
           sudo docker builder prune -af
           sudo docker build --tag "$candidate_image" "$GITHUB_WORKSPACE/backend"
@@ -110,6 +117,9 @@ jobs:
             printf '%s\n' "$candidate_heads" | awk '/\(head\)/ { print $1; exit }'
           )
           test -n "$candidate_schema_head"
+          sudo docker image rm "$candidate_image" || true
+          sudo docker image prune -f
+          sudo docker builder prune -af
 
           backup_dir=/var/backups/fundscope
           sudo mkdir -p "$backup_dir"
