@@ -87,6 +87,10 @@ jobs:
           mkdir -p "$deploy_dir"
           candidate_image="fundscope-backend-candidate:$GITHUB_SHA"
           trap 'sudo docker image rm "$candidate_image" >/dev/null 2>&1 || true' EXIT
+          for old_candidate in $(sudo docker image ls \
+            --format '{{.Repository}}:{{.Tag}}' fundscope-backend-candidate); do
+            sudo docker image rm "$old_candidate" || true
+          done
           sudo docker image prune -f
           sudo docker builder prune -af
           sudo docker build --tag "$candidate_image" "$GITHUB_WORKSPACE/backend"
@@ -158,10 +162,21 @@ jobs:
             sudo find "$backup_dir" -maxdepth 1 -type f -name 'fundscope_*.dump' \
               -printf 'Backup %f: %s bytes\n'
             sudo docker system df
+            sudo docker image ls \
+              --format 'table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.Size}}'
             printf 'PostgreSQL database size (bytes): '
             sudo docker compose -f "$COMPOSE_FILE" exec -T postgres \
               psql -U fundscope -d fundscope -Atqc \
               "SELECT pg_database_size(current_database())"
+            sudo docker compose -f "$COMPOSE_FILE" exec -T postgres \
+              psql -U fundscope -d fundscope -P pager=off -c \
+              "SELECT schemaname, relname,
+                pg_total_relation_size(relid) AS total_bytes,
+                pg_relation_size(relid) AS heap_bytes,
+                pg_table_size(relid) AS table_bytes,
+                pg_indexes_size(relid) AS index_bytes,
+                n_live_tup, n_dead_tup
+              FROM pg_stat_user_tables ORDER BY total_bytes DESC"
           } >&2
           backup_path=$(
             sudo env \

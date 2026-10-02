@@ -49,8 +49,10 @@ to `/srv/fundscope`, preserves server-local configuration files, and runs Compos
 from `/srv/fundscope/deploy`.
 The server checkout does not need to be a git repository.
 
-Before building, the workflow removes unused Docker build cache and dangling
-images. It also removes its temporary candidate image when the deployment step
+Before building, the workflow removes old `fundscope-backend-candidate` tags,
+unused Docker build cache and dangling images. Image removal is not forced;
+Docker retains images that containers or other tags still need. The workflow
+also removes its temporary candidate image when the deployment step
 exits, including on failure. Database volumes and sealed backups are retained.
 The backup still requires the larger of the configured estimate (5 GiB by
 default) or the latest sealed dump, plus 2 GiB of free space. If that check

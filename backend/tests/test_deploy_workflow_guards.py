@@ -271,7 +271,10 @@ def test_deploy_reclaims_cache_and_cleans_candidate_when_backup_has_no_capacity(
         "docker": textwrap.dedent(r"""
             #!/bin/sh
             case "$*" in
-              "image prune -f"|"builder prune -af"|"image rm fundscope-backend-candidate:$GITHUB_SHA") ;;
+              "image prune -f"|"builder prune -af"|"image rm fundscope-backend-candidate:"*) ;;
+              "image ls --format {{.Repository}}:{{.Tag}} fundscope-backend-candidate")
+                printf 'fundscope-backend-candidate:older\nfundscope-backend-candidate:previous\n' ;;
+              "image ls --format table "*) printf 'other-project keep fixture-image 1GB\n' ;;
               "build --tag "*) ;;
               "run --rm --entrypoint alembic "*) printf 'candidate (head)\n' ;;
               "system df") printf 'Build Cache: fixture reclaimable\n' ;;
@@ -280,6 +283,7 @@ def test_deploy_reclaims_cache_and_cleans_candidate_when_backup_has_no_capacity(
               *"SELECT count(*) FROM alembic_version") printf '1\n' ;;
               *"SELECT version_num FROM alembic_version") printf 'previous\n' ;;
               *"SELECT pg_database_size(current_database())") printf '3000000000\n' ;;
+              *"FROM pg_stat_user_tables ORDER BY total_bytes DESC") printf 'public | fixture_table | 3000000000 | 2000000000 | 2000000000 | 1000000000 | 100 | 50\n' ;;
               *) printf 'Unexpected Docker command: %s\n' "$*" >&2; exit 64 ;;
             esac
             """).lstrip(),
@@ -315,13 +319,21 @@ def test_deploy_reclaims_cache_and_cleans_candidate_when_backup_has_no_capacity(
     assert "Insufficient backup capacity: available=4805132KB required=7340032KB" in result.stderr
     assert "Build Cache: fixture reclaimable" in result.stderr
     assert "PostgreSQL database size (bytes): 3000000000" in result.stderr
+    assert "other-project keep fixture-image 1GB" in result.stderr
+    assert "public | fixture_table | 3000000000" in result.stderr
     assert "fixture" not in result.stdout
     log = command_log.read_text(encoding="utf-8").splitlines()
     build_index = next(index for index, command in enumerate(log) if command.startswith("docker build "))
     backup_index = next(index for index, command in enumerate(log) if command.endswith("/deploy/backup-compose.sh"))
     assert log.index("docker image prune -f") < build_index < backup_index
     assert log.index("docker builder prune -af") < build_index
+    assert log.index("docker image rm fundscope-backend-candidate:older") < build_index
+    assert log.index("docker image rm fundscope-backend-candidate:previous") < build_index
     assert log[-1] == f"docker image rm fundscope-backend-candidate:{'a' * 40}"
+    assert all(
+        command.startswith("docker image rm fundscope-backend-candidate:")
+        for command in log if command.startswith("docker image rm ")
+    )
     assert not any(command.startswith("rsync ") or " pg_dump " in command for command in log)
     assert not any(" down " in command or "alembic upgrade" in command for command in log)
     assert previous_source.read_text() == "previous deployment\n"
