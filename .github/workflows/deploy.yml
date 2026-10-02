@@ -87,9 +87,14 @@ jobs:
           mkdir -p "$deploy_dir"
           candidate_image="fundscope-backend-candidate:$GITHUB_SHA"
           trap 'sudo docker image rm "$candidate_image" >/dev/null 2>&1 || true' EXIT
-          for old_candidate in $(sudo docker image ls \
-            --format '{{.Repository}}:{{.Tag}}' fundscope-backend-candidate); do
-            sudo docker image rm "$old_candidate" || true
+          for old_image in $(sudo docker image ls --filter 'reference=fundscope-*' \
+            --format '{{.Repository}}:{{.Tag}}'); do
+            container_refs=$(sudo docker ps -aq --filter "ancestor=$old_image")
+            if [ -n "$container_refs" ]; then
+              printf 'Keeping FundScope image referenced by a container: %s\n' "$old_image" >&2
+              continue
+            fi
+            sudo docker image rm "$old_image" || true
           done
           sudo docker image prune -f
           sudo docker builder prune -af
@@ -164,6 +169,7 @@ jobs:
             sudo docker system df
             sudo docker image ls \
               --format 'table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.Size}}'
+            sudo docker ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
             printf 'PostgreSQL database size (bytes): '
             sudo docker compose -f "$COMPOSE_FILE" exec -T postgres \
               psql -U fundscope -d fundscope -Atqc \

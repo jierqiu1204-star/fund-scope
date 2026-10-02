@@ -271,9 +271,15 @@ def test_deploy_reclaims_cache_and_cleans_candidate_when_backup_has_no_capacity(
         "docker": textwrap.dedent(r"""
             #!/bin/sh
             case "$*" in
-              "image prune -f"|"builder prune -af"|"image rm fundscope-backend-candidate:"*) ;;
-              "image ls --format {{.Repository}}:{{.Tag}} fundscope-backend-candidate")
-                printf 'fundscope-backend-candidate:older\nfundscope-backend-candidate:previous\n' ;;
+              "image prune -f"|"builder prune -af"|"image rm fundscope-"*) ;;
+              "image ls --filter reference=fundscope-* --format {{.Repository}}:{{.Tag}}")
+                printf 'fundscope-backend-candidate:older\nfundscope-backend-candidate:previous\nfundscope-v2-research:unused\nfundscope-v2-cache:active\nfundscope-v2-research:stopped\nfundscope-v2-research:base\n' ;;
+              "ps -aq --filter ancestor=fundscope-v2-cache:active") printf 'active-container\n' ;;
+              "ps -aq --filter ancestor=fundscope-v2-research:stopped") printf 'stopped-container\n' ;;
+              "ps -aq --filter ancestor=fundscope-v2-research:base") printf 'descendant-container\n' ;;
+              "ps -aq --filter ancestor=fundscope-"*) ;;
+              "ps -a --format table {{.Names}}\t{{.Image}}\t{{.Status}}")
+                printf 'fixture-active fundscope-v2-cache:active Up 1 hour\nfixture-stopped fundscope-v2-research:stopped Exited (0) 1 hour ago\n' ;;
               "image ls --format table "*) printf 'other-project keep fixture-image 1GB\n' ;;
               "build --tag "*) ;;
               "run --rm --entrypoint alembic "*) printf 'candidate (head)\n' ;;
@@ -320,6 +326,7 @@ def test_deploy_reclaims_cache_and_cleans_candidate_when_backup_has_no_capacity(
     assert "Build Cache: fixture reclaimable" in result.stderr
     assert "PostgreSQL database size (bytes): 3000000000" in result.stderr
     assert "other-project keep fixture-image 1GB" in result.stderr
+    assert "fixture-stopped fundscope-v2-research:stopped Exited (0)" in result.stderr
     assert "public | fixture_table | 3000000000" in result.stderr
     assert "fixture" not in result.stdout
     log = command_log.read_text(encoding="utf-8").splitlines()
@@ -329,9 +336,18 @@ def test_deploy_reclaims_cache_and_cleans_candidate_when_backup_has_no_capacity(
     assert log.index("docker builder prune -af") < build_index
     assert log.index("docker image rm fundscope-backend-candidate:older") < build_index
     assert log.index("docker image rm fundscope-backend-candidate:previous") < build_index
+    assert log.index("docker image rm fundscope-v2-research:unused") < build_index
+    for protected_image in (
+        "fundscope-v2-cache:active",
+        "fundscope-v2-research:stopped",
+        "fundscope-v2-research:base",
+    ):
+        assert log.index(f"docker ps -aq --filter ancestor={protected_image}") < build_index
+        assert f"docker image rm {protected_image}" not in log
+        assert f"Keeping FundScope image referenced by a container: {protected_image}" in result.stderr
     assert log[-1] == f"docker image rm fundscope-backend-candidate:{'a' * 40}"
     assert all(
-        command.startswith("docker image rm fundscope-backend-candidate:")
+        command.startswith("docker image rm fundscope-")
         for command in log if command.startswith("docker image rm ")
     )
     assert not any(command.startswith("rsync ") or " pg_dump " in command for command in log)
